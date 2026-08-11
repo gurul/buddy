@@ -49,9 +49,30 @@ void EPD_RESET(void)
 
 void EPD_Sleep(void)
 {
+  // Power the analog stage down properly before deep sleep (GxEPD2's
+  // _PowerOff). Entering 0x10 deep sleep with the booster still up is out of
+  // spec order and is a prime suspect for RAM-plane corruption across sleep
+  // — the overlapping-text bug.
+  EPD_WR_REG(0x22);
+  EPD_WR_DATA8(0x83);
+  EPD_WR_REG(0x20);
+  EPD_ReadBusy();
   EPD_WR_REG(0x10);
   EPD_WR_DATA8(0x01);
   delay(50);
+}
+
+// Wake from deep sleep for a partial refresh: hardware reset + soft reset +
+// internal temperature sensor select. Mirrors GxEPD2's _InitDisplay — the
+// full EPD_Init() is NOT wanted here.
+void EPD_Wake(void)
+{
+  EPD_RESET();
+  EPD_ReadBusy();
+  EPD_WR_REG(0x12);
+  EPD_ReadBusy();
+  EPD_WR_REG(0x18);   // temperature sensor: internal
+  EPD_WR_DATA8(0x80);
 }
 
 
@@ -72,8 +93,14 @@ void EPD_Update_Fast(void)
 
 void EPD_Update_Part(void)
 {
+  // 0xFC, not the stock 0xFF — the differential (display mode 2) update
+  // value GxEPD2 uses on this exact panel. 0x21 is re-issued here so the
+  // old-data plane is never bypassed regardless of what init ran before.
+  EPD_WR_REG(0x21);
+  EPD_WR_DATA8(0x00);
+  EPD_WR_DATA8(0x00);
   EPD_WR_REG(0x22);
-  EPD_WR_DATA8(0xFF);
+  EPD_WR_DATA8(0xFC);
   EPD_WR_REG(0x20);
   EPD_ReadBusy();
 }
@@ -250,10 +277,22 @@ void EPD_Display_Part(uint16_t x, uint16_t y, uint16_t sizex, uint16_t sizey, co
     }
   }
   EPD_Update_Part();
-  // sync the old-data plane so the NEXT partial diffs against this frame
+  // Set current and previous buffers equal so the NEXT partial diffs against
+  // this frame — BOTH planes, like GxEPD2's writeImageAgain (rewriting only
+  // 0x26 is not sufficient on this controller).
   EPD_Address_Set(x, y, x + sizex - 1, y + sizey - 1);
   EPD_SetCursor(x, y);
   EPD_WR_REG(0x26);
+  for (j = 0; j < Height; j++)
+  {
+    for (i = 0; i < Width; i++)
+    {
+      EPD_WR_DATA8(Image[i + j * Width]);
+    }
+  }
+  EPD_Address_Set(x, y, x + sizex - 1, y + sizey - 1);
+  EPD_SetCursor(x, y);
+  EPD_WR_REG(0x24);
   for (j = 0; j < Height; j++)
   {
     for (i = 0; i < Width; i++)

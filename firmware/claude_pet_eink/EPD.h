@@ -12,6 +12,7 @@
 
 void EPD_ReadBusy(void);
 void EPD_RESET(void);
+void EPD_Wake(void);
 void EPD_Sleep(void);
 
 void EPD_Update(void);
