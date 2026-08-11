@@ -90,6 +90,15 @@ all ack. See `firmware/claude_pet_eink/README.md` for the vendored Elecrow
 panel driver (including the old-image-plane fix that stops partial-refresh
 text overlap) and the pin map, and DESIGN.md for the port notes.
 
+**The bridge is board-agnostic.** Any device that speaks the NDJSON contract
+over a serial port (or BLE NUS) is a valid pet: parse the heartbeat
+(`total`/`running`/`waiting`/`prompt`/`entries`/`time`), print `[alive]`
+every 5s, answer `{"cmd":"status"}` with a status ack, and emit
+`permission`/`focus`/`key`/`voice` verbs from whatever inputs the hardware
+has. The two firmwares here (240×320 touch LCD, 400×300 e-paper + buttons)
+are just two modalities of the same protocol — DESIGN.md's e-ink section
+documents the exact contract a new board must keep.
+
 ## Printable shell
 
 ![frame, back and stand as they come off the printer](docs/assets/shell-render.png)

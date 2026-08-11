@@ -60,6 +60,10 @@ class Daemon:
             # daemon doesn't care which transport is live.
             from .serial_transport import BuddySerial
             self.ble = BuddySerial(on_message=self._handle_ble, port=serial_port)
+            # A board reboot under an unbroken CH340 link never fires the
+            # on-connect resync — replay it when the boot banner scrolls past,
+            # or the reborn board keeps "--:--" and "No Claude" indefinitely.
+            self.ble.on_boot = self._resync_board
         else:
             self.ble = BuddyBLE(
                 on_message=self._handle_ble,
@@ -192,6 +196,15 @@ class Daemon:
                 self._last_hb_sent_at = now
             else:
                 log.warning("heartbeat: ble.send returned failure")
+
+    async def _resync_board(self) -> None:
+        """Re-run the on-connect resync after a board reboot on a live link:
+        time sync, forced heartbeat, status poll. The board buffers serial RX
+        during its boot-time panel clear, so no settling delay is needed."""
+        log.info("board rebooted under a live link — resyncing time + state")
+        await self.ble.send(build_time_sync())
+        await self._push_heartbeat(force=True)
+        await self.ble.send({"cmd": "status"})
 
     async def _on_ble_connected(self) -> None:
         """On every (re)connect, emit time sync + force a heartbeat + kick
