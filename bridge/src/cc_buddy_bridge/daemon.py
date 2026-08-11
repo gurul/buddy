@@ -60,6 +60,10 @@ class Daemon:
             # daemon doesn't care which transport is live.
             from .serial_transport import BuddySerial
             self.ble = BuddySerial(on_message=self._handle_ble, port=serial_port)
+            # A board reboot under an unbroken CH340 link never fires the
+            # on-connect resync — replay it when the boot banner scrolls past,
+            # or the reborn board keeps "--:--" and "No Claude" indefinitely.
+            self.ble.on_boot = self._resync_board
         else:
             self.ble = BuddyBLE(
                 on_message=self._handle_ble,
@@ -193,6 +197,15 @@ class Daemon:
             else:
                 log.warning("heartbeat: ble.send returned failure")
 
+    async def _resync_board(self) -> None:
+        """Re-run the on-connect resync after a board reboot on a live link:
+        time sync, forced heartbeat, status poll. The board buffers serial RX
+        during its boot-time panel clear, so no settling delay is needed."""
+        log.info("board rebooted under a live link — resyncing time + state")
+        await self.ble.send(build_time_sync())
+        await self._push_heartbeat(force=True)
+        await self.ble.send({"cmd": "status"})
+
     async def _on_ble_connected(self) -> None:
         """On every (re)connect, emit time sync + force a heartbeat + kick
         a status poll so we learn the link's encryption state right away."""
@@ -263,6 +276,13 @@ class Daemon:
                         force(why)
                     continue
             self._status_sent_at = time.monotonic()
+            # Re-sync time with every poll. The board's RTC-valid flag is
+            # RAM-only, so any watchdog reset blanks the mini clock; a reboot
+            # that slips past silence detection (fast reboot, half-dead link)
+            # never refires the on-connect time sync, leaving the clock gone
+            # until the next reconnect. Periodic sync makes it self-heal
+            # within one poll and corrects RTC drift for free.
+            await self.ble.send(build_time_sync())
             await self.ble.send({"cmd": "status"})
 
     async def _voice_watchdog(self) -> None:
@@ -517,7 +537,10 @@ class Daemon:
         # If BLE isn't connected, skip the round-trip and return no decision so
         # Claude Code's normal flow runs (respects user's auto/allow settings).
         if not self.ble.connected:
-            log.info("pretooluse for %s: ble not connected, deferring to default flow", tool_name)
+            # "stick", not "ble": self.ble duck-types over serial too, and the
+            # 2026-08-06 log read as a BLE problem when the board was simply
+            # off the USB bus.
+            log.info("pretooluse for %s: stick not connected, deferring to default flow", tool_name)
             self.audit.record(**audit_kwargs, decision=None, source="ble_disconnected")
             return {"ok": True}
 
@@ -647,11 +670,16 @@ class Daemon:
             return
         cmd = obj.get("cmd")
         if cmd == "focus":
-            # Swipe UP on the permission card: raise the terminal of the
-            # session that is asking. The card stays pending — this is a
-            # look-before-you-decide action, not a decision.
+            # Two senders, same verb. Swipe UP on the permission card carries
+            # the prompt id: raise the terminal of the session that is asking
+            # (the card stays pending — look-before-you-decide, not a
+            # decision). A tap on the pet in attention state carries no id:
+            # resolve the waiting session ourselves (oldest pending
+            # permission, else newest needs-input session).
             from .focus_terminal import focus_session_terminal
             cwd = self._pending_cwds.get(str(obj.get("id") or ""), "")
+            if not cwd:
+                cwd = self.state.attention_cwd()
             log.info("focus: requested for %r", cwd or "(unknown session)")
             asyncio.create_task(focus_session_terminal(cwd))
             return
