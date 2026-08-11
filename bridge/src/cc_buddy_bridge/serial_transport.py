@@ -60,6 +60,13 @@ _IS_CRASH = re.compile(
     re.IGNORECASE,
 )
 
+# The board rebooted underneath an unbroken link. A CH340-bridged board reset
+# does NOT re-enumerate USB, so no reconnect fires and the on-connect resync
+# (time + forced heartbeat) never runs — the reborn board sits at "--:--" and
+# "No Claude connected" until state happens to change. The ROM banner and the
+# firmware's own boot line are the tell; the daemon hooks them via `on_boot`.
+_IS_BOOT = re.compile(r"rst:0x|^\[boot\] ")
+
 # Treat the link as dead after this long with no bytes read at all.
 #
 # A USB re-enumeration — which every board reset causes, including the one
@@ -114,6 +121,11 @@ class BuddySerial:
         baud: int = 115200,
     ) -> None:
         self.on_message = on_message
+        # Optional async hook fired when the board's boot banner scrolls past
+        # on an already-open link (see _IS_BOOT). Debounced: a boot emits
+        # several matching lines back to back.
+        self.on_boot: Optional[Callable[[], Awaitable[None]]] = None
+        self._last_boot_hook = 0.0
         self.port_pattern = port
         self.baud = baud
         self._ser: Optional[serial.Serial] = None
@@ -261,6 +273,11 @@ class BuddySerial:
                                 else logging.DEBUG,
                                 "stick: %s", text,
                             )
+                            if (self.on_boot is not None
+                                    and _IS_BOOT.search(text)
+                                    and time.monotonic() - self._last_boot_hook > 5.0):
+                                self._last_boot_hook = time.monotonic()
+                                asyncio.create_task(self.on_boot())
                         continue
                     try:
                         obj = json.loads(text)
