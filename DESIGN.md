@@ -204,6 +204,66 @@ server is registered in `.mcp.json` for live-in-GUI iteration.
 - **Bash matchers are anchored at the start of the command** (`^git push( |$)`, …). A leading
   variable assignment or `cd` defeats them, and the command quietly takes the default path.
 
+## E-ink port (CrowPanel 4.2")
+
+`firmware/claude_pet_eink` — same NDJSON protocol, second board. Not a
+board_compat shim: e-paper invalidates the whole render model (a 240×320
+sprite pushed 30×/s), so the sketch is a small event-driven remake (~450
+lines + the vendored Elecrow SSD1683 driver).
+
+**Board facts (verified 2026-08-11):** Elecrow CrowPanel ESP32 4.2" E-Paper
+HMI. ESP32-S3-WROOM-1-N8R8 (QFN56 rev0.2, 8MB QIO flash, 8MB PSRAM — unused),
+SSD1683 panel 400×300 1bpp. USB-C goes through a **CH340** to UART0, so the
+port is `/dev/cu.usbserial-*` and opening it can auto-reset the board (unlike
+the FNK's native CDC). Flash at **460800** — 921600 dies mid-write on the
+CH340. Pins: EPD SCK=12 MOSI=11 RES=47 DC=46 CS=45 BUSY=48 (bit-banged),
+panel power GPIO7 HIGH. Buttons active-low, external pull-ups: MENU=2 EXIT=1
+rotary up=6 down=4 press=5. FQBN
+`esp32:esp32:esp32s3:FlashSize=8M,PartitionScheme=default_8MB` — USB CDC off,
+`Serial` is UART0.
+
+**Refresh policy.** Every render clears the full 15KB framebuffer and redraws
+from scratch (no incremental dirty regions — so text overlap is impossible at
+the buffer level), then pushes the whole screen: partial refresh normally,
+fast-full (`EPD_Init_Fast` 1.5s waveform) on boot, on card in/out (big
+inversions ghost worst) and every 24 partials to deghost. Panel deep-sleeps
+after every push; every render path re-inits, which wakes it. Redraws are
+triggered by a change signature — pet state, session counts, prompt id/queue/
+ttl-bucket (5 buckets, so a card redraws ~5× over its 300s TTL), connection,
+and the minute tick (which also alternates the two art frames). Token counts
+ride along on the next tick rather than triggering one. Steady state is one
+partial per minute ≈ 1.4k refreshes/day against a ~1M-cycle panel.
+
+**Contract kept with the daemon:** `[alive]` every 5s (RX_SILENCE watchdog),
+`{"ack":"status",...}` in the touch build's exact shape (ack watchdog + CLI
+`status`; battery is faked at 100%/USB — the BAT socket has no sense line),
+time sync consumed, `permission`/`focus`/`key` verbs emitted. `char_begin` is
+refused at the handshake (`ok:false`) so the host never streams a GIF pack at
+a board with no filesystem — the daemon's "LittleFS unformatted" ERROR on
+connect is this refusal being misread and is cosmetic. `Serial` RX buffer is
+raised to 4096 *before* `begin()`: a render blocks `loop()` for ~1–2s and a
+2KB heartbeat must survive it (UART default is 256).
+
+**Buttons replace gestures.** OK short/hold = approve once/always (hot
+prompts require the hold; a short tap draws a "HOLD OK" hint — the physical
+analogue of the stiffer swipe), EXIT = deny, MENU = focus (with prompt id
+when a card is up), rotary = `prev`/`next` keys, OK with no card = `enter`.
+Presses land on release with a 30ms debounce; a tap fully inside a refresh
+window can be missed — known v1 limit.
+
+**Local change to the vendored driver:** `EPD_ReadBusy()` got an 8s escape
+(stock code spins forever; a wedged panel would kill `[alive]` and the daemon
+would RTS-reset us — which on the CH340 wiring is a real EN reset, so it
+recovers, but the timeout makes it a non-event).
+
+**Verified 2026-08-11 with hwlog** (`~/Documents/personal/hardware-logging`):
+state machine transitions, status ack, prompt card, char refusal, button
+verbs, plus a conditioning suite — 30-message state flap at 400ms (renders
+coalesce via the signature check, no queue), 26 alternating partials across
+the deghost boundary, 4× max-length hot cards (720-byte detail wrapped), the
+23:59→0:00 clock shrink, and a >4KB heartbeat flood during a render. Zero
+crashes, heap flat at 328480 through the whole run.
+
 ## Phases
 
 - **A — display bring-up:** sketch compiles under arduino-cli, buddy idle animation renders correctly
