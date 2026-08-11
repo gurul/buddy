@@ -440,10 +440,10 @@ static void drawPromptScreen() {
     centered(358, "destructive command:", 16);
     centered(378, "HOLD OK to approve", 16);
   } else if (tama.promptHot) {
-    centered(358, "HOLD OK approve   v deny", 16);
+    centered(358, "HOLD OK approve   < deny", 16);
     centered(380, "MENU show terminal", 12);
   } else {
-    centered(358, "^ approve   v deny", 16);
+    centered(358, "> approve   < deny", 16);
     centered(380, "hold OK = always   MENU show terminal", 12);
   }
 }
@@ -536,18 +536,21 @@ static void onButton(uint8_t which, uint32_t heldMs) {
       sendFocus(prompt ? tama.promptId : nullptr);
       break;
     // With a card up the slider decides, like the touch build's swipe:
-    // up = approve, down = deny. A flick can't "hold", so destructive
-    // prompts route the approve through the same HOLD-OK gate.
+    // flick right = approve, left = deny. In the dock the rocker's NEXT
+    // (GPIO4) direction is physical RIGHT — verified 2026-08-11 when the
+    // opposite mapping turned an intended approve into two PR denials. A
+    // flick can't "hold", so destructive prompts route the approve through
+    // the HOLD-OK gate.
     case B_NEXT:
-      if (prompt) { denials++; prefs.putULong("deny", denials); sendPermission("deny"); }
-      else sendKey("next");
-      break;
-    case B_PREV:
       if (prompt) {
         if (tama.promptHot) { holdHint = true; drawnSig = 0xFFFFFFFF; break; }
         approvals++; prefs.putULong("appr", approvals);
         sendPermission("once");
-      } else sendKey("prev");
+      } else sendKey("next");
+      break;
+    case B_PREV:
+      if (prompt) { denials++; prefs.putULong("deny", denials); sendPermission("deny"); }
+      else sendKey("prev");
       break;
   }
 }
