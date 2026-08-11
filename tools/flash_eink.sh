@@ -8,9 +8,11 @@
 set -euo pipefail
 cd "$(dirname "$0")/.."
 
-FQBN="esp32:esp32:esp32s3:FlashSize=8M,PartitionScheme=default_8MB"
+# UploadSpeed pinned to 460800: the CH340 drops out mid-write at 921600.
+FQBN="esp32:esp32:esp32s3:FlashSize=8M,PartitionScheme=default_8MB,UploadSpeed=460800"
 SKETCH=firmware/claude_pet_eink
 BUILD="$SKETCH/build"
+PLIST="$HOME/Library/LaunchAgents/com.github.cc-buddy-bridge.daemon.plist"
 
 arduino-cli compile --fqbn "$FQBN" --build-path "$BUILD" "$SKETCH"
 
@@ -25,6 +27,13 @@ PORT="${1:-$(ls /dev/cu.usbserial-* 2>/dev/null | head -1)}"
 UPLOAD=(arduino-cli upload --fqbn "$FQBN" -p "$PORT" --input-dir "$BUILD" "$SKETCH")
 if command -v hwlog >/dev/null 2>&1 && hwlog status >/dev/null 2>&1; then
   hwlog flash -- "${UPLOAD[@]}"
+elif launchctl list 2>/dev/null | grep -q com.github.cc-buddy-bridge.daemon; then
+  # the bridge daemon owns the port exclusively and KeepAlive respawns it —
+  # boot it out for the flash, bring it back after (same dance as flash.sh)
+  launchctl unload "$PLIST"
+  trap 'launchctl load -w "$PLIST"' EXIT
+  sleep 1
+  "${UPLOAD[@]}"
 else
   "${UPLOAD[@]}"
 fi
