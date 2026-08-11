@@ -58,6 +58,35 @@ Claude Code CLI ─hooks→ unix socket → bridge daemon ─NDJSON over USB ser
 | Touch | FT6336G @ I2C 0x38 — SDA 16 / SCL 15 / INT 17 / RST 18 |
 | Extras | WS2812 LED (GPIO42), ES8311 codec + mic + speaker (unused), microSD, battery ADC GPIO9 |
 
+## E-ink build (CrowPanel 4.2")
+
+The pet also runs on the **Elecrow CrowPanel ESP32 4.2" E-Paper HMI**
+(ESP32-S3-WROOM-1-N8R8, SSD1683, 400×300 black/white, CH340 UART on the
+USB-C) — `firmware/claude_pet_eink`, an event-driven remake speaking the same
+protocol. E-paper can't animate at 30fps, so the panel redraws only on state
+changes, prompt traffic, and the minute tick: partial refresh for routine
+updates, a fast full refresh every 24 partials (and on card in/out) to clear
+ghosting, deep sleep between updates. The front buttons replace the gestures:
+
+| Button | No card up | Card showing |
+|---|---|---|
+| OK (rotary press) | Enter on the Mac | approve once; hold 0.7s = always. Destructive prompts *require* the hold — a short tap just draws "HOLD OK to approve" |
+| EXIT | — | deny |
+| MENU/HOME | raise the blocked session's terminal | raise the asking session's terminal (card stays pending) |
+| rotary up / down | previous / next option in Claude Code's pickers | — |
+
+```bash
+./tools/flash_eink.sh    # compile + archive ELF + flash (through `hwlog flash` when its daemon owns the port)
+cc-buddy-bridge install --service --serial-port '/dev/cu.usbserial-*'   # CH340 enumerates as usbserial, not usbmodem
+```
+
+GIF character packs don't apply on a 1-bit panel with no filesystem — the
+board refuses `char_begin` at the handshake, and the daemon logs one cosmetic
+"LittleFS unformatted" error per connect. One ASCII species (the cat, poses
+adapted from the touch build) ships in `pet_art.h`; `name`/`owner`/`species`
+commands all ack. See `firmware/claude_pet_eink/README.md` for the vendored
+Elecrow panel driver and the pin map, and DESIGN.md for the port notes.
+
 ## Printable shell
 
 ![frame, back and stand as they come off the printer](docs/assets/shell-render.png)
@@ -185,6 +214,8 @@ launchctl load -w ~/Library/LaunchAgents/com.github.cc-buddy-bridge.daemon.plist
 |---|---|
 | `firmware/claude_pet` | the sketch — pet state machine, touch UI, swipe cards, clock, diag ring |
 | `firmware/claude_pet/src/board_compat.*` | the port: shims the `M5StickCPlus.h` API onto this board |
+| `firmware/claude_pet_eink` | the CrowPanel 4.2" e-paper build — event-driven renders, button approvals, vendored SSD1683 driver |
+| `tools/flash_eink.sh` | compile + ELF archive + flash for the e-ink build |
 | `bridge/src/cc_buddy_bridge` | daemon, hooks, serial transport, voice trigger, read policy |
 | `case/shell_v2.py` | parametric 3D-printable shell, current revision (FreeCAD headless) — frame + back + alignment gauge, heat-set insert bosses, STLs in `case/export/` |
 | `case/shell.py` | v1 shell record (wrong hole grid; superseded) — still the source of the unchanged stand |
