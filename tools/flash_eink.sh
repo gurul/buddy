@@ -32,7 +32,12 @@ elif launchctl list 2>/dev/null | grep -q com.github.cc-buddy-bridge.daemon; the
   # boot it out for the flash, bring it back after (same dance as flash.sh)
   launchctl unload "$PLIST"
   trap 'launchctl load -w "$PLIST"' EXIT
-  sleep 1
+  # wait for the daemon to actually release the port — its reader thread
+  # holds the fd past the unload, and a fixed sleep raced it ([Errno 35])
+  for _ in $(seq 1 20); do
+    lsof "$PORT" >/dev/null 2>&1 || break
+    sleep 1
+  done
   "${UPLOAD[@]}"
 else
   "${UPLOAD[@]}"
