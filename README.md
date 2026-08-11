@@ -60,20 +60,23 @@ Claude Code CLI ─hooks→ unix socket → bridge daemon ─NDJSON over USB ser
 
 ## E-ink build (CrowPanel 4.2")
 
-The pet also runs on the **Elecrow CrowPanel ESP32 4.2" E-Paper HMI**
+A second board target: the **Elecrow CrowPanel ESP32 4.2" E-Paper HMI**
 (ESP32-S3-WROOM-1-N8R8, SSD1683, 400×300 black/white, CH340 UART on the
-USB-C) — `firmware/claude_pet_eink`, an event-driven remake speaking the same
-protocol. E-paper can't animate at 30fps, so the panel redraws only on state
-changes, prompt traffic, and the minute tick: partial refresh for routine
-updates, a fast full refresh every 24 partials (and on card in/out) to clear
-ghosting, deep sleep between updates. The front buttons replace the gestures:
+USB-C) — `firmware/claude_pet_eink`, same NDJSON protocol, **no pet**: on
+e-paper the build is a purely functional portrait status display — big
+clock + date, a state banner (IDLE / WORKING / NEEDS YOU / DONE!), session
+and token counters, the tail of the live transcript, and permission prompts
+as a full-screen card. Redraws happen on state changes, prompt traffic, and
+the minute tick: partial refresh for routine updates, a fast full refresh
+every 24 partials (and on card in/out) to clear ghosting, deep sleep between
+updates. The front controls (two buttons + a rocker/press "slider"):
 
-| Button | No card up | Card showing |
+| Control | No card up | Card showing |
 |---|---|---|
-| OK (rotary press) | Enter on the Mac | approve once; hold 0.7s = always. Destructive prompts *require* the hold — a short tap just draws "HOLD OK to approve" |
-| EXIT | — | deny |
+| slider press (OK) | Enter on the Mac | approve once; hold 0.7s = always. Destructive prompts *require* the hold — a short tap just draws "HOLD OK to approve" |
+| slider up / down | previous / next option in Claude Code's pickers | up = approve once, down = deny — the swipe, made physical. Destructive prompts won't approve from a flick; they point you at the OK hold |
+| EXIT | **hold = push-to-talk** — the daemon holds your dictation hotkey until you let go | deny |
 | MENU/HOME | raise the blocked session's terminal | raise the asking session's terminal (card stays pending) |
-| rotary up / down | previous / next option in Claude Code's pickers | — |
 
 ```bash
 ./tools/flash_eink.sh    # compile + archive ELF + flash (through `hwlog flash` when its daemon owns the port)
@@ -82,10 +85,10 @@ cc-buddy-bridge install --service --serial-port '/dev/cu.usbserial-*'   # CH340 
 
 GIF character packs don't apply on a 1-bit panel with no filesystem — the
 board refuses `char_begin` at the handshake, and the daemon logs one cosmetic
-"LittleFS unformatted" error per connect. One ASCII species (the cat, poses
-adapted from the touch build) ships in `pet_art.h`; `name`/`owner`/`species`
-commands all ack. See `firmware/claude_pet_eink/README.md` for the vendored
-Elecrow panel driver and the pin map, and DESIGN.md for the port notes.
+"LittleFS unformatted" error per connect. `name`/`owner`/`species` commands
+all ack. See `firmware/claude_pet_eink/README.md` for the vendored Elecrow
+panel driver (including the old-image-plane fix that stops partial-refresh
+text overlap) and the pin map, and DESIGN.md for the port notes.
 
 ## Printable shell
 
@@ -214,7 +217,7 @@ launchctl load -w ~/Library/LaunchAgents/com.github.cc-buddy-bridge.daemon.plist
 |---|---|
 | `firmware/claude_pet` | the sketch — pet state machine, touch UI, swipe cards, clock, diag ring |
 | `firmware/claude_pet/src/board_compat.*` | the port: shims the `M5StickCPlus.h` API onto this board |
-| `firmware/claude_pet_eink` | the CrowPanel 4.2" e-paper build — event-driven renders, button approvals, vendored SSD1683 driver |
+| `firmware/claude_pet_eink` | the CrowPanel 4.2" e-paper build — portrait status display, button approvals, vendored SSD1683 driver |
 | `tools/flash_eink.sh` | compile + ELF archive + flash for the e-ink build |
 | `bridge/src/cc_buddy_bridge` | daemon, hooks, serial transport, voice trigger, read policy |
 | `case/shell_v2.py` | parametric 3D-printable shell, current revision (FreeCAD headless) — frame + back + alignment gauge, heat-set insert bosses, STLs in `case/export/` |

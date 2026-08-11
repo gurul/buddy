@@ -208,8 +208,14 @@ server is registered in `.mcp.json` for live-in-GUI iteration.
 
 `firmware/claude_pet_eink` — same NDJSON protocol, second board. Not a
 board_compat shim: e-paper invalidates the whole render model (a 240×320
-sprite pushed 30×/s), so the sketch is a small event-driven remake (~450
-lines + the vendored Elecrow SSD1683 driver).
+sprite pushed 30×/s), so the sketch is a small event-driven remake (~500
+lines + the vendored Elecrow SSD1683 driver). **There is no pet on this
+build** — the first revision drew the ASCII cat, but on a panel that redraws
+once a minute a mascot is mostly a ghosting liability, so it's a purely
+functional portrait status display (`UI_ROTATE 90`, flip to 270 if a future
+dock stands it the other way): big clock + date, state banner
+(IDLE/WORKING/NEEDS YOU/DONE!), session/token counters, transcript tail,
+full-screen permission cards.
 
 **Board facts (verified 2026-08-11):** Elecrow CrowPanel ESP32 4.2" E-Paper
 HMI. ESP32-S3-WROOM-1-N8R8 (QFN56 rev0.2, 8MB QIO flash, 8MB PSRAM — unused),
@@ -244,17 +250,34 @@ connect is this refusal being misread and is cosmetic. `Serial` RX buffer is
 raised to 4096 *before* `begin()`: a render blocks `loop()` for ~1–2s and a
 2KB heartbeat must survive it (UART default is 256).
 
-**Buttons replace gestures.** OK short/hold = approve once/always (hot
-prompts require the hold; a short tap draws a "HOLD OK" hint — the physical
-analogue of the stiffer swipe), EXIT = deny, MENU = focus (with prompt id
-when a card is up), rotary = `prev`/`next` keys, OK with no card = `enter`.
-Presses land on release with a 30ms debounce; a tap fully inside a refresh
-window can be missed — known v1 limit.
+**Buttons replace gestures.** With a card up the slider decides like the
+touch build's swipe — up = approve once, down = deny (a flick can't "hold",
+so destructive approvals route through the HOLD-OK gate instead). OK
+short/hold = approve once/always (hot prompts require the hold; a short tap
+draws a "HOLD OK" hint — the physical analogue of the stiffer swipe), EXIT =
+deny with a card up and
+**hold-for-push-to-talk without one** (`{"cmd":"voice"}` start on the down
+edge, stop on release; the prompt-ness is latched at press time so a card
+arriving mid-dictation can't turn the release into a deny), MENU = focus
+(with prompt id when a card is up), rotary = `prev`/`next` keys, OK with no
+card = `enter`. Presses land on release with a 30ms debounce; a tap fully
+inside a refresh window can be missed — known v1 limit.
 
-**Local change to the vendored driver:** `EPD_ReadBusy()` got an 8s escape
-(stock code spins forever; a wedged panel would kill `[alive]` and the daemon
-would RTS-reset us — which on the CH340 wiring is a real EN reset, so it
-recovers, but the timeout makes it a non-event).
+**Local changes to the vendored driver:** (1) `EPD_ReadBusy()` got an 8s
+escape (stock code spins forever; a wedged panel would kill `[alive]` and
+the daemon would RTS-reset us — which on the CH340 wiring is a real EN
+reset, so it recovers, but the timeout makes it a non-event). (2) **The
+old-image plane fix — the overlapping-text autopsy.** The SSD1683 computes a
+partial refresh as the *diff* between its new-data RAM (0x24) and old-data
+RAM (0x26). The stock Elecrow driver only ever writes 0x24, so 0x26 holds
+whatever frame it last saw (boot-clear white, then never updated) and every
+partial diffs against stale data: black pixels from previous screens are
+never driven back to white, and two screens' text visibly merge ("19:88"
+clocks, interleaved words — first-print photos, 2026-08-11). Fix: partial
+updates write 0x24 → refresh → copy the same frame to 0x26 so the *next*
+partial diffs correctly; full updates write both planes up front. Ghosting
+proper (faint residue the waveform can't fully erase) still exists and is
+what the 24-partial full-refresh cycle clears.
 
 **Verified 2026-08-11 with hwlog** (`~/Documents/personal/hardware-logging`):
 state machine transitions, status ack, prompt card, char refusal, button

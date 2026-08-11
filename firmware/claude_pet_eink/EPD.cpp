@@ -1,8 +1,31 @@
 // Vendored from Elecrow's CrowPanel 4.2" demo (4.2_partial_refresh), see
-// this folder's README.md. Local change: EPD_ReadBusy gets a 8s escape so a
-// wedged panel can't hang loop() forever — a full SSD1683 refresh is ~4s
-// worst case, so 8s of BUSY means the panel is gone, not slow.
+// this folder's README.md. Local changes:
+//  - EPD_ReadBusy gets a 8s escape so a wedged panel can't hang loop()
+//    forever — a full SSD1683 refresh is ~4s worst case, so 8s of BUSY means
+//    the panel is gone, not slow.
+//  - Every display path now maintains the controller's "old data" RAM plane
+//    (0x26). The stock driver only ever writes new frames to 0x24, so a
+//    partial update diffs against whatever stale frame 0x26 held and black
+//    pixels from earlier frames survive — on-screen text visibly overlaps
+//    after two different screens. Partial updates write 0x24, refresh, then
+//    copy the same frame into 0x26 so the *next* partial diffs correctly;
+//    full updates write both planes up front.
 #include "EPD.h"
+
+static void EPD_WritePlane(uint8_t reg, const uint8_t *Image)
+{
+  uint16_t i, j, Width, Height;
+  Width = (EPD_W % 8 == 0) ? (EPD_W / 8) : (EPD_W / 8 + 1);
+  Height = EPD_H;
+  EPD_WR_REG(reg);
+  for (j = 0; j < Height; j++)
+  {
+    for (i = 0; i < Width; i++)
+    {
+      EPD_WR_DATA8(Image[i + j * Width]);
+    }
+  }
+}
 
 void EPD_ReadBusy(void)
 {
@@ -190,34 +213,16 @@ void EPD_Clear_R26A6H(void)
 
 void EPD_Display(const uint8_t *Image)
 {
-  uint16_t i, j, Width, Height;
-  Width = (EPD_W % 8 == 0) ? (EPD_W / 8) : (EPD_W / 8 + 1);
-  Height = EPD_H;
-  EPD_WR_REG(0x24);
-  for (j = 0; j < Height; j++)
-  {
-    for (i = 0; i < Width; i++)
-    {
-      EPD_WR_DATA8(Image[i + j * Width]);
-    }
-  }
+  EPD_WritePlane(0x24, Image);
+  EPD_WritePlane(0x26, Image);
   EPD_Update();
 }
 
 
 void EPD_Display_Fast(const uint8_t *Image)
 {
-  uint16_t i, j, Width, Height;
-  Width = (EPD_W % 8 == 0) ? (EPD_W / 8) : (EPD_W / 8 + 1);
-  Height = EPD_H;
-  EPD_WR_REG(0x24);
-  for (j = 0; j < Height; j++)
-  {
-    for (i = 0; i < Width; i++)
-    {
-      EPD_WR_DATA8(Image[i + j * Width]);
-    }
-  }
+  EPD_WritePlane(0x24, Image);
+  EPD_WritePlane(0x26, Image);
   EPD_Update_Fast();
 }
 
@@ -245,4 +250,15 @@ void EPD_Display_Part(uint16_t x, uint16_t y, uint16_t sizex, uint16_t sizey, co
     }
   }
   EPD_Update_Part();
+  // sync the old-data plane so the NEXT partial diffs against this frame
+  EPD_Address_Set(x, y, x + sizex - 1, y + sizey - 1);
+  EPD_SetCursor(x, y);
+  EPD_WR_REG(0x26);
+  for (j = 0; j < Height; j++)
+  {
+    for (i = 0; i < Width; i++)
+    {
+      EPD_WR_DATA8(Image[i + j * Width]);
+    }
+  }
 }
