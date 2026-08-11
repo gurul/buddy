@@ -272,21 +272,31 @@ the *diff* between its new-data RAM (0x24) and old-data RAM (0x26); pixels
 where the planes agree are not driven, so a previously-black pixel the diff
 misses stays black and consecutive screens' text visibly merges ("19:88"
 clocks, interleaved words — first-print photos, 2026-08-11). The stock
-Elecrow driver breaks this four ways at once, and fixing only one (the first
-attempt wrote 0x26 after each partial) is NOT enough. The working recipe is
-GxEPD2's, from its GDEY042T81 class (the same panel/controller), adopted
-verbatim 2026-08-11 after a hardware A/B on the real board: **(a)** enter
-deep sleep only after powering the analog stage down (`0x22=0x83` + `0x20` +
-busy-wait, then `0x10=0x01`) — sleeping with the booster up corrupts the RAM
-planes, which is why the 0x26-only fix changed nothing; **(b)** after every
-partial refresh rewrite BOTH planes with the displayed frame ("set current
-and previous buffers equal" — 0x26 alone is insufficient); **(c)** wake for
-a partial with `EPD_Wake()` (RESET pulse + SWRESET + `0x18=0x80` internal
-temp sensor), never the full `EPD_Init()`; **(d)** trigger partials with
-`0x22=0xFC` and force `0x21=0x00,0x00` immediately before, so the old plane
-can never be bypassed. Ghosting proper (faint residue the waveform can't
-fully erase) still exists and is what the 24-partial full-refresh cycle
-clears.
+Elecrow driver mishandles this, and the first fix attempt (write 0x26 after
+each partial) made it differently wrong: per the SSD1683 datasheet (§0x37
+"Ping-Pong for black/white mode", enabled via panel OTP) the controller
+**switches its plane roles after every Mode-2 update**, so a post-update
+write to 0x26 alone lands in the plane about to serve as *current* and the
+true old plane goes stale — the merge persisted. (RAM itself provably
+survives deep sleep mode 1 + HW reset + SWRESET — datasheet: "Retain RAM
+data but cannot access the RAM"; resets clear register state, "RAM are
+unaffected".) The reference drivers use exactly two safe patterns: never
+touch 0x26 after the baseline full refresh and let ping-pong maintain it
+(Good Display / Waveshare / the Elecrow factory firmware, whose partial wake
+is a bare RES pulse), or rewrite BOTH planes after every refresh ("set
+current and previous buffers equal" — GxEPD2). We adopted the GxEPD2 recipe
+verbatim (2026-08-11, verified on hardware): **(a)** power the analog stage
+down before deep sleep (`0x22=0x83` + `0x20` + busy, then `0x10=0x01`);
+**(b)** rewrite both planes after every partial; **(c)** wake for a partial
+with `EPD_Wake()` (RESET pulse + SWRESET + `0x18=0x80` internal temp
+sensor), never the full `EPD_Init()`; **(d)** trigger partials with
+`0x22=0xFC` forcing `0x21=0x00,0x00` immediately before, so the old plane is
+never bypassed (`0x12` resets 0x21 even though it leaves RAM alone). Related
+sharp edge from GxEPD2's own v1.5.6 fix on this exact panel: any `0x22`
+value that loads the Mode-2 LUT outside a real display update (0xF8, 0x99,
+0xB9) triggers the buffer switch on its own — don't. Ghosting proper (faint
+residue the waveform can't fully erase) still exists and is what the
+24-partial full-refresh cycle clears.
 
 **Verified 2026-08-11 with hwlog** (`~/Documents/personal/hardware-logging`):
 state machine transitions, status ack, prompt card, char refusal, button
