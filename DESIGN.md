@@ -267,17 +267,26 @@ inside a refresh window can be missed — known v1 limit.
 escape (stock code spins forever; a wedged panel would kill `[alive]` and
 the daemon would RTS-reset us — which on the CH340 wiring is a real EN
 reset, so it recovers, but the timeout makes it a non-event). (2) **The
-old-image plane fix — the overlapping-text autopsy.** The SSD1683 computes a
-partial refresh as the *diff* between its new-data RAM (0x24) and old-data
-RAM (0x26). The stock Elecrow driver only ever writes 0x24, so 0x26 holds
-whatever frame it last saw (boot-clear white, then never updated) and every
-partial diffs against stale data: black pixels from previous screens are
-never driven back to white, and two screens' text visibly merge ("19:88"
-clocks, interleaved words — first-print photos, 2026-08-11). Fix: partial
-updates write 0x24 → refresh → copy the same frame to 0x26 so the *next*
-partial diffs correctly; full updates write both planes up front. Ghosting
-proper (faint residue the waveform can't fully erase) still exists and is
-what the 24-partial full-refresh cycle clears.
+partial-refresh overlap autopsy.** The SSD1683 computes a partial refresh as
+the *diff* between its new-data RAM (0x24) and old-data RAM (0x26); pixels
+where the planes agree are not driven, so a previously-black pixel the diff
+misses stays black and consecutive screens' text visibly merges ("19:88"
+clocks, interleaved words — first-print photos, 2026-08-11). The stock
+Elecrow driver breaks this four ways at once, and fixing only one (the first
+attempt wrote 0x26 after each partial) is NOT enough. The working recipe is
+GxEPD2's, from its GDEY042T81 class (the same panel/controller), adopted
+verbatim 2026-08-11 after a hardware A/B on the real board: **(a)** enter
+deep sleep only after powering the analog stage down (`0x22=0x83` + `0x20` +
+busy-wait, then `0x10=0x01`) — sleeping with the booster up corrupts the RAM
+planes, which is why the 0x26-only fix changed nothing; **(b)** after every
+partial refresh rewrite BOTH planes with the displayed frame ("set current
+and previous buffers equal" — 0x26 alone is insufficient); **(c)** wake for
+a partial with `EPD_Wake()` (RESET pulse + SWRESET + `0x18=0x80` internal
+temp sensor), never the full `EPD_Init()`; **(d)** trigger partials with
+`0x22=0xFC` and force `0x21=0x00,0x00` immediately before, so the old plane
+can never be bypassed. Ghosting proper (faint residue the waveform can't
+fully erase) still exists and is what the 24-partial full-refresh cycle
+clears.
 
 **Verified 2026-08-11 with hwlog** (`~/Documents/personal/hardware-logging`):
 state machine transitions, status ack, prompt card, char refusal, button

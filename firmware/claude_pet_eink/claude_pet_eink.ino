@@ -338,7 +338,11 @@ static void pushFrame() {
     partialsSinceFull = 0;
     needFull = false;
   } else {
-    EPD_Init();
+    // Wake from deep sleep the way GxEPD2 does on this panel (reset + soft
+    // reset + temp sensor select) — NOT the full EPD_Init(). The controller
+    // retains both RAM planes through a properly-entered deep sleep, so the
+    // partial can diff against the previous frame.
+    EPD_Wake();
     EPD_Display_Part(0, 0, EPD_W, EPD_H, fb);
     partialsSinceFull++;
   }
