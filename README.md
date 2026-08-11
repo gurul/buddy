@@ -231,6 +231,7 @@ launchctl load -w ~/Library/LaunchAgents/com.github.cc-buddy-bridge.daemon.plist
 | `bridge/src/cc_buddy_bridge` | daemon, hooks, serial transport, voice trigger, read policy |
 | `case/shell_v2.py` | parametric 3D-printable shell, current revision (FreeCAD headless) — frame + back + alignment gauge, heat-set insert bosses, STLs in `case/export/` |
 | `case/shell.py` | v1 shell record (wrong hole grid; superseded) — still the source of the unchanged stand |
+| `case/stand_eink.py` | prop-up stand for the CrowPanel e-ink build — 65° pocket wedge sized off the vendor STEP, open cable mouth, fit-proofed, support-free |
 | `tools/flash.sh` | compile + ELF archive + daemon-safe flash in one step |
 | `DESIGN.md` | architecture, board facts, port map, disconnect runbook, and the gotchas worth knowing |
 
