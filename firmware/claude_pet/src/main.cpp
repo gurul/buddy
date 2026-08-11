@@ -488,9 +488,10 @@ static void drawCardFace(TFT_eSPI* g, int ox, int oy, const Palette& p) {
   }
 }
 
-// Tap the card → full-screen detail: the whole command (prompt.detail from
-// the bridge, falling back to the hint), wrapped, with the same
-// swipe-to-decide still live. Tap again to collapse.
+// Full-screen detail — the DEFAULT view while a request is up: the whole
+// command (prompt.detail from the bridge, falling back to the hint) wrapped
+// over ~66% of the screen, with the same swipe-to-decide still live and only
+// minimal deny/approve affordances. Tap toggles the compact pet view.
 static void drawCardDetail(const Palette& p) {
   float r = cardRatio();
   uint16_t edge = (r > 0.3f) ? GREEN : (r < -0.3f) ? HOT
@@ -509,12 +510,33 @@ static void drawCardDetail(const Palette& p) {
     spr.setCursor(W - 14 - sw, 44);
     spr.print(tama.promptSess);
   }
+
+  // Meta row under the header: elapsed/left timer, queued count, pet hint.
+  int remain = (int)tama.promptTtl - (int)((millis() - tama.promptTtlAtMs) / 1000);
+  if (remain < 0) remain = 0;
+  bool closing = tama.promptTtl && remain <= 60;
+  uint32_t waited = (millis() - promptArrivedMs) / 1000;
+  char wb[12];
+  if (closing) snprintf(wb, sizeof(wb), "%ds left", remain);
+  else         snprintf(wb, sizeof(wb), "%lus", (unsigned long)waited);
+  spr.setTextColor(closing ? HOT : p.textDim, PANEL);
+  spr.setCursor(14, 58);
+  spr.print(wb);
+  if (tama.promptQueued) {
+    spr.setTextColor(p.body, PANEL);
+    spr.setCursor((W - 3 * 6) / 2, 58);
+    spr.printf("+%u", tama.promptQueued);
+  }
+  spr.setTextColor(p.textDim, PANEL);
+  spr.setCursor(W - 14 - 8 * 6, 58);
+  spr.print("tap: pet");
+
   const char* src = tama.promptDetail[0] ? tama.promptDetail : tama.promptHint;
-  static char rows[18][40];
-  uint8_t n = wrapInto(src, rows, 18, 36);
+  static char rows[24][40];
+  uint8_t n = wrapInto(src, rows, 24, 36);
   spr.setTextColor(p.text, PANEL);
-  int y = 64;
-  for (uint8_t i = 0; i < n; i++, y += 10) {
+  int y = 72;
+  for (uint8_t i = 0; i < n && y <= H - 38; i++, y += 10) {
     spr.setCursor(14, y);
     spr.print(rows[i]);
   }
@@ -524,9 +546,12 @@ static void drawCardDetail(const Palette& p) {
   spr.setTextColor(GREEN, PANEL);
   spr.setCursor(W - 14 - 9 * 6, H - 24);
   spr.print("approve >");
-  spr.setTextColor(p.textDim, PANEL);
-  spr.setCursor((W - 12 * 6) / 2, H - 24);
-  spr.print("tap to close");
+  // TTL drain bar along the panel's bottom edge, same scale as the compact
+  // card, so the terminal-fallback deadline stays visible in this view too.
+  if (tama.promptTtlMax) {
+    int bw = (W - 28) * remain / tama.promptTtlMax;
+    if (bw > 0) spr.fillRect(14, H - 14, bw, 2, closing ? HOT : p.textDim);
+  }
   if (fabsf(r) > 0.3f) {
     bool ok = r > 0;
     const char* s = ok ? (cardAlways ? "ALWAYS" : "APPROVE") : "DENY";
@@ -646,7 +671,13 @@ void setup() {
   // during init used to leave the board silent forever while the USB port
   // kept enumerating. Setup's delays total ~3.8s against the 15s budget.
   diagWatchdogBegin();
+  // Phase + ring checkpoints through setup: the 2026-08-05 12:37 plug-in
+  // crash (INT-WDT in the systick handler, systimer never latching) reported
+  // "DIED IN: none" because nothing ever set a phase before loop(). Every
+  // setup death now names the stage it died after.
+  diagPhase(DP_SETUP);
   M5.begin();
+  diagLog("m5.begin done");
   delay(2000);                       // let the host attach before first prints
   diagReport("boot");                // why the last run ended + what it was doing
   Serial.println("[boot] M5.begin done");
@@ -654,6 +685,7 @@ void setup() {
   M5.Imu.Init();
   M5.Beep.begin();
   startBt();
+  diagLog("bt up");
   applyBrightness();
   Serial.println("[boot] bt+brightness done");
   lastInteractMs = millis();
@@ -667,6 +699,7 @@ void setup() {
   Serial.printf("[boot] sprite created=%d psram=%d heap=%u\n",
                 (int)spr.created(), (int)psramFound(), ESP.getFreeHeap());
   characterInit(nullptr);  // scan /characters/ for whatever is installed
+  diagLog("characterInit done");
   Serial.println("[boot] characterInit done");
   gifAvailable = characterLoaded();
   // species NVS: 0..N-1 = ASCII species, 0xFF = use GIF (also the default,
@@ -789,7 +822,19 @@ void loop() {
     // functional only — hold to dictate, swipe down for Enter; the pet's
     // moods come from Claude's state, not from being poked). The events are
     // still drained so the compat-layer state machine can't latch.
-    if (M5.petTapped()) wake();
+    // The one functional tap: while the pet demands attention (a session is
+    // blocked on the human but no card is up — cards own the screen and have
+    // their own swipe-up focus), tapping it raises that session's terminal.
+    // baseState, not activeState: a one-shot overlay (level-up celebrate)
+    // must not eat the tap while a session is actually waiting.
+    if (M5.petTapped()) {
+      wake();
+      if (baseState == P_ATTENTION) {
+        diagLog("tap -> focus");
+        sendCmd("{\"cmd\":\"focus\"}");
+        beep(1600, 40);
+      }
+    }
     M5.petScrubbed();
   } else {
     // drain while overlays open, so a stale gesture can't fire later
@@ -824,7 +869,11 @@ void loop() {
       if (buddyMode) buddyInvalidate();
       cardPhase = CARD_REST;
       cardX = 0; cardVel = 0; cardArmed = false; cardAlways = false;
-      cardExpanded = false;
+      // Text-first: a fresh request opens straight into the full-screen
+      // detail view (the pet steps aside) so the command is readable
+      // without an extra tap. Tapping toggles back to the compact
+      // pet-and-card view and the swipe gestures work in both.
+      cardExpanded = true;
       if (!cardSpr.created()) cardSpr.createSprite(CARD_W, CARD_H);
     } else {
       // Prompt resolved — free the card sprite and repaint everything so
@@ -1018,11 +1067,14 @@ void loop() {
   if (pk && !lastPasskey) { wake(); beep(1800, 60); }
   lastPasskey = pk;
 
+  // RENDER covers every draw path — the GIF branch used to carry no phase at
+  // all, so a hang in characterTick would have blamed "clock face" (the last
+  // phase set before this chain).
+  diagPhase(DP_RENDER);
   if (napping || screenOff || landscapeClock) {
     // skip sprite render — face-down, powered off, or landscape clock
     // (which draws direct-to-LCD below)
   } else if (buddyMode) {
-    diagPhase(DP_RENDER);
     buddyTick(activeState);
   } else if (characterLoaded()) {
     characterSetState(activeState);
@@ -1056,6 +1108,10 @@ void loop() {
     else if (clocking) drawClock();
     else if (settings().hud) drawHUD();
     drawMiniClock();
+    // Split phase: every TG0WDT reset of 2026-08-05/06 died in "render",
+    // which conflated the draw code above with this full-frame SPI write.
+    // The next hang names the guilty half.
+    diagPhase(DP_PUSH);
     spr.pushSprite(0, 0);
   }
 
@@ -1064,6 +1120,7 @@ void loop() {
   // Exit needs sustained not-down so IMU noise at the threshold doesn't
   // bounce brightness between 8 and full every few frames.
   static int8_t faceDownFrames = 0;
+  diagPhase(DP_NAP);
   if (!inPrompt) {
     bool down = isFaceDown();
     if (down)       { if (faceDownFrames < 20) faceDownFrames++; }

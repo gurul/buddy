@@ -30,6 +30,12 @@ Claude Code CLI ─hooks→ unix socket → bridge daemon ─NDJSON over USB ser
   Tap the card for a full-screen view of the whole command; hold it at the right edge to
   approve **and stop being asked** for that command shape (daemon lifetime). Approving a
   read grants its whole enclosing repo for the daemon's lifetime.
+- **Summons your terminal.** Tap the pet while it demands attention and the daemon raises
+  the terminal of the session that's blocked on you (swipe up on a permission card for the
+  same, without deciding). Window-level matching by the session's repo name works everywhere —
+  AppleScript for iTerm2/Terminal.app, Accessibility (AXRaise) for Ghostty, Warp, cmux and
+  friends — falling back to raising the app; the app order is configurable via
+  `CC_BUDDY_FOCUS_APPS`.
 - **Push-to-talk dictation.** Hold the pet and the daemon holds your dictation app's global
   hotkey until you let go — app-agnostic, it just holds a chord.
 - **Hands-on-pet option picking.** Swipe left/right to walk Claude Code's option pickers
@@ -52,6 +58,68 @@ Claude Code CLI ─hooks→ unix socket → bridge daemon ─NDJSON over USB ser
 | Touch | FT6336G @ I2C 0x38 — SDA 16 / SCL 15 / INT 17 / RST 18 |
 | Extras | WS2812 LED (GPIO42), ES8311 codec + mic + speaker (unused), microSD, battery ADC GPIO9 |
 
+## E-ink build (CrowPanel 4.2")
+
+A second board target: the **Elecrow CrowPanel ESP32 4.2" E-Paper HMI**
+(ESP32-S3-WROOM-1-N8R8, SSD1683, 400×300 black/white, CH340 UART on the
+USB-C) — `firmware/claude_pet_eink`, same NDJSON protocol, **no pet**: on
+e-paper the build is a purely functional portrait status display — big
+clock + date, a state banner (IDLE / WORKING / NEEDS YOU / DONE!), session
+and token counters, the tail of the live transcript, and permission prompts
+as a full-screen card. Redraws happen on state changes, prompt traffic, and
+the minute tick: partial refresh for routine updates, a fast full refresh
+every 24 partials (and on card in/out) to clear ghosting, deep sleep between
+updates. The front controls (two buttons + a rocker/press "slider"):
+
+| Control | No card up | Card showing |
+|---|---|---|
+| slider press (OK) | Enter on the Mac | approve once; hold 0.7s = always. Destructive prompts *require* the hold — a short tap just draws "HOLD OK to approve" |
+| slider up / down | previous / next option in Claude Code's pickers | up = approve once, down = deny — the swipe, made physical. Destructive prompts won't approve from a flick; they point you at the OK hold |
+| EXIT | **hold = push-to-talk** — the daemon holds your dictation hotkey until you let go | deny |
+| MENU/HOME | raise the blocked session's terminal | raise the asking session's terminal (card stays pending) |
+
+```bash
+./tools/flash_eink.sh    # compile + archive ELF + flash (through `hwlog flash` when its daemon owns the port)
+cc-buddy-bridge install --service --serial-port '/dev/cu.usbserial-*'   # CH340 enumerates as usbserial, not usbmodem
+```
+
+GIF character packs don't apply on a 1-bit panel with no filesystem — the
+board refuses `char_begin` at the handshake, and the daemon logs one cosmetic
+"LittleFS unformatted" error per connect. `name`/`owner`/`species` commands
+all ack. See `firmware/claude_pet_eink/README.md` for the vendored Elecrow
+panel driver (including the old-image-plane fix that stops partial-refresh
+text overlap) and the pin map, and DESIGN.md for the port notes.
+
+**The bridge is board-agnostic.** Any device that speaks the NDJSON contract
+over a serial port (or BLE NUS) is a valid pet: parse the heartbeat
+(`total`/`running`/`waiting`/`prompt`/`entries`/`time`), print `[alive]`
+every 5s, answer `{"cmd":"status"}` with a status ack, and emit
+`permission`/`focus`/`key`/`voice` verbs from whatever inputs the hardware
+has. The two firmwares here (240×320 touch LCD, 400×300 e-paper + buttons)
+are just two modalities of the same protocol — DESIGN.md's e-ink section
+documents the exact contract a new board must keep.
+
+## Printable shell
+
+![frame, back and stand as they come off the printer](docs/assets/shell-render.png)
+
+A parametric three-part case lives in `case/` — `shell.py` builds it headless in FreeCAD
+and exports STLs to `case/export/`. Frame (bezel + walls, print face down), back cover
+(screw bosses, WS2812 glow window, BOOT/RESET pokeholes, print outer face down), and a
+65° stand dock (print base down). All support-free. Every rebuild runs a **fit
+proof**: a mock board (PCB, display module, USB body, connector overhangs) must clear
+both shell parts or the build fails. Dimensions came off the real board with calipers;
+see `DESIGN.md` for what's measured vs. derived.
+
+**Current revision: v2** (`case/shell_v2.py` → `frame_v2.stl`, `back_v2.stl`,
+`gauge_v2.stl`). The first print revealed the v1 hole grid was off by >2mm on both
+axes; v2 uses the re-measured grid (77.18 × 41.50 center-to-center) and switches
+fastening to **M3 heat-set inserts** in the back bosses (Ø4.0 × 6.8mm bores, fits
+inserts up to M3×5.7) with M3×14/16 flat-head machine screws from the front. The v1
+stand is unchanged and still fits — don't reprint it. Print the **gauge** first: a
+1.2mm board-footprint plate with the hole grid; lay the bare PCB on it flush and
+confirm daylight through all four holes before committing to the shell print.
+
 ## Controls
 
 | Gesture | Action |
@@ -59,6 +127,8 @@ Claude Code CLI ─hooks→ unix socket → bridge daemon ─NDJSON over USB ser
 | **Swipe card right / left** | approve / deny the pending prompt |
 | **Hold card at the right edge** (700ms) | stamp flips to ALWAYS — approve and stop carding this command shape for the daemon's lifetime |
 | **Tap the card** | expand to a full-screen view of the whole command (long commands truncate on the card); tap again to close |
+| **Swipe the card up** | raise the asking session's terminal — the card stays pending (look before you decide) |
+| **Tap the pet** (attention state only) | raise the terminal of the session that's blocked on you |
 | **Hold the pet** | push-to-talk: holds your dictation hotkey while held |
 | **Swipe down** (anywhere) | press Enter on the Mac |
 | **Swipe left / right** (no card up) | previous / next option in Claude Code's pickers (Up/Down arrow) |
@@ -94,13 +164,18 @@ tap **RESET**, release BOOT, retry.
 cd bridge
 python3.12 -m venv .venv && .venv/bin/pip install -e .
 .venv/bin/cc-buddy-bridge install    # registers the hooks in Claude Code's settings.json
-.venv/bin/cc-buddy-bridge install --service --serial-port '/dev/cu.usbmodem*'
+.venv/bin/cc-buddy-bridge install --service --serial-port '/dev/cu.usbmodem*' --voice-hotkey option
 ```
+
+`install` and `install --service` are **two separate steps** — `--service` installs the unit
+*instead of* the hooks, so running only the second leaves you with a connected board that
+never receives session state. Run both.
 
 | Command | What |
 |---|---|
 | `daemon --serial-port …` | run the bridge in the foreground |
-| `install` / `uninstall` / `status` | manage hooks; `--service` also installs the launchd/systemd unit |
+| `install` / `uninstall` / `status` | manage hooks; `--service` installs the launchd/systemd unit *instead* |
+| `install --service --voice-hotkey option` | bake the push-to-talk hotkey into the unit so it survives reinstalls |
 | `audit` | the approval decision log |
 | `diag` / `diag --watch` | why the board last reset, and what it was doing |
 | `voice-check` | diagnose push-to-talk (Accessibility permission, hotkey delivery) |
@@ -112,8 +187,9 @@ python3.12 -m venv .venv && .venv/bin/pip install -e .
 |---|---|
 | `CLAUDE_CONFIG_DIR` | which Claude config home `install`/`status` target (default `~/.claude`) |
 | `CC_BUDDY_CLAUDE_CONFIG_DIRS` | `os.pathsep`-separated homes the daemon serves — it runs outside any session, so it can't inherit the above |
-| `CC_BUDDY_VOICE_HOTKEY` | `option` (default), `opt-space`, or `fn` — match your dictation app |
+| `CC_BUDDY_VOICE_HOTKEY` | `option` (default and recommended), `opt-space`, or `fn` — prefer rebinding your dictation app to Option over changing this. Bake it in with `install --service --voice-hotkey …`; a hand-edited unit file is wiped by the next `--service` install |
 | `CC_BUDDY_KEY_METHOD` | `osascript` routes Enter through System Events, for apps that swallow synthetic key events (Warp) |
+| `CC_BUDDY_FOCUS_APPS` | comma-separated app names, in priority order, that tap-to-focus raises (e.g. `Warp,cmux,Composer`) — default: Ghostty, Warp, cmux, Composer, Cursor, VS Code |
 
 Installing into the wrong config home **fails silently** — hooks written, board animating,
 no session ever prompting. `status` prints the home it resolved; check it first.
@@ -121,7 +197,28 @@ no session ever prompting. `status` prints the home it resolved; check it first.
 Push-to-talk needs **Accessibility permission** for the daemon's python (macOS filters
 synthetic events from untrusted processes). `voice-check` prints the exact binary to grant.
 Avoid `fn` as a hotkey: it's a secondary-fn modifier that many apps read from raw HID, which
-synthetic events can't reach — rebind to an ordinary chord.
+synthetic events can't reach — rebind your dictation app to a bare **Option** hold, the
+default, which synthesizes reliably.
+
+Granting that permission has two traps worth knowing before you fight them:
+
+- **The system dialog is the easy path.** Holding the pet once triggers macOS's
+  "would like to control this computer" prompt, whose *Open System Settings* button adds the
+  entry for you. It fires **once per daemon lifetime** — if you miss it, restart the daemon
+  to get it back. Adding the binary by hand instead means `+` → file picker → click out of
+  the search field → `Cmd+Shift+G`; dragging from Finder is silently rejected.
+- **`voice-check` run from a granted terminal reports that terminal's permission, not the
+  daemon's.** macOS attributes Accessibility to the responsible process, so a terminal with
+  the grant makes the check print `trusted: True` while the launchd daemon logs
+  `Accessibility not granted`. When the two disagree, **the daemon log is the truth.**
+
+After editing a unit file, reload it properly — `launchctl kickstart` restarts the process
+but reuses the job definition cached at load time, so environment changes are ignored:
+
+```bash
+launchctl unload ~/Library/LaunchAgents/com.github.cc-buddy-bridge.daemon.plist
+launchctl load -w ~/Library/LaunchAgents/com.github.cc-buddy-bridge.daemon.plist
+```
 
 ## Layout
 
@@ -129,7 +226,11 @@ synthetic events can't reach — rebind to an ordinary chord.
 |---|---|
 | `firmware/claude_pet` | the sketch — pet state machine, touch UI, swipe cards, clock, diag ring |
 | `firmware/claude_pet/src/board_compat.*` | the port: shims the `M5StickCPlus.h` API onto this board |
+| `firmware/claude_pet_eink` | the CrowPanel 4.2" e-paper build — portrait status display, button approvals, vendored SSD1683 driver |
+| `tools/flash_eink.sh` | compile + ELF archive + flash for the e-ink build |
 | `bridge/src/cc_buddy_bridge` | daemon, hooks, serial transport, voice trigger, read policy |
+| `case/shell_v2.py` | parametric 3D-printable shell, current revision (FreeCAD headless) — frame + back + alignment gauge, heat-set insert bosses, STLs in `case/export/` |
+| `case/shell.py` | v1 shell record (wrong hole grid; superseded) — still the source of the unchanged stand |
 | `tools/flash.sh` | compile + ELF archive + daemon-safe flash in one step |
 | `DESIGN.md` | architecture, board facts, port map, disconnect runbook, and the gotchas worth knowing |
 
