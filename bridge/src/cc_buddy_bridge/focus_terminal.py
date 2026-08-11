@@ -159,6 +159,11 @@ on run argv
     tell process procName
       repeat with w in windows
         if (name of w as string) contains needle then
+          try
+            if value of attribute "AXMinimized" of w is true then
+              set value of attribute "AXMinimized" of w to false
+            end if
+          end try
           perform action "AXRaise" of w
           set frontmost to true
           return "raised"
@@ -168,6 +173,36 @@ on run argv
     end tell
   end tell
   return "no-match"
+end run
+'''
+
+# `activate` does NOT pull a minimized window out of the Dock — an app whose
+# only window is minimized comes "frontmost" showing nothing, which reads as
+# the button doing nothing (2026-08-11, MENU on the e-ink board). If no
+# window of the app is visible, restore the first minimized one.
+_UNMINIMIZE_SCRIPT = '''
+on run argv
+  set procName to item 1 of argv
+  tell application "System Events"
+    if not (exists process procName) then return "no-proc"
+    tell process procName
+      repeat with w in windows
+        try
+          if value of attribute "AXMinimized" of w is false then return "visible"
+        end try
+      end repeat
+      repeat with w in windows
+        try
+          if value of attribute "AXMinimized" of w is true then
+            set value of attribute "AXMinimized" of w to false
+            perform action "AXRaise" of w
+            return "unminimized"
+          end if
+        end try
+      end repeat
+      return "no-windows"
+    end tell
+  end tell
 end run
 '''
 
@@ -214,16 +249,20 @@ async def focus_session_terminal(cwd: str) -> None:
                      "assuming it's on screen", frontmost_app, needle)
             return
 
-        # Pass 2: no window matched anywhere — raise the first running app.
+        # Pass 2: no window matched anywhere — raise the first running app,
+        # restoring a minimized window if that's all it has (activate alone
+        # leaves a Dock-minimized window in the Dock).
         for proc_name, bundle_id in running:
             if bundle_id is not None:
                 result = await _osascript(_ACTIVATE_SCRIPT, bundle_id)
             else:
                 result = await _osascript(_ACTIVATE_BY_NAME_SCRIPT, proc_name)
-            log.info("focus: activated %s (%s)", proc_name,
-                     result or "error")
             if result:
+                unmin = await _osascript(_UNMINIMIZE_SCRIPT, proc_name)
+                log.info("focus: activated %s (windows: %s)", proc_name,
+                         unmin or "ax-error")
                 return
+            log.info("focus: activated %s (error)", proc_name)
         log.info("focus: no known terminal app running (needle=%r)", needle)
     except Exception as e:  # noqa: BLE001
         log.warning("focus: failed non-fatally: %s", e)
