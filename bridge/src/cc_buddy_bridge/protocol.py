@@ -70,6 +70,13 @@ def build_heartbeat(state: State, msg: Optional[str] = None, codec: Optional[str
         "entries": [sanitize_for_stick(_format_entry(e.at, e.text, codec), codec) for e in reversed(state.entries)],
         "tokens": state.tokens_cumulative,
         "tokens_today": state.tokens_today,
+        # Per-agent rows for the landscape monitor build. Firmware ignores the
+        # key when it doesn't know it, so this stays wire-compatible with the
+        # portrait/pet builds.
+        "agents": [
+            {k: sanitize_for_stick(v, codec) for k, v in row.items()}
+            for row in state.agent_rows()
+        ],
     }
     # Pulse the firmware's celebrate animation (confetti + bouncing) for the
     # few seconds after a turn ends. Honoured by data.h:_applyJson which maps

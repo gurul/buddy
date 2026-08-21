@@ -42,6 +42,14 @@ log = logging.getLogger(__name__)
 # derived from it, so it lives next to the serializer. Re-exported via the
 # import above for callers/tests that referenced it here.
 
+# Monitor-only mode: the board is a status display with inert buttons, so no
+# permission ever waits on it. Env-gated rather than a CLI flag because it is
+# a property of which firmware is flashed, not of how the daemon was invoked —
+# the two have to be set together or prompts stall for PERMISSION_WAIT_SECS.
+MONITOR_ONLY = os.environ.get("CC_BUDDY_MONITOR_ONLY", "").strip().lower() in (
+    "1", "true", "yes", "on",
+)
+
 
 class Daemon:
     def __init__(
@@ -184,6 +192,15 @@ class Daemon:
         if not (force or changed or stale):
             return
         if self.ble.connected:
+            # Monitor build: what actually went on the wire for the agent
+            # table. Keep this — "the board shows 0 sessions" has to be
+            # separable from "the daemon sent 0 sessions", and reading that
+            # off a photo of an e-ink panel is not a diagnosis.
+            log.debug(
+                "hb->board: total=%d running=%d waiting=%d agents=%s",
+                snap["total"], snap["running"], snap["waiting"],
+                [f"{a['n']}:{a['s']}" for a in snap.get("agents", [])],
+            )
             log.debug(
                 "heartbeat: %d bytes, entries=%d (last=%r), force=%s, changed=%s",
                 len(serialized), len(snap.get("entries", [])),
@@ -481,6 +498,8 @@ class Daemon:
             tool_name = req.get("tool_name")
             if isinstance(tool_name, str):
                 self.state.add_entry(f"+ {tool_name}")
+                self._ensure_session(req)
+                self.state.note_tool(req.get("session_id", ""), tool_name)
             await self._push_heartbeat()
             return {"ok": True}
 
@@ -507,6 +526,8 @@ class Daemon:
         session_id = req.get("session_id") or "unknown"
         tool_name = req.get("tool_name") or "tool"
         hint = req.get("hint") or ""
+        self._ensure_session(req)
+        self.state.note_tool(session_id, tool_name)
 
         # Read tool takes its own path: out-of-cwd reads card on the stick and
         # an approval grants the enclosing repo/dir. See read_policy.py.
@@ -542,6 +563,17 @@ class Daemon:
             # off the USB bus.
             log.info("pretooluse for %s: stick not connected, deferring to default flow", tool_name)
             self.audit.record(**audit_kwargs, decision=None, source="ble_disconnected")
+            return {"ok": True}
+
+        # Monitor-only: the panel is a display, not an input device. Take the
+        # same exit as a disconnected stick so Claude Code's own prompt runs
+        # immediately — never _await_stick_decision, which would block the
+        # tool call for PERMISSION_WAIT_SECS waiting on a button that is now
+        # inert. Placed after auto_allow/stick_always so the matcher fast
+        # paths (which never touch the screen) keep working.
+        if MONITOR_ONLY:
+            log.info("pretooluse for %s: monitor-only, deferring to default flow", tool_name)
+            self.audit.record(**audit_kwargs, decision=None, source="monitor_only")
             return {"ok": True}
 
         # Unknown commands don't force a button press — defer to Claude Code's
@@ -599,6 +631,30 @@ class Daemon:
             await self._push_heartbeat()
         return decision, source, elapsed
 
+    def _ensure_session(self, req: dict[str, Any]) -> None:
+        """Register the session behind a hook event if we've never seen it.
+
+        SessionStart is the only hook that normally creates a session, so a
+        daemon restart leaves every *already-running* session invisible until
+        the human restarts it too — the monitor then shows an empty agent list
+        while agents are plainly working. Tool hooks carry both ids we need,
+        and session_start is create-if-absent, so adopting the session here is
+        free and makes the list self-heal within one tool call.
+        """
+        session_id = req.get("session_id")
+        if not (isinstance(session_id, str) and session_id):
+            return
+        cwd = req.get("cwd") or None
+        self.state.session_start(session_id, cwd=cwd)
+        # session_start is create-if-absent, so it will NOT fill in a cwd it
+        # missed. posttooluse doesn't carry one, so whichever hook happens to
+        # fire first decides the row's name forever — and losing the race
+        # leaves the agent labelled with a session-id prefix instead of its
+        # repo. Backfill the first cwd we actually see.
+        sess = self.state.sessions.get(session_id)
+        if sess is not None and cwd and not sess.cwd:
+            sess.cwd = cwd
+
     async def _handle_read_pretooluse(
         self, req: dict[str, Any], tool_use_id: str, session_id: str, hint: str,
     ) -> dict[str, Any]:
@@ -620,6 +676,9 @@ class Daemon:
             return {"ok": True, "decision": "allow"}
         if not self.ble.connected:
             self.audit.record(**audit_kwargs, decision=None, source="ble_disconnected")
+            return {"ok": True}
+        if MONITOR_ONLY:
+            self.audit.record(**audit_kwargs, decision=None, source="monitor_only")
             return {"ok": True}
         # Card it. Show the path home-relative so the two hint lines carry
         # the tail of the path, which is the part a human recognises.

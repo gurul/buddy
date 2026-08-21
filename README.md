@@ -7,6 +7,12 @@ when you're idle, gets busy when Claude is working, and demands attention when C
 blocked on you. Permission prompts arrive as a card you approve or deny by swiping —
 right to approve, left to deny.
 
+Three builds, two boards: the touch **pet**, the CrowPanel e-ink **monitor-and-control**
+dock, and a **monitor-only** variant of that same e-ink board — a read-only landscape
+wallboard of your live agents, for when you want the status without the controls.
+See [E-ink build](#e-ink-build-crowpanel-42) and
+[E-ink agent monitor](#e-ink-agent-monitor-variant).
+
 Two MIT projects ported to the **Freenove FNK0104B** (ESP32-S3 Display 2.8" Touch):
 [anthropics/claude-desktop-buddy](https://github.com/anthropics/claude-desktop-buddy) for the
 firmware (the 7-state pet, retargeted from the M5StickC Plus) and
@@ -90,14 +96,83 @@ all ack. See `firmware/claude_pet_eink/README.md` for the vendored Elecrow
 panel driver (including the old-image-plane fix that stops partial-refresh
 text overlap) and the pin map, and DESIGN.md for the port notes.
 
+## E-ink agent monitor (variant)
+
+`firmware/claude_pet_eink_monitor` is a **variant of the e-ink build for the
+same CrowPanel hardware** — not a third board, and not a replacement.
+`claude_pet_eink` remains the **monitor-and-control** build: it shows status
+*and* you act on it, approving prompts with the buttons. This variant is
+**monitor-only** — a read-only landscape wallboard that answers "what are my
+agents doing right now" and nothing else. Same NDJSON protocol, same driver,
+same flashing dance; pick whichever suits the board's job and flash that one.
+
+|  | `claude_pet_eink` | `claude_pet_eink_monitor` |
+|---|---|---|
+| Orientation | portrait 300×400, USB-C down | landscape 400×300, USB-C **left** |
+| Permission cards | full-screen card, buttons decide | **never drawn** — approvals happen in the terminal |
+| Buttons | OK / EXIT / slider / MENU all live | **inert** (pins still configured) |
+| Per-agent rows | — | up to 6: name, state, current tool |
+| Panel refresh | partial + periodic full | **full init + full refresh every frame** |
+| Daemon | default | **requires `CC_BUDDY_MONITOR_ONLY=1`** |
+
+The screen is a clock + AM/PM date, a state banner, `N sess / N run`, today's
+tokens, an `AGENT / STATE / TOOL` table of live sessions (waiting first, then
+running, then idle — ordered by rank then name so rows don't hop between
+refreshes), and the transcript tail filling whatever is left.
+
+```bash
+./tools/flash_eink_monitor.sh    # compile + archive ELF + flash
+CC_BUDDY_MONITOR_ONLY=1 cc-buddy-bridge daemon   # or add it to the service env
+```
+
+**Set `CC_BUDDY_MONITOR_ONLY=1` — the firmware and the flag are a matched
+pair.** Without it the daemon still surfaces permissions to a board whose
+buttons no longer answer, so every prompt stalls the tool call for the full
+`PERMISSION_WAIT_SECS` (300s) before falling back to the terminal. With it,
+the daemon takes the same defer path it uses for a disconnected board, so
+Claude Code's own prompt runs immediately. The `auto_allow` / `stick_always`
+matcher fast paths are unaffected — they never touched the screen.
+
+Two behaviours worth knowing:
+
+- **Sessions self-register.** `SessionStart` is normally the only hook that
+  creates a session, so a daemon restart used to leave every already-running
+  session invisible until you restarted it too. Tool hooks now adopt unknown
+  sessions (and backfill the `cwd` that names the row), so the list heals
+  within one tool call. A row labelled with a six-char hex prefix instead of
+  a repo name is a session that hasn't hit a `cwd`-carrying hook yet.
+- **The clock self-heals.** The host sends `{"time":...}` once on connect, and
+  opening the CH340 port toggles DTR/RTS — which resets the board, so the sync
+  can land while the ESP32 is still in its ROM bootloader and be lost. The
+  board re-emits its boot banner while it has no clock; the daemon's existing
+  boot detector replays the resync and it goes quiet once time arrives.
+
+### Why this variant does not use partial refresh
+
+`EPD_Wake()` does reset + soft-reset + temperature-select only — it never
+re-sends data-entry mode (`0x11`), the address window, or the cursor, all of
+which `EPD_Init()` sets and a hardware reset clears. So from the second
+sleep/wake cycle on, a partial refresh writes into an unconfigured controller
+and nothing lands, **silently**, because `EPD_ReadBusy()` gives up after 8s
+and returns normally. The symptom is a frozen panel while the firmware
+happily counts renders. This variant therefore runs a full `EPD_Init()` +
+`EPD_Display()` every frame — the same sequence `EPD_Clear()` uses at boot —
+rate-limited by `MIN_FRAME_MS`. It costs a ~2s flashing refresh, deghosts for
+free, and makes the panel self-healing: a controller wedged by a mid-refresh
+reset recovers on the next frame instead of staying dead until a power cycle.
+`claude_pet_eink` still uses the partial path and is still exposed to this.
+
 **The bridge is board-agnostic.** Any device that speaks the NDJSON contract
 over a serial port (or BLE NUS) is a valid pet: parse the heartbeat
 (`total`/`running`/`waiting`/`prompt`/`entries`/`time`), print `[alive]`
 every 5s, answer `{"cmd":"status"}` with a status ack, and emit
 `permission`/`focus`/`key`/`voice` verbs from whatever inputs the hardware
-has. The two firmwares here (240×320 touch LCD, 400×300 e-paper + buttons)
-are just two modalities of the same protocol — DESIGN.md's e-ink section
-documents the exact contract a new board must keep.
+has. The three firmwares here (240×320 touch LCD, 400×300 e-paper + buttons,
+and the monitor-only variant of that same e-paper board) are just modalities
+of the same protocol — and the monitor variant shows the floor: a board that
+only ever *reads* the heartbeat is still a valid client, it simply emits no
+verbs. DESIGN.md's e-ink section documents the exact contract a new board
+must keep.
 
 ## Printable shell
 
@@ -190,6 +265,7 @@ never receives session state. Run both.
 | `CC_BUDDY_VOICE_HOTKEY` | `option` (default and recommended), `opt-space`, or `fn` — prefer rebinding your dictation app to Option over changing this. Bake it in with `install --service --voice-hotkey …`; a hand-edited unit file is wiped by the next `--service` install |
 | `CC_BUDDY_KEY_METHOD` | `osascript` routes Enter through System Events, for apps that swallow synthetic key events (Warp) |
 | `CC_BUDDY_FOCUS_APPS` | comma-separated app names, in priority order, that tap-to-focus raises (e.g. `Warp,cmux,Composer`) — default: Ghostty, Warp, cmux, Composer, Cursor, VS Code |
+| `CC_BUDDY_MONITOR_ONLY` | `1`/`true`/`yes`/`on` → never surface a permission card; defer to Claude Code's own prompt immediately. **Required by the e-ink agent-monitor firmware**, whose buttons can't answer. Env-gated rather than a CLI flag because it's a property of which firmware is flashed, not of how the daemon was invoked |
 
 Installing into the wrong config home **fails silently** — hooks written, board animating,
 no session ever prompting. `status` prints the home it resolved; check it first.
@@ -227,7 +303,9 @@ launchctl load -w ~/Library/LaunchAgents/com.github.cc-buddy-bridge.daemon.plist
 | `firmware/claude_pet` | the sketch — pet state machine, touch UI, swipe cards, clock, diag ring |
 | `firmware/claude_pet/src/board_compat.*` | the port: shims the `M5StickCPlus.h` API onto this board |
 | `firmware/claude_pet_eink` | the CrowPanel 4.2" e-paper build — portrait status display, button approvals, vendored SSD1683 driver |
+| `firmware/claude_pet_eink_monitor` | variant of the above for the same board — landscape read-only agent wallboard, no cards, inert buttons, full-refresh-only panel path |
 | `tools/flash_eink.sh` | compile + ELF archive + flash for the e-ink build |
+| `tools/flash_eink_monitor.sh` | same, for the e-ink agent-monitor variant |
 | `bridge/src/cc_buddy_bridge` | daemon, hooks, serial transport, voice trigger, read policy |
 | `case/shell_v2.py` | parametric 3D-printable shell, current revision (FreeCAD headless) — frame + back + alignment gauge, heat-set insert bosses, STLs in `case/export/` |
 | `case/shell.py` | v1 shell record (wrong hole grid; superseded) — still the source of the unchanged stand |
