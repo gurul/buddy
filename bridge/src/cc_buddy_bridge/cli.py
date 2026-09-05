@@ -1,4 +1,4 @@
-"""Entry point. `cc-buddy-bridge [daemon|install|uninstall|status]`."""
+"""Entry point. `cc-buddy-bridge [daemon|install|uninstall|status|notes-widget|...]`."""
 
 from __future__ import annotations
 
@@ -67,12 +67,21 @@ def main(argv: list[str] | None = None) -> int:
              f"this flag the hotkey must be hand-edited into the unit file, and the "
              f"next --service install silently reverts it.",
     )
+    p_install.add_argument(
+        "--notes-widget", action="store_true",
+        help="macOS: also install a second launchd agent that shows the robot's idle-explorer "
+             "notes as a desktop widget at login (com.github.cc-buddy-bridge.notes-widget)",
+    )
     p_uninstall = sub.add_parser(
         "uninstall", help="Remove cc-buddy-bridge hooks from Claude Code's settings.json")
     p_uninstall.add_argument("--config-dir", default=None, help=CONFIG_DIR_HELP)
     p_uninstall.add_argument(
         "--service", action="store_true",
         help="Remove the user-level service (launchd agent / systemd unit) instead of removing hooks",
+    )
+    p_uninstall.add_argument(
+        "--notes-widget", action="store_true",
+        help="macOS: remove the notes-widget launchd agent",
     )
     p_status = sub.add_parser("status", help="Show install status")
     p_status.add_argument("--config-dir", default=None, help=CONFIG_DIR_HELP)
@@ -95,6 +104,13 @@ def main(argv: list[str] | None = None) -> int:
              "an installed GIF character pack",
     )
     p_species.add_argument("--socket", default=None, help="IPC path or host:port override")
+
+    p_widget = sub.add_parser(
+        "notes-widget",
+        help="macOS: show the robot's idle-explorer notes in a desktop widget (foreground)",
+    )
+    p_widget.add_argument("--once", action="store_true",
+                          help="Build the window, print what it rendered, and exit (smoke test)")
 
     sub.add_parser(
         "voice-check",
@@ -175,6 +191,14 @@ def main(argv: list[str] | None = None) -> int:
     if args.cmd == "daemon":
         return _run_daemon(args)
     if args.cmd == "install":
+        # --notes-widget is additive: on its own it installs only the widget
+        # unit; combined with --service it installs both. Without it the
+        # install path is exactly what it was.
+        if getattr(args, "notes_widget", False):
+            from .service import install_notes_widget
+            rc = install_notes_widget()
+            if rc or not getattr(args, "service", False):
+                return rc
         if getattr(args, "service", False):
             from .service import install_service
             return install_service(
@@ -184,11 +208,21 @@ def main(argv: list[str] | None = None) -> int:
         from .installer import install_hooks
         return install_hooks(config_dir=getattr(args, "config_dir", None))
     if args.cmd == "uninstall":
+        if getattr(args, "notes_widget", False):
+            from .service import uninstall_notes_widget
+            rc = uninstall_notes_widget()
+            if rc or not getattr(args, "service", False):
+                return rc
         if getattr(args, "service", False):
             from .service import uninstall_service
             return uninstall_service()
         from .installer import uninstall_hooks
         return uninstall_hooks(config_dir=getattr(args, "config_dir", None))
+    if args.cmd == "notes-widget":
+        logging.basicConfig(level=logging.INFO,
+                            format="%(asctime)s %(levelname)s %(name)s: %(message)s")
+        from .notes_widget import run as widget_run
+        return widget_run(once=args.once)
     if args.cmd == "status":
         from .installer import show_status
         return show_status(config_dir=getattr(args, "config_dir", None))

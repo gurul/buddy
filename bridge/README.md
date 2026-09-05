@@ -221,6 +221,34 @@ rates`. Rates table lives in [`pricing.py`](src/cc_buddy_bridge/pricing.py) —
 edit to override or add models. Not a billing source of truth; treat
 as a heads-up.
 
+### Notes widget (macOS)
+
+When Claude has been idle for 10 minutes the robot explores the room and
+writes one-line observations to `~/.config/cc-buddy-bridge/notes/YYYY-MM-DD.md`
+(`- HH:MM yaw=+20 pitch=40 — <sentence>`). `cc-buddy-bridge notes-widget`
+shows the newest 40 of those lines — today's and yesterday's, newest first,
+one header per day — in a borderless dark panel that sits just above the
+desktop icons on every Space. It has no Dock icon and no menu-bar entry.
+Drag it by its background to move it (the position is saved in
+`~/.config/cc-buddy-bridge/widget.json`); right-click for **Open notes
+folder** and **Quit**. It re-renders when a note file changes (via
+`watchfiles`) and polls every 30 s as a backstop.
+
+```bash
+.venv/bin/cc-buddy-bridge notes-widget            # run in the foreground
+.venv/bin/cc-buddy-bridge notes-widget --once     # build, print, exit (smoke test)
+.venv/bin/cc-buddy-bridge install --notes-widget  # start it at login (second launchd agent)
+.venv/bin/cc-buddy-bridge uninstall --notes-widget
+```
+
+`install --notes-widget` writes
+`~/Library/LaunchAgents/com.github.cc-buddy-bridge.notes-widget.plist`
+pointed at the same Python as the daemon agent (`RunAtLoad`, no
+`KeepAlive` — a widget you quit stays quit until next login), logging to
+`~/Library/Logs/cc-buddy-bridge-notes-widget.log`. It is independent of
+`--service`; pass both to install daemon and widget in one go. Set
+`CC_BUDDY_NOTES_DIR` to point the widget at another notes folder.
+
 ## Working with Claude Code's `permissions` config
 
 Claude Code's own `~/.claude/settings.json` `permissions` block (`allow` /
