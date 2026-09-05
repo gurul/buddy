@@ -77,6 +77,23 @@ bool toggleAwb();   // returns the new AWB state
 // Analysed frames per second over the last second.
 int fps();
 
+// ---- host frame stream -----------------------------------------------------
+// {"cmd":"cam","on":true,"fps":5,"w":160,"h":120}: the look task subsamples
+// each QVGA frame to w x h (2x2 nearest; sensor stays QVGA so the on-board
+// detector keeps its grid), JPEG-encodes it (fmt2jpg, quality kStreamJpegQ)
+// and writes ONE NDJSON line from the task, never from loop():
+//   {"frame":{"seq":n,"w":160,"h":120,"fmt":"jpeg","b64":"...","yaw":Y,"pitch":P}}
+// Frames are capped at fps, skipped while the previous line is still being
+// written or while setStreamPaused(true) (a transfer owns the wire).
+// Every 30 s the task prints `[cam] %d frames, %d KB, %d ms/encode`.
+void setStream(bool on, uint8_t fps, uint16_t w, uint16_t h);
+void setStreamPaused(bool paused);
+// Head pose echoed into each frame line (the pose the servos were streamed
+// at capture time, so host latency cannot corrupt the absolute angles).
+void setHeadPose(int yawDeg, int pitchDeg);
+constexpr uint8_t kStreamJpegQ = 60;
+constexpr uint16_t kStreamMaxW = 160, kStreamMaxH = 120;
+
 // Fusion: face when face_conf >= kFuseFaceMinConf (a still face keeps the
 // gaze), else motion when conf >= kFuseMotionMinConf, else none.
 // source = 'F', 'M', or 0. Returns true when a target exists.

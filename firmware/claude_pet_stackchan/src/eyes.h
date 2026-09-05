@@ -40,7 +40,9 @@ uint16_t eyesColor();
 //   hotPrompt:      the pending permission is destructive (sweat while waiting)
 //   gazeSide:       -1 screen left, +1 screen right, 0 none — used when the
 //                   head is centred so the eyes still glance at the toucher
-void eyesSet(PersonaState s, bool needsAttention, bool listening, bool hotPrompt, int8_t gazeSide);
+//   explore:        {"cmd":"mode","explore":true} — DEFAULT mood, curiosity on
+void eyesSet(PersonaState s, bool needsAttention, bool listening, bool hotPrompt, int8_t gazeSide,
+             bool explore = false);
 
 // Keep the eyes and the head agreeing: head yaw/pitch in degrees →
 // setPosition band (W / NW / N / NE / E, DEFAULT when centred).
@@ -57,4 +59,4 @@ void eyesTick(uint32_t now);
 
 // One short word for the status row: "zzz", "working...", "needs you!",
 // "listening...", "done!", "<3", "@_@". Empty for idle-without-daemon.
-const char* eyesStatusText(PersonaState s, bool listening);
+const char* eyesStatusText(PersonaState s, bool listening, bool explore = false);

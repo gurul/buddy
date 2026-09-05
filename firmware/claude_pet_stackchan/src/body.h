@@ -70,3 +70,12 @@ int8_t bodyGazeSide();
 // True while a glide is in progress OR the servos report motion. The vision
 // quarantine must use this, not the servo flag alone.
 bool   bodyMoving();
+// The pose actually streamed to the servos right now (mid-glide value), for
+// tagging camera frames with the pose at capture.
+int    bodyCmdYawDeg();
+int    bodyCmdPitchDeg();
+
+// Explore mode ({"cmd":"mode","explore":true}): the host drives the head
+// with look cmds; the sleep pose is not applied and the LEDs breathe dim
+// white. explore=false restores the state's pose.
+void   bodySetExplore(bool on);

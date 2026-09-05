@@ -828,7 +828,21 @@ void loop() {
   bodyUpdate(activeState, baseState == P_ATTENTION, now);
   // Camera/memory gaze after the body so its bodyLookAt() lands next frame;
   // eyesLookAt() below reads the head angles every frame, so the eyes follow.
-  gazeUpdate(activeState, baseState == P_ATTENTION, listenNow, now, &tama.ownerReset);
+  bodySetExplore(tama.explore);
+  {
+    GazeHostInput hin;
+    hin.camOn = tama.camOn; hin.camFps = tama.camFps; hin.camW = tama.camW; hin.camH = tama.camH;
+    hin.wireBusy = xferActive();             // a character transfer owns the wire: skip frames
+    hin.faceSeq = tama.faceSeq; hin.faceBx = tama.faceBx; hin.faceBy = tama.faceBy;
+    hin.faceSize = tama.faceSize; hin.faceConf = tama.faceConf;
+    hin.faceYaw = tama.faceYaw; hin.facePitch = tama.facePitch;
+    hin.faceOwner = tama.faceOwner; hin.faceAtMs = tama.faceAtMs;
+    hin.hostLookReq = tama.hostLookReq; hin.hostLookYaw = tama.hostLookYaw;
+    hin.hostLookPitch = tama.hostLookPitch; hin.hostLookHold = tama.hostLookHold;
+    hin.explore = tama.explore; hin.cardUp = tama.promptId[0] != 0;
+    gazeUpdate(activeState, baseState == P_ATTENTION, listenNow, now, &tama.ownerReset, &hin);
+    tama.hostLookReq = hin.hostLookReq;      // consumed by gaze
+  }
 
   diagPhase(DP_GESTURE);
   // touch gestures on the pet: tap = pet it (heart), scrub = dizzy,
@@ -1136,14 +1150,14 @@ void loop() {
     // skip sprite render — face-down, powered off, or landscape clock
   } else {
     const Palette& p = characterPalette();
-    eyesSet(activeState, baseState == P_ATTENTION, listenNow, tama.promptHot, bodyGazeSide());
+    eyesSet(activeState, baseState == P_ATTENTION, listenNow, tama.promptHot, bodyGazeSide(), tama.explore);
     eyesCardUp(tama.promptId[0] != 0);   // card owns y >= 126: eyes park on the N row
     eyesLookAt((int8_t)bodyYawDeg(), (int8_t)bodyPitchDeg());
     eyesTick(now);
     // Status word: cleared and redrawn each frame (the card band overwrites
     // it during a prompt, which is intended — the card is the status then).
     spr.fillRect(0, EYES_STATUS_Y, W, 18, p.bg);
-    const char* st = eyesStatusText(activeState, listenNow);
+    const char* st = eyesStatusText(activeState, listenNow, tama.explore);
     if (st[0]) {
       spr.setTextDatum(MC_DATUM);
       spr.setTextSize(2);

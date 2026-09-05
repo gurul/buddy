@@ -98,6 +98,11 @@ static void headTo(int yawDeg, int pitchDeg, int speed) {
 }
 
 bool bodyMoving() { return gliding || M5StackChan.Motion.isMoving(); }
+int  bodyCmdYawDeg()   { return (int)lroundf(cmdYaw); }
+int  bodyCmdPitchDeg() { return (int)lroundf(cmdPitch); }
+
+static bool exploring = false;   // host drives the head; sleep pose not applied
+static void onEnterSilent(PersonaState s, uint32_t now);
 
 // Advance the glide, add the idle micro-drift, stream to the BSP at 25 Hz.
 static void stepTween(uint32_t now) {
@@ -149,12 +154,16 @@ static void stepSeq(uint32_t now) {
 static const Key SEQ_SLEEP[]     = { {0, 0, PITCH_SLEEP, 150} };
 static const Key SEQ_LEVEL[]     = { {0, 0, PITCH_LEVEL, 250} };
 static const Key SEQ_ATTN_UP[]   = { {0, 0, PITCH_ATTENTION, 500} };
-// "Where are you?" search: far left (hold 0.9 s), near left, near right,
-// far right, centre. ~3 s, repeated every 5 s while a session waits.
+// "Where are you?" search, two rows so a face above the current gaze is
+// found: row 1 at pitch 45 (far left, hold 0.9 s, near left, near right,
+// far right), row 2 at pitch 65 (right to left), then centre. ~4.3 s,
+// repeated every 5 s while the owner is wanted and not found.
+static const int PITCH_SCAN_LOW = 45, PITCH_SCAN_HIGH = 65;
 static const Key SEQ_ATTN_SCAN[] = {
-  {0,    -40, PITCH_ATTENTION, 500}, {900,  -12, PITCH_ATTENTION, 400},
-  {1400,  15, PITCH_ATTENTION, 400}, {1900,  40, PITCH_ATTENTION, 500},
-  {2500,   0, PITCH_ATTENTION, 400} };
+  {0,    -40, PITCH_SCAN_LOW,  500}, {900,  -12, PITCH_SCAN_LOW,  400},
+  {1400,  15, PITCH_SCAN_LOW,  400}, {1900,  40, PITCH_SCAN_LOW,  500},
+  {2500,  40, PITCH_SCAN_HIGH, 400}, {2900,   0, PITCH_SCAN_HIGH, 400},
+  {3400, -40, PITCH_SCAN_HIGH, 500}, {4000,   0, PITCH_SCAN_HIGH, 400} };
 static const Key SEQ_NOD[]       = { {0, KEEP, PITCH_LEVEL - 8, 400}, {450, KEEP, PITCH_LEVEL, 400} };
 static const Key SEQ_CELEBRATE[] = {
   {0, 20, PITCH_LEVEL + 10, 900}, {150, -20, KEEP, 900}, {300, 12, KEEP, 900},
@@ -199,13 +208,16 @@ static const int PITCH_LISTEN = PITCH_LEVEL + 15;
 bool bodySearchSweep() {
   uint32_t now = millis();
   if (seq || gazeHeld(now)) return false;
-  int8_t pitch = (int8_t)(listening ? PITCH_LISTEN : PITCH_ATTENTION);
-  for (uint8_t i = 0; i < NKEYS(SEQ_ATTN_SCAN); i++) {
-    dyn[i] = SEQ_ATTN_SCAN[i];
-    dyn[i].pitch = pitch;
-  }
-  play(dyn, NKEYS(SEQ_ATTN_SCAN), now);
+  // Two pitch rows (45 then 65) in both attention and listening: a face
+  // above the current gaze is the common miss (bench: head aimed at the wall).
+  play(SEQ_ATTN_SCAN, NKEYS(SEQ_ATTN_SCAN), now);
   return true;
+}
+
+void bodySetExplore(bool on) {
+  if (on == exploring) return;
+  exploring = on;
+  if (!on && lastState != 0xFF && !listening) onEnterSilent((PersonaState)lastState, millis());
 }
 
 void bodyLookAt(int8_t yawDeg, uint16_t holdMs) {
@@ -247,6 +259,14 @@ void ledSet(uint8_t r, uint8_t g, uint8_t b);   // board_compat.cpp
 static void ledForState(PersonaState s, uint32_t now) {
   if (!ledEnabled) { ledSet(0, 0, 0); return; }
   if (micLive)     { ledSet(0, 30, 90); return; }
+  if (exploring && s != P_ATTENTION) {
+    // Explore: slow dim white breathe (6 s, 2..14), same quantised ramp idea.
+    uint32_t ph = (now % 6000) * 16 / 6000;
+    uint32_t k  = ph < 8 ? ph : 15 - ph;
+    uint8_t  v  = (uint8_t)(2 + k * 12 / 7);
+    ledSet(v, v, v);
+    return;
+  }
   switch (s) {
     case P_ATTENTION: {
       // 800 ms triangle between a dim ember and full orange, 16 steps.
@@ -300,7 +320,7 @@ static void say(ChirpKind k, bool force = false) { if (!quiet) chirpPlay(k, forc
 // states without a chirp of their own get the wake whistle instead.
 static void onEnter(PersonaState s, uint32_t now, bool fromSleep) {
   switch (s) {
-    case P_SLEEP:     play(SEQ_SLEEP, NKEYS(SEQ_SLEEP), now);
+    case P_SLEEP:     if (!exploring) play(SEQ_SLEEP, NKEYS(SEQ_SLEEP), now);   // explore: head stays where the host put it
                       say(CHIRP_SLEEPY); break;
     case P_IDLE:      play(SEQ_LEVEL, NKEYS(SEQ_LEVEL), now);
                       nextIdleAt = now + 8000 + random(7000);
@@ -392,6 +412,7 @@ static void updateInner(PersonaState active, bool needsAttention, uint32_t now) 
     gazePending = false;
   }
   if (listening) { stepSeq(now); return; }  // no sway / nod while listening; sweeps from gaze.cpp still step
+  if (exploring && active != P_ATTENTION) { stepSeq(now); return; }   // host owns the head
 
   switch (active) {
     case P_IDLE:
