@@ -543,8 +543,9 @@ For every frame it processes the daemon replies with
 (+bx = right of frame, +by = down), `size` is the face width as a
 percentage of the frame width, `conf` is the detector's confidence, and
 `yaw`/`pitch` echo the head pose the frame was taken at. `conf:0` without
-`bx`/`by` means "frame seen, no face". `who` is `unknown` until an identity
-module exists. Detection runs on one worker thread; while it is busy the
+`bx`/`by` means "frame seen, no face". `who` is `owner` when the face
+matches the enrolled owner (see [Owner identity](#owner-identity)), else
+`unknown`. Detection runs on one worker thread; while it is busy the
 newest frame waits and older waiting frames are dropped, so the board
 always gets an answer for a recent frame instead of a backlog.
 
@@ -563,6 +564,42 @@ CC_BUDDY_SAVE_FRAMES=~/frames                  # same, as an env var for the ser
 ```
 
 Saved frames are written as they arrived: `.jpg` for JPEG, `.png` for gray.
+
+## Owner identity
+
+The robot learns its owner's face and tags every face it sees. To enrol,
+hold the Option key (the listen key) while facing the robot for a few
+seconds. While the key is down, the daemon takes one print every 2 s of the
+single face in the frame, as long as that face is at least 20 % of the
+frame width — so a colleague in the background or a face at the far side of
+the room never gets enrolled. Each enrolment logs `identity: enrolled owner
+print #3 (size=31%, 3/24 held)`. It keeps up to 24 prints; when full, a new
+print replaces the enrolled one most like it, so different poses and
+lighting survive. Enrol again whenever recognition gets flaky (new glasses,
+a beard, a lamp moved).
+
+After that every face cmd carries `"who":"owner"` when the largest face is
+within the distance threshold of any enrolled print and `"who":"unknown"`
+otherwise. The daemon logs `identity: owner recognised (d=0.42)` and
+`identity: unknown face (d=1.13)` when the answer flips, at most once per
+30 s.
+
+Prints are Apple Vision image feature prints (revision 2, 768 floats) of
+the face crop padded by 25 %; they are not photos and cannot be turned back
+into one. They live in `~/.config/cc-buddy-bridge/owner_faceprints.json`
+(mode 600, written on every enrolment, loaded at daemon start). Vision's
+distance is plain Euclidean over the print, which is what the daemon
+computes; the default threshold is 0.9 (`CC_BUDDY_OWNER_THRESHOLD` to
+tune it — lower is stricter; the `d=` in the log lines tells you where your
+own face and strangers land).
+
+```bash
+cc-buddy-bridge identity            # prints held, file, threshold, last face seen
+cc-buddy-bridge identity reset      # forget the owner (in the daemon and on disk)
+```
+
+Without macOS Vision every face stays `unknown` and the daemon logs one
+warning at startup.
 
 ## Requirements
 
