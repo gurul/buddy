@@ -15,6 +15,8 @@ if TYPE_CHECKING:
 
 from .audit import AuditLog
 from .ble import BuddyBLE
+from .identity import FaceIdentity, OwnerIdentity, configured_threshold, make_describer
+from .identity import default_path as identity_default_path
 from .ipc import IPCServer
 from .jsonl_tailer import JSONLTailer
 from .listen_key import Stopper, start_listen_key
@@ -112,6 +114,13 @@ class Daemon:
         # board to stream — it keeps its on-board tracking.
         self._vision = FaceTracker(
             detect=None, send=self.ble.send, save_dir=configured_save_dir(save_frames))
+        # Physical listen-key state, independent of what the board received:
+        # identity.py enrols the owner only while it is down. Written on the
+        # loop thread, read on the vision executor thread (a bool: no lock).
+        self._listen_down = False
+        # Owner identity: the prints live in memory; the file is loaded and
+        # the Vision describer resolved in run(), like the detector.
+        self._identity: Optional[FaceIdentity] = None
         # Most recent {"diag":{...}} the board sent; served over IPC so
         # `cc-buddy-bridge diag` can show it without owning the serial port.
         self._last_diag: Optional[dict[str, Any]] = None
@@ -161,6 +170,8 @@ class Daemon:
         await self.ipc.start()
         self._listen_stop = start_listen_key(self._on_listen_key, asyncio.get_running_loop())
         self._vision.detect = make_detector()
+        self._identity = self._make_identity()
+        self._vision.identity = self._identity
         tasks = [
             asyncio.create_task(self.ipc.serve_forever(), name="ipc"),
             asyncio.create_task(self.ble.run(), name="ble"),
@@ -354,6 +365,42 @@ class Daemon:
             if line is not None:
                 log.info(line)
 
+    # ---- owner identity ----
+
+    def _make_identity(self) -> Optional[FaceIdentity]:
+        """Load the owner prints and wire the Vision describer. None when
+        this host cannot produce feature prints — faces stay 'unknown'."""
+        if not self._vision.enabled:
+            return None
+        describe = make_describer()
+        if describe is None:
+            return None
+        core = OwnerIdentity(path=identity_default_path(), threshold=configured_threshold())
+        n = core.load()
+        log.info("identity: %d owner print(s) loaded from %s (threshold %.2f)", n, core.path, core.threshold)
+        return FaceIdentity(core, describe=describe, listen_down=lambda: self._listen_down)
+
+    def _handle_identity(self, action: str) -> dict[str, Any]:
+        """Loop thread. The core is lock-guarded, so this is safe against a
+        classify/enrol in flight on the vision executor."""
+        if action == "reset":
+            if self._identity is None:
+                core = OwnerIdentity(path=identity_default_path())
+                core.load()
+                removed = core.reset()
+            else:
+                removed = self._identity.core.reset()
+                self._identity.last_who = None
+            log.info("identity: reset — %d owner print(s) removed", removed)
+            return {"ok": True, "removed": removed}
+        if self._identity is None:
+            core = OwnerIdentity(path=identity_default_path(), threshold=configured_threshold())
+            core.load()
+            st = FaceIdentity(core, describe=lambda f, r: None).status()
+        else:
+            st = self._identity.status()
+        return {"ok": True, "enabled": self._identity is not None, "identity": st}
+
     # ---- listen key ----
 
     def _on_listen_key(self, on: bool) -> None:
@@ -361,6 +408,7 @@ class Daemon:
         Dedupe here, synchronously, so two fast edges cannot both read the
         same last-sent state and put duplicates on the wire."""
         log.info("listen key: %s", "down" if on else "up")
+        self._listen_down = on
         if not self.ble.connected or on == self._listen_sent:
             return
         self._listen_sent = on
@@ -454,6 +502,10 @@ class Daemon:
                 await self.ble.send({"cmd": "diag"})
             return {"ok": True, "connected": self.ble.connected,
                     "diag": self._last_diag}
+        if evt == "identity":
+            # `cc-buddy-bridge identity status|reset`. The daemon owns the
+            # in-memory prints, so a reset must go through it while it runs.
+            return self._handle_identity(str(req.get("action") or "status"))
         if evt == "session_start":
             self.state.session_start(
                 req["session_id"],

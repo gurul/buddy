@@ -17,8 +17,8 @@ Wire contract (fixed; the firmware side is built against it):
                     "who":"unknown"}
     host -> board  {"cmd":"face","seq":n,"conf":0,"who":"unknown"}   (no face)
 
-``who`` is the identity slot: "unknown" until a later identity module sets
-"owner".
+``who`` is the identity slot: "owner" when identity.py matched the largest
+face against the enrolled owner prints, "unknown" otherwise.
 
 ``fmt:"gray"`` is raw 8-bit luma, w*h bytes. ``fmt:"jpeg"`` is a baseline
 JPEG. ``bx``/``by`` is the face centre relative to the frame centre
@@ -57,7 +57,7 @@ import time
 import zlib
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Awaitable, Callable, Optional
+from typing import Any, Awaitable, Callable, Optional, Protocol
 
 log = logging.getLogger(__name__)
 
@@ -74,8 +74,8 @@ SAVE_FRAMES_MIN_INTERVAL = 1.0
 STATS_INTERVAL_SECS = 30.0
 
 FRAME_FORMATS = ("jpeg", "gray")
-# Identity slot on every face cmd. Detection only knows there is a face; a
-# later identity module will say "owner".
+# Identity slot on every face cmd. Detection only knows there is a face;
+# identity.py says "owner".
 WHO_UNKNOWN = "unknown"
 
 
@@ -113,6 +113,12 @@ class FaceResult:
 # It runs on the executor thread, so it may block.
 Detector = Callable[[Frame], list[Rect]]
 Sender = Callable[[dict[str, Any]], Awaitable[bool]]
+
+
+class Identity(Protocol):
+    """identity.py's FaceIdentity: ``who`` for the largest face. Executor thread."""
+
+    def process(self, frame: Frame, rects: list[Rect]) -> str: ...
 
 
 # ---- pure core --------------------------------------------------------------
@@ -168,11 +174,16 @@ def _clamp(v: float, lo: int, hi: int) -> int:
     return max(lo, min(hi, int(round(v))))
 
 
+def largest_rect(rects: list[Rect]) -> Rect:
+    """The face we track and identify: largest by area."""
+    return max(rects, key=lambda r: r.w * r.h)
+
+
 def pick_face(rects: list[Rect], w: int, h: int) -> Optional[FaceResult]:
     """Largest rect (by area) -> centre offset, width %, confidence %."""
     if not rects or w <= 0 or h <= 0:
         return None
-    best = max(rects, key=lambda r: r.w * r.h)
+    best = largest_rect(rects)
     cx = best.x + best.w / 2.0
     cy = best.y + best.h / 2.0
     return FaceResult(
@@ -259,7 +270,10 @@ class FaceTracker:
     missing): ``enabled`` is False, the daemon never sends ``cam on`` and
     any frame that still arrives is ignored. ``send`` is the transport's
     send coroutine. ``save_dir`` writes every received frame, rate-limited
-    to one per second, for bench debugging.
+    to one per second, for bench debugging. ``identity`` (identity.py's
+    FaceIdentity, or anything with ``process(frame, rects) -> who``) runs
+    on the same executor thread straight after the detect and fills the
+    face cmd's ``who``; None leaves every face "unknown".
     """
 
     def __init__(
@@ -268,11 +282,13 @@ class FaceTracker:
         send: Sender,
         save_dir: Optional[Path] = None,
         clock: Callable[[], float] = time.monotonic,
+        identity: Optional[Identity] = None,
     ) -> None:
         self.detect = detect
         self.send = send
         self.save_dir = save_dir
         self.clock = clock
+        self.identity = identity
         self.governor = FrameRateGovernor()
         self.faces = 0                  # processed frames that had a face
         self.detect_secs = 0.0          # summed wall time inside the executor
@@ -324,20 +340,29 @@ class FaceTracker:
             cur = nxt
             t0 = self.clock()
             try:
-                assert self.detect is not None
-                rects = await loop.run_in_executor(self._executor, self.detect, cur)
+                rects, who = await loop.run_in_executor(self._executor, self._work, cur)
             except RuntimeError:
                 # Executor shut down under us (daemon stopping).
                 return
             except Exception:  # noqa: BLE001
                 log.exception("vision: detector failed on frame %d", cur.seq)
-                rects = []
+                rects, who = [], WHO_UNKNOWN
             self.detect_secs += self.clock() - t0
             result = pick_face(rects, cur.w, cur.h)
             if result is not None:
                 self.faces += 1
-            await self.send(build_face_cmd(cur.seq, result, cur.yaw, cur.pitch))
+            await self.send(build_face_cmd(cur.seq, result, cur.yaw, cur.pitch, who=who))
             nxt = self.governor.done()
+
+    def _work(self, frame: Frame) -> tuple[list[Rect], str]:
+        """Executor thread: detect, then identify the largest face on the same
+        thread so two Vision requests never run at once."""
+        assert self.detect is not None
+        rects = self.detect(frame)
+        who = WHO_UNKNOWN
+        if rects and self.identity is not None:
+            who = self.identity.process(frame, rects)
+        return rects, who
 
     # ---- stats ----
 

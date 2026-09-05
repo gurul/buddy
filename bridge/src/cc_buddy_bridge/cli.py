@@ -127,6 +127,13 @@ def main(argv: list[str] | None = None) -> int:
     )
     p_vision.add_argument("image", help="Path to a JPEG/PNG (anything macOS ImageIO decodes)")
 
+    p_identity = sub.add_parser(
+        "identity",
+        help="Owner face prints: show what the robot knows, or forget it (enrol by holding Option)",
+    )
+    p_identity.add_argument("action", choices=("status", "reset"), nargs="?", default="status")
+    p_identity.add_argument("--socket", default=None, help="IPC path or host:port override")
+
     p_push = sub.add_parser(
         "push-character",
         help="Upload a GIF character pack folder to the stick (manifest.json + *.gif)",
@@ -212,6 +219,9 @@ def main(argv: list[str] | None = None) -> int:
     if args.cmd == "vision-test":
         from .vision import run_vision_test
         return run_vision_test(args.image)
+    if args.cmd == "identity":
+        from .identity import run_identity
+        return run_identity(args.action, args.socket)
     if args.cmd == "push-character":
         return _run_push_character(args.path)
     if args.cmd == "audit":
