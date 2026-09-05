@@ -30,6 +30,21 @@ struct TamaState {
                              // chars, matching the bridge's 720-byte cap.
   bool     listening;        // host dictation key held: {"cmd":"listen","on":bool}
   bool     ownerReset;       // {"cmd":"owner","op":"reset"} arrived; consumer clears it
+  // Host vision ({"cmd":"cam"}, {"cmd":"face"}, {"cmd":"look"}, {"cmd":"mode"})
+  bool     camOn;            // host wants the frame stream
+  uint8_t  camFps;           // frames per second cap (default 5)
+  uint16_t camW, camH;       // requested frame size (default 160x120)
+  uint32_t faceSeq;          // frame seq the detection belongs to
+  int8_t   faceBx, faceBy;   // -100..100, +bx = right of frame, +by = down
+  uint8_t  faceSize;         // 0..100
+  uint8_t  faceConf;         // 0..100, 0 = no face in that frame
+  int16_t  faceYaw, facePitch; // head pose echoed back from the frame line
+  bool     faceOwner;        // "who":"owner" (else unknown)
+  uint32_t faceAtMs;         // millis() when the last face cmd arrived (0 = never)
+  bool     hostLookReq;      // {"cmd":"look"} pending; consumer clears it
+  int16_t  hostLookYaw, hostLookPitch;
+  uint16_t hostLookHold;     // ms
+  bool     explore;          // {"cmd":"mode","explore":true}
 };
 
 // ---------------------------------------------------------------------------
@@ -93,6 +108,45 @@ static void _applyJson(const char* line, TamaState* out) {
   if (cmd && strcmp(cmd, "owner") == 0) {
     const char* op = doc["op"];
     if (op && strcmp(op, "reset") == 0) out->ownerReset = true;
+    _lastLiveMs = millis();
+    return;
+  }
+  // Host vision. {"cmd":"cam","on":bool,"fps":n,"w":160,"h":120}
+  if (cmd && strcmp(cmd, "cam") == 0) {
+    out->camOn  = doc["on"]  | false;
+    out->camFps = doc["fps"] | (uint8_t)5;
+    out->camW   = doc["w"]   | (uint16_t)160;
+    out->camH   = doc["h"]   | (uint16_t)120;
+    _lastLiveMs = millis();
+    return;
+  }
+  // {"cmd":"face","seq":n,"bx":..,"by":..,"size":..,"conf":..,"yaw":..,"pitch":..,"who":"owner"|"unknown"}
+  if (cmd && strcmp(cmd, "face") == 0) {
+    out->faceSeq   = doc["seq"]   | (uint32_t)0;
+    out->faceBx    = doc["bx"]    | (int8_t)0;
+    out->faceBy    = doc["by"]    | (int8_t)0;
+    out->faceSize  = doc["size"]  | (uint8_t)0;
+    out->faceConf  = doc["conf"]  | (uint8_t)0;
+    out->faceYaw   = doc["yaw"]   | (int16_t)0;
+    out->facePitch = doc["pitch"] | (int16_t)45;
+    const char* who = doc["who"];
+    out->faceOwner = who && strcmp(who, "owner") == 0;
+    out->faceAtMs  = millis();
+    _lastLiveMs = millis();
+    return;
+  }
+  // {"cmd":"look","yaw":deg,"pitch":deg,"hold":ms}: absolute pose request.
+  if (cmd && strcmp(cmd, "look") == 0) {
+    out->hostLookYaw   = doc["yaw"]   | (int16_t)0;
+    out->hostLookPitch = doc["pitch"] | (int16_t)45;
+    out->hostLookHold  = doc["hold"]  | (uint16_t)3000;
+    out->hostLookReq   = true;
+    _lastLiveMs = millis();
+    return;
+  }
+  // {"cmd":"mode","explore":bool}
+  if (cmd && strcmp(cmd, "mode") == 0) {
+    out->explore = doc["explore"] | out->explore;
     _lastLiveMs = millis();
     return;
   }
@@ -223,6 +277,7 @@ inline void dataPoll(TamaState* out) {
   if (!out->connected) {
     out->sessionsTotal=0; out->sessionsRunning=0; out->sessionsWaiting=0;
     out->recentlyCompleted=false; out->lastUpdated=now; out->listening=false;
+    out->camOn=false; out->explore=false; out->faceAtMs=0;
     strncpy(out->msg, "No Claude connected", sizeof(out->msg)-1);
     out->msg[sizeof(out->msg)-1]=0;
   }

@@ -26,9 +26,10 @@ static const int EYE_W = 96, EYE_H = 96, EYE_R = 22, EYE_GAP = 36;
 static const int EYE_H_BUSY = 67, EYE_H_LISTEN = 110;
 
 struct EyesKey {
-  uint8_t state = 0xFF; bool attn = false, listen = false, hot = false; int8_t side = 0;
+  uint8_t state = 0xFF; bool attn = false, listen = false, hot = false; int8_t side = 0; bool explore = false;
   bool operator!=(const EyesKey& o) const {
-    return state != o.state || attn != o.attn || listen != o.listen || hot != o.hot || side != o.side;
+    return state != o.state || attn != o.attn || listen != o.listen || hot != o.hot || side != o.side
+        || explore != o.explore;
   }
 };
 static EyesKey  cur;
@@ -111,6 +112,14 @@ static void applyState(const EyesKey& k, uint32_t now) {
     eyes.setHeight(EYE_H_LISTEN, EYE_H_LISTEN);
     eyes.setAutoblinker(ON, 5, 1);
     eyes.setIdleMode(OFF);
+  } else if (k.explore && k.state != P_ATTENTION) {
+    // Exploring the room under host control: curious, awake, no idle wander
+    // (the host is steering the head; the eyes follow via eyesLookAt).
+    eyes.setMood(DEFAULT);
+    eyes.open();
+    eyes.setCuriosity(ON);
+    eyes.setAutoblinker(ON, 3, 2);
+    eyes.setIdleMode(OFF);
   } else switch ((PersonaState)k.state) {
     case P_SLEEP:
       sleepy = true;
@@ -169,12 +178,14 @@ static void applyState(const EyesKey& k, uint32_t now) {
   lastPos = 0xFF;                      // force a position re-apply next eyesLookAt
 }
 
-void eyesSet(PersonaState s, bool needsAttention, bool listening, bool hotPrompt, int8_t gazeSide) {
+void eyesSet(PersonaState s, bool needsAttention, bool listening, bool hotPrompt, int8_t gazeSide,
+             bool explore) {
   EyesKey k;
   k.state = (uint8_t)s; k.attn = needsAttention; k.listen = listening;
-  k.hot = hotPrompt && (s == P_ATTENTION || needsAttention); k.side = gazeSide;
+  k.hot = hotPrompt && (s == P_ATTENTION || needsAttention); k.side = gazeSide; k.explore = explore;
   if (!(k != cur)) return;
-  bool sideOnly = k.state == cur.state && k.attn == cur.attn && k.listen == cur.listen && k.hot == cur.hot;
+  bool sideOnly = k.state == cur.state && k.attn == cur.attn && k.listen == cur.listen && k.hot == cur.hot
+               && k.explore == cur.explore;
   cur = k;
   if (sideOnly) { lastPos = 0xFF; return; }   // gaze handled by eyesLookAt
   applyState(k, millis());
@@ -222,8 +233,9 @@ void eyesTick(uint32_t now) {
   canvas.pushSprite(&spr, 0, EYES_Y);  // palette → RGB565 into the frame
 }
 
-const char* eyesStatusText(PersonaState s, bool listening) {
+const char* eyesStatusText(PersonaState s, bool listening, bool explore) {
   if (listening) return "listening...";
+  if (explore && s != P_ATTENTION) return "exploring...";
   switch (s) {
     case P_SLEEP:     return "zzz";
     case P_BUSY:      return "working...";

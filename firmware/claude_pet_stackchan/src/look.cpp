@@ -19,6 +19,8 @@
 #include <freertos/task.h>
 #include <esp_heap_caps.h>
 #include <string.h>
+#include <img_converters.h>     // fmt2jpg (esp32-camera)
+#include <mbedtls/base64.h>
 
 namespace look {
 namespace {
@@ -281,6 +283,74 @@ void analyse(uint32_t nowMs, bool quarantined, uint32_t costUs) {
     xSemaphoreGive(s_lock);
 }
 
+// ---- host frame stream (runs inside task(), core 0) ----
+// Byte order: the sensor delivers RGB565 big-endian per pixel (bench frame
+// dumps, kRgb565ByteSwap = true) and esp32-camera's JPEG encoder reads
+// RGB565 input the same way (byte0 = RRRRRGGG), so the subsample copies the
+// 16-bit words untouched.
+volatile bool s_streamOn = false;
+volatile bool s_streamPaused = false;
+volatile uint8_t s_streamFps = 5;
+volatile uint16_t s_streamW = 160, s_streamH = 120;
+volatile int s_headYaw = 0, s_headPitch = 45;
+uint8_t* s_sub = nullptr;        // PSRAM: subsampled RGB565, kStreamMaxW*kStreamMaxH*2
+char*    s_line = nullptr;       // PSRAM: NDJSON line, base64 payload
+constexpr size_t kLineCap = 24 * 1024;
+uint32_t s_streamSeq = 0, s_lastFrameMs = 0;
+uint32_t s_statFrames = 0, s_statBytes = 0, s_statEncodeUs = 0, s_statAt = 0;
+
+void streamFrame(const uint8_t* buf, uint32_t nowMs) {
+    if (!s_streamOn || s_streamPaused || !s_sub || !s_line) return;
+    uint32_t period = 1000 / (s_streamFps ? s_streamFps : 1);
+    if (s_lastFrameMs && nowMs - s_lastFrameMs < period) return;
+    uint16_t w = s_streamW, h = s_streamH;
+    if (w > kStreamMaxW) w = kStreamMaxW;
+    if (h > kStreamMaxH) h = kStreamMaxH;
+    if (w < 16 || h < 16) return;
+    int yaw = s_headYaw, pitch = s_headPitch;   // pose at capture
+    uint32_t e0 = micros();
+    // nearest-neighbour subsample of the QVGA frame
+    int sx = kFrameW / w, sy = kFrameH / h;
+    if (sx < 1) sx = 1;
+    if (sy < 1) sy = 1;
+    const uint16_t* src = (const uint16_t*)buf;
+    uint16_t* dst = (uint16_t*)s_sub;
+    for (int y = 0; y < h; ++y) {
+        const uint16_t* row = src + (size_t)(y * sy) * kFrameW;
+        for (int x = 0; x < w; ++x) dst[y * w + x] = row[x * sx];
+    }
+    uint8_t* jpg = nullptr;
+    size_t jpgLen = 0;
+    if (!fmt2jpg(s_sub, (size_t)w * h * 2, w, h, PIXFORMAT_RGB565, kStreamJpegQ, &jpg, &jpgLen) || !jpg) {
+        if (jpg) free(jpg);
+        return;
+    }
+    // The line starts with '\n' so a half-written loop() line (println is
+    // two writes) is terminated before our JSON, and ends with '\n'.
+    int head = snprintf(s_line, kLineCap,
+                        "\n{\"frame\":{\"seq\":%lu,\"w\":%u,\"h\":%u,\"fmt\":\"jpeg\",\"b64\":\"",
+                        (unsigned long)s_streamSeq, (unsigned)w, (unsigned)h);
+    size_t b64Len = 0;
+    size_t cap = kLineCap - head - 64;
+    int rc = mbedtls_base64_encode((unsigned char*)s_line + head, cap, &b64Len, jpg, jpgLen);
+    free(jpg);
+    if (rc != 0) return;
+    int tail = snprintf(s_line + head + b64Len, 64, "\",\"yaw\":%d,\"pitch\":%d}}\n", yaw, pitch);
+    size_t total = head + b64Len + tail;
+    uint32_t encodeUs = micros() - e0;
+    s_lastFrameMs = nowMs;
+    s_streamSeq++;
+    Serial.write((const uint8_t*)s_line, total);   // one write: HWCDC holds tx_lock for the whole buffer
+    s_statFrames++; s_statBytes += total; s_statEncodeUs += encodeUs;
+    if (s_statAt == 0) s_statAt = nowMs;
+    if (nowMs - s_statAt >= 30000) {
+        Serial.printf("[cam] %lu frames, %lu KB, %lu ms/encode\n",
+                      (unsigned long)s_statFrames, (unsigned long)(s_statBytes / 1024),
+                      (unsigned long)(s_statFrames ? s_statEncodeUs / s_statFrames / 1000 : 0));
+        s_statFrames = 0; s_statBytes = 0; s_statEncodeUs = 0; s_statAt = nowMs;
+    }
+}
+
 void task(void*) {
     uint32_t fpsWindowStart = millis();
     int frames = 0;
@@ -292,6 +362,7 @@ void task(void*) {
             continue;
         }
         if (fb->format == PIXFORMAT_RGB565 && fb->width == kFrameW && fb->height == kFrameH) {
+            streamFrame(fb->buf, millis());   // host stream first: the frame is still whole
             uint32_t c0 = micros();
             const bool swap = s_swap;
             downscale(fb->buf, swap);
@@ -376,10 +447,30 @@ bool begin() {
         Serial.printf("[look] enable awb/aec/agc -> %d/%d/%d, now awb=%u aec=%u agc=%u byteswap=%d\n",
                       ra, re, rg, s->status.awb, s->status.aec, s->status.agc, (int)s_swap);
     }
-    xTaskCreatePinnedToCore(task, "look", 8192, nullptr, 2, nullptr, 0);
+    // Host stream buffers (PSRAM): subsampled frame + one NDJSON line.
+    s_sub  = (uint8_t*)heap_caps_malloc((size_t)kStreamMaxW * kStreamMaxH * 2, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+    s_line = (char*)heap_caps_malloc(kLineCap, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+    if (!s_sub || !s_line) Serial.println("[cam] stream buffers FAILED (no PSRAM?)");
+    xTaskCreatePinnedToCore(task, "look", 12288, nullptr, 2, nullptr, 0);   // +4 KB for fmt2jpg
     xTaskCreatePinnedToCore(dumpTask, "lookdump", 4096, nullptr, 1, &s_dumpTask, 1);
     return true;
 }
+
+void setStream(bool on, uint8_t fps, uint16_t w, uint16_t h) {
+    if (fps < 1) fps = 1;
+    if (fps > 15) fps = 15;
+    s_streamFps = fps;
+    if (w) s_streamW = w > kStreamMaxW ? kStreamMaxW : w;
+    if (h) s_streamH = h > kStreamMaxH ? kStreamMaxH : h;
+    if (on != s_streamOn) {
+        s_streamOn = on;
+        s_lastFrameMs = 0;
+        Serial.printf("[cam] stream %s fps=%u %ux%u q=%u\n", on ? "on" : "off",
+                      (unsigned)s_streamFps, (unsigned)s_streamW, (unsigned)s_streamH, (unsigned)kStreamJpegQ);
+    }
+}
+void setStreamPaused(bool paused) { s_streamPaused = paused; }
+void setHeadPose(int yawDeg, int pitchDeg) { s_headYaw = yawDeg; s_headPitch = pitchDeg; }
 
 void requestDump(bool oppositeOrder) { s_dumpReq = oppositeOrder ? 2 : 1; }
 

@@ -115,8 +115,19 @@ static void moveTo(float yaw, float pitch, uint32_t holdMs) {
   moving = true;
 }
 
+// ---- host vision ----
+static constexpr uint32_t kHostFreshMs   = 3000;   // host faces within this: on-board target ignored
+static constexpr uint8_t  kHostFaceMinConf = 40;
+static uint32_t lastHostFaceSeq = 0;
+static bool     hostLive = false;                  // host faces arriving
+static float    hostFaceYaw = 0, hostFacePitch = 45;
+static uint32_t hostFaceMs = 0;                    // last OWNER face with conf >= 40
+static bool     hostFaceUnknownGlance = false;     // an unknown face wants a glance
+static float    unkYaw = 0, unkPitch = 45; static uint32_t unkMs = 0;
+static int8_t   lastBx = 0, lastBy = 0; static uint8_t lastSize = 0;
+
 void gazeUpdate(PersonaState active, bool needsAttention, bool listening,
-                uint32_t now, bool* ownerReset) {
+                uint32_t now, bool* ownerReset, GazeHostInput* host) {
   if (ownerReset && *ownerReset) {
     *ownerReset = false;
     model.reset();
@@ -135,8 +146,45 @@ void gazeUpdate(PersonaState active, bool needsAttention, bool listening,
 
   float curYaw = (float)bodyYawDeg(), curPitch = (float)bodyPitchDeg();
 
-  // Camera observation -> absolute head-frame angles.
-  if (cameraUp && look::poll(&sample) && !sample.quarantined) {
+  // Frame stream to the host: on/off + fps from the cam cmd, paused while a
+  // transfer owns the wire; every frame line carries the streamed pose.
+  if (host) {
+    look::setStream(host->camOn && cameraUp, host->camFps, host->camW, host->camH);
+    look::setStreamPaused(host->wireBusy);
+    look::setHeadPose(bodyCmdYawDeg(), bodyCmdPitchDeg());
+  }
+
+  // Host face detections (highest priority). Absolute angles use the pose
+  // ECHOED in the face cmd (the pose at capture), never the current one.
+  bool hostFresh = host && host->faceAtMs && now - host->faceAtMs <= kHostFreshMs;
+  if (hostFresh != hostLive) {
+    hostLive = hostFresh;
+    if (!hostLive) Serial.println("[gaze] host silent, on-board fallback");
+  }
+  if (host && host->faceAtMs && host->faceSeq != lastHostFaceSeq) {
+    lastHostFaceSeq = host->faceSeq;
+    if (host->faceConf >= kHostFaceMinConf) {
+      float absYaw = host->faceYaw + kYawSign * (host->faceBx / 100.0f) * (kCameraHfovDeg * 0.5f);
+      float absPitch = host->facePitch - kElevSign * (host->faceBy / 100.0f) * (kCameraVfovDeg * 0.5f); // +by = down
+      absYaw = clampf(absYaw, -kYawLimitDeg, kYawLimitDeg);
+      absPitch = clampf(absPitch, kPitchMinDeg, kPitchMaxDeg);
+      lastBx = host->faceBx; lastBy = host->faceBy; lastSize = host->faceSize;
+      if (host->faceOwner) {
+        // Owner: LIVE target + memory training.
+        model.observe(absYaw, absPitch, host->faceConf, now);
+        hostFaceYaw = absYaw; hostFacePitch = absPitch; hostFaceMs = now;
+        lastSrc = 'H';
+      } else {
+        // Unknown face: a curious glance in BUSY/IDLE only, never trains memory.
+        unkYaw = absYaw; unkPitch = absPitch; unkMs = now;
+        hostFaceUnknownGlance = true;
+      }
+    }
+  }
+
+  // On-board observation -> absolute head-frame angles. Ignored while the
+  // host is delivering faces.
+  if (cameraUp && look::poll(&sample) && !sample.quarantined && !hostLive) {
     int b, e, conf; char src;
     if (look::bestTarget(sample, &b, &e, &conf, &src) && conf >= kObserveMinConf) {
       float absYaw = curYaw + kYawSign * (b / 100.0f) * (kCameraHfovDeg * 0.5f);
@@ -148,6 +196,21 @@ void gazeUpdate(PersonaState active, bool needsAttention, bool listening,
     }
   }
   model.decay(now);
+
+  // Host-driven gaze ({"cmd":"look"}): SLEEP/IDLE/BUSY only, never with a
+  // card up, never while the owner is wanted. Same tween, clamped.
+  if (host && host->hostLookReq) {
+    host->hostLookReq = false;
+    bool ok = !host->cardUp && !listening && active != P_ATTENTION && !needsAttention
+              && (active == P_SLEEP || active == P_IDLE || active == P_BUSY);
+    if (ok) {
+      float y = clampf(host->hostLookYaw, -kYawLimitDeg, kYawLimitDeg);
+      float p = clampf(host->hostLookPitch, kPitchMinDeg, kPitchMaxDeg);
+      bodyLookAt((int8_t)y, (int8_t)p, host->hostLookHold);
+      look::setMoving(true); model.noteMoving(true); moving = true;
+      Serial.printf("[gaze] host look yaw=%.0f pitch=%.0f hold=%u\n", y, p, (unsigned)host->hostLookHold);
+    }
+  }
 
   // Persistence: periodic + conf crossing 60, at most one write per 60 s.
   {
@@ -193,7 +256,11 @@ void gazeUpdate(PersonaState active, bool needsAttention, bool listening,
   if (want) {
     if (model.wantLiveMove(curYaw, curPitch, now, &ty, &tp)) {
       moveTo(ty, tp, kWantHoldMs);
-      Serial.printf("[gaze] live yaw=%.0f pitch=%.0f conf=%u\n", ty, tp, model.liveConf());
+      if (hostLive && lastSrc == 'H')
+        Serial.printf("[gaze] host face bx=%d by=%d size=%u -> yaw=%d pitch=%d\n",
+                      lastBx, lastBy, (unsigned)lastSize, (int)ty, (int)tp);
+      else
+        Serial.printf("[gaze] live yaw=%.0f pitch=%.0f conf=%u\n", ty, tp, model.liveConf());
       if (!locked) Serial.printf("[gaze] found src=%c\n", lastSrc);
       locked = true; searching = false;
       return;
@@ -220,7 +287,18 @@ void gazeUpdate(PersonaState active, bool needsAttention, bool listening,
     }
   } else {
     // BUSY / IDLE: a glance, not a stare. Live only, deadband 8 deg, 3 s.
-    if (model.wantLiveMove(curYaw, curPitch, now, &ty, &tp)) {
+    // An UNKNOWN host face gets the same glance and nothing more (it never
+    // reaches the owner model).
+    if (hostFaceUnknownGlance) {
+      hostFaceUnknownGlance = false;
+      bool far = fabsf(unkYaw - curYaw) >= kGentleDeadbandDeg || fabsf(unkPitch - curPitch) >= kGentleDeadbandDeg;
+      if (far && !moving && now - unkMs < 1000 && now - lastGentleMs >= kGentleIntervalMs) {
+        lastGentleMs = now;
+        moveTo(unkYaw, unkPitch, kGentleHoldMs);
+        Serial.printf("[gaze] host face (unknown) bx=%d by=%d size=%u -> yaw=%d pitch=%d (glance)\n",
+                      lastBx, lastBy, (unsigned)lastSize, (int)unkYaw, (int)unkPitch);
+      }
+    } else if (model.wantLiveMove(curYaw, curPitch, now, &ty, &tp)) {
       bool far = fabsf(ty - curYaw) >= kGentleDeadbandDeg || fabsf(tp - curPitch) >= kGentleDeadbandDeg;
       if (far && now - lastGentleMs >= kGentleIntervalMs) {
         lastGentleMs = now;
