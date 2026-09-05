@@ -96,6 +96,16 @@ all ack. See `firmware/claude_pet_eink/README.md` for the vendored Elecrow
 panel driver (including the old-image-plane fix that stops partial-refresh
 text overlap) and the pin map, and DESIGN.md for the port notes.
 
+## StackChan (research)
+
+A third board is on the bench: the **M5StackChan AI Desktop Robot** (K151,
+CoreS3 / ESP32-S3, Feetech serial servos, 12 RGB LEDs, three-zone touch,
+NFC). No firmware yet. Hardware and software capability notes, plus an index of
+the twelve vendored reference repos, live in `docs/stackchan/`:
+[capabilities.md](docs/stackchan/capabilities.md) and
+[repos.md](docs/stackchan/repos.md). The link will be USB serial, same as
+the other boards.
+
 ## E-ink agent monitor (variant)
 
 `firmware/claude_pet_eink_monitor` is a **variant of the e-ink build for the
