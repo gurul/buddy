@@ -11,11 +11,16 @@ import sys
 
 from . import __version__
 from .daemon import Daemon
+from .envfile import load_env_file
 from .ipc import make_transport
 from .voice_trigger import DEFAULT_HOTKEY, HOTKEYS
 
 
 def main(argv: list[str] | None = None) -> int:
+    # Secrets and knobs the service cannot inherit from a shell
+    # (OPENAI_API_KEY, CC_BUDDY_*) — read before any subcommand looks at
+    # os.environ. Existing variables win; the file only fills gaps.
+    load_env_file()
     parser = argparse.ArgumentParser(prog="cc-buddy-bridge")
     parser.add_argument("--version", action="version", version=f"cc-buddy-bridge {__version__}")
     sub = parser.add_subparsers(dest="cmd")
@@ -150,6 +155,19 @@ def main(argv: list[str] | None = None) -> int:
     p_identity.add_argument("action", choices=("status", "reset"), nargs="?", default="status")
     p_identity.add_argument("--socket", default=None, help="IPC path or host:port override")
 
+    p_notes = sub.add_parser(
+        "notes",
+        help="Print the idle explorer's recent notes (what the robot saw while Claude was quiet)",
+    )
+    p_notes.add_argument("-n", "--last", type=int, default=20,
+                         help="Show the last N notes (default 20; 0 = all)")
+
+    p_notes_test = sub.add_parser(
+        "notes-test",
+        help="Send one image to the notes model and print the sentence (one real API call)",
+    )
+    p_notes_test.add_argument("image", help="Path to a JPEG or PNG")
+
     p_push = sub.add_parser(
         "push-character",
         help="Upload a GIF character pack folder to the stick (manifest.json + *.gif)",
@@ -256,6 +274,13 @@ def main(argv: list[str] | None = None) -> int:
     if args.cmd == "identity":
         from .identity import run_identity
         return run_identity(args.action, args.socket)
+
+    if args.cmd == "notes":
+        from .explore import run_notes_cli
+        return run_notes_cli(args.last)
+    if args.cmd == "notes-test":
+        from .explore import run_notes_test
+        return run_notes_test(args.image)
     if args.cmd == "push-character":
         return _run_push_character(args.path)
     if args.cmd == "audit":

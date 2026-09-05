@@ -148,7 +148,8 @@ class _StubBle:
 
 
 def _daemon(connected: bool = True) -> SimpleNamespace:
-    return SimpleNamespace(ble=_StubBle(connected), _listen_sent=None)
+    # _note_activity: the listen key is activity for the idle explorer (explore.py).
+    return SimpleNamespace(ble=_StubBle(connected), _listen_sent=None, _note_activity=lambda: None)
 
 
 async def _drive(d: SimpleNamespace, edges: list[bool]) -> list[dict]:

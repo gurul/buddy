@@ -363,7 +363,9 @@ def _daemon(detect, connected: bool = True) -> SimpleNamespace:
     from cc_buddy_bridge.daemon import Daemon
 
     ble = _StubBle(connected)
-    d = SimpleNamespace(ble=ble, _listen_sent=None, _shutdown=asyncio.Event())
+    # _explorer/_note_activity: the idle explorer's hooks in _handle_ble (explore.py).
+    d = SimpleNamespace(ble=ble, _listen_sent=None, _shutdown=asyncio.Event(),
+                        _explorer=SimpleNamespace(active=False), _note_activity=lambda: None)
     d._vision = FaceTracker(detect=detect, send=ble.send)
     for name in ("_reset_listen", "_send_cam"):
         setattr(d, name, MethodType(getattr(Daemon, name), d))

@@ -370,7 +370,10 @@ def _daemon(identity_obj, connected: bool = True) -> SimpleNamespace:
     from cc_buddy_bridge.daemon import Daemon
 
     ble = _StubBle(connected)
-    d = SimpleNamespace(ble=ble, _listen_sent=None, _listen_down=False, _identity=identity_obj)
+    # _note_activity / _explorer: the listen key and every frame are also seen
+    # by the idle explorer (explore.py); the stub keeps it inactive.
+    d = SimpleNamespace(ble=ble, _listen_sent=None, _listen_down=False, _identity=identity_obj,
+                        _note_activity=lambda: None, _explorer=SimpleNamespace(active=False))
     d._vision = FaceTracker(detect=lambda f: [Rect(60, 40, 40, 40, conf=1.0)], send=ble.send,
                             identity=identity_obj)
     for name in ("_on_listen_key", "_handle_identity", "_handle_ble"):

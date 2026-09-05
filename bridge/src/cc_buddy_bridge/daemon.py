@@ -15,6 +15,18 @@ if TYPE_CHECKING:
 
 from .audit import AuditLog
 from .ble import BuddyBLE
+from .explore import (
+    Action,
+    Explorer,
+    Look,
+    Mode,
+    Note,
+    NoteTaker,
+    build_look_cmd,
+    build_mode_cmd,
+    make_note_client,
+)
+from .explore import configured as explore_configured
 from .identity import FaceIdentity, OwnerIdentity, configured_threshold, make_describer
 from .identity import default_path as identity_default_path
 from .ipc import IPCServer
@@ -34,7 +46,7 @@ from .read_policy import is_within, read_scope
 from .state import State
 from .version_check import check as version_check
 from .vision import STATS_INTERVAL_SECS as VISION_STATS_SECS
-from .vision import FaceTracker, build_cam_cmd, configured_save_dir, make_detector
+from .vision import FaceTracker, build_cam_cmd, configured_save_dir, decode_frame, make_detector
 
 # Entry text is prefixed with a 2-byte marker ("> ", "@ ", "+ ") before being
 # stored. Budget the user-supplied portion so the full entry stays within the
@@ -121,6 +133,19 @@ class Daemon:
         # Owner identity: the prints live in memory; the file is loaded and
         # the Vision describer resolved in run(), like the detector.
         self._identity: Optional[FaceIdentity] = None
+        # Idle explorer (explore.py): after a quiet stretch the board pans
+        # the room and, per waypoint, may spend a note on what it sees. The
+        # pure Explorer is ticked from _explore_loop; the note client is
+        # resolved in run() so constructing a Daemon never imports openai.
+        self._explore_cfg = explore_configured()
+        self._explorer = Explorer(self._explore_cfg, now=time.monotonic())
+        self._notes: Optional[NoteTaker] = None
+        # Monotonic time of the last thing a human or a session did: any hook
+        # event, a board touch, the listen key. Idle time is measured from it.
+        self._last_activity_at = time.monotonic()
+        # The newest raw {"frame":...} object, kept only while exploring so a
+        # waypoint sample never costs a decode on the 5 fps path.
+        self._explore_raw_frame: Optional[dict[str, Any]] = None
         # Most recent {"diag":{...}} the board sent; served over IPC so
         # `cc-buddy-bridge diag` can show it without owning the serial port.
         self._last_diag: Optional[dict[str, Any]] = None
@@ -183,11 +208,21 @@ class Daemon:
             asyncio.create_task(self._voice_watchdog(), name="voice-watchdog"),
             asyncio.create_task(self._vision_stats_loop(), name="vision-stats"),
         ]
+        if self._explore_cfg.enabled:
+            client = make_note_client(self._explore_cfg)
+            self._explorer.notes_enabled = client is not None
+            if client is not None:
+                self._notes = NoteTaker(client, self._explore_cfg.notes_dir)
+            tasks.append(asyncio.create_task(self._explore_loop(), name="explore"))
+        else:
+            log.info("explore: disabled (CC_BUDDY_EXPLORE=0)")
         try:
             await self._shutdown.wait()
         finally:
-            # Stop the camera before the transport task is cancelled — its
-            # reader owns the port close, so a send after that goes nowhere.
+            # Leave explore mode and stop the camera before the transport
+            # task is cancelled — its reader owns the port close, so a send
+            # after that goes nowhere.
+            await self._stop_explore("daemon stopping")
             await self._send_cam(False)
             self._vision.stop()
             for t in tasks:
@@ -401,6 +436,77 @@ class Daemon:
             st = self._identity.status()
         return {"ok": True, "enabled": self._identity is not None, "identity": st}
 
+    # ---- idle explorer ----
+
+    def _note_activity(self) -> None:
+        """Something happened: a hook event, a board touch, the listen key."""
+        self._last_activity_at = time.monotonic()
+
+    def _idle_secs(self, now: float) -> float:
+        """Seconds since the last activity. A running or waiting session is
+        activity in itself, so the clock does not start until it is gone."""
+        if self.state.running_count or self.state.waiting_count:
+            self._last_activity_at = now
+            return 0.0
+        return max(0.0, now - self._last_activity_at)
+
+    async def _explore_loop(self) -> None:
+        while not self._shutdown.is_set():
+            try:
+                await asyncio.wait_for(self._shutdown.wait(), timeout=1.0)
+                return
+            except asyncio.TimeoutError:
+                pass
+            try:
+                await self._explore_step(time.monotonic())
+            except Exception:  # noqa: BLE001
+                log.exception("explore: step failed")
+
+    async def _explore_step(self, now: float) -> None:
+        """One tick: gather the facts, run the schedule, execute its actions."""
+        frame = None
+        if self._explorer.wants_frame(now) and self._explore_raw_frame is not None:
+            try:
+                frame = decode_frame(self._explore_raw_frame)
+            except ValueError:
+                frame = None
+            self._explore_raw_frame = None
+        actions = self._explorer.tick(
+            now,
+            idle_secs=self._idle_secs(now),
+            card_pending=self.state.pending_count > 0,
+            listening=bool(self._listen_sent),
+            frame=frame,
+            connected=self.ble.connected,
+        )
+        for action in actions:
+            await self._run_explore_action(action)
+
+    async def _run_explore_action(self, action: Action) -> None:
+        if isinstance(action, Mode):
+            if action.explore:
+                log.info("explore: start (%s)", action.reason)
+            else:
+                log.info("explore: stop (%s)", action.reason)
+                self._explore_raw_frame = None
+            if self.ble.connected:
+                await self.ble.send(build_mode_cmd(action.explore))
+        elif isinstance(action, Look):
+            log.info("explore: look yaw=%+d pitch=%d", action.yaw, action.pitch)
+            if self.ble.connected:
+                await self.ble.send(build_look_cmd(action.yaw, action.pitch, action.hold_ms))
+        elif isinstance(action, Note):
+            if self._notes is not None:
+                asyncio.create_task(self._notes.take(action))
+
+    async def _stop_explore(self, reason: str) -> None:
+        """Shutdown path: leave explore mode on the board if we put it there."""
+        if self._explorer.active:
+            await self._run_explore_action(Mode(False, reason))
+        self._explorer.reset()
+        if self._notes is not None:
+            self._notes.stop()
+
     # ---- listen key ----
 
     def _on_listen_key(self, on: bool) -> None:
@@ -409,6 +515,7 @@ class Daemon:
         same last-sent state and put duplicates on the wire."""
         log.info("listen key: %s", "down" if on else "up")
         self._listen_down = on
+        self._note_activity()
         if not self.ble.connected or on == self._listen_sent:
             return
         self._listen_sent = on
@@ -472,6 +579,10 @@ class Daemon:
         # hud polling — also too chatty to be useful here.
         if evt not in ("pretooluse", "get_state"):
             log.info("ipc evt=%r session=%s", evt, (req.get("session_id") or "?")[:8])
+        # Every hook event is activity for the idle explorer, except the
+        # polls that fire on their own (statusline, diag watch).
+        if evt not in ("get_state", "diag"):
+            self._note_activity()
 
         if evt == "celebrate":
             # Host-triggered celebration. Reuses the same `completed: true`
@@ -824,6 +935,10 @@ class Daemon:
         if isinstance(frame, dict):
             # Camera frame: hottest object on the link (5/s). Hand it to the
             # tracker, which parks or runs it and replies with the face cmd.
+            # While exploring, also keep the newest one for the next waypoint
+            # sample (the explore loop decodes it, once, when it is due).
+            if self._explorer.active:
+                self._explore_raw_frame = frame
             await self._vision.on_frame(frame)
             return
         diag = obj.get("diag")
@@ -857,6 +972,9 @@ class Daemon:
                         "  pre-reset event: %s", ev)
             return
         cmd = obj.get("cmd")
+        if cmd in ("focus", "key", "voice", "permission"):
+            # A touch on the board: the human is here, stop exploring.
+            self._note_activity()
         if cmd == "focus":
             # Two senders, same verb. Swipe UP on the permission card carries
             # the prompt id: raise the terminal of the session that is asking

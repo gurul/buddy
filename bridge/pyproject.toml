@@ -43,6 +43,10 @@ dependencies = [
     # NSPanel. Cocoa bundles AppKit + Foundation. 12.2.2 current per
     # `pip index versions`, 2026-09-05.
     "pyobjc-framework-Cocoa>=12.0; sys_platform == 'darwin'",
+    # Idle explorer notes (explore.py): one Responses API call per note with
+    # an input_image data URL. 3.8.0 current per `pip index versions`,
+    # 2026-09-05. Imported lazily, only when OPENAI_API_KEY is set.
+    "openai>=3.8",
 ]
 
 [project.optional-dependencies]
