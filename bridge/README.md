@@ -629,6 +629,68 @@ cc-buddy-bridge identity reset      # forget the owner (in the daemon and on dis
 Without macOS Vision every face stays `unknown` and the daemon logs one
 warning at startup.
 
+## Idle explorer and notes
+
+When Claude has been quiet for a while the robot stops waiting and looks
+around. After `CC_BUDDY_EXPLORE_AFTER_MIN` minutes (default 10) with no
+session running or waiting, no hook event, no board touch, and the listen
+key up, the daemon sends `{"cmd":"mode","explore":true}` and walks the head
+through a pan plan: yaw -45, -20, 0, 20, 45 at pitch 40, then the same five
+at pitch 60, one `{"cmd":"look","yaw":..,"pitch":..,"hold":6000}` every 6 s.
+Two seconds after each look — once the head has settled — it keeps one
+camera frame. If that frame differs from the last one it noted at that
+waypoint (mean luma difference of 32x24 thumbnails above 12, or the first
+visit), it spends a note: the frame goes to an OpenAI vision model and the
+one-sentence answer is appended to a dated file. After the ten waypoints it
+sends `mode explore false` and rests `CC_BUDDY_EXPLORE_CYCLE_MIN` minutes
+(default 15) before the next cycle.
+
+Anything that means the human is back stops it at once with `mode explore
+false`: a hook event (a session running or waiting), a permission card, the
+listen key going down, a touch on the board, or the board disconnecting.
+The idle clock then has to reach `CC_BUDDY_EXPLORE_AFTER_MIN` again.
+
+Log lines, at most one per event: `explore: start (idle 10 min)`,
+`explore: look yaw=-45 pitch=40`, `explore: note -> <file>`,
+`explore: stop (<reason>)`.
+
+**The env file.** The service runs with a fixed environment, so the API key
+lives in `~/.config/cc-buddy-bridge/env` (make it `chmod 600`):
+
+```
+# KEY=VALUE, one per line; # comments; quotes optional
+OPENAI_API_KEY=sk-...
+```
+
+Every `cc-buddy-bridge` command reads it at startup and fills any variable
+that is not already set — a value from the shell always wins. Without a
+key the robot still pans but takes no notes (one warning at startup).
+
+**Budget.** One note is one Responses API request (`gpt-5-mini` by default,
+`CC_BUDDY_NOTES_MODEL` to change) with one low-detail image, minimal
+reasoning effort, and at most 60 output tokens. A token bucket caps notes at
+`CC_BUDDY_NOTES_PER_HOUR` (default 6; it starts full, so a fresh daemon can
+note a whole first cycle). The change detector keeps the bucket from being
+spent on a room that has not moved. Each call has a 20 s timeout and no
+retries; failures are logged once per 10 minutes and the note is skipped.
+
+**Where notes go.** `CC_BUDDY_NOTES_DIR` (default
+`~/.config/cc-buddy-bridge/notes`, created mode 700), one file per day:
+
+```
+$ cc-buddy-bridge notes --last 3
+2026-09-05 - 14:07 yaw=+20 pitch=40 — Two mugs on the desk by a window with daylight.
+2026-09-05 - 14:13 yaw=+0 pitch=60 — The keyboard is unplugged and pushed aside.
+2026-09-05 - 14:31 yaw=-45 pitch=40 — One person walked past the doorway.
+```
+
+`cc-buddy-bridge notes-test photo.jpg` sends a single image and prints the
+sentence — one real call, for checking the key and model.
+
+**Disable** with `CC_BUDDY_EXPLORE=0` (in the env file or the service's
+environment). The daemon then logs `explore: disabled` and never sends
+`mode` or `look`.
+
 ## Requirements
 
 * macOS 12+ / Windows 10+ / Linux with BlueZ
