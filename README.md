@@ -1,17 +1,18 @@
-# Claude Pet 🐾
+# buddy
 
-![the ASCII buddy on the board's screen — "a buddy appears", with the mini clock and live transcript HUD](docs/assets/thumbnail.png)
+![buddy on a desk, eyes on, saying working...](docs/assets/thumbnail.png)
 
-A desk pet on an ESP32-S3 touchscreen that reacts to **Claude Code** in real time. It sleeps
+A small, open companion for a more capable world. A desk pet on an ESP32-S3 touchscreen
+that reacts to **Claude Code** in real time. It sleeps
 when you're idle, gets busy when Claude is working, and demands attention when Claude is
 blocked on you. Permission prompts arrive as a card you approve or deny by swiping —
 right to approve, left to deny.
 
-Three builds, two boards: the touch **pet**, the CrowPanel e-ink **monitor-and-control**
-dock, and a **monitor-only** variant of that same e-ink board — a read-only landscape
-wallboard of your live agents, for when you want the status without the controls.
-See [E-ink build](#e-ink-build-crowpanel-42) and
-[E-ink agent monitor](#e-ink-agent-monitor-variant).
+Four builds, three boards: the touch **pet**, the CrowPanel e-ink **monitor-and-control**
+dock, a **monitor-only** variant of that same e-ink board — a read-only landscape
+wallboard of your live agents — and the **StackChan robot**, a head that turns to look at
+you. See [E-ink build](#e-ink-build-crowpanel-42),
+[E-ink agent monitor](#e-ink-agent-monitor-variant) and [StackChan](#stackchan-m5stackchan-k151).
 
 Two MIT projects ported to the **Freenove FNK0104B** (ESP32-S3 Display 2.8" Touch):
 [anthropics/claude-desktop-buddy](https://github.com/anthropics/claude-desktop-buddy) for the
@@ -96,15 +97,61 @@ all ack. See `firmware/claude_pet_eink/README.md` for the vendored Elecrow
 panel driver (including the old-image-plane fix that stops partial-refresh
 text overlap) and the pin map, and DESIGN.md for the port notes.
 
-## StackChan (research)
+## StackChan (M5StackChan K151)
 
-A third board is on the bench: the **M5StackChan AI Desktop Robot** (K151,
-CoreS3 / ESP32-S3, Feetech serial servos, 12 RGB LEDs, three-zone touch,
-NFC). No firmware yet. Hardware and software capability notes, plus an index of
-the twelve vendored reference repos, live in `docs/stackchan/`:
-[capabilities.md](docs/stackchan/capabilities.md) and
-[repos.md](docs/stackchan/repos.md). The link will be USB serial, same as
-the other boards.
+A third board: the **M5StackChan AI Desktop Robot** (K151 — CoreS3 core,
+ESP32-S3, 320×240 LCD, GC0308 camera, two Feetech serial servos for yaw and
+pitch, 12 RGB LEDs, a three-zone top touch pad, speaker) —
+`firmware/claude_pet_stackchan`, same NDJSON protocol over the native
+USB-Serial/JTAG port (`/dev/cu.usbmodem*`; opening it does not reset the
+board). The face is FluxGarage RoboEyes on a 1-bit canvas with a random eye
+colour per boot and one status word, no clock. The body does the talking:
+eased head motion (an `easeInOutCubic` tween at 25 Hz on top of the BSP's
+servo spring), idle micro-drift, LED moods, and R2D2 chirps synthesized to
+PCM at 16 kHz. Three states must read at a glance:
+
+| State | Claude | Head | Eyes | LEDs |
+|---|---|---|---|---|
+| sleep | connected, idle | chin down, torque off | closed, a peek every ~20 s | dim blue breathe |
+| busy | a session running | level, nods every 2.5 s | squint | dim cyan |
+| attention | a session waits on you | up, then a two-row search sweep until it finds you | angry flicker; sweat on a destructive prompt | orange pulse |
+| listening | Option held on the Mac | faces you | wide | blue |
+
+**Host vision.** The daemon turns the camera on (`{"cmd":"cam",...}`); the board
+streams 160×120 JPEGs (~2.5 KB at ~4 fps); macOS Vision finds the largest
+face in 5–20 ms and answers `{"cmd":"face",...,"who":"owner"|"unknown"}`, which
+drives the head. Hold Option while facing it to enrol yourself as owner
+(Vision feature prints, threshold 0.9); the board keeps a habit map of where
+you sit in NVS and searches there first. On-board motion/skin tracking is the
+fallback with no host. After 10 idle minutes the daemon pans the room and
+writes one-sentence notes (`gpt-5-mini`, 6/hour) to
+`~/.config/cc-buddy-bridge/notes/`, shown by the WidgetKit widget in `widget/`
+or `cc-buddy-bridge notes-widget`.
+
+```bash
+./tools/flash_stackchan.sh     # compile + archive ELF + flash; boots the daemon out first
+cc-buddy-bridge install --service --serial-port '/dev/cu.usbmodem*'
+```
+
+Daemon flags used with the robot: `CC_BUDDY_MONITOR_ONLY=1` in the plist env
+(no permission cards on the robot; taps only focus the terminal),
+`~/.config/cc-buddy-bridge/matchers.toml` with `replace_defaults = true` and
+an empty `always_ask`, and `OPENAI_API_KEY` in `~/.config/cc-buddy-bridge/env`
+(mode 600 — the launchd daemon does not read `.zshrc`). The listen key needs
+**Input Monitoring** for the daemon's python. Back up the factory image
+before the first flash (`esptool ... read-flash`, no `-b` on this link);
+restore with `esptool write-flash 0x0 firmware/build-archive/stackchan-factory-20260905.bin`.
+
+| Control | Action |
+|---|---|
+| Front zone tap | attention: raise the blocked terminal. Otherwise a head pat: heart, pink LEDs |
+| Middle zone hold (0.6 s) | push-to-talk, same as holding the panel |
+| Back zone | scroll the transcript (same as the bottom-right strip) |
+| Panel gestures | as the touch pet: hold = dictate, swipe down = Enter, left/right = option pickers |
+
+Full reference: [docs/stackchan/build.md](docs/stackchan/build.md) (port map,
+gaze policy, wire additions, bench-verified conventions); research in
+[capabilities.md](docs/stackchan/capabilities.md) and [repos.md](docs/stackchan/repos.md).
 
 ## E-ink agent monitor (variant)
 
@@ -316,6 +363,9 @@ launchctl load -w ~/Library/LaunchAgents/com.github.cc-buddy-bridge.daemon.plist
 | `firmware/claude_pet_eink_monitor` | variant of the above for the same board — landscape read-only agent wallboard, no cards, inert buttons, full-refresh-only panel path |
 | `tools/flash_eink.sh` | compile + ELF archive + flash for the e-ink build |
 | `tools/flash_eink_monitor.sh` | same, for the e-ink agent-monitor variant |
+| `firmware/claude_pet_stackchan` | the M5StackChan K151 robot build — RoboEyes face, head/LED/chirp choreography, camera gaze, host-vision stream |
+| `tools/flash_stackchan.sh` | compile + ELF archive + daemon-safe flash for the robot |
+| `widget/` | macOS WidgetKit widget showing the robot's room notes (`docs/stackchan/widget.md`) |
 | `bridge/src/cc_buddy_bridge` | daemon, hooks, serial transport, voice trigger, read policy |
 | `case/shell_v2.py` | parametric 3D-printable shell, current revision (FreeCAD headless) — frame + back + alignment gauge, heat-set insert bosses, STLs in `case/export/` |
 | `case/shell.py` | v1 shell record (wrong hole grid; superseded) — still the source of the unchanged stand |
