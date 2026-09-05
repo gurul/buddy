@@ -30,9 +30,11 @@ def _run(coro: Coroutine[Any, Any, _T]) -> _T:
 class FakeSerial:
     """Minimal pyserial stand-in.
 
-    ``lines`` are returned one per readline() call; once exhausted every
-    subsequent call returns b"" — exactly what a stale handle looks like, since
-    pyserial returns empty on its read timeout rather than raising.
+    ``lines`` are returned one per read() call (the transport's _read_chunk
+    asks for one byte and then whatever is waiting; here a whole line comes
+    back at once and ``in_waiting`` stays 0). Once exhausted every subsequent
+    call returns b"" — exactly what a stale handle looks like, since pyserial
+    returns empty on its read timeout rather than raising.
     """
 
     def __init__(self, lines: list[bytes]) -> None:
@@ -45,7 +47,9 @@ class FakeSerial:
         self.input_resets = 0
         self.written: list[bytes] = []
 
-    def readline(self) -> bytes:
+    in_waiting = 0
+
+    def read(self, _n: int = 1) -> bytes:
         return self._lines.pop(0) if self._lines else b""
 
     def write(self, data: bytes) -> None:

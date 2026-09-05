@@ -30,6 +30,12 @@ def main(argv: list[str] | None = None) -> int:
         help="USB serial port of the buddy (e.g. /dev/cu.usbmodem*). Uses serial instead of BLE.",
     )
     p_daemon.add_argument("--log-level", default="INFO")
+    p_daemon.add_argument(
+        "--save-frames",
+        default=os.environ.get("CC_BUDDY_SAVE_FRAMES") or None,
+        metavar="DIR",
+        help="Bench debugging: write received camera frames here (at most one per second)",
+    )
 
     CONFIG_DIR_HELP = (
         "Claude Code config home to operate on (default: $CLAUDE_CONFIG_DIR, else ~/.claude). "
@@ -115,6 +121,12 @@ def main(argv: list[str] | None = None) -> int:
         help="Clear the stick's stored BLE bond (you must also Forget on the macOS side afterwards)",
     )
 
+    p_vision = sub.add_parser(
+        "vision-test",
+        help="Run the host face detector on an image file and print the face cmd it would send",
+    )
+    p_vision.add_argument("image", help="Path to a JPEG/PNG (anything macOS ImageIO decodes)")
+
     p_push = sub.add_parser(
         "push-character",
         help="Upload a GIF character pack folder to the stick (manifest.json + *.gif)",
@@ -197,6 +209,9 @@ def main(argv: list[str] | None = None) -> int:
         return hud_run(ascii_only=args.ascii, socket_path=args.socket)
     if args.cmd == "unpair":
         return _run_unpair()
+    if args.cmd == "vision-test":
+        from .vision import run_vision_test
+        return run_vision_test(args.image)
     if args.cmd == "push-character":
         return _run_push_character(args.path)
     if args.cmd == "audit":
@@ -250,6 +265,7 @@ def _run_daemon(args: argparse.Namespace) -> int:
         device_name_prefix=args.device_name,
         device_address=args.device_address,
         serial_port=args.serial_port,
+        save_frames=args.save_frames,
     )
 
     loop = asyncio.new_event_loop()

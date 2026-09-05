@@ -486,6 +486,84 @@ available.
 - The firmware variant is a downstream fork — there's no auto-update
   story. Re-build & re-flash manually when you pull new firmware changes.
 
+## Listen key
+
+Hold the Option key on the Mac and the board turns to face you and shows
+its listening pose. Release it and the board goes back to what it was
+doing. Option is the default dictation hotkey, so the board listens while
+you dictate. Hold-the-pet push-to-talk presses the same key, so the board
+shows the same pose either way.
+
+The daemon watches the key with a listen-only Quartz event tap and sends
+`{"cmd":"listen","on":true}` on key down and `{"cmd":"listen","on":false}`
+on key up. It sends each transition once, at most one per 150 ms, and only
+while the board is connected. It also sends `on:false` every time the board
+connects or reboots, so a reboot mid-hold never leaves the pose stuck.
+
+Pick the key with `CC_BUDDY_LISTEN_KEY`:
+
+| Value    | Watches                          |
+| -------- | -------------------------------- |
+| `option` | the Option key (default on macOS) |
+| `fn`     | the fn key                        |
+| `off`    | nothing — the feature is disabled |
+
+The event tap needs macOS **Input Monitoring** for the daemon's python.
+Without it the daemon logs one warning at startup, `listen key: could not
+create the event tap — grant Input Monitoring to <python> ...`, and runs
+without the feature. To grant it: System Settings > Privacy & Security >
+Input Monitoring, add the python binary from `bridge/.venv` (the warning
+prints the resolved path), turn its toggle on, then restart the daemon.
+
+## Host vision
+
+The board has a camera but a slow, coarse on-board face detector. While the
+Mac is attached the daemon does the looking instead: the board streams
+small frames, the Mac runs Apple's Vision framework on each one, and the
+board gets back where the largest face is so it can turn to look at you.
+On-board tracking stays as the fallback for when no host asks.
+
+Once per connect or reboot, after the time sync, the daemon sends
+`{"cmd":"cam","on":true,"fps":5,"w":160,"h":120}`; on shutdown it sends
+`{"cmd":"cam","on":false}`. The board answers with one line per frame:
+
+```json
+{"frame":{"seq":12,"w":160,"h":120,"fmt":"jpeg","b64":"...","yaw":4.0,"pitch":-2.0}}
+```
+
+`fmt` is `jpeg` (baseline JPEG) or `gray` (raw 8-bit luma, `w*h` bytes).
+For every frame it processes the daemon replies with
+
+```json
+{"cmd":"face","seq":12,"bx":-8,"by":48,"size":36,"conf":59,"yaw":4.0,"pitch":-2.0,"who":"unknown"}
+{"cmd":"face","seq":13,"conf":0,"who":"unknown"}
+```
+
+`bx`/`by` is the face centre relative to the frame centre in -100..100
+(+bx = right of frame, +by = down), `size` is the face width as a
+percentage of the frame width, `conf` is the detector's confidence, and
+`yaw`/`pitch` echo the head pose the frame was taken at. `conf:0` without
+`bx`/`by` means "frame seen, no face". `who` is `unknown` until an identity
+module exists. Detection runs on one worker thread; while it is busy the
+newest frame waits and older waiting frames are dropped, so the board
+always gets an answer for a recent frame instead of a backlog.
+
+The daemon logs the first frame (`vision: first frame 160x120 jpeg 3.1 KB`)
+and then one line every 30 s (`vision: 148 frames, 12 dropped, 4.9 fps,
+21 ms/detect, faces 87%`), never per frame. Without macOS Vision (Linux,
+or `pyobjc-framework-Vision` missing) it logs one warning at startup and
+never asks the board to stream.
+
+Bench tools:
+
+```bash
+cc-buddy-bridge vision-test photo.jpg          # rects + the face cmd it would send
+cc-buddy-bridge daemon --save-frames ~/frames  # dump received frames (max 1/s)
+CC_BUDDY_SAVE_FRAMES=~/frames                  # same, as an env var for the service
+```
+
+Saved frames are written as they arrived: `.jpg` for JPEG, `.png` for gray.
+
 ## Requirements
 
 * macOS 12+ / Windows 10+ / Linux with BlueZ
