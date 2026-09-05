@@ -17,6 +17,7 @@ from .audit import AuditLog
 from .ble import BuddyBLE
 from .ipc import IPCServer
 from .jsonl_tailer import JSONLTailer
+from .listen_key import Stopper, start_listen_key
 from .matchers import MatcherConfig, classify_command, derive_always_pattern
 from .matchers import load_config as load_matcher_config
 from .protocol import (
@@ -30,6 +31,8 @@ from .protocol import (
 from .read_policy import is_within, read_scope
 from .state import State
 from .version_check import check as version_check
+from .vision import STATS_INTERVAL_SECS as VISION_STATS_SECS
+from .vision import FaceTracker, build_cam_cmd, configured_save_dir, make_detector
 
 # Entry text is prefixed with a 2-byte marker ("> ", "@ ", "+ ") before being
 # stored. Budget the user-supplied portion so the full entry stays within the
@@ -59,6 +62,7 @@ class Daemon:
         device_address: Optional[str] = None,
         matchers: Optional[MatcherConfig] = None,
         serial_port: Optional[str] = None,
+        save_frames: Optional[str] = None,
     ) -> None:
         self.state = State()
         self.ipc = IPCServer(self._handle_ipc, socket_path=socket_path) if socket_path else IPCServer(self._handle_ipc)
@@ -94,6 +98,20 @@ class Daemon:
         # stick's voice start/stop events. Lazily constructed on first use so
         # non-mac / Quartz-less hosts pay nothing.
         self._voice: Optional["VoiceHold"] = None
+        # Listen key (held Option = dictation): a Quartz tap on its own
+        # thread, started in run(). None when the tap could not be created.
+        self._listen_stop: Optional[Stopper] = None
+        # Last {"cmd":"listen"} state the board received. None until the
+        # first send; reset to False on every connect/resync so a rebooted
+        # board never keeps the listening pose.
+        self._listen_sent: Optional[bool] = None
+        # Host vision: the board streams camera frames, we answer with the
+        # face position. The detector (macOS Vision) is resolved in run() so
+        # constructing a Daemon never imports pyobjc; until then, and on
+        # hosts without Vision, the tracker is disabled and we never ask the
+        # board to stream — it keeps its on-board tracking.
+        self._vision = FaceTracker(
+            detect=None, send=self.ble.send, save_dir=configured_save_dir(save_frames))
         # Most recent {"diag":{...}} the board sent; served over IPC so
         # `cc-buddy-bridge diag` can show it without owning the serial port.
         self._last_diag: Optional[dict[str, Any]] = None
@@ -141,6 +159,8 @@ class Daemon:
     async def run(self) -> None:
         _log_permission_config_summary(self.matchers)
         await self.ipc.start()
+        self._listen_stop = start_listen_key(self._on_listen_key, asyncio.get_running_loop())
+        self._vision.detect = make_detector()
         tasks = [
             asyncio.create_task(self.ipc.serve_forever(), name="ipc"),
             asyncio.create_task(self.ble.run(), name="ble"),
@@ -150,10 +170,15 @@ class Daemon:
             asyncio.create_task(self._status_poller(), name="status-poller"),
             asyncio.create_task(self._update_check_loop(), name="update-check"),
             asyncio.create_task(self._voice_watchdog(), name="voice-watchdog"),
+            asyncio.create_task(self._vision_stats_loop(), name="vision-stats"),
         ]
         try:
             await self._shutdown.wait()
         finally:
+            # Stop the camera before the transport task is cancelled — its
+            # reader owns the port close, so a send after that goes nowhere.
+            await self._send_cam(False)
+            self._vision.stop()
             for t in tasks:
                 t.cancel()
             for pend in list(self._pending_turn_ends.values()):
@@ -163,6 +188,8 @@ class Daemon:
                                  return_exceptions=True)
             if self._voice is not None:
                 self._voice.stop()   # idempotent; never exit with keys down
+            if self._listen_stop is not None:
+                self._listen_stop()
             await self.ble.stop()
             await self.ipc.stop()
 
@@ -222,6 +249,8 @@ class Daemon:
         await self.ble.send(build_time_sync())
         await self._push_heartbeat(force=True)
         await self.ble.send({"cmd": "status"})
+        await self._reset_listen()
+        await self._send_cam(True)
 
     async def _on_ble_connected(self) -> None:
         """On every (re)connect, emit time sync + force a heartbeat + kick
@@ -238,6 +267,8 @@ class Daemon:
             await self.ble.send(build_time_sync())
             await self._push_heartbeat(force=True)
             await self.ble.send({"cmd": "status"})
+            await self._reset_listen()
+            await self._send_cam(True)
             # Wait for the connection to drop before waiting again.
             while self.ble.connected and not self._shutdown.is_set():
                 await asyncio.sleep(1.0)
@@ -301,6 +332,46 @@ class Daemon:
             # within one poll and corrects RTC drift for free.
             await self.ble.send(build_time_sync())
             await self.ble.send({"cmd": "status"})
+
+    # ---- host vision ----
+
+    async def _send_cam(self, on: bool) -> None:
+        """Ask the board to start/stop streaming frames. Only when a detector
+        exists: a board streaming at a host that cannot look is wasted link
+        time, and the board keeps its own tracking while no host asks."""
+        if not self._vision.enabled or not self.ble.connected:
+            return
+        try:
+            await asyncio.wait_for(self.ble.send(build_cam_cmd(on)), timeout=2.0)
+        except asyncio.TimeoutError:
+            log.warning("vision: cam %s command timed out", "on" if on else "off")
+
+    async def _vision_stats_loop(self) -> None:
+        """One summary line per window, and only when frames arrived. Never per-frame."""
+        while not self._shutdown.is_set():
+            await asyncio.sleep(VISION_STATS_SECS)
+            line = self._vision.stats_line()
+            if line is not None:
+                log.info(line)
+
+    # ---- listen key ----
+
+    def _on_listen_key(self, on: bool) -> None:
+        """Debounced edge from listen_key.py, delivered on the loop thread.
+        Dedupe here, synchronously, so two fast edges cannot both read the
+        same last-sent state and put duplicates on the wire."""
+        log.info("listen key: %s", "down" if on else "up")
+        if not self.ble.connected or on == self._listen_sent:
+            return
+        self._listen_sent = on
+        asyncio.create_task(self.ble.send({"cmd": "listen", "on": on}))
+
+    async def _reset_listen(self) -> None:
+        """Board (re)connected or rebooted: tell it the key is up. Its listen
+        state lives in RAM, and a reboot mid-hold would otherwise leave the
+        pose stuck until the next key press."""
+        await self.ble.send({"cmd": "listen", "on": False})
+        self._listen_sent = False
 
     async def _voice_watchdog(self) -> None:
         """Force-release an overdue push-to-talk hold. The stop event can be
@@ -697,6 +768,12 @@ class Daemon:
     # ---- BLE handler ----
 
     async def _handle_ble(self, obj: dict[str, Any]) -> None:
+        frame = obj.get("frame")
+        if isinstance(frame, dict):
+            # Camera frame: hottest object on the link (5/s). Hand it to the
+            # tracker, which parks or runs it and replies with the face cmd.
+            await self._vision.on_frame(frame)
+            return
         diag = obj.get("diag")
         if isinstance(diag, dict):
             # Crash/hang report from the board (see firmware diag.h). Logged at
