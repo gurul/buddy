@@ -1,4 +1,4 @@
-"""Entry point. `cc-buddy-bridge [daemon|install|uninstall|status]`."""
+"""Entry point. `cc-buddy-bridge [daemon|install|uninstall|status|notes-widget|...]`."""
 
 from __future__ import annotations
 
@@ -11,11 +11,16 @@ import sys
 
 from . import __version__
 from .daemon import Daemon
+from .envfile import load_env_file
 from .ipc import make_transport
 from .voice_trigger import DEFAULT_HOTKEY, HOTKEYS
 
 
 def main(argv: list[str] | None = None) -> int:
+    # Secrets and knobs the service cannot inherit from a shell
+    # (OPENAI_API_KEY, CC_BUDDY_*) — read before any subcommand looks at
+    # os.environ. Existing variables win; the file only fills gaps.
+    load_env_file()
     parser = argparse.ArgumentParser(prog="cc-buddy-bridge")
     parser.add_argument("--version", action="version", version=f"cc-buddy-bridge {__version__}")
     sub = parser.add_subparsers(dest="cmd")
@@ -30,6 +35,12 @@ def main(argv: list[str] | None = None) -> int:
         help="USB serial port of the buddy (e.g. /dev/cu.usbmodem*). Uses serial instead of BLE.",
     )
     p_daemon.add_argument("--log-level", default="INFO")
+    p_daemon.add_argument(
+        "--save-frames",
+        default=os.environ.get("CC_BUDDY_SAVE_FRAMES") or None,
+        metavar="DIR",
+        help="Bench debugging: write received camera frames here (at most one per second)",
+    )
 
     CONFIG_DIR_HELP = (
         "Claude Code config home to operate on (default: $CLAUDE_CONFIG_DIR, else ~/.claude). "
@@ -61,12 +72,21 @@ def main(argv: list[str] | None = None) -> int:
              f"this flag the hotkey must be hand-edited into the unit file, and the "
              f"next --service install silently reverts it.",
     )
+    p_install.add_argument(
+        "--notes-widget", action="store_true",
+        help="macOS: also install a second launchd agent that shows the robot's idle-explorer "
+             "notes as a desktop widget at login (com.github.cc-buddy-bridge.notes-widget)",
+    )
     p_uninstall = sub.add_parser(
         "uninstall", help="Remove cc-buddy-bridge hooks from Claude Code's settings.json")
     p_uninstall.add_argument("--config-dir", default=None, help=CONFIG_DIR_HELP)
     p_uninstall.add_argument(
         "--service", action="store_true",
         help="Remove the user-level service (launchd agent / systemd unit) instead of removing hooks",
+    )
+    p_uninstall.add_argument(
+        "--notes-widget", action="store_true",
+        help="macOS: remove the notes-widget launchd agent",
     )
     p_status = sub.add_parser("status", help="Show install status")
     p_status.add_argument("--config-dir", default=None, help=CONFIG_DIR_HELP)
@@ -89,6 +109,13 @@ def main(argv: list[str] | None = None) -> int:
              "an installed GIF character pack",
     )
     p_species.add_argument("--socket", default=None, help="IPC path or host:port override")
+
+    p_widget = sub.add_parser(
+        "notes-widget",
+        help="macOS: show the robot's idle-explorer notes in a desktop widget (foreground)",
+    )
+    p_widget.add_argument("--once", action="store_true",
+                          help="Build the window, print what it rendered, and exit (smoke test)")
 
     sub.add_parser(
         "voice-check",
@@ -114,6 +141,32 @@ def main(argv: list[str] | None = None) -> int:
         "unpair",
         help="Clear the stick's stored BLE bond (you must also Forget on the macOS side afterwards)",
     )
+
+    p_vision = sub.add_parser(
+        "vision-test",
+        help="Run the host face detector on an image file and print the face cmd it would send",
+    )
+    p_vision.add_argument("image", help="Path to a JPEG/PNG (anything macOS ImageIO decodes)")
+
+    p_identity = sub.add_parser(
+        "identity",
+        help="Owner face prints: show what the robot knows, or forget it (enrol by holding Option)",
+    )
+    p_identity.add_argument("action", choices=("status", "reset"), nargs="?", default="status")
+    p_identity.add_argument("--socket", default=None, help="IPC path or host:port override")
+
+    p_notes = sub.add_parser(
+        "notes",
+        help="Print the idle explorer's recent notes (what the robot saw while Claude was quiet)",
+    )
+    p_notes.add_argument("-n", "--last", type=int, default=20,
+                         help="Show the last N notes (default 20; 0 = all)")
+
+    p_notes_test = sub.add_parser(
+        "notes-test",
+        help="Send one image to the notes model and print the sentence (one real API call)",
+    )
+    p_notes_test.add_argument("image", help="Path to a JPEG or PNG")
 
     p_push = sub.add_parser(
         "push-character",
@@ -156,6 +209,14 @@ def main(argv: list[str] | None = None) -> int:
     if args.cmd == "daemon":
         return _run_daemon(args)
     if args.cmd == "install":
+        # --notes-widget is additive: on its own it installs only the widget
+        # unit; combined with --service it installs both. Without it the
+        # install path is exactly what it was.
+        if getattr(args, "notes_widget", False):
+            from .service import install_notes_widget
+            rc = install_notes_widget()
+            if rc or not getattr(args, "service", False):
+                return rc
         if getattr(args, "service", False):
             from .service import install_service
             return install_service(
@@ -165,11 +226,21 @@ def main(argv: list[str] | None = None) -> int:
         from .installer import install_hooks
         return install_hooks(config_dir=getattr(args, "config_dir", None))
     if args.cmd == "uninstall":
+        if getattr(args, "notes_widget", False):
+            from .service import uninstall_notes_widget
+            rc = uninstall_notes_widget()
+            if rc or not getattr(args, "service", False):
+                return rc
         if getattr(args, "service", False):
             from .service import uninstall_service
             return uninstall_service()
         from .installer import uninstall_hooks
         return uninstall_hooks(config_dir=getattr(args, "config_dir", None))
+    if args.cmd == "notes-widget":
+        logging.basicConfig(level=logging.INFO,
+                            format="%(asctime)s %(levelname)s %(name)s: %(message)s")
+        from .notes_widget import run as widget_run
+        return widget_run(once=args.once)
     if args.cmd == "status":
         from .installer import show_status
         return show_status(config_dir=getattr(args, "config_dir", None))
@@ -197,6 +268,19 @@ def main(argv: list[str] | None = None) -> int:
         return hud_run(ascii_only=args.ascii, socket_path=args.socket)
     if args.cmd == "unpair":
         return _run_unpair()
+    if args.cmd == "vision-test":
+        from .vision import run_vision_test
+        return run_vision_test(args.image)
+    if args.cmd == "identity":
+        from .identity import run_identity
+        return run_identity(args.action, args.socket)
+
+    if args.cmd == "notes":
+        from .explore import run_notes_cli
+        return run_notes_cli(args.last)
+    if args.cmd == "notes-test":
+        from .explore import run_notes_test
+        return run_notes_test(args.image)
     if args.cmd == "push-character":
         return _run_push_character(args.path)
     if args.cmd == "audit":
@@ -250,6 +334,7 @@ def _run_daemon(args: argparse.Namespace) -> int:
         device_name_prefix=args.device_name,
         device_address=args.device_address,
         serial_port=args.serial_port,
+        save_frames=args.save_frames,
     )
 
     loop = asyncio.new_event_loop()

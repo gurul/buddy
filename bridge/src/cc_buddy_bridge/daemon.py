@@ -15,8 +15,23 @@ if TYPE_CHECKING:
 
 from .audit import AuditLog
 from .ble import BuddyBLE
+from .explore import (
+    Action,
+    Explorer,
+    Look,
+    Mode,
+    Note,
+    NoteTaker,
+    build_look_cmd,
+    build_mode_cmd,
+    make_note_client,
+)
+from .explore import configured as explore_configured
+from .identity import FaceIdentity, OwnerIdentity, configured_threshold, make_describer
+from .identity import default_path as identity_default_path
 from .ipc import IPCServer
 from .jsonl_tailer import JSONLTailer
+from .listen_key import Stopper, start_listen_key
 from .matchers import MatcherConfig, classify_command, derive_always_pattern
 from .matchers import load_config as load_matcher_config
 from .protocol import (
@@ -30,6 +45,8 @@ from .protocol import (
 from .read_policy import is_within, read_scope
 from .state import State
 from .version_check import check as version_check
+from .vision import STATS_INTERVAL_SECS as VISION_STATS_SECS
+from .vision import FaceTracker, build_cam_cmd, configured_save_dir, decode_frame, make_detector
 
 # Entry text is prefixed with a 2-byte marker ("> ", "@ ", "+ ") before being
 # stored. Budget the user-supplied portion so the full entry stays within the
@@ -42,6 +59,14 @@ log = logging.getLogger(__name__)
 # derived from it, so it lives next to the serializer. Re-exported via the
 # import above for callers/tests that referenced it here.
 
+# Monitor-only mode: the board is a status display with inert buttons, so no
+# permission ever waits on it. Env-gated rather than a CLI flag because it is
+# a property of which firmware is flashed, not of how the daemon was invoked —
+# the two have to be set together or prompts stall for PERMISSION_WAIT_SECS.
+MONITOR_ONLY = os.environ.get("CC_BUDDY_MONITOR_ONLY", "").strip().lower() in (
+    "1", "true", "yes", "on",
+)
+
 
 class Daemon:
     def __init__(
@@ -51,6 +76,7 @@ class Daemon:
         device_address: Optional[str] = None,
         matchers: Optional[MatcherConfig] = None,
         serial_port: Optional[str] = None,
+        save_frames: Optional[str] = None,
     ) -> None:
         self.state = State()
         self.ipc = IPCServer(self._handle_ipc, socket_path=socket_path) if socket_path else IPCServer(self._handle_ipc)
@@ -86,6 +112,40 @@ class Daemon:
         # stick's voice start/stop events. Lazily constructed on first use so
         # non-mac / Quartz-less hosts pay nothing.
         self._voice: Optional["VoiceHold"] = None
+        # Listen key (held Option = dictation): a Quartz tap on its own
+        # thread, started in run(). None when the tap could not be created.
+        self._listen_stop: Optional[Stopper] = None
+        # Last {"cmd":"listen"} state the board received. None until the
+        # first send; reset to False on every connect/resync so a rebooted
+        # board never keeps the listening pose.
+        self._listen_sent: Optional[bool] = None
+        # Host vision: the board streams camera frames, we answer with the
+        # face position. The detector (macOS Vision) is resolved in run() so
+        # constructing a Daemon never imports pyobjc; until then, and on
+        # hosts without Vision, the tracker is disabled and we never ask the
+        # board to stream — it keeps its on-board tracking.
+        self._vision = FaceTracker(
+            detect=None, send=self.ble.send, save_dir=configured_save_dir(save_frames))
+        # Physical listen-key state, independent of what the board received:
+        # identity.py enrols the owner only while it is down. Written on the
+        # loop thread, read on the vision executor thread (a bool: no lock).
+        self._listen_down = False
+        # Owner identity: the prints live in memory; the file is loaded and
+        # the Vision describer resolved in run(), like the detector.
+        self._identity: Optional[FaceIdentity] = None
+        # Idle explorer (explore.py): after a quiet stretch the board pans
+        # the room and, per waypoint, may spend a note on what it sees. The
+        # pure Explorer is ticked from _explore_loop; the note client is
+        # resolved in run() so constructing a Daemon never imports openai.
+        self._explore_cfg = explore_configured()
+        self._explorer = Explorer(self._explore_cfg, now=time.monotonic())
+        self._notes: Optional[NoteTaker] = None
+        # Monotonic time of the last thing a human or a session did: any hook
+        # event, a board touch, the listen key. Idle time is measured from it.
+        self._last_activity_at = time.monotonic()
+        # The newest raw {"frame":...} object, kept only while exploring so a
+        # waypoint sample never costs a decode on the 5 fps path.
+        self._explore_raw_frame: Optional[dict[str, Any]] = None
         # Most recent {"diag":{...}} the board sent; served over IPC so
         # `cc-buddy-bridge diag` can show it without owning the serial port.
         self._last_diag: Optional[dict[str, Any]] = None
@@ -133,6 +193,10 @@ class Daemon:
     async def run(self) -> None:
         _log_permission_config_summary(self.matchers)
         await self.ipc.start()
+        self._listen_stop = start_listen_key(self._on_listen_key, asyncio.get_running_loop())
+        self._vision.detect = make_detector()
+        self._identity = self._make_identity()
+        self._vision.identity = self._identity
         tasks = [
             asyncio.create_task(self.ipc.serve_forever(), name="ipc"),
             asyncio.create_task(self.ble.run(), name="ble"),
@@ -142,10 +206,25 @@ class Daemon:
             asyncio.create_task(self._status_poller(), name="status-poller"),
             asyncio.create_task(self._update_check_loop(), name="update-check"),
             asyncio.create_task(self._voice_watchdog(), name="voice-watchdog"),
+            asyncio.create_task(self._vision_stats_loop(), name="vision-stats"),
         ]
+        if self._explore_cfg.enabled:
+            client = make_note_client(self._explore_cfg)
+            self._explorer.notes_enabled = client is not None
+            if client is not None:
+                self._notes = NoteTaker(client, self._explore_cfg.notes_dir)
+            tasks.append(asyncio.create_task(self._explore_loop(), name="explore"))
+        else:
+            log.info("explore: disabled (CC_BUDDY_EXPLORE=0)")
         try:
             await self._shutdown.wait()
         finally:
+            # Leave explore mode and stop the camera before the transport
+            # task is cancelled — its reader owns the port close, so a send
+            # after that goes nowhere.
+            await self._stop_explore("daemon stopping")
+            await self._send_cam(False)
+            self._vision.stop()
             for t in tasks:
                 t.cancel()
             for pend in list(self._pending_turn_ends.values()):
@@ -155,6 +234,8 @@ class Daemon:
                                  return_exceptions=True)
             if self._voice is not None:
                 self._voice.stop()   # idempotent; never exit with keys down
+            if self._listen_stop is not None:
+                self._listen_stop()
             await self.ble.stop()
             await self.ipc.stop()
 
@@ -184,6 +265,15 @@ class Daemon:
         if not (force or changed or stale):
             return
         if self.ble.connected:
+            # Monitor build: what actually went on the wire for the agent
+            # table. Keep this — "the board shows 0 sessions" has to be
+            # separable from "the daemon sent 0 sessions", and reading that
+            # off a photo of an e-ink panel is not a diagnosis.
+            log.debug(
+                "hb->board: total=%d running=%d waiting=%d agents=%s",
+                snap["total"], snap["running"], snap["waiting"],
+                [f"{a['n']}:{a['s']}" for a in snap.get("agents", [])],
+            )
             log.debug(
                 "heartbeat: %d bytes, entries=%d (last=%r), force=%s, changed=%s",
                 len(serialized), len(snap.get("entries", [])),
@@ -205,6 +295,8 @@ class Daemon:
         await self.ble.send(build_time_sync())
         await self._push_heartbeat(force=True)
         await self.ble.send({"cmd": "status"})
+        await self._reset_listen()
+        await self._send_cam(True)
 
     async def _on_ble_connected(self) -> None:
         """On every (re)connect, emit time sync + force a heartbeat + kick
@@ -221,6 +313,8 @@ class Daemon:
             await self.ble.send(build_time_sync())
             await self._push_heartbeat(force=True)
             await self.ble.send({"cmd": "status"})
+            await self._reset_listen()
+            await self._send_cam(True)
             # Wait for the connection to drop before waiting again.
             while self.ble.connected and not self._shutdown.is_set():
                 await asyncio.sleep(1.0)
@@ -285,6 +379,155 @@ class Daemon:
             await self.ble.send(build_time_sync())
             await self.ble.send({"cmd": "status"})
 
+    # ---- host vision ----
+
+    async def _send_cam(self, on: bool) -> None:
+        """Ask the board to start/stop streaming frames. Only when a detector
+        exists: a board streaming at a host that cannot look is wasted link
+        time, and the board keeps its own tracking while no host asks."""
+        if not self._vision.enabled or not self.ble.connected:
+            return
+        try:
+            await asyncio.wait_for(self.ble.send(build_cam_cmd(on)), timeout=2.0)
+        except asyncio.TimeoutError:
+            log.warning("vision: cam %s command timed out", "on" if on else "off")
+
+    async def _vision_stats_loop(self) -> None:
+        """One summary line per window, and only when frames arrived. Never per-frame."""
+        while not self._shutdown.is_set():
+            await asyncio.sleep(VISION_STATS_SECS)
+            line = self._vision.stats_line()
+            if line is not None:
+                log.info(line)
+
+    # ---- owner identity ----
+
+    def _make_identity(self) -> Optional[FaceIdentity]:
+        """Load the owner prints and wire the Vision describer. None when
+        this host cannot produce feature prints — faces stay 'unknown'."""
+        if not self._vision.enabled:
+            return None
+        describe = make_describer()
+        if describe is None:
+            return None
+        core = OwnerIdentity(path=identity_default_path(), threshold=configured_threshold())
+        n = core.load()
+        log.info("identity: %d owner print(s) loaded from %s (threshold %.2f)", n, core.path, core.threshold)
+        return FaceIdentity(core, describe=describe, listen_down=lambda: self._listen_down)
+
+    def _handle_identity(self, action: str) -> dict[str, Any]:
+        """Loop thread. The core is lock-guarded, so this is safe against a
+        classify/enrol in flight on the vision executor."""
+        if action == "reset":
+            if self._identity is None:
+                core = OwnerIdentity(path=identity_default_path())
+                core.load()
+                removed = core.reset()
+            else:
+                removed = self._identity.core.reset()
+                self._identity.last_who = None
+            log.info("identity: reset — %d owner print(s) removed", removed)
+            return {"ok": True, "removed": removed}
+        if self._identity is None:
+            core = OwnerIdentity(path=identity_default_path(), threshold=configured_threshold())
+            core.load()
+            st = FaceIdentity(core, describe=lambda f, r: None).status()
+        else:
+            st = self._identity.status()
+        return {"ok": True, "enabled": self._identity is not None, "identity": st}
+
+    # ---- idle explorer ----
+
+    def _note_activity(self) -> None:
+        """Something happened: a hook event, a board touch, the listen key."""
+        self._last_activity_at = time.monotonic()
+
+    def _idle_secs(self, now: float) -> float:
+        """Seconds since the last activity. A running or waiting session is
+        activity in itself, so the clock does not start until it is gone."""
+        if self.state.running_count or self.state.waiting_count:
+            self._last_activity_at = now
+            return 0.0
+        return max(0.0, now - self._last_activity_at)
+
+    async def _explore_loop(self) -> None:
+        while not self._shutdown.is_set():
+            try:
+                await asyncio.wait_for(self._shutdown.wait(), timeout=1.0)
+                return
+            except asyncio.TimeoutError:
+                pass
+            try:
+                await self._explore_step(time.monotonic())
+            except Exception:  # noqa: BLE001
+                log.exception("explore: step failed")
+
+    async def _explore_step(self, now: float) -> None:
+        """One tick: gather the facts, run the schedule, execute its actions."""
+        frame = None
+        if self._explorer.wants_frame(now) and self._explore_raw_frame is not None:
+            try:
+                frame = decode_frame(self._explore_raw_frame)
+            except ValueError:
+                frame = None
+            self._explore_raw_frame = None
+        actions = self._explorer.tick(
+            now,
+            idle_secs=self._idle_secs(now),
+            card_pending=self.state.pending_count > 0,
+            listening=bool(self._listen_sent),
+            frame=frame,
+            connected=self.ble.connected,
+        )
+        for action in actions:
+            await self._run_explore_action(action)
+
+    async def _run_explore_action(self, action: Action) -> None:
+        if isinstance(action, Mode):
+            if action.explore:
+                log.info("explore: start (%s)", action.reason)
+            else:
+                log.info("explore: stop (%s)", action.reason)
+                self._explore_raw_frame = None
+            if self.ble.connected:
+                await self.ble.send(build_mode_cmd(action.explore))
+        elif isinstance(action, Look):
+            log.info("explore: look yaw=%+d pitch=%d", action.yaw, action.pitch)
+            if self.ble.connected:
+                await self.ble.send(build_look_cmd(action.yaw, action.pitch, action.hold_ms))
+        elif isinstance(action, Note):
+            if self._notes is not None:
+                asyncio.create_task(self._notes.take(action))
+
+    async def _stop_explore(self, reason: str) -> None:
+        """Shutdown path: leave explore mode on the board if we put it there."""
+        if self._explorer.active:
+            await self._run_explore_action(Mode(False, reason))
+        self._explorer.reset()
+        if self._notes is not None:
+            self._notes.stop()
+
+    # ---- listen key ----
+
+    def _on_listen_key(self, on: bool) -> None:
+        """Debounced edge from listen_key.py, delivered on the loop thread.
+        Dedupe here, synchronously, so two fast edges cannot both read the
+        same last-sent state and put duplicates on the wire."""
+        log.info("listen key: %s", "down" if on else "up")
+        self._listen_down = on
+        self._note_activity()
+        if not self.ble.connected or on == self._listen_sent:
+            return
+        self._listen_sent = on
+        asyncio.create_task(self.ble.send({"cmd": "listen", "on": on}))
+
+    async def _reset_listen(self) -> None:
+        """Board (re)connected or rebooted: tell it the key is up. Its listen
+        state lives in RAM, and a reboot mid-hold would otherwise leave the
+        pose stuck until the next key press."""
+        await self.ble.send({"cmd": "listen", "on": False})
+        self._listen_sent = False
+
     async def _voice_watchdog(self) -> None:
         """Force-release an overdue push-to-talk hold. The stop event can be
         lost (serial died mid-hold, board reset while recording), and a
@@ -336,6 +579,10 @@ class Daemon:
         # hud polling — also too chatty to be useful here.
         if evt not in ("pretooluse", "get_state"):
             log.info("ipc evt=%r session=%s", evt, (req.get("session_id") or "?")[:8])
+        # Every hook event is activity for the idle explorer, except the
+        # polls that fire on their own (statusline, diag watch).
+        if evt not in ("get_state", "diag"):
+            self._note_activity()
 
         if evt == "celebrate":
             # Host-triggered celebration. Reuses the same `completed: true`
@@ -366,6 +613,10 @@ class Daemon:
                 await self.ble.send({"cmd": "diag"})
             return {"ok": True, "connected": self.ble.connected,
                     "diag": self._last_diag}
+        if evt == "identity":
+            # `cc-buddy-bridge identity status|reset`. The daemon owns the
+            # in-memory prints, so a reset must go through it while it runs.
+            return self._handle_identity(str(req.get("action") or "status"))
         if evt == "session_start":
             self.state.session_start(
                 req["session_id"],
@@ -481,6 +732,8 @@ class Daemon:
             tool_name = req.get("tool_name")
             if isinstance(tool_name, str):
                 self.state.add_entry(f"+ {tool_name}")
+                self._ensure_session(req)
+                self.state.note_tool(req.get("session_id", ""), tool_name)
             await self._push_heartbeat()
             return {"ok": True}
 
@@ -507,6 +760,8 @@ class Daemon:
         session_id = req.get("session_id") or "unknown"
         tool_name = req.get("tool_name") or "tool"
         hint = req.get("hint") or ""
+        self._ensure_session(req)
+        self.state.note_tool(session_id, tool_name)
 
         # Read tool takes its own path: out-of-cwd reads card on the stick and
         # an approval grants the enclosing repo/dir. See read_policy.py.
@@ -542,6 +797,17 @@ class Daemon:
             # off the USB bus.
             log.info("pretooluse for %s: stick not connected, deferring to default flow", tool_name)
             self.audit.record(**audit_kwargs, decision=None, source="ble_disconnected")
+            return {"ok": True}
+
+        # Monitor-only: the panel is a display, not an input device. Take the
+        # same exit as a disconnected stick so Claude Code's own prompt runs
+        # immediately — never _await_stick_decision, which would block the
+        # tool call for PERMISSION_WAIT_SECS waiting on a button that is now
+        # inert. Placed after auto_allow/stick_always so the matcher fast
+        # paths (which never touch the screen) keep working.
+        if MONITOR_ONLY:
+            log.info("pretooluse for %s: monitor-only, deferring to default flow", tool_name)
+            self.audit.record(**audit_kwargs, decision=None, source="monitor_only")
             return {"ok": True}
 
         # Unknown commands don't force a button press — defer to Claude Code's
@@ -599,6 +865,30 @@ class Daemon:
             await self._push_heartbeat()
         return decision, source, elapsed
 
+    def _ensure_session(self, req: dict[str, Any]) -> None:
+        """Register the session behind a hook event if we've never seen it.
+
+        SessionStart is the only hook that normally creates a session, so a
+        daemon restart leaves every *already-running* session invisible until
+        the human restarts it too — the monitor then shows an empty agent list
+        while agents are plainly working. Tool hooks carry both ids we need,
+        and session_start is create-if-absent, so adopting the session here is
+        free and makes the list self-heal within one tool call.
+        """
+        session_id = req.get("session_id")
+        if not (isinstance(session_id, str) and session_id):
+            return
+        cwd = req.get("cwd") or None
+        self.state.session_start(session_id, cwd=cwd)
+        # session_start is create-if-absent, so it will NOT fill in a cwd it
+        # missed. posttooluse doesn't carry one, so whichever hook happens to
+        # fire first decides the row's name forever — and losing the race
+        # leaves the agent labelled with a session-id prefix instead of its
+        # repo. Backfill the first cwd we actually see.
+        sess = self.state.sessions.get(session_id)
+        if sess is not None and cwd and not sess.cwd:
+            sess.cwd = cwd
+
     async def _handle_read_pretooluse(
         self, req: dict[str, Any], tool_use_id: str, session_id: str, hint: str,
     ) -> dict[str, Any]:
@@ -621,6 +911,9 @@ class Daemon:
         if not self.ble.connected:
             self.audit.record(**audit_kwargs, decision=None, source="ble_disconnected")
             return {"ok": True}
+        if MONITOR_ONLY:
+            self.audit.record(**audit_kwargs, decision=None, source="monitor_only")
+            return {"ok": True}
         # Card it. Show the path home-relative so the two hint lines carry
         # the tail of the path, which is the part a human recognises.
         home = str(Path.home())
@@ -638,6 +931,16 @@ class Daemon:
     # ---- BLE handler ----
 
     async def _handle_ble(self, obj: dict[str, Any]) -> None:
+        frame = obj.get("frame")
+        if isinstance(frame, dict):
+            # Camera frame: hottest object on the link (5/s). Hand it to the
+            # tracker, which parks or runs it and replies with the face cmd.
+            # While exploring, also keep the newest one for the next waypoint
+            # sample (the explore loop decodes it, once, when it is due).
+            if self._explorer.active:
+                self._explore_raw_frame = frame
+            await self._vision.on_frame(frame)
+            return
         diag = obj.get("diag")
         if isinstance(diag, dict):
             # Crash/hang report from the board (see firmware diag.h). Logged at
@@ -669,6 +972,9 @@ class Daemon:
                         "  pre-reset event: %s", ev)
             return
         cmd = obj.get("cmd")
+        if cmd in ("focus", "key", "voice", "permission"):
+            # A touch on the board: the human is here, stop exploring.
+            self._note_activity()
         if cmd == "focus":
             # Two senders, same verb. Swipe UP on the permission card carries
             # the prompt id: raise the terminal of the session that is asking

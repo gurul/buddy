@@ -221,6 +221,34 @@ rates`. Rates table lives in [`pricing.py`](src/cc_buddy_bridge/pricing.py) —
 edit to override or add models. Not a billing source of truth; treat
 as a heads-up.
 
+### Notes widget (macOS)
+
+When Claude has been idle for 10 minutes the robot explores the room and
+writes one-line observations to `~/.config/cc-buddy-bridge/notes/YYYY-MM-DD.md`
+(`- HH:MM yaw=+20 pitch=40 — <sentence>`). `cc-buddy-bridge notes-widget`
+shows the newest 40 of those lines — today's and yesterday's, newest first,
+one header per day — in a borderless dark panel that sits just above the
+desktop icons on every Space. It has no Dock icon and no menu-bar entry.
+Drag it by its background to move it (the position is saved in
+`~/.config/cc-buddy-bridge/widget.json`); right-click for **Open notes
+folder** and **Quit**. It re-renders when a note file changes (via
+`watchfiles`) and polls every 30 s as a backstop.
+
+```bash
+.venv/bin/cc-buddy-bridge notes-widget            # run in the foreground
+.venv/bin/cc-buddy-bridge notes-widget --once     # build, print, exit (smoke test)
+.venv/bin/cc-buddy-bridge install --notes-widget  # start it at login (second launchd agent)
+.venv/bin/cc-buddy-bridge uninstall --notes-widget
+```
+
+`install --notes-widget` writes
+`~/Library/LaunchAgents/com.github.cc-buddy-bridge.notes-widget.plist`
+pointed at the same Python as the daemon agent (`RunAtLoad`, no
+`KeepAlive` — a widget you quit stays quit until next login), logging to
+`~/Library/Logs/cc-buddy-bridge-notes-widget.log`. It is independent of
+`--service`; pass both to install daemon and widget in one go. Set
+`CC_BUDDY_NOTES_DIR` to point the widget at another notes folder.
+
 ## Working with Claude Code's `permissions` config
 
 Claude Code's own `~/.claude/settings.json` `permissions` block (`allow` /
@@ -486,11 +514,188 @@ available.
 - The firmware variant is a downstream fork — there's no auto-update
   story. Re-build & re-flash manually when you pull new firmware changes.
 
+## Listen key
+
+Hold the Option key on the Mac and the board turns to face you and shows
+its listening pose. Release it and the board goes back to what it was
+doing. Option is the default dictation hotkey, so the board listens while
+you dictate. Hold-the-pet push-to-talk presses the same key, so the board
+shows the same pose either way.
+
+The daemon watches the key with a listen-only Quartz event tap and sends
+`{"cmd":"listen","on":true}` on key down and `{"cmd":"listen","on":false}`
+on key up. It sends each transition once, at most one per 150 ms, and only
+while the board is connected. It also sends `on:false` every time the board
+connects or reboots, so a reboot mid-hold never leaves the pose stuck.
+
+Pick the key with `CC_BUDDY_LISTEN_KEY`:
+
+| Value    | Watches                          |
+| -------- | -------------------------------- |
+| `option` | the Option key (default on macOS) |
+| `fn`     | the fn key                        |
+| `off`    | nothing — the feature is disabled |
+
+The event tap needs macOS **Input Monitoring** for the daemon's python.
+Without it the daemon logs one warning at startup, `listen key: could not
+create the event tap — grant Input Monitoring to <python> ...`, and runs
+without the feature. To grant it: System Settings > Privacy & Security >
+Input Monitoring, add the python binary from `bridge/.venv` (the warning
+prints the resolved path), turn its toggle on, then restart the daemon.
+
+## Host vision
+
+The board has a camera but a slow, coarse on-board face detector. While the
+Mac is attached the daemon does the looking instead: the board streams
+small frames, the Mac runs Apple's Vision framework on each one, and the
+board gets back where the largest face is so it can turn to look at you.
+On-board tracking stays as the fallback for when no host asks.
+
+Once per connect or reboot, after the time sync, the daemon sends
+`{"cmd":"cam","on":true,"fps":5,"w":160,"h":120}`; on shutdown it sends
+`{"cmd":"cam","on":false}`. The board answers with one line per frame:
+
+```json
+{"frame":{"seq":12,"w":160,"h":120,"fmt":"jpeg","b64":"...","yaw":4.0,"pitch":-2.0}}
+```
+
+`fmt` is `jpeg` (baseline JPEG) or `gray` (raw 8-bit luma, `w*h` bytes).
+For every frame it processes the daemon replies with
+
+```json
+{"cmd":"face","seq":12,"bx":-8,"by":48,"size":36,"conf":59,"yaw":4.0,"pitch":-2.0,"who":"unknown"}
+{"cmd":"face","seq":13,"conf":0,"who":"unknown"}
+```
+
+`bx`/`by` is the face centre relative to the frame centre in -100..100
+(+bx = right of frame, +by = down), `size` is the face width as a
+percentage of the frame width, `conf` is the detector's confidence, and
+`yaw`/`pitch` echo the head pose the frame was taken at. `conf:0` without
+`bx`/`by` means "frame seen, no face". `who` is `owner` when the face
+matches the enrolled owner (see [Owner identity](#owner-identity)), else
+`unknown`. Detection runs on one worker thread; while it is busy the
+newest frame waits and older waiting frames are dropped, so the board
+always gets an answer for a recent frame instead of a backlog.
+
+The daemon logs the first frame (`vision: first frame 160x120 jpeg 3.1 KB`)
+and then one line every 30 s (`vision: 148 frames, 12 dropped, 4.9 fps,
+21 ms/detect, faces 87%`), never per frame. Without macOS Vision (Linux,
+or `pyobjc-framework-Vision` missing) it logs one warning at startup and
+never asks the board to stream.
+
+Bench tools:
+
+```bash
+cc-buddy-bridge vision-test photo.jpg          # rects + the face cmd it would send
+cc-buddy-bridge daemon --save-frames ~/frames  # dump received frames (max 1/s)
+CC_BUDDY_SAVE_FRAMES=~/frames                  # same, as an env var for the service
+```
+
+Saved frames are written as they arrived: `.jpg` for JPEG, `.png` for gray.
+
+## Owner identity
+
+The robot learns its owner's face and tags every face it sees. To enrol,
+hold the Option key (the listen key) while facing the robot for a few
+seconds. While the key is down, the daemon takes one print every 2 s of the
+single face in the frame, as long as that face is at least 20 % of the
+frame width — so a colleague in the background or a face at the far side of
+the room never gets enrolled. Each enrolment logs `identity: enrolled owner
+print #3 (size=31%, 3/24 held)`. It keeps up to 24 prints; when full, a new
+print replaces the enrolled one most like it, so different poses and
+lighting survive. Enrol again whenever recognition gets flaky (new glasses,
+a beard, a lamp moved).
+
+After that every face cmd carries `"who":"owner"` when the largest face is
+within the distance threshold of any enrolled print and `"who":"unknown"`
+otherwise. The daemon logs `identity: owner recognised (d=0.42)` and
+`identity: unknown face (d=1.13)` when the answer flips, at most once per
+30 s.
+
+Prints are Apple Vision image feature prints (revision 2, 768 floats) of
+the face crop padded by 25 %; they are not photos and cannot be turned back
+into one. They live in `~/.config/cc-buddy-bridge/owner_faceprints.json`
+(mode 600, written on every enrolment, loaded at daemon start). Vision's
+distance is plain Euclidean over the print, which is what the daemon
+computes; the default threshold is 0.9 (`CC_BUDDY_OWNER_THRESHOLD` to
+tune it — lower is stricter; the `d=` in the log lines tells you where your
+own face and strangers land).
+
+```bash
+cc-buddy-bridge identity            # prints held, file, threshold, last face seen
+cc-buddy-bridge identity reset      # forget the owner (in the daemon and on disk)
+```
+
+Without macOS Vision every face stays `unknown` and the daemon logs one
+warning at startup.
+
+## Idle explorer and notes
+
+When Claude has been quiet for a while the robot stops waiting and looks
+around. After `CC_BUDDY_EXPLORE_AFTER_MIN` minutes (default 10) with no
+session running or waiting, no hook event, no board touch, and the listen
+key up, the daemon sends `{"cmd":"mode","explore":true}` and walks the head
+through a pan plan: yaw -45, -20, 0, 20, 45 at pitch 40, then the same five
+at pitch 60, one `{"cmd":"look","yaw":..,"pitch":..,"hold":6000}` every 6 s.
+Two seconds after each look — once the head has settled — it keeps one
+camera frame. If that frame differs from the last one it noted at that
+waypoint (mean luma difference of 32x24 thumbnails above 12, or the first
+visit), it spends a note: the frame goes to an OpenAI vision model and the
+one-sentence answer is appended to a dated file. After the ten waypoints it
+sends `mode explore false` and rests `CC_BUDDY_EXPLORE_CYCLE_MIN` minutes
+(default 15) before the next cycle.
+
+Anything that means the human is back stops it at once with `mode explore
+false`: a hook event (a session running or waiting), a permission card, the
+listen key going down, a touch on the board, or the board disconnecting.
+The idle clock then has to reach `CC_BUDDY_EXPLORE_AFTER_MIN` again.
+
+Log lines, at most one per event: `explore: start (idle 10 min)`,
+`explore: look yaw=-45 pitch=40`, `explore: note -> <file>`,
+`explore: stop (<reason>)`.
+
+**The env file.** The service runs with a fixed environment, so the API key
+lives in `~/.config/cc-buddy-bridge/env` (make it `chmod 600`):
+
+```
+# KEY=VALUE, one per line; # comments; quotes optional
+OPENAI_API_KEY=sk-...
+```
+
+Every `cc-buddy-bridge` command reads it at startup and fills any variable
+that is not already set — a value from the shell always wins. Without a
+key the robot still pans but takes no notes (one warning at startup).
+
+**Budget.** One note is one Responses API request (`gpt-5-mini` by default,
+`CC_BUDDY_NOTES_MODEL` to change) with one low-detail image, minimal
+reasoning effort, and at most 60 output tokens. A token bucket caps notes at
+`CC_BUDDY_NOTES_PER_HOUR` (default 6; it starts full, so a fresh daemon can
+note a whole first cycle). The change detector keeps the bucket from being
+spent on a room that has not moved. Each call has a 20 s timeout and no
+retries; failures are logged once per 10 minutes and the note is skipped.
+
+**Where notes go.** `CC_BUDDY_NOTES_DIR` (default
+`~/.config/cc-buddy-bridge/notes`, created mode 700), one file per day:
+
+```
+$ cc-buddy-bridge notes --last 3
+2026-09-05 - 14:07 yaw=+20 pitch=40 — Two mugs on the desk by a window with daylight.
+2026-09-05 - 14:13 yaw=+0 pitch=60 — The keyboard is unplugged and pushed aside.
+2026-09-05 - 14:31 yaw=-45 pitch=40 — One person walked past the doorway.
+```
+
+`cc-buddy-bridge notes-test photo.jpg` sends a single image and prints the
+sentence — one real call, for checking the key and model.
+
+**Disable** with `CC_BUDDY_EXPLORE=0` (in the env file or the service's
+environment). The daemon then logs `explore: disabled` and never sends
+`mode` or `look`.
+
 ## Requirements
 
 * macOS 12+ / Windows 10+ / Linux with BlueZ
 * Python 3.11+
-* A flashed claude-desktop-buddy device (M5StickC Plus)
+* A flashed board: the Freenove pet, the CrowPanel e-ink dock, or the M5StackChan robot (M5StickC Plus with the upstream firmware also works)
 * Claude Code CLI
 
 ## Signal mapping

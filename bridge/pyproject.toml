@@ -35,6 +35,18 @@ dependencies = [
     # AXIsProcessTrusted Accessibility check + prompt.
     "pyobjc-framework-Quartz>=12.0; sys_platform == 'darwin'",
     "pyobjc-framework-ApplicationServices>=12.0; sys_platform == 'darwin'",
+    # macOS-only: host face detection for the board's camera frames
+    # (vision.py) — VNDetectFaceRectanglesRequest over a CGImage. 12.2.2
+    # current per `pip index versions`, 2026-09-05.
+    "pyobjc-framework-Vision>=12.0; sys_platform == 'darwin'",
+    # macOS-only: the desktop notes widget (notes_widget.py) is an AppKit
+    # NSPanel. Cocoa bundles AppKit + Foundation. 12.2.2 current per
+    # `pip index versions`, 2026-09-05.
+    "pyobjc-framework-Cocoa>=12.0; sys_platform == 'darwin'",
+    # Idle explorer notes (explore.py): one Responses API call per note with
+    # an input_image data URL. 3.8.0 current per `pip index versions`,
+    # 2026-09-05. Imported lazily, only when OPENAI_API_KEY is set.
+    "openai>=3.8",
 ]
 
 [project.optional-dependencies]
