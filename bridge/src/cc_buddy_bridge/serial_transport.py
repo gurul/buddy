@@ -12,7 +12,7 @@ Duck-types BuddyBLE's surface used by Daemon: ``connected``,
 Threading model: run()'s reader thread is the SOLE owner of the port
 handle's close. Event-loop-side paths (force_reconnect, pulse_reset,
 send-failure, stop) never close the fd — closing it under the reader's
-blocked readline() raced (paired EBADF on every forced reconnect, and an
+blocked read() raced (paired EBADF on every forced reconnect, and an
 fd-reuse hazard). They set a drop reason and cancel_read() instead; the
 reader notices, breaks, and closes in its finally.
 """
@@ -82,6 +82,30 @@ _IS_BOOT = re.compile(r"rst:0x|^\[boot\] ")
 # board (the USB peripheral is autonomous silicon and keeps enumerating while
 # the CPU is stuck). Keep in sync with the firmware interval.
 RX_SILENCE_SECS = 20.0
+
+# Longest NDJSON line we will assemble before declaring the stream garbage.
+# Camera frames are the big ones: 160x120 gray is 19.2 KB raw → 25.6 KB of
+# base64 in one line; JPEG frames are a few KB. 256 KB leaves room for
+# larger frame sizes without letting a newline-less firmware spew grow
+# the buffer without bound.
+MAX_LINE_BYTES = 256 * 1024
+
+
+def _read_chunk(ser: serial.Serial) -> bytes:
+    """Reader thread. One blocking read of whatever the board has sent.
+
+    Not ``ser.readline()``: pyserial inherits io.IOBase's readline, which
+    pulls ONE byte per read() — a select() plus a syscall each — so a 25 KB
+    camera-frame line cost tens of thousands of round trips and the reader
+    fell behind at 5 fps. Block up to the port timeout for the first byte,
+    then drain what is already waiting. Returns b"" on the timeout (or a
+    cancel_read), exactly like readline did.
+    """
+    first = ser.read(1)
+    if not first:
+        return b""
+    waiting = ser.in_waiting
+    return first + ser.read(waiting) if waiting else first
 
 
 def _resolve_port(pattern: str) -> Optional[str]:
@@ -237,12 +261,12 @@ class BuddySerial:
             last_rx = time.monotonic()
             try:
                 while not self._stop.is_set():
-                    chunk = await loop.run_in_executor(None, ser.readline)
+                    chunk = await loop.run_in_executor(None, _read_chunk, ser)
                     if self._drop_reason is not None:
                         log.warning("serial: dropping link — %s", self._drop_reason)
                         break
                     if not chunk:
-                        # readline returned on its 1s timeout (or a
+                        # read returned on its 1s timeout (or a
                         # cancel_read). Silence past the watchdog means a stale
                         # fd or a hung board — drop and let the outer loop
                         # re-resolve the glob and reopen.
@@ -257,34 +281,17 @@ class BuddySerial:
                         continue
                     last_rx = time.monotonic()
                     buf += chunk
-                    if not buf.endswith(b"\n"):
-                        continue  # partial line (timeout mid-line)
-                    line, buf = buf, b""
-                    text = line.decode("utf-8", errors="replace").strip()
-                    if not text.startswith("{"):
-                        if text:
-                            # Crash output must survive at the default log
-                            # level. A panic backtrace logged at DEBUG is
-                            # invisible exactly when it matters, and asking
-                            # someone to reproduce a freeze under a
-                            # hand-started DEBUG daemon is a bad trade.
-                            log.log(
-                                logging.WARNING if _IS_CRASH.search(text)
-                                else logging.DEBUG,
-                                "stick: %s", text,
-                            )
-                            if (self.on_boot is not None
-                                    and _IS_BOOT.search(text)
-                                    and time.monotonic() - self._last_boot_hook > 5.0):
-                                self._last_boot_hook = time.monotonic()
-                                asyncio.create_task(self.on_boot())
-                        continue
-                    try:
-                        obj = json.loads(text)
-                    except json.JSONDecodeError:
-                        log.debug("serial: bad json: %r", text[:120])
-                        continue
-                    asyncio.create_task(self.on_message(obj))
+                    # A chunk may hold several lines, or the tail of a long
+                    # one (a camera frame spans many USB packets).
+                    while True:
+                        nl = buf.find(b"\n")
+                        if nl < 0:
+                            break
+                        line, buf = buf[:nl], buf[nl + 1:]
+                        self._dispatch_line(line)
+                    if len(buf) > MAX_LINE_BYTES:
+                        log.warning("serial: %d bytes without a newline — discarding", len(buf))
+                        buf = b""
             except Exception as e:  # noqa: BLE001
                 log.warning("serial read error (%s) — reconnecting", e)
             finally:
@@ -292,6 +299,33 @@ class BuddySerial:
             holdoff = self._reopen_holdoff or RECONNECT_SECS
             self._reopen_holdoff = 0.0
             await asyncio.sleep(holdoff)
+
+    def _dispatch_line(self, line: bytes) -> None:
+        """Loop thread. One complete line off the wire: JSON to on_message,
+        anything else to the log (crash output at WARNING, see _IS_CRASH)."""
+        text = line.decode("utf-8", errors="replace").strip()
+        if not text.startswith("{"):
+            if text:
+                # Crash output must survive at the default log level. A panic
+                # backtrace logged at DEBUG is invisible exactly when it
+                # matters, and asking someone to reproduce a freeze under a
+                # hand-started DEBUG daemon is a bad trade.
+                log.log(
+                    logging.WARNING if _IS_CRASH.search(text) else logging.DEBUG,
+                    "stick: %s", text,
+                )
+                if (self.on_boot is not None
+                        and _IS_BOOT.search(text)
+                        and time.monotonic() - self._last_boot_hook > 5.0):
+                    self._last_boot_hook = time.monotonic()
+                    asyncio.create_task(self.on_boot())
+            return
+        try:
+            obj = json.loads(text)
+        except json.JSONDecodeError:
+            log.debug("serial: bad json: %r", text[:120])
+            return
+        asyncio.create_task(self.on_message(obj))
 
     def _close_current(self) -> None:
         """Close the current handle. Reader-side only (run()'s finally)."""
@@ -312,7 +346,7 @@ class BuddySerial:
         ser = self._ser
         if ser is not None:
             try:
-                ser.cancel_read()  # unblocks the reader's readline immediately
+                ser.cancel_read()  # unblocks the reader's blocking read immediately
             except Exception:  # noqa: BLE001
                 pass
 

@@ -35,6 +35,10 @@ class Session:
     # the firmware's attention animation via the heartbeat's ``waiting``
     # count. 0.0 = not waiting. Cleared by turn_begin/posttooluse.
     needs_input_at: float = 0.0
+    # Most recent tool this session touched, for the monitor's per-agent row.
+    # Set on pre/post tool use; purely cosmetic, so a miss just blanks the
+    # column rather than mis-stating the session's state.
+    last_tool: str = ""
 
 
 @dataclass
@@ -162,6 +166,17 @@ class State:
             self.sessions[session_id] = s
         s.needs_input_at = time.monotonic()
 
+    def note_tool(self, session_id: str, tool_name: str) -> None:
+        """Record the tool a session most recently touched (monitor display).
+
+        Silently ignores unknown sessions — unlike needs_input this must not
+        conjure a Session, or a stray hook would invent an agent row for a
+        session that never started.
+        """
+        s = self.sessions.get(session_id)
+        if s is not None and tool_name:
+            s.last_tool = tool_name
+
     def input_received(self, session_id: str) -> None:
         s = self.sessions.get(session_id)
         if s is not None:
@@ -246,6 +261,48 @@ class State:
             1 for s in self.sessions.values()
             if s.pending is not None or self._needs_input_live(s)
         )
+
+    # ---- per-agent rows (monitor display) ----
+
+    # How many rows the landscape monitor can show. The firmware clips to the
+    # same number; sending more would only burn heartbeat bytes.
+    MAX_AGENT_ROWS = 6
+
+    # Display width of the name column on the panel, in characters.
+    AGENT_NAME_CHARS = 14
+
+    def agent_rows(self, limit: Optional[int] = None) -> list[dict[str, str]]:
+        """One compact row per live session for the monitor's agent list.
+
+        Keys are single letters because this rides in every heartbeat and the
+        firmware's line buffer is 2KB shared with a 720-byte prompt detail.
+
+        Ordering is (rank, name) — deterministic rather than recency-based, so
+        a row doesn't hop between refreshes. On e-ink a reordered list costs a
+        full redraw and reads as flicker, and "which agent is where" is worth
+        more than "which moved last".
+        """
+        import os
+
+        cap = self.MAX_AGENT_ROWS if limit is None else limit
+        rows: list[tuple[int, str, dict[str, str]]] = []
+        for s in self.sessions.values():
+            name = os.path.basename((s.cwd or "").rstrip("/")) or s.session_id[:6] or "?"
+            name = name[: self.AGENT_NAME_CHARS]
+            if s.pending is not None:
+                rank, status, tool = 0, "wait", s.pending.tool_name
+            elif self._needs_input_live(s):
+                rank, status, tool = 0, "wait", s.last_tool
+            elif s.running:
+                rank, status, tool = 1, "run", s.last_tool
+            else:
+                rank, status, tool = 2, "idle", s.last_tool
+            row = {"n": name, "s": status}
+            if tool:
+                row["t"] = tool[:12]
+            rows.append((rank, name, row))
+        rows.sort(key=lambda r: (r[0], r[1]))
+        return [r[2] for r in rows[:cap]]
 
 
 def _today_key() -> str:

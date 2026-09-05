@@ -60,9 +60,33 @@ def uninstall_service() -> int:
     return backend.uninstall()
 
 
+def install_notes_widget() -> int:
+    """Install the desktop notes widget as its own login unit (macOS only)."""
+    backend = _backend()
+    if backend is None or not hasattr(backend, "install_widget"):
+        print(f"cc-buddy-bridge: the notes widget is macOS-only (got {sys.platform!r}).",
+              file=sys.stderr)
+        return 2
+    return backend.install_widget()
+
+
+def uninstall_notes_widget() -> int:
+    backend = _backend()
+    if backend is None or not hasattr(backend, "uninstall_widget"):
+        print(f"cc-buddy-bridge: the notes widget is macOS-only (got {sys.platform!r}).",
+              file=sys.stderr)
+        return 2
+    return backend.uninstall_widget()
+
+
 def is_installed() -> bool:
     backend = _backend()
     return backend is not None and backend.is_installed()
+
+
+def is_notes_widget_installed() -> bool:
+    backend = _backend()
+    return backend is not None and getattr(backend, "is_widget_installed", lambda: False)()
 
 
 def is_loaded() -> bool:
