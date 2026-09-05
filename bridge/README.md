@@ -695,7 +695,7 @@ environment). The daemon then logs `explore: disabled` and never sends
 
 * macOS 12+ / Windows 10+ / Linux with BlueZ
 * Python 3.11+
-* A flashed claude-desktop-buddy device (M5StickC Plus)
+* A flashed board: the Freenove pet, the CrowPanel e-ink dock, or the M5StackChan robot (M5StickC Plus with the upstream firmware also works)
 * Claude Code CLI
 
 ## Signal mapping
