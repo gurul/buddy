@@ -39,6 +39,10 @@ dependencies = [
     # (vision.py) — VNDetectFaceRectanglesRequest over a CGImage. 12.2.2
     # current per `pip index versions`, 2026-09-05.
     "pyobjc-framework-Vision>=12.0; sys_platform == 'darwin'",
+    # macOS-only: the desktop notes widget (notes_widget.py) is an AppKit
+    # NSPanel. Cocoa bundles AppKit + Foundation. 12.2.2 current per
+    # `pip index versions`, 2026-09-05.
+    "pyobjc-framework-Cocoa>=12.0; sys_platform == 'darwin'",
 ]
 
 [project.optional-dependencies]
