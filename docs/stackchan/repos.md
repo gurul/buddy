@@ -23,6 +23,7 @@ BLE are capabilities, not the link.
 | `m5stack-avatar/` | stack-chan/m5stack-avatar | `Avatar` face renderer (eyes, mouth, expressions) over M5Unified. Display only. | Arduino C++ | display only |
 | `stackchan-arduino/` | stack-chan/stackchan-arduino | YAML config loader plus servo abstraction (PWM, Feetech SCS, Dynamixel) for DIY kits. | Arduino C++ | DIY. SCS mode on the K151 bus is UNKNOWN |
 | `awesome-stack-chan/` | stack-chan/awesome-stack-chan | Curated list: hardware, parts, firmware, mods, articles. | Markdown | index |
+| `RoboEyes/` | FluxGarage/RoboEyes | Animated robot eyes (moods, blink, idle, flicker, sweat) as a header-only template over any Adafruit-GFX-shaped display. Used for the StackChan face (adapter over an M5GFX 1-bit sprite). Linked into `~/Documents/Arduino/libraries/FluxGarage_RoboEyes`. | Arduino C++ | display only |
 
 ## Custom firmware and AI integrations
 
@@ -55,7 +56,7 @@ mkdir -p vendor/stackchan && cd vendor/stackchan
 for r in m5stack/StackChan stack-chan/stack-chan m5stack/StackChan-BSP \
   stack-chan/m5stack-avatar stack-chan/stackchan-arduino stack-chan/awesome-stack-chan \
   kisaragi-mochi/stackchan-mcp schroneko/stackchan-nukoevi BrettKinny/dotty-stackchan \
-  A-Uta/StackChan_Minimal rt-net/stack-chan ronron-gh/AI_StackChan_Ex; do
+  A-Uta/StackChan_Minimal rt-net/stack-chan ronron-gh/AI_StackChan_Ex FluxGarage/RoboEyes; do
   name=$(basename $r); [ "$r" = rt-net/stack-chan ] && name=rt-net-stack-chan
   git clone --depth 1 "https://github.com/$r.git" "$name"
 done
