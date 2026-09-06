@@ -355,20 +355,35 @@ enum NoteStore {
     /// widget shows at most a handful; the diary window reads the originals.
     static let mirroredPhotos = 24
 
+    /// A record's photo path is written by the daemon (photos.py) and must
+    /// look exactly like `photos/YYYY-MM-DD/HHMMSS-<id>.jpg`. Anything else is
+    /// refused rather than resolved: these strings become file operations, and
+    /// a loose one would copy or delete the wrong thing.
+    static func isPhotoPath(_ rel: String) -> Bool {
+        let parts = rel.split(separator: "/", omittingEmptySubsequences: false)
+        guard parts.count == 3, parts[0] == "photos" else { return false }
+        guard parts[1].count == 10, parts[1].allSatisfy({ $0.isNumber || $0 == "-" }) else { return false }
+        guard parts[2].hasSuffix(".jpg"), !parts[2].hasPrefix(".") else { return false }
+        return !rel.contains("..")
+    }
+
     /// Copies the photos the newest records reference into the container, and
-    /// removes copies nothing references any more. Failures are not fatal: a
-    /// missing copy just means no thumbnail in the widget.
+    /// removes copies nothing references any more. The container mirrors the
+    /// notes directory's own layout, so a record's path resolves the same way
+    /// on both sides. Failures are not fatal: a missing copy just means no
+    /// thumbnail in the widget.
     @discardableResult
     static func mirrorPhotos(_ thoughts: [Thought], notesDir: URL) -> Int {
-        guard let root = AppGroup.photosURL else { return 0 }
+        guard let container = AppGroup.containerURL else { return 0 }
         let fm = FileManager.default
-        let wanted = Array(thoughts.compactMap(\.photo).prefix(mirroredPhotos))
+        let wanted = Array(thoughts.compactMap(\.photo).filter(isPhotoPath).prefix(mirroredPhotos))
         var copied = 0
         for rel in wanted {
-            let dst = root.appendingPathComponent(rel, isDirectory: false)
+            let dst = container.appendingPathComponent(rel, isDirectory: false)
             if fm.fileExists(atPath: dst.path) { continue }
             let src = notesDir.appendingPathComponent(rel, isDirectory: false)
-            guard fm.fileExists(atPath: src.path) else { continue }
+            var isDir: ObjCBool = false
+            guard fm.fileExists(atPath: src.path, isDirectory: &isDir), !isDir.boolValue else { continue }
             do {
                 try fm.createDirectory(at: dst.deletingLastPathComponent(), withIntermediateDirectories: true)
                 try fm.copyItem(at: src, to: dst)
@@ -377,17 +392,24 @@ enum NoteStore {
                 continue
             }
         }
-        pruneMirroredPhotos(keeping: Set(wanted), root: root)
+        pruneMirroredPhotos(keeping: Set(wanted))
         return copied
     }
 
-    private static func pruneMirroredPhotos(keeping wanted: Set<String>, root: URL) {
+    /// Deletes mirrored files nothing references, and the day folders they
+    /// leave empty. Only ever touches `photos/<day>/<file>.jpg` inside the
+    /// container; anything else in there is left alone.
+    private static func pruneMirroredPhotos(keeping wanted: Set<String>) {
+        guard let root = AppGroup.photosURL else { return }
         let fm = FileManager.default
-        guard let days = try? fm.contentsOfDirectory(at: root, includingPropertiesForKeys: nil) else { return }
-        for day in days where (try? day.resourceValues(forKeys: [.isDirectoryKey]).isDirectory) == true {
+        guard let days = try? fm.contentsOfDirectory(at: root, includingPropertiesForKeys: [.isDirectoryKey])
+        else { return }
+        for day in days {
+            guard (try? day.resourceValues(forKeys: [.isDirectoryKey]).isDirectory) == true else { continue }
             let files = (try? fm.contentsOfDirectory(at: day, includingPropertiesForKeys: nil)) ?? []
             for file in files {
                 let rel = "photos/\(day.lastPathComponent)/\(file.lastPathComponent)"
+                guard isPhotoPath(rel) else { continue }
                 if !wanted.contains(rel) { try? fm.removeItem(at: file) }
             }
             if ((try? fm.contentsOfDirectory(at: day, includingPropertiesForKeys: nil)) ?? []).isEmpty {

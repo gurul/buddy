@@ -140,7 +140,9 @@ void MoodEngine::express() {
   e.pulseHz = a > 0.4f ? 2.5f : a < -0.3f ? 0.25f : 0.5f;
   // Head: tempo and amplitude with arousal; pitch bias down when low, up on surprise.
   e.tempo = moodClamp(1.0f + 0.6f * a, 0.5f, 1.6f);
-  e.amplitude = (uint8_t)moodClamp(30.0f + 15.0f * a, 15.0f, 45.0f);
+  // Wander amplitude follows arousal across most of the neck's travel: bored
+  // stares at its own desk, keen sweeps the room behind its shoulders.
+  e.amplitude = (uint8_t)moodClamp(65.0f + 45.0f * a, 25.0f, 110.0f);
   e.pitchBias = kind == MOOD_SURPRISED || kind == MOOD_STARTLED ? 10
               : (kind == MOOD_LONELY || kind == MOOD_BORED) ? -10 : 0;
   // Sound: one chirp per kind change, rate-limited.

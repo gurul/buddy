@@ -11,10 +11,18 @@ from pathlib import Path
 from types import MethodType, SimpleNamespace
 
 from cc_buddy_bridge import daemon as daemon_mod
+from cc_buddy_bridge.caption_pager import CaptionPager
 from cc_buddy_bridge.daemon import Daemon
-from cc_buddy_bridge.explore import ExploreConfig, Explorer, Look, Mode
+from cc_buddy_bridge.explore import WAYPOINTS, ExploreConfig, Explorer, Look, Mode
 
 MODE_ON = {"cmd": "mode", "explore": True}
+
+
+def _first_look() -> dict:
+    """The look the explorer opens a pan with, whatever the pan plan is."""
+    yaw, pitch = WAYPOINTS[0]
+    return {"cmd": "look", "yaw": yaw, "pitch": pitch, "hold": 6000}
+
 MODE_OFF = {"cmd": "mode", "explore": False}
 
 
@@ -64,8 +72,10 @@ def _daemon(connected: bool = True, pending: int = 0, listen_sent=None, enabled:
         _agent_cfg=SimpleNamespace(enabled=False),
         _last_diag=None,
     )
+    d._thought_pager = CaptionPager()
     for name in ("_note_activity", "_idle_secs", "_explore_step", "_run_explore_action", "_stop_explore",
-                 "_request_explore", "_dismiss_explore", "_handle_ipc", "_handle_ble", "_on_wake",
+                 "_request_explore", "_dismiss_explore", "_clear_thought", "_flush_thought_pager",
+                 "_show_thought", "_handle_ipc", "_handle_ble", "_on_wake",
                  "_converse", "_on_voice_explore", "_on_agent_state", "_resync_agent", "_agent_keepalive",
                  "_cancel_active_task", "_make_agent", "_wake_suppressed", "_on_caption"):
         setattr(d, name, MethodType(getattr(Daemon, name), d))
@@ -82,7 +92,7 @@ def test_ipc_start_puts_the_board_in_explore_mode_without_counting_as_activity()
         assert resp["ok"] and resp["connected"]
         assert resp["explore"]["state"] == "exploring" and resp["explore"]["manual"] is True
         assert resp["explore"]["reason"] == "requested by cli"
-        assert d.ble.sent == [MODE_ON, {"cmd": "look", "yaw": -45, "pitch": 40, "hold": 6000}]
+        assert d.ble.sent == [MODE_ON, _first_look()]
         assert d._last_activity_at == 123.0            # the request itself is not "the human is back"
         # a tick with zero idle time (a session is running) keeps exploring
         d.state.running_count = 1
@@ -100,7 +110,7 @@ def test_ipc_stop_ends_it_and_status_reports() -> None:
         assert st["explore"]["state"] == "off"
         await d._handle_ipc({"evt": "explore", "action": "start"})
         st = await d._handle_ipc({"evt": "explore", "action": "status"})
-        assert st["explore"]["state"] == "exploring" and st["explore"]["waypoint"] == [-45, 40]
+        assert st["explore"]["state"] == "exploring" and st["explore"]["waypoint"] == list(WAYPOINTS[0])
         resp = await d._handle_ipc({"evt": "explore", "action": "stop"})
         assert resp["ok"] and resp["explore"]["state"] == "off" and resp["explore"]["manual"] is False
         assert d.ble.sent[-1] == MODE_OFF
@@ -142,7 +152,7 @@ def test_a_touch_ends_a_manual_explore_at_once() -> None:
     async def go():
         d = _daemon()
         await d._handle_ipc({"evt": "explore", "action": "start"})
-        await d._handle_ble({"cmd": "voice", "on": False})
+        await d._handle_ble({"cmd": "voice", "on": True})
         assert d._explorer.state == "off" and not d._explorer.manual
         assert d.ble.sent[-1] == MODE_OFF
         # the idle clock restarted: the next tick does not resume
@@ -206,7 +216,7 @@ def test_voice_go_explore_starts_once_the_conversation_has_closed(monkeypatch) -
         assert d._explorer.started_reason == "requested by voice"
         assert d._explore_after_conversation is None
         assert MODE_ON in d.ble.sent
-        assert {"cmd": "look", "yaw": -45, "pitch": 40, "hold": 6000} in d.ble.sent
+        assert _first_look() in d.ble.sent
         assert {"cmd": "agent", "state": "idle"} in d.ble.sent
         assert d.ble.sent.index(MODE_ON) > d.ble.sent.index({"cmd": "agent", "state": "listening"})
     asyncio.run(go())
@@ -333,4 +343,132 @@ def test_stream_frames_still_go_to_the_tracker_and_bad_snaps_are_none() -> None:
         asyncio.create_task(board())
         assert await d._take_snapshot() is None
         assert d._snap_waiter is None
+    asyncio.run(go())
+
+
+def test_a_voice_release_does_not_end_an_explore_nobody_touched() -> None:
+    """The board sends {"cmd":"voice","on":false} when a finger comes off, and
+    a stale one arrives after a reboot. Only the press means the human is here
+    (bench 2026-09-06: a release stopped a manual explore seven seconds in)."""
+    async def go():
+        d = _daemon()
+        await d._handle_ipc({"evt": "explore", "action": "start"})
+        await d._handle_ble({"cmd": "voice", "on": False})
+        assert d._explorer.active and d._explorer.manual
+        assert MODE_OFF not in d.ble.sent
+        await d._handle_ble({"cmd": "voice", "on": True})       # a real touch
+        assert d._explorer.state == "off"
+        assert d.ble.sent[-1] == MODE_OFF
+    asyncio.run(go())
+
+
+def test_every_other_board_touch_still_ends_it() -> None:
+    """focus / key / permission carry no on-flag: any of them is the human."""
+    async def go():
+        for cmd in ({"cmd": "focus"}, {"cmd": "key", "name": "enter"}, {"cmd": "permission", "id": "x"}):
+            d = _daemon()
+            d._pending_cwds = {}
+            d._voice = SimpleNamespace(start=lambda: None, stop=lambda: None, tap=lambda name: None)
+            await d._handle_ipc({"evt": "explore", "action": "start"})
+            try:
+                await d._handle_ble(cmd)
+            except AttributeError:
+                # The rest of the handler needs daemon state this stub does not
+                # carry; the explore must already have been dismissed by then.
+                pass
+            assert d._explorer.state == "off", cmd
+            assert MODE_OFF in d.ble.sent, cmd
+    asyncio.run(go())
+
+
+# ---- thoughts on the robot's own screen while it explores ---------------------------------------
+
+def _captions(d) -> list[dict]:
+    return [m for m in d.ble.sent if m.get("cmd") == "caption"]
+
+
+def _exploring_daemon() -> SimpleNamespace:
+    d = _daemon()
+    d._show_thought = MethodType(_Daemon._show_thought, d)
+    d._flush_thought_pager = MethodType(_Daemon._flush_thought_pager, d)
+    d._clear_thought = MethodType(_Daemon._clear_thought, d)
+    d._on_caption = MethodType(_Daemon._on_caption, d)
+    return d
+
+
+def test_a_thought_goes_onto_the_screen_while_exploring() -> None:
+    async def go():
+        d = _exploring_daemon()
+        await d._handle_ipc({"evt": "explore", "action": "start"})
+        d._show_thought("Someone brought a plant to my desk.", False)
+        await asyncio.sleep(0)
+        pages = _captions(d)
+        assert pages, "nothing was drawn"
+        first = pages[0]
+        assert first["page"] == 0 and first["lines"]
+        assert all(len(line) <= 17 for line in first["lines"])
+        assert len(first["lines"]) <= 4
+        assert "plant" in " ".join(p_line for p in pages for p_line in p.get("lines", []))
+    asyncio.run(go())
+
+
+def test_a_photographed_thought_says_so_on_the_screen() -> None:
+    async def go():
+        d = _exploring_daemon()
+        await d._handle_ipc({"evt": "explore", "action": "start"})
+        d._show_thought("A plant arrived.", True)
+        await asyncio.sleep(0)
+        text = " ".join(line for p in _captions(d) for line in p.get("lines", []))
+        assert "photo" in text
+    asyncio.run(go())
+
+
+def test_nothing_is_drawn_when_the_screen_is_not_buddys_to_use() -> None:
+    async def go():
+        # not exploring at all
+        d = _exploring_daemon()
+        d._show_thought("A thought nobody asked for.", False)
+        assert _captions(d) == []
+
+        # a permission card is waiting
+        d = _exploring_daemon()
+        await d._handle_ipc({"evt": "explore", "action": "start"})
+        d.state.pending_count = 1
+        d._show_thought("A thought.", False)
+        assert _captions(d) == []
+
+        # a conversation owns the screen
+        d = _exploring_daemon()
+        await d._handle_ipc({"evt": "explore", "action": "start"})
+        d._conversation = _Conversation()
+        d._show_thought("A thought.", False)
+        assert _captions(d) == []
+
+        # the owner is dictating
+        d = _exploring_daemon()
+        await d._handle_ipc({"evt": "explore", "action": "start"})
+        d._listen_down = True
+        d._show_thought("A thought.", False)
+        assert _captions(d) == []
+
+        # the board is away
+        d = _exploring_daemon()
+        await d._handle_ipc({"evt": "explore", "action": "start"})
+        d.ble.connected = False
+        d._show_thought("A thought.", False)
+        assert _captions(d) == []
+    asyncio.run(go())
+
+
+def test_the_screen_is_cleared_when_the_explore_ends() -> None:
+    async def go():
+        d = _exploring_daemon()
+        await d._handle_ipc({"evt": "explore", "action": "start"})
+        d._show_thought("Half-read when the human walks in.", False)
+        await asyncio.sleep(0)
+        assert _captions(d)
+        await d._handle_ble({"cmd": "voice", "on": True})       # a touch ends it
+        await asyncio.sleep(0)                                  # _on_caption sends on a task
+        assert {"cmd": "caption", "clear": True} in _captions(d)
+        assert _captions(d)[-1] == {"cmd": "caption", "clear": True}
     asyncio.run(go())

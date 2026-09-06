@@ -474,6 +474,10 @@ def build_context(memory: Memory, when: datetime, yaw: int, pitch: int, guess_ta
         "MY ALBUM (pictures I already keep — do not ask for one of these again unless it changed):\n"
         + ("\n".join(_fmt_photo(r) for r in album(memory.records, now_ts)[-ALBUM_IN_CONTEXT:]) or "(no photos yet)"),
         f"NOW: {when:%A %H:%M}, head yaw={yaw:+d} pitch={pitch} (pitch < 45 looks down at the desk, > 45 up at the room).",
+        # The Responses API refuses a json_object response format unless the
+        # word appears in the input itself, not only in the instructions
+        # (bench 2026-09-06: every thought came back 400 without this line).
+        "Answer with one json object in the shape given above, and nothing else.",
     ]
     return "\n\n".join(parts)
 
@@ -788,6 +792,7 @@ class DiaryTaker:
         wall: Callable[[], datetime] = datetime.now,
         snapshot: Optional[Callable[[], Awaitable[Optional[Frame]]]] = None,
         photo_config: Optional[photos.PhotoConfig] = None,
+        on_thought: Optional[Callable[[str, bool], Any]] = None,
     ) -> None:
         self.client = client
         self.memory = Memory(notes_dir, wall=wall)
@@ -798,6 +803,9 @@ class DiaryTaker:
         # picture is better than no picture.
         self.snapshot = snapshot
         self.photo_config = photo_config if photo_config is not None else photos.configured()
+        # Every thought buddy has, with whether it kept a picture of it, so the
+        # daemon can put it on the robot's own screen while it is exploring.
+        self.on_thought = on_thought
         self.timeout = timeout
         self.clock = clock
         self.wall = wall
@@ -861,6 +869,11 @@ class DiaryTaker:
         else:
             log.info("diary: kept in memory, not written (novelty %d, importance %d): %s",
                      rec.novelty, rec.importance, rec.thought)
+        if self.on_thought is not None:
+            try:
+                self.on_thought(rec.thought, bool(rec.photo))
+            except Exception:  # noqa: BLE001 — a caption is never worth a thought
+                log.exception("diary: on_thought failed")
         if self.send_emote is not None:
             try:
                 await self.send_emote(Emote(rec.valence, rec.arousal, rec.label))
