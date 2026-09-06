@@ -1,7 +1,5 @@
-# buddy
-
 <p align="center">
-  <img src="docs/assets/buddy.jpg" alt="buddy on the counter, eyes up, listening" width="520">
+  <img src="docs/assets/hero.png" alt="buddy — a small, open companion for a more capable world" width="100%">
 </p>
 
 **A small robot that lives on your desk, has feelings, keeps a diary, and runs your Mac
