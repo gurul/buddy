@@ -28,10 +28,13 @@ daemon ─{"cmd":"agent","state":…}─▶ robot: wake · listening · thinking
    with a chirp (`wake`) and a conversation opens. A wake is ignored while you are
    holding the dictation key, while a conversation is already open, or while a
    permission card is waiting on the board.
-2. **Talk.** A Realtime session (`gpt-realtime-2.1-mini`, semantic turn detection,
-   barge-in) hears the same microphone and answers through the Mac speaker. The
-   robot faces you while `listening`, glances aside for `thinking`, bobs while
-   `speaking`.
+2. **Talk.** A Realtime session (`gpt-realtime-2.1-mini`, semantic turn detection)
+   hears the same microphone and answers through the Mac speaker. The robot faces
+   you while `listening`, glances aside for `thinking`, bobs while `speaking`. The
+   link is **half-duplex**: while buddy talks (and for 0.4 s after) the mic is not
+   forwarded, because the Mac mic hears the Mac speaker and, with no echo
+   cancellation, buddy answered its own greeting in a loop on the bench. Let it
+   finish a sentence, then talk.
 3. **Work.** When you ask for something on the computer, the voice model calls
    `start_task(goal)`. A `gpt-6-astra` loop takes a screenshot, writes a few lines
    of PyAutoGUI, runs them in a persistent worker process, looks again, and so on,
@@ -57,7 +60,7 @@ are per machine:
 |---|---|
 | Keyword model (19 MB, once) | `mkdir -p ~/.config/cc-buddy-bridge/models && curl -L https://github.com/k2-fsa/sherpa-onnx/releases/download/kws-models/sherpa-onnx-kws-zipformer-gigaspeech-3.3M-2024-01-01.tar.bz2 \| tar xj -C ~/.config/cc-buddy-bridge/models` |
 | **Microphone** for the daemon's python | macOS attributes the grant to the interpreter binary: System Settings → Privacy & Security → Microphone → add the resolved venv python (`cc-buddy-bridge ears-check` prints it, and the daemon warns `ears: the microphone has been silent for 10 s` when the grant is missing) |
-| **Accessibility** + **Screen Recording** for the same python | needed by the desktop worker to click and to screenshot; `cc-buddy-bridge voice-check` shows the Accessibility state, the worker refuses to start without either and the task reports "Sorry, that failed" |
+| **Accessibility** + **Screen Recording** for the same python | needed by the desktop worker to click and to screenshot. At startup the daemon checks both **as launchd sees them** (a check from your terminal reports the terminal's grant, not the daemon's), logs `agent: computer control will refuse to start — … not granted to <python>` with the fix, and asks macOS to show the Screen Recording dialog for that binary — click *Open System Settings* there, turn the entry on, restart the daemon. Until then a task says out loud that it cannot see the screen yet |
 | `OPENAI_API_KEY` | in `~/.config/cc-buddy-bridge/env` (mode 600) — the wake word works without it, the conversation does not |
 
 Check the ears end to end:

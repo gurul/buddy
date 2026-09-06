@@ -50,10 +50,12 @@ DEFAULT_MODEL = "gpt-realtime-2.1-mini"
 DEFAULT_VOICE = "marin"
 DEFAULT_IDLE_TIMEOUT_SECS = 20.0
 DEFAULT_MAX_SESSION_SECS = 600.0
+SPEAKER_TAIL_SECS = 0.4        # mic stays muted this long after the speaker drains
 SAMPLE_RATE = 24000
 
 INSTRUCTIONS = """You are buddy, a small desk robot with a cheerful, curious personality, talking with your owner.
-You just heard your wake word. Answer in one or two short spoken sentences; no lists, no markdown.
+You just heard your wake word. Answer in one or two short spoken sentences; no lists, no markdown, no
+offers of things you "can help with" — you are a pet, not an assistant menu. Wait for the owner to talk.
 
 You can operate your owner's Mac for them:
 - When they ask you to do something on the computer, call start_task with a precise goal in your own
@@ -61,7 +63,8 @@ You can operate your owner's Mac for them:
 - While a task runs, keep listening. "stop" / "cancel" / "never mind" → call stop_task at once.
   Corrections or additions ("use Safari instead", "also save it") → call steer_task with the text.
   "How's it going?" → call task_status and summarise in one line.
-- When a message tagged [task finished] arrives, tell the owner the result in one short line.
+- When a message tagged [task finished] arrives, tell the owner the result in one short line and say a
+  two-word goodbye; the conversation ends right after.
 - When a message tagged [task question] arrives, ask the owner that exact question out loud, wait for
   their answer, then call answer_question with their answer as plain words ("yes", "no", "the second one").
 - When the owner says goodbye, thanks, or "that's all", call end_conversation after a two-word farewell.
@@ -235,6 +238,18 @@ class VoiceSession:
         self._started_at = self._clock()
         self.tool_calls: list[tuple[str, dict[str, Any]]] = []
         self.transcript: list[str] = []
+        # The Realtime API allows one response at a time. A function_call_arguments.done
+        # event arrives BEFORE that response's response.done, so a response.create sent
+        # right after a tool result fails with "already has an active response". Track
+        # the in-flight response and defer our creates until it is done.
+        self._response_active = False
+        self._response_wanted = False
+        self._speaking_until = 0.0
+        # After a task finishes, buddy says the result and the conversation
+        # closes — it must not sit there listening (owner request 2026-09-06).
+        # Set when the [task finished] message goes in; acted on when the
+        # response that speaks it is done.
+        self._end_after_response = False
 
     # -- state --
     def _set(self, state: str) -> None:
@@ -257,6 +272,7 @@ class VoiceSession:
         self._started_at = self._last_activity = self._clock()
         await self.conn.session.update(session=session_config(self.config))
         await self.conn.response.create(response={"instructions": "Say a one- or two-word greeting, like 'Yeah?'"})
+        self._response_active = True
         pump = asyncio.create_task(self._pump_mic(), name="voice-mic")
         watchdog = asyncio.create_task(self._watchdog(), name="voice-watchdog")
         try:
@@ -269,15 +285,31 @@ class VoiceSession:
                 self.agent.cancel()
             if self._agent_task is not None:
                 await asyncio.gather(self._agent_task, return_exceptions=True)
+            await self._drain_speaker()
             self.speaker.stop()
             self._set("idle")
 
     def end(self) -> None:
         self._ended.set()
 
+    async def _drain_speaker(self, timeout: float = 15.0) -> None:
+        """Let a queued reply finish playing (barge-in and errors skip this)."""
+        deadline = self._clock() + timeout
+        while self.speaker.busy and self._clock() < deadline:
+            await asyncio.sleep(0.05)
+
     async def _pump_mic(self) -> None:
+        # Half-duplex: the Mac mic hears the Mac speaker, and with no echo
+        # cancellation buddy would answer its own greeting in a loop (bench
+        # 2026-09-06 09:01). While a reply is playing (plus a short tail) the
+        # mic is not forwarded. Cost: no barge-in mid-sentence; say it after.
         while not self._ended.is_set():
             raw = await self.mic.get()
+            if self.speaker.busy:
+                self._speaking_until = self._clock() + SPEAKER_TAIL_SECS
+                continue
+            if self._clock() < self._speaking_until:
+                continue
             await self.conn.input_audio_buffer.append(audio=base64.b64encode(raw).decode("ascii"))
 
     async def _watchdog(self) -> None:
@@ -307,6 +339,7 @@ class VoiceSession:
             self.speaker.stop()                     # barge-in: the human talks over buddy
             self._set("listening")
         elif t == "response.created":
+            self._response_active = True
             self._set("thinking")
         elif t in ("response.output_audio.delta", "response.audio.delta"):
             delta = _attr(event, "delta")
@@ -321,8 +354,18 @@ class VoiceSession:
         elif t == "response.function_call_arguments.done":
             await self._tool(_attr(event, "name") or "", _attr(event, "call_id") or "", _attr(event, "arguments") or "{}")
         elif t == "response.done":
+            self._response_active = False
             self._last_activity = self._clock()
+            if self._end_after_response and not self._response_wanted:
+                # the result has been spoken (the audio may still be draining;
+                # the speaker is drained by the caller before "idle" lands)
+                self._end_after_response = False
+                self._ended.set()
+                return
             self._set("working" if self.task_running else "listening")
+            if self._response_wanted and not self._ended.is_set():
+                self._response_wanted = False
+                await self.conn.response.create()
         elif t == "error":
             err = _attr(event, "error")
             log.warning("voice: realtime error: %s", err)
@@ -364,7 +407,7 @@ class VoiceSession:
         await self.conn.conversation.item.create(item={"type": "function_call_output", "call_id": call_id,
                                                        "output": json.dumps(result)})
         if name != "end_conversation":
-            await self.conn.response.create()
+            await self._request_response()
 
     def _start_task(self, goal: str) -> dict[str, Any]:
         if not goal:
@@ -382,6 +425,7 @@ class VoiceSession:
         final = await self.agent.run(goal)
         self._last_activity = self._clock()
         if not self._ended.is_set():
+            self._end_after_response = True
             await self._say_from_task(f"[task finished] {final}")
         return final
 
@@ -410,7 +454,14 @@ class VoiceSession:
     async def _say_from_task(self, text: str) -> None:
         await self.conn.conversation.item.create(item={"type": "message", "role": "user",
                                                        "content": [{"type": "input_text", "text": text}]})
-        await self.conn.response.create()
+        await self._request_response()
+
+    async def _request_response(self) -> None:
+        """response.create now, or as soon as the in-flight response is done."""
+        if self._response_active:
+            self._response_wanted = True
+        else:
+            await self.conn.response.create()
 
 
 def _attr(event: Any, name: str) -> Any:

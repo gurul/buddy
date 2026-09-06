@@ -336,7 +336,12 @@ class ComputerAgent:
             self._emit("cancelled", str(e))
         except Exception as e:  # noqa: BLE001
             log.exception("agent: run failed")
-            result = f"Sorry, that failed: {type(e).__name__}."
+            msg = str(e)
+            if "Screen Recording" in msg or "Accessibility" in msg:
+                result = ("I can't see or touch the screen yet — my human needs to grant Screen Recording and "
+                          "Accessibility to the daemon in System Settings.")
+            else:
+                result = f"Sorry, that failed: {type(e).__name__}."
             self._emit("error", f"{type(e).__name__}: {e}")
         finally:
             await worker.close()
@@ -448,6 +453,54 @@ class ComputerAgent:
                 f.write(json.dumps({"t": round(self._clock(), 3), **entry}, ensure_ascii=False) + "\n")
         except OSError:
             pass
+
+
+# ---- desktop grants ----------------------------------------------------------------------
+
+def desktop_grants(prompt: bool = False) -> dict[str, Any]:
+    """Accessibility and Screen Recording as macOS sees THIS process.
+
+    TCC credits the responsible process: run from a terminal that is a
+    terminal's grant, under launchd it is the python binary's. The daemon
+    calls this at startup with prompt=True so the Screen Recording dialog
+    appears for the right binary (bench 2026-09-06: the worker failed with
+    "Screen Recording is not granted" although a shell check said True).
+    """
+    out: dict[str, Any] = {"python": os.path.realpath(sys.executable), "accessibility": None, "screen": None}
+    if sys.platform != "darwin":
+        return out
+    try:
+        import ctypes
+
+        svc = ctypes.CDLL("/System/Library/Frameworks/ApplicationServices.framework/ApplicationServices")
+        svc.AXIsProcessTrusted.restype = ctypes.c_bool
+        out["accessibility"] = bool(svc.AXIsProcessTrusted())
+    except Exception as e:  # noqa: BLE001
+        out["accessibility_error"] = str(e)
+    try:
+        import Quartz
+
+        ok = bool(Quartz.CGPreflightScreenCaptureAccess())
+        if not ok and prompt:
+            Quartz.CGRequestScreenCaptureAccess()      # shows the system dialog, once per binary
+        out["screen"] = ok
+    except Exception as e:  # noqa: BLE001
+        out["screen_error"] = str(e)
+    return out
+
+
+def log_desktop_grants(prompt: bool = True) -> dict[str, Any]:
+    g = desktop_grants(prompt=prompt)
+    missing = [k for k in ("accessibility", "screen") if g.get(k) is False]
+    if missing:
+        names = {"accessibility": "Accessibility", "screen": "Screen & System Audio Recording"}
+        log.warning("agent: computer control will refuse to start — %s not granted to %s. System Settings > "
+                    "Privacy & Security > %s: add that binary (+ then Cmd+Shift+G to paste the path) and turn it on, "
+                    "then restart the daemon.", " and ".join(names[m] for m in missing), g["python"],
+                    " / ".join(names[m] for m in missing))
+    else:
+        log.info("agent: desktop grants ok (Accessibility, Screen Recording) for %s", g["python"])
+    return g
 
 
 # ---- the real Responses client --------------------------------------------------------
