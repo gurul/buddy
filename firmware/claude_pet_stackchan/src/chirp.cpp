@@ -118,6 +118,32 @@ static void build(ChirpKind kind) {
       seg(k, k * 0.5f, 250);
       break;
     }
+    case CHIRP_CURIOUS: {                       // "oh?": two rising notes
+      int k = random(900, 1300);
+      note(k, 90); gap(40); seg(k * 1.3f, k * 1.9f, 160);
+      break;
+    }
+    case CHIRP_SURPRISE: {                      // "!": one high blip
+      note(random(2400, 3200), 110);
+      break;
+    }
+    case CHIRP_SIGH: {                          // slow falling sweep, quiet
+      amp = 0.4f;
+      int k = random(1100, 1500);
+      seg(k, k * 0.55f, 520);
+      break;
+    }
+    case CHIRP_WARBLE: {                        // soft quick warble
+      amp = 0.5f;
+      int k = random(1300, 1700);
+      for (int i = 0; i < 4; i++) seg(k + (i & 1 ? 150 : -150), k + (i & 1 ? -150 : 150), 55);
+      break;
+    }
+    case CHIRP_STARTLE: {                       // sharp double blip
+      int k = random(2600, 3400);
+      note(k, 60); gap(25); note(k + 300, 80);
+      break;
+    }
     case CHIRP_CONFUSED: {                      // wobble around a base
       int k = random(1000, 1500);
       for (int i = 0; i < 6; i++) seg(k + (i & 1 ? 400 : -400), k + (i & 1 ? -400 : 400), 80);

@@ -58,6 +58,7 @@ static uint32_t           lastGentleMs = 0;
 static bool               searching = false;
 static bool               locked = false;
 static char               lastSrc = 'M';           // 'F' face blob, 'M' motion
+static GazeObs            obs = {};                // latched for gazeTakeObs()
 
 static float clampf(float v, float lo, float hi) { return v < lo ? lo : (v > hi ? hi : v); }
 
@@ -97,6 +98,13 @@ void gazeBegin() {
   cameraUp = look::begin();      // false: memory + touch still work, no live layer
   lastPeriodicMs = millis();
   Serial.printf("[gaze] camera %s\n", cameraUp ? "up" : "OFF");
+}
+
+bool gazeTakeObs(GazeObs* out) {
+  if (!obs.motionConf && !obs.faceSeen) return false;
+  *out = obs;
+  obs = GazeObs{};
+  return true;
 }
 
 void gazeNoteTouch(int8_t side) {
@@ -169,6 +177,7 @@ void gazeUpdate(PersonaState active, bool needsAttention, bool listening,
       absYaw = clampf(absYaw, -kYawLimitDeg, kYawLimitDeg);
       absPitch = clampf(absPitch, kPitchMinDeg, kPitchMaxDeg);
       lastBx = host->faceBx; lastBy = host->faceBy; lastSize = host->faceSize;
+      obs.faceSeen = true; obs.faceOwner = obs.faceOwner || host->faceOwner;
       if (host->faceOwner) {
         // Owner: LIVE target + memory training.
         model.observe(absYaw, absPitch, host->faceConf, now);
@@ -193,6 +202,8 @@ void gazeUpdate(PersonaState active, bool needsAttention, bool listening,
       absPitch = clampf(absPitch, kPitchMinDeg, kPitchMaxDeg);
       model.observe(absYaw, absPitch, (uint8_t)conf, now);
       lastSrc = src;
+      if ((uint8_t)conf > obs.motionConf) obs.motionConf = (uint8_t)conf;
+      if (src == 'F') obs.faceSeen = true;
     }
   }
   model.decay(now);

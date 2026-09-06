@@ -2,30 +2,133 @@
 
 ![buddy on a desk, eyes on, saying working...](docs/assets/thumbnail.png)
 
-A small, open companion for a more capable world. A desk pet on an ESP32-S3 touchscreen
-that reacts to **Claude Code** in real time. It sleeps
-when you're idle, gets busy when Claude is working, and demands attention when Claude is
-blocked on you. Permission prompts arrive as a card you approve or deny by swiping —
-right to approve, left to deny.
+**buddy is a small desk robot that lives next to your terminal.** It is an
+[M5StackChan K151](https://docs.m5stack.com/en/products/sku/K151) — a CoreS3 head
+with a camera, two servos, twelve LEDs, a speaker and a touch pad — running
+firmware in `firmware/claude_pet_stackchan` and a Python daemon on your Mac in
+`bridge/`. Together they make a companion that:
 
-Four builds, three boards: the touch **pet**, the CrowPanel e-ink **monitor-and-control**
-dock, a **monitor-only** variant of that same e-ink board — a read-only landscape
-wallboard of your live agents — and the **StackChan robot**, a head that turns to look at
-you. See [E-ink build](#e-ink-build-crowpanel-42),
-[E-ink agent monitor](#e-ink-agent-monitor-variant) and [StackChan](#stackchan-m5stackchan-k151).
-
-Two MIT projects ported to the **Freenove FNK0104B** (ESP32-S3 Display 2.8" Touch):
-[anthropics/claude-desktop-buddy](https://github.com/anthropics/claude-desktop-buddy) for the
-firmware (the 7-state pet, retargeted from the M5StickC Plus) and
-[SnowWarri0r/cc-buddy-bridge](https://github.com/SnowWarri0r/cc-buddy-bridge) for the host
-daemon (extended with a USB serial transport in place of BLE).
+- **Talks, and runs your computer.** Say **"hey buddy"** and it listens (an on-device
+  keyword spotter, no cloud until you speak); ask it to do something on the Mac and a
+  `gpt-6-astra` computer-use loop does it through the real mouse and keyboard while
+  the robot acts it out — head down at the desk, quick eyes, "on it…" — takes
+  corrections mid-task, asks before anything consequential, stops on "stop".
+  → [docs/stackchan/voice.md](docs/stackchan/voice.md)
+- **Has feelings you can read.** While it explores the room an affect engine on the
+  board (valence, arousal, a social and a stimulation drive) drives its eyes, LED
+  colour and pulse, head tempo and chirps: curious, surprised, startled, happy,
+  affectionate when it sees you, bored when nothing moves, lonely when nobody comes.
+  → [docs/stackchan/personality.md](docs/stackchan/personality.md)
+- **Keeps a diary worth reading.** Every look it takes becomes a memory record; each
+  new thought is written with the whole memory in context, picked for novelty, gated
+  for interest, and reflected on each evening. A macOS widget shows the newest
+  thoughts and how buddy felt; click it for the full diary — observations, what
+  changed, feelings over time, its profile of you and the room, its reflections.
+  → [docs/stackchan/widget.md](docs/stackchan/widget.md)
+- **Mirrors Claude Code.** Sleeping when you are idle, busy while Claude works, head up
+  and searching for you when a session is blocked on you — driven by Claude Code hooks
+  and a tailer over the session transcripts. Tap it to raise the blocked terminal.
+- **Looks at you.** The board streams camera frames; macOS Vision finds your face and
+  learns where you usually sit; hold Option while facing it to enrol as its owner.
 
 ```
-Claude Code CLI ─hooks→ unix socket → bridge daemon ─NDJSON over USB serial→ ESP32-S3
-   └─ JSONL tailer (tokens, transcript entries) ┘        pet state machine + touch UI
+you ─"hey buddy"─▶ Mac mic ─▶ bridge daemon ─▶ gpt-realtime (voice) ─▶ gpt-6-astra + PyAutoGUI (hands)
+Claude Code CLI ─hooks─▶ bridge daemon ─NDJSON over USB serial─▶ StackChan: persona · affect engine · agent phases
+camera frames ◀─────────▶ macOS Vision (faces) · diary (memory + vision LLM) ─▶ widget
 ```
 
-## What it does
+The firmware started from [anthropics/claude-desktop-buddy](https://github.com/anthropics/claude-desktop-buddy)
+and the daemon from [SnowWarri0r/cc-buddy-bridge](https://github.com/SnowWarri0r/cc-buddy-bridge),
+both MIT; three earlier boards on the way to this one are kept under
+[Experiments that led here](#experiments-that-led-here).
+
+## Quick start
+
+```bash
+# host
+cd bridge && python3.12 -m venv .venv && .venv/bin/pip install -e .
+.venv/bin/cc-buddy-bridge install                                   # Claude Code hooks
+.venv/bin/cc-buddy-bridge install --service --serial-port '/dev/cu.usbmodem*'
+mkdir -p ~/.config/cc-buddy-bridge/models && curl -L \
+  https://github.com/k2-fsa/sherpa-onnx/releases/download/kws-models/sherpa-onnx-kws-zipformer-gigaspeech-3.3M-2024-01-01.tar.bz2 \
+  | tar xj -C ~/.config/cc-buddy-bridge/models                        # the wake-word model, once
+printf 'OPENAI_API_KEY=sk-...\n' > ~/.config/cc-buddy-bridge/env && chmod 600 ~/.config/cc-buddy-bridge/env
+.venv/bin/cc-buddy-bridge ears-check                                # say "hey buddy"
+
+# robot
+./tools/flash_stackchan.sh                                          # compile + archive ELF + flash
+```
+
+Grant the daemon's python **Microphone**, **Accessibility** and **Screen Recording**
+in System Settings → Privacy & Security (the `*-check` commands print the exact
+binary). `CC_BUDDY_MONITOR_ONLY=1` in the service env keeps permission cards off the
+robot (taps only focus the terminal). Full setup and knobs:
+[docs/stackchan/build.md](docs/stackchan/build.md), [bridge/README.md](bridge/README.md).
+
+## The robot (M5StackChan K151)
+
+The **M5StackChan AI Desktop Robot** (K151 — CoreS3 core,
+ESP32-S3, 320×240 LCD, GC0308 camera, two Feetech serial servos for yaw and
+pitch, 12 RGB LEDs, a three-zone top touch pad, speaker) —
+`firmware/claude_pet_stackchan`, same NDJSON protocol over the native
+USB-Serial/JTAG port (`/dev/cu.usbmodem*`; opening it does not reset the
+board). The face is FluxGarage RoboEyes on a 1-bit canvas with a random eye
+colour per boot and one status word, no clock. The body does the talking:
+eased head motion (an `easeInOutCubic` tween at 25 Hz on top of the BSP's
+servo spring), idle micro-drift, LED moods, and R2D2 chirps synthesized to
+PCM at 16 kHz. Three states must read at a glance:
+
+| State | Claude | Head | Eyes | LEDs |
+|---|---|---|---|---|
+| sleep | connected, idle | chin down, torque off | closed, a peek every ~20 s | dim blue breathe |
+| busy | a session running | level, nods every 2.5 s | squint | dim cyan |
+| attention | a session waits on you | up, then a two-row search sweep until it finds you | angry flicker; sweat on a destructive prompt | orange pulse |
+| listening | Option held on the Mac, or "hey buddy" | faces you | wide | blue |
+| exploring | idle for 10 min | looks around on its own; tempo, amplitude and droop follow its mood | mood: openness, smile/droop, saccade tempo | mood colour and pulse |
+| working | a voice task runs on the Mac | down at the desk, typing glances | squint, fast saccades | cyan 2.5 Hz |
+
+Feelings and agent phases in full: [docs/stackchan/personality.md](docs/stackchan/personality.md).
+
+**Host vision.** The daemon turns the camera on (`{"cmd":"cam",...}`); the board
+streams 160×120 JPEGs (~2.5 KB at ~4 fps); macOS Vision finds the largest
+face in 5–20 ms and answers `{"cmd":"face",...,"who":"owner"|"unknown"}`, which
+drives the head. Hold Option while facing it to enrol yourself as owner
+(Vision feature prints, threshold 0.9); the board keeps a habit map of where
+you sit in NVS and searches there first. On-board motion/skin tracking is the
+fallback with no host. After 10 idle minutes the daemon pans the room; the robot
+keeps looking around on its own between and after the pans, and each look can
+become a diary thought (`gpt-5-mini`, 6/hour, written with its whole memory in
+context) in `~/.config/cc-buddy-bridge/notes/`, shown by the WidgetKit widget
+in `widget/` (click it for the full diary) or `cc-buddy-bridge notes-widget`.
+
+```bash
+./tools/flash_stackchan.sh     # compile + archive ELF + flash; boots the daemon out first
+cc-buddy-bridge install --service --serial-port '/dev/cu.usbmodem*'
+```
+
+Daemon flags used with the robot: `CC_BUDDY_MONITOR_ONLY=1` in the plist env
+(no permission cards on the robot; taps only focus the terminal),
+`~/.config/cc-buddy-bridge/matchers.toml` with `replace_defaults = true` and
+an empty `always_ask`, and `OPENAI_API_KEY` in `~/.config/cc-buddy-bridge/env`
+(mode 600 — the launchd daemon does not read `.zshrc`). The listen key needs
+**Input Monitoring** for the daemon's python. Back up the factory image
+before the first flash (`esptool ... read-flash`, no `-b` on this link);
+restore with `esptool write-flash 0x0 firmware/build-archive/stackchan-factory-20260905.bin`.
+
+| Control | Action |
+|---|---|
+| Front zone tap | attention: raise the blocked terminal. Otherwise a head pat: heart, pink LEDs |
+| Middle zone hold (0.6 s) | push-to-talk, same as holding the panel |
+| Back zone | scroll the transcript (same as the bottom-right strip) |
+| Panel gestures | as the touch pet: hold = dictate, swipe down = Enter, left/right = option pickers |
+
+Full reference: [docs/stackchan/build.md](docs/stackchan/build.md) (port map,
+gaze policy, wire additions, bench-verified conventions); research in
+[capabilities.md](docs/stackchan/capabilities.md) and [repos.md](docs/stackchan/repos.md).
+
+## Claude Code integration
+
+What every build, robot included, does with a Claude Code session:
 
 - **Mirrors Claude's state.** Sleeping, busy, waiting, celebrating — driven by Claude Code
   hooks plus a tailer over the session transcripts for tokens and message counts.
@@ -57,7 +160,92 @@ Claude Code CLI ─hooks→ unix socket → bridge daemon ─NDJSON over USB ser
   from reconnects (with a deliberate closed-port hold) up to an automatic RTS hardware reset
   of the board, so a wedged link heals without touching a cable.
 
-## Hardware
+## Host bridge
+
+```bash
+cd bridge
+python3.12 -m venv .venv && .venv/bin/pip install -e .
+.venv/bin/cc-buddy-bridge install    # registers the hooks in Claude Code's settings.json
+.venv/bin/cc-buddy-bridge install --service --serial-port '/dev/cu.usbmodem*' --voice-hotkey option
+```
+
+`install` and `install --service` are **two separate steps** — `--service` installs the unit
+*instead of* the hooks, so running only the second leaves you with a connected board that
+never receives session state. Run both.
+
+| Command | What |
+|---|---|
+| `daemon --serial-port …` | run the bridge in the foreground |
+| `install` / `uninstall` / `status` | manage hooks; `--service` installs the launchd/systemd unit *instead* |
+| `install --service --voice-hotkey option` | bake the push-to-talk hotkey into the unit so it survives reinstalls |
+| `audit` | the approval decision log |
+| `diag` / `diag --watch` | why the board last reset, and what it was doing |
+| `voice-check` | diagnose push-to-talk (Accessibility permission, hotkey delivery) |
+| `ears-check` | diagnose the "hey buddy" wake word (mic, model), then listen for it |
+| `notes --last N` | print the diary's newest thoughts |
+| `celebrate` | make the pet celebrate |
+
+### Configuration
+
+| Variable | Purpose |
+|---|---|
+| `CLAUDE_CONFIG_DIR` | which Claude config home `install`/`status` target (default `~/.claude`) |
+| `CC_BUDDY_CLAUDE_CONFIG_DIRS` | `os.pathsep`-separated homes the daemon serves — it runs outside any session, so it can't inherit the above |
+| `CC_BUDDY_VOICE_HOTKEY` | `off` (default — holding the pet never touches the keyboard or your mic), `option` (recommended when enabling), `opt-space`, or `fn`. Bake it in with `install --service --voice-hotkey …`; a hand-edited unit file is wiped by the next `--service` install |
+| `CC_BUDDY_KEY_METHOD` | `osascript` routes Enter through System Events, for apps that swallow synthetic key events (Warp) |
+| `CC_BUDDY_FOCUS_APPS` | comma-separated app names, in priority order, that tap-to-focus raises (e.g. `Warp,cmux,Composer`) — default: Ghostty, Warp, cmux, Composer, Cursor, VS Code |
+| `CC_BUDDY_VOICE` / `CC_BUDDY_WAKE_WORD` / `CC_BUDDY_WAKE_THRESHOLD` / `CC_BUDDY_MIC` | the wake word (default on, `hey buddy`, 0.25, default input) — [docs/stackchan/voice.md](docs/stackchan/voice.md) |
+| `CC_BUDDY_REALTIME_MODEL` / `CC_BUDDY_VOICE_NAME` / `CC_BUDDY_VOICE_IDLE_SECS` | the voice conversation (`gpt-realtime-2.1-mini`, `marin`, 20 s) |
+| `CC_BUDDY_COMPUTER_CONTROL` / `CC_BUDDY_AGENT_MODEL` / `CC_BUDDY_AGENT_MAX_TURNS` | computer use (on, `gpt-6-astra`, 25 steps); action logs in `~/.config/cc-buddy-bridge/agent-runs/` |
+| `CC_BUDDY_MONITOR_ONLY` | `1`/`true`/`yes`/`on` → never surface a permission card; defer to Claude Code's own prompt immediately. **Required by the e-ink agent-monitor firmware**, whose buttons can't answer. Env-gated rather than a CLI flag because it's a property of which firmware is flashed, not of how the daemon was invoked |
+
+Installing into the wrong config home **fails silently** — hooks written, board animating,
+no session ever prompting. `status` prints the home it resolved; check it first.
+
+Push-to-talk is off unless `CC_BUDDY_VOICE_HOTKEY` names a chord. When enabled it needs
+**Accessibility permission** for the daemon's python (macOS filters synthetic events from
+untrusted processes). `voice-check` prints the exact binary to grant. Avoid `fn` as a hotkey:
+it's a secondary-fn modifier that many apps read from raw HID, which synthetic events can't
+reach — rebind your dictation app to a bare **Option** hold, which synthesizes reliably.
+
+Granting that permission has two traps worth knowing before you fight them:
+
+- **The system dialog is the easy path.** Holding the pet once triggers macOS's
+  "would like to control this computer" prompt, whose *Open System Settings* button adds the
+  entry for you. It fires **once per daemon lifetime** — if you miss it, restart the daemon
+  to get it back. Adding the binary by hand instead means `+` → file picker → click out of
+  the search field → `Cmd+Shift+G`; dragging from Finder is silently rejected.
+- **`voice-check` run from a granted terminal reports that terminal's permission, not the
+  daemon's.** macOS attributes Accessibility to the responsible process, so a terminal with
+  the grant makes the check print `trusted: True` while the launchd daemon logs
+  `Accessibility not granted`. When the two disagree, **the daemon log is the truth.**
+
+After editing a unit file, reload it properly — `launchctl kickstart` restarts the process
+but reuses the job definition cached at load time, so environment changes are ignored:
+
+```bash
+launchctl unload ~/Library/LaunchAgents/com.github.cc-buddy-bridge.daemon.plist
+launchctl load -w ~/Library/LaunchAgents/com.github.cc-buddy-bridge.daemon.plist
+```
+
+## Experiments that led here
+
+buddy grew out of three earlier builds on two other boards. They still work,
+share the same NDJSON protocol and daemon, and are kept for anyone with that
+hardware — but the robot above is the project.
+
+### Touch pet (Freenove FNK0104B, ESP32-S3 2.8" touch LCD)
+
+The first build: the 7-state desk pet from claude-desktop-buddy, retargeted from the
+M5StickC Plus to a 240×320 touch panel (`firmware/claude_pet`). Permission prompts
+arrive as a card you approve or deny by swiping — right to approve, left to deny;
+hold at the right edge to approve and stop being asked for that command shape; tap
+the card for the whole command; swipe up to raise the asking terminal. Hold the pet
+to dictate (opt-in, `CC_BUDDY_VOICE_HOTKEY`), swipe down for Enter, swipe left/right
+through Claude Code's option pickers. A WS2812 pulses orange while an approval is
+pending. The parametric 3D-printed shell for this board is in `case/`.
+
+##### Touch pet hardware
 
 | Part | Detail |
 |---|---|
@@ -66,9 +254,47 @@ Claude Code CLI ─hooks→ unix socket → bridge daemon ─NDJSON over USB ser
 | Touch | FT6336G @ I2C 0x38 — SDA 16 / SCL 15 / INT 17 / RST 18 |
 | Extras | WS2812 LED (GPIO42), ES8311 codec + mic + speaker (unused), microSD, battery ADC GPIO9 |
 
-## E-ink build (CrowPanel 4.2")
+##### Touch pet controls
 
-A second board target: the **Elecrow CrowPanel ESP32 4.2" E-Paper HMI**
+| Gesture | Action |
+|---|---|
+| **Swipe card right / left** | approve / deny the pending prompt |
+| **Hold card at the right edge** (700ms) | stamp flips to ALWAYS — approve and stop carding this command shape for the daemon's lifetime |
+| **Tap the card** | expand to a full-screen view of the whole command (long commands truncate on the card); tap again to close |
+| **Swipe the card up** | raise the asking session's terminal — the card stays pending (look before you decide) |
+| **Tap the pet** (attention state only) | raise the terminal of the session that's blocked on you |
+| **Hold the pet** | push-to-talk: holds your dictation hotkey while held |
+| **Swipe down** (anywhere) | press Enter on the Mac |
+| **Swipe left / right** (no card up) | previous / next option in Claude Code's pickers (Up/Down arrow) |
+| Tap bottom-right | scroll back through the transcript |
+
+There is no on-device menu, settings, or info screen — the pet is always the
+whole UI. Species and settings are host-side via the CLI
+(`cc-buddy-bridge species`, `matchers.toml`); battery and link state via
+`cc-buddy-bridge status` / `diag`.
+
+The WS2812 pulses orange while an approval is pending, green on celebrate, pink on heart,
+solid blue while dictating.
+
+##### Build & flash (touch pet)
+
+```bash
+arduino-cli core install esp32:esp32          # tested with 3.3.10
+arduino-cli lib install ArduinoJson AnimatedGIF TFT_eSPI
+
+./tools/flash.sh                              # compile → archive ELF → flash → restart daemon
+```
+
+`tools/flash.sh` handles the whole dance: it compiles, files the exact ELF away under
+`firmware/build-archive/` (so any future panic backtrace stays symbolizable), boots the
+daemon **out** (it owns `/dev/cu.usbmodem*` exclusively and the plist sets `KeepAlive`, so
+merely stopping it isn't enough — esptool would fail looking exactly like a bricked board),
+uploads, and bootstraps the daemon back. If the flasher still can't connect: hold **BOOT**,
+tap **RESET**, release BOOT, retry.
+
+#### E-ink build (CrowPanel 4.2")
+
+The second board: the **Elecrow CrowPanel ESP32 4.2" E-Paper HMI**
 (ESP32-S3-WROOM-1-N8R8, SSD1683, 400×300 black/white, CH340 UART on the
 USB-C) — `firmware/claude_pet_eink`, same NDJSON protocol, **no pet**: on
 e-paper the build is a purely functional portrait status display — big
@@ -98,63 +324,7 @@ all ack. See `firmware/claude_pet_eink/README.md` for the vendored Elecrow
 panel driver (including the old-image-plane fix that stops partial-refresh
 text overlap) and the pin map, and DESIGN.md for the port notes.
 
-## StackChan (M5StackChan K151)
-
-A third board: the **M5StackChan AI Desktop Robot** (K151 — CoreS3 core,
-ESP32-S3, 320×240 LCD, GC0308 camera, two Feetech serial servos for yaw and
-pitch, 12 RGB LEDs, a three-zone top touch pad, speaker) —
-`firmware/claude_pet_stackchan`, same NDJSON protocol over the native
-USB-Serial/JTAG port (`/dev/cu.usbmodem*`; opening it does not reset the
-board). The face is FluxGarage RoboEyes on a 1-bit canvas with a random eye
-colour per boot and one status word, no clock. The body does the talking:
-eased head motion (an `easeInOutCubic` tween at 25 Hz on top of the BSP's
-servo spring), idle micro-drift, LED moods, and R2D2 chirps synthesized to
-PCM at 16 kHz. Three states must read at a glance:
-
-| State | Claude | Head | Eyes | LEDs |
-|---|---|---|---|---|
-| sleep | connected, idle | chin down, torque off | closed, a peek every ~20 s | dim blue breathe |
-| busy | a session running | level, nods every 2.5 s | squint | dim cyan |
-| attention | a session waits on you | up, then a two-row search sweep until it finds you | angry flicker; sweat on a destructive prompt | orange pulse |
-| listening | Option held on the Mac | faces you | wide | blue |
-
-**Host vision.** The daemon turns the camera on (`{"cmd":"cam",...}`); the board
-streams 160×120 JPEGs (~2.5 KB at ~4 fps); macOS Vision finds the largest
-face in 5–20 ms and answers `{"cmd":"face",...,"who":"owner"|"unknown"}`, which
-drives the head. Hold Option while facing it to enrol yourself as owner
-(Vision feature prints, threshold 0.9); the board keeps a habit map of where
-you sit in NVS and searches there first. On-board motion/skin tracking is the
-fallback with no host. After 10 idle minutes the daemon pans the room and
-writes one-sentence notes (`gpt-5-mini`, 6/hour) to
-`~/.config/cc-buddy-bridge/notes/`, shown by the WidgetKit widget in `widget/`
-or `cc-buddy-bridge notes-widget`.
-
-```bash
-./tools/flash_stackchan.sh     # compile + archive ELF + flash; boots the daemon out first
-cc-buddy-bridge install --service --serial-port '/dev/cu.usbmodem*'
-```
-
-Daemon flags used with the robot: `CC_BUDDY_MONITOR_ONLY=1` in the plist env
-(no permission cards on the robot; taps only focus the terminal),
-`~/.config/cc-buddy-bridge/matchers.toml` with `replace_defaults = true` and
-an empty `always_ask`, and `OPENAI_API_KEY` in `~/.config/cc-buddy-bridge/env`
-(mode 600 — the launchd daemon does not read `.zshrc`). The listen key needs
-**Input Monitoring** for the daemon's python. Back up the factory image
-before the first flash (`esptool ... read-flash`, no `-b` on this link);
-restore with `esptool write-flash 0x0 firmware/build-archive/stackchan-factory-20260905.bin`.
-
-| Control | Action |
-|---|---|
-| Front zone tap | attention: raise the blocked terminal. Otherwise a head pat: heart, pink LEDs |
-| Middle zone hold (0.6 s) | push-to-talk, same as holding the panel |
-| Back zone | scroll the transcript (same as the bottom-right strip) |
-| Panel gestures | as the touch pet: hold = dictate, swipe down = Enter, left/right = option pickers |
-
-Full reference: [docs/stackchan/build.md](docs/stackchan/build.md) (port map,
-gaze policy, wire additions, bench-verified conventions); research in
-[capabilities.md](docs/stackchan/capabilities.md) and [repos.md](docs/stackchan/repos.md).
-
-## E-ink agent monitor (variant)
+#### E-ink agent monitor (variant)
 
 `firmware/claude_pet_eink_monitor` is a **variant of the e-ink build for the
 same CrowPanel hardware** — not a third board, and not a replacement.
@@ -205,7 +375,7 @@ Two behaviours worth knowing:
   board re-emits its boot banner while it has no clock; the daemon's existing
   boot detector replays the resync and it goes quiet once time arrives.
 
-### Why this variant does not use partial refresh
+#### Why this variant does not use partial refresh
 
 `EPD_Wake()` does reset + soft-reset + temperature-select only — it never
 re-sends data-entry mode (`0x11`), the address window, or the cursor, all of
@@ -232,7 +402,7 @@ only ever *reads* the heartbeat is still a valid client, it simply emits no
 verbs. DESIGN.md's e-ink section documents the exact contract a new board
 must keep.
 
-## Printable shell
+#### Printable shell
 
 ![frame, back and stand as they come off the printer](docs/assets/shell-render.png)
 
@@ -253,121 +423,21 @@ stand is unchanged and still fits — don't reprint it. Print the **gauge** firs
 1.2mm board-footprint plate with the hole grid; lay the bare PCB on it flush and
 confirm daylight through all four holes before committing to the shell print.
 
-## Controls
-
-| Gesture | Action |
-|---|---|
-| **Swipe card right / left** | approve / deny the pending prompt |
-| **Hold card at the right edge** (700ms) | stamp flips to ALWAYS — approve and stop carding this command shape for the daemon's lifetime |
-| **Tap the card** | expand to a full-screen view of the whole command (long commands truncate on the card); tap again to close |
-| **Swipe the card up** | raise the asking session's terminal — the card stays pending (look before you decide) |
-| **Tap the pet** (attention state only) | raise the terminal of the session that's blocked on you |
-| **Hold the pet** | push-to-talk: holds your dictation hotkey while held |
-| **Swipe down** (anywhere) | press Enter on the Mac |
-| **Swipe left / right** (no card up) | previous / next option in Claude Code's pickers (Up/Down arrow) |
-| Tap bottom-right | scroll back through the transcript |
-
-There is no on-device menu, settings, or info screen — the pet is always the
-whole UI. Species and settings are host-side via the CLI
-(`cc-buddy-bridge species`, `matchers.toml`); battery and link state via
-`cc-buddy-bridge status` / `diag`.
-
-The WS2812 pulses orange while an approval is pending, green on celebrate, pink on heart,
-solid blue while dictating.
-
-## Build & flash
-
-```bash
-arduino-cli core install esp32:esp32          # tested with 3.3.10
-arduino-cli lib install ArduinoJson AnimatedGIF TFT_eSPI
-
-./tools/flash.sh                              # compile → archive ELF → flash → restart daemon
-```
-
-`tools/flash.sh` handles the whole dance: it compiles, files the exact ELF away under
-`firmware/build-archive/` (so any future panic backtrace stays symbolizable), boots the
-daemon **out** (it owns `/dev/cu.usbmodem*` exclusively and the plist sets `KeepAlive`, so
-merely stopping it isn't enough — esptool would fail looking exactly like a bricked board),
-uploads, and bootstraps the daemon back. If the flasher still can't connect: hold **BOOT**,
-tap **RESET**, release BOOT, retry.
-
-## Host bridge
-
-```bash
-cd bridge
-python3.12 -m venv .venv && .venv/bin/pip install -e .
-.venv/bin/cc-buddy-bridge install    # registers the hooks in Claude Code's settings.json
-.venv/bin/cc-buddy-bridge install --service --serial-port '/dev/cu.usbmodem*' --voice-hotkey option
-```
-
-`install` and `install --service` are **two separate steps** — `--service` installs the unit
-*instead of* the hooks, so running only the second leaves you with a connected board that
-never receives session state. Run both.
-
-| Command | What |
-|---|---|
-| `daemon --serial-port …` | run the bridge in the foreground |
-| `install` / `uninstall` / `status` | manage hooks; `--service` installs the launchd/systemd unit *instead* |
-| `install --service --voice-hotkey option` | bake the push-to-talk hotkey into the unit so it survives reinstalls |
-| `audit` | the approval decision log |
-| `diag` / `diag --watch` | why the board last reset, and what it was doing |
-| `voice-check` | diagnose push-to-talk (Accessibility permission, hotkey delivery) |
-| `celebrate` | make the pet celebrate |
-
-### Configuration
-
-| Variable | Purpose |
-|---|---|
-| `CLAUDE_CONFIG_DIR` | which Claude config home `install`/`status` target (default `~/.claude`) |
-| `CC_BUDDY_CLAUDE_CONFIG_DIRS` | `os.pathsep`-separated homes the daemon serves — it runs outside any session, so it can't inherit the above |
-| `CC_BUDDY_VOICE_HOTKEY` | `off` (default — holding the pet never touches the keyboard or your mic), `option` (recommended when enabling), `opt-space`, or `fn`. Bake it in with `install --service --voice-hotkey …`; a hand-edited unit file is wiped by the next `--service` install |
-| `CC_BUDDY_KEY_METHOD` | `osascript` routes Enter through System Events, for apps that swallow synthetic key events (Warp) |
-| `CC_BUDDY_FOCUS_APPS` | comma-separated app names, in priority order, that tap-to-focus raises (e.g. `Warp,cmux,Composer`) — default: Ghostty, Warp, cmux, Composer, Cursor, VS Code |
-| `CC_BUDDY_MONITOR_ONLY` | `1`/`true`/`yes`/`on` → never surface a permission card; defer to Claude Code's own prompt immediately. **Required by the e-ink agent-monitor firmware**, whose buttons can't answer. Env-gated rather than a CLI flag because it's a property of which firmware is flashed, not of how the daemon was invoked |
-
-Installing into the wrong config home **fails silently** — hooks written, board animating,
-no session ever prompting. `status` prints the home it resolved; check it first.
-
-Push-to-talk is off unless `CC_BUDDY_VOICE_HOTKEY` names a chord. When enabled it needs
-**Accessibility permission** for the daemon's python (macOS filters synthetic events from
-untrusted processes). `voice-check` prints the exact binary to grant. Avoid `fn` as a hotkey:
-it's a secondary-fn modifier that many apps read from raw HID, which synthetic events can't
-reach — rebind your dictation app to a bare **Option** hold, which synthesizes reliably.
-
-Granting that permission has two traps worth knowing before you fight them:
-
-- **The system dialog is the easy path.** Holding the pet once triggers macOS's
-  "would like to control this computer" prompt, whose *Open System Settings* button adds the
-  entry for you. It fires **once per daemon lifetime** — if you miss it, restart the daemon
-  to get it back. Adding the binary by hand instead means `+` → file picker → click out of
-  the search field → `Cmd+Shift+G`; dragging from Finder is silently rejected.
-- **`voice-check` run from a granted terminal reports that terminal's permission, not the
-  daemon's.** macOS attributes Accessibility to the responsible process, so a terminal with
-  the grant makes the check print `trusted: True` while the launchd daemon logs
-  `Accessibility not granted`. When the two disagree, **the daemon log is the truth.**
-
-After editing a unit file, reload it properly — `launchctl kickstart` restarts the process
-but reuses the job definition cached at load time, so environment changes are ignored:
-
-```bash
-launchctl unload ~/Library/LaunchAgents/com.github.cc-buddy-bridge.daemon.plist
-launchctl load -w ~/Library/LaunchAgents/com.github.cc-buddy-bridge.daemon.plist
-```
-
 ## Layout
 
 | Path | What |
 |---|---|
-| `firmware/claude_pet` | the sketch — pet state machine, touch UI, swipe cards, clock, diag ring |
+| `firmware/claude_pet` | the touch pet (experiment) — pet state machine, touch UI, swipe cards, clock, diag ring |
 | `firmware/claude_pet/src/board_compat.*` | the port: shims the `M5StickCPlus.h` API onto this board |
 | `firmware/claude_pet_eink` | the CrowPanel 4.2" e-paper build — portrait status display, button approvals, vendored SSD1683 driver |
 | `firmware/claude_pet_eink_monitor` | variant of the above for the same board — landscape read-only agent wallboard, no cards, inert buttons, full-refresh-only panel path |
 | `tools/flash_eink.sh` | compile + ELF archive + flash for the e-ink build |
 | `tools/flash_eink_monitor.sh` | same, for the e-ink agent-monitor variant |
-| `firmware/claude_pet_stackchan` | the M5StackChan K151 robot build — RoboEyes face, head/LED/chirp choreography, camera gaze, host-vision stream |
+| `firmware/claude_pet_stackchan` | **the robot** — RoboEyes face, head/LED/chirp choreography, camera gaze, host-vision stream, affect engine (`mood.cpp`), agent phases |
 | `tools/flash_stackchan.sh` | compile + ELF archive + daemon-safe flash for the robot |
-| `widget/` | macOS WidgetKit widget showing the robot's room notes (`docs/stackchan/widget.md`) |
-| `bridge/src/cc_buddy_bridge` | daemon, hooks, serial transport, voice trigger, read policy |
+| `widget/` | macOS WidgetKit widget + diary window: thoughts, feelings, profile, reflections (`docs/stackchan/widget.md`) |
+| `bridge/src/cc_buddy_bridge` | daemon, hooks, serial transport, read policy; `ears.py` (wake word), `voice_agent.py` (Realtime conversation), `computer_agent.py` + `desktop_worker.py` (gpt-6-astra on the desktop), `explore.py` + `diary.py` (looking around, memory, thoughts), `mood_model.py` (reference affect model) |
+| `docs/stackchan/voice.md`, `docs/stackchan/personality.md` | "hey buddy" and computer control; feelings, agent phases, the diary — with the research behind them |
 | `case/shell_v2.py` | parametric 3D-printable shell, current revision (FreeCAD headless) — frame + back + alignment gauge, heat-set insert bosses, STLs in `case/export/` |
 | `case/shell.py` | v1 shell record (wrong hole grid; superseded) — still the source of the unchanged stand |
 | `case/stand_eink.py` | prop-up stand for the CrowPanel e-ink build — 65° pocket wedge sized off the vendor STEP, open cable mouth, fit-proofed, support-free |

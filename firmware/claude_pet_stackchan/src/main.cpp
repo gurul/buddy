@@ -32,6 +32,7 @@ static void startBt() {
 #include "eyes.h"
 #include "chirp.h"
 #include "gaze.h"
+#include "mood.h"
 // Landscape 320x240 (the robot's face). Portrait build was 240x320.
 const int W = SCREEN_W, H = SCREEN_H;
 const int CX = W / 2;
@@ -776,6 +777,9 @@ void setup() {
   diagLog("setup done buddy=%d", (int)buddyMode);
 }
 
+// The mood expression the eyes render this frame (nullptr = not exploring).
+static const MoodExpr* moodExprForEyes = nullptr;
+
 void loop() {
   diagWatchdogFeed();   // a hang past DIAG_WDT_SECS now resets + reports
   static uint32_t _loopStart = 0;
@@ -825,6 +829,45 @@ void loop() {
   chirpSetEnabled(settings().sound);   // mute follows the pet's sound setting
   chirpUpdate();
   bodyLedPolicy(settings().led, listenNow);
+  // The host conversation ({"cmd":"agent"}): the robot acts the phase out.
+  // A phase older than 15 min with no follow-up is stale (daemon died
+  // mid-conversation): fall back to the persona.
+  {
+    uint8_t ag = tama.agentState;
+    if (ag != AG_IDLE && now - tama.agentAtMs > 15UL * 60UL * 1000UL) { tama.agentState = AG_IDLE; ag = AG_IDLE; }
+    bodySetAgent((AgentState)ag);
+  }
+  // The mood engine: what the camera saw, touches, new views and the host's
+  // appraisal, integrated every loop; expressed only while exploring.
+  {
+    static MoodEngine mood;
+    static uint32_t moodLastMs = 0;
+    static uint32_t moodLogMs = 0;
+    uint32_t dt = moodLastMs ? now - moodLastMs : 0;
+    moodLastMs = now;
+    MoodInput in{};
+    in.exploring = tama.explore;
+    in.asleep = activeState == P_SLEEP;
+    GazeObs ob;
+    if (gazeTakeObs(&ob)) { in.motionConf = ob.motionConf; in.faceSeen = ob.faceSeen; in.faceOwner = ob.faceOwner; }
+    in.touched = bodyTakeTouched();
+    in.newView = bodyTakeNewView();
+    if (tama.emoteReq) {
+      tama.emoteReq = false;
+      in.hostEmote = true; in.dv = tama.emoteDv; in.da = tama.emoteDa;
+      diagLog("emote dv=%d da=%d %s", tama.emoteDv, tama.emoteDa, tama.emoteLabel);
+    }
+    MoodKind before = mood.kind;
+    mood.step(in, dt);
+    bool expressing = tama.explore && tama.agentState == AG_IDLE && !listenNow;
+    bodySetMood(expressing ? &mood.expr : nullptr);
+    moodExprForEyes = expressing ? &mood.expr : nullptr;
+    if (mood.kind != before || now - moodLogMs > 60000) {
+      moodLogMs = now;
+      Serial.printf("[mood] %s v=%.2f a=%.2f social=%.2f stim=%.2f\n", mood.expr.word, mood.v, mood.a,
+                    mood.social, mood.stimulation);
+    }
+  }
   bodyUpdate(activeState, baseState == P_ATTENTION, now);
   // Camera/memory gaze after the body so its bodyLookAt() lands next frame;
   // eyesLookAt() below reads the head angles every frame, so the eyes follow.
@@ -1150,14 +1193,15 @@ void loop() {
     // skip sprite render — face-down, powered off, or landscape clock
   } else {
     const Palette& p = characterPalette();
-    eyesSet(activeState, baseState == P_ATTENTION, listenNow, tama.promptHot, bodyGazeSide(), tama.explore);
+    eyesSet(activeState, baseState == P_ATTENTION, listenNow, tama.promptHot, bodyGazeSide(), tama.explore,
+            tama.agentState, moodExprForEyes);
     eyesCardUp(tama.promptId[0] != 0);   // card owns y >= 126: eyes park on the N row
     eyesLookAt((int8_t)bodyYawDeg(), (int8_t)bodyPitchDeg());
     eyesTick(now);
     // Status word: cleared and redrawn each frame (the card band overwrites
     // it during a prompt, which is intended — the card is the status then).
     spr.fillRect(0, EYES_STATUS_Y, W, 18, p.bg);
-    const char* st = eyesStatusText(activeState, listenNow, tama.explore);
+    const char* st = eyesStatusText(activeState, listenNow, tama.explore, tama.agentState, moodExprForEyes);
     if (st[0]) {
       spr.setTextDatum(MC_DATUM);
       spr.setTextSize(2);

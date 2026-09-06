@@ -40,6 +40,11 @@ struct GazeHostInput {
 void gazeUpdate(PersonaState active, bool needsAttention, bool listening,
                 uint32_t now, bool* ownerReset, GazeHostInput* host);
 
+// What the camera saw since the last call, for the mood engine: the strongest
+// on-board motion/skin confidence, and whether a face (host or on-board) was
+// seen and whether the host tagged it as the owner. Clears on read.
+struct GazeObs { uint8_t motionConf; bool faceSeen; bool faceOwner; };
+bool gazeTakeObs(GazeObs* out);
 // A touch on the pet is an owner observation (weight 2 at yaw ±28, pitch
 // level). Called from bodyNoteToucher().
 void gazeNoteTouch(int8_t side);

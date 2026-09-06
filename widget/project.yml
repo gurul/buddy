@@ -33,6 +33,9 @@ targets:
         CFBundleName: StackChanNotes
         LSUIElement: true
         LSMinimumSystemVersion: "14.0"
+        CFBundleURLTypes:
+          - CFBundleURLName: com.github.cc-buddy-bridge.StackChanNotes
+            CFBundleURLSchemes: [stackchan]
         NSHumanReadableCopyright: MIT
     entitlements:
       path: StackChanNotes/StackChanNotes.entitlements

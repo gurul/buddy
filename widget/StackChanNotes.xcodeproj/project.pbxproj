@@ -8,6 +8,7 @@
 
 /* Begin PBXBuildFile section */
 		0D9D2B38517F4928E7660D15 /* StackChanNotesWidget.appex in Embed Foundation Extensions */ = {isa = PBXBuildFile; fileRef = 90B0C584761D23A8F5B381DC /* StackChanNotesWidget.appex */; settings = {ATTRIBUTES = (RemoveHeadersOnCopy, ); }; };
+		1AFEE56DD21647A645159D29 /* DiaryView.swift in Sources */ = {isa = PBXBuildFile; fileRef = F62C19E6D654259E691D6474 /* DiaryView.swift */; };
 		60A1428A6FE897347E2394B9 /* NoteStore.swift in Sources */ = {isa = PBXBuildFile; fileRef = 3AD72D4FED4488570BCA96ED /* NoteStore.swift */; };
 		61576D5572BCCEA5587116ED /* NoteStore.swift in Sources */ = {isa = PBXBuildFile; fileRef = 3AD72D4FED4488570BCA96ED /* NoteStore.swift */; };
 		7EBD54E6D6885AAA13F3CFA6 /* StackChanNotesApp.swift in Sources */ = {isa = PBXBuildFile; fileRef = 9CAF58838BD7BD34C55C270A /* StackChanNotesApp.swift */; };
@@ -50,6 +51,7 @@
 		C55628C4B48A52DAFD05B905 /* StackChanNotesWidget.entitlements */ = {isa = PBXFileReference; lastKnownFileType = text.plist.entitlements; path = StackChanNotesWidget.entitlements; sourceTree = "<group>"; };
 		D86E64157D65B00D05751E84 /* StackChanNotes.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = StackChanNotes.app; sourceTree = BUILT_PRODUCTS_DIR; };
 		F54C4933A274AD6C400BBE85 /* StackChanNotes.entitlements */ = {isa = PBXFileReference; lastKnownFileType = text.plist.entitlements; path = StackChanNotes.entitlements; sourceTree = "<group>"; };
+		F62C19E6D654259E691D6474 /* DiaryView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DiaryView.swift; sourceTree = "<group>"; };
 /* End PBXFileReference section */
 
 /* Begin PBXGroup section */
@@ -93,6 +95,7 @@
 		DA3BA2039F222259ED015254 /* StackChanNotes */ = {
 			isa = PBXGroup;
 			children = (
+				F62C19E6D654259E691D6474 /* DiaryView.swift */,
 				7D9ED287F21568518C44885F /* Info.plist */,
 				8D991EA2CD7ADE334CFD65C9 /* NotesMirror.swift */,
 				F54C4933A274AD6C400BBE85 /* StackChanNotes.entitlements */,
@@ -193,6 +196,7 @@
 			isa = PBXSourcesBuildPhase;
 			buildActionMask = 2147483647;
 			files = (
+				1AFEE56DD21647A645159D29 /* DiaryView.swift in Sources */,
 				61576D5572BCCEA5587116ED /* NoteStore.swift in Sources */,
 				7F505FC43B317BECFBCF1ED1 /* NotesMirror.swift in Sources */,
 				7EBD54E6D6885AAA13F3CFA6 /* StackChanNotesApp.swift in Sources */,

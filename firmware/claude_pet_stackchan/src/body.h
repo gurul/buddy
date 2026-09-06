@@ -8,6 +8,7 @@
 // This header pulls in no M5 library so board_compat.cpp can include it.
 #include <stdint.h>
 #include "persona.h"
+#include "mood.h"
 
 // After halBegin(). Servo power on, goHome() once, torque managed by the
 // BSP auto-release. Arms the top touch sensor 3 s later (see bodyUpdate).
@@ -79,3 +80,16 @@ int    bodyCmdPitchDeg();
 // with look cmds; the sleep pose is not applied and the LEDs breathe dim
 // white. explore=false restores the state's pose.
 void   bodySetExplore(bool on);
+
+// Host voice / computer-control conversation ({"cmd":"agent","state":..}):
+// the robot acts the phase out (see AgentState in persona.h). AG_IDLE
+// restores the persona state's pose. Never overrides ATTENTION or a card.
+void   bodySetAgent(AgentState s);
+// The mood engine's expression while exploring (main.cpp owns the engine):
+// LED colour and pulse, look-around tempo / amplitude / pitch bias, and one
+// chirp per feeling change. nullptr = not exploring: the plain explore LED.
+void   bodySetMood(const MoodExpr* e);
+// Edge flags for the mood engine, cleared on read: a touch on the pet since
+// the last call; the look-around started a new glance since the last call.
+bool   bodyTakeTouched();
+bool   bodyTakeNewView();

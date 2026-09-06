@@ -1,4 +1,10 @@
 // WidgetKit extension — sandboxed, reads only the mirrored notes.json from the App Group.
+//
+// Design: a dark, warm card. A header with buddy's name and the current feeling
+// (emoji + label + a colour dot: hue from valence, brightness from arousal — the
+// same mapping as the robot's LEDs), then the newest thoughts, each with its
+// time and a thin colour bar for the feeling it was written in. Tapping the
+// widget opens the diary window in the helper app (stackchan://diary).
 
 import SwiftUI
 import WidgetKit
@@ -38,11 +44,24 @@ struct StackChanNotesWidget: Widget {
     var body: some WidgetConfiguration {
         StaticConfiguration(kind: Self.kind, provider: NotesProvider()) { entry in
             NotesView(entry: entry)
-                .containerBackground(.fill.tertiary, for: .widget)
+                .containerBackground(for: .widget) {
+                    LinearGradient(colors: [Color(red: 0.11, green: 0.11, blue: 0.13),
+                                            Color(red: 0.07, green: 0.07, blue: 0.09)],
+                                   startPoint: .topLeading, endPoint: .bottomTrailing)
+                }
+                .widgetURL(AppGroup.diaryURL)
         }
-        .configurationDisplayName("StackChan notes")
-        .description("What your desk robot noticed.")
+        .configurationDisplayName("buddy's diary")
+        .description("What your desk robot noticed, and how it felt about it. Tap to open the diary.")
         .supportedFamilies([.systemSmall, .systemMedium, .systemLarge])
+    }
+}
+
+extension Color {
+    static func mood(_ t: Thought?) -> Color {
+        guard let t else { return Color.white.opacity(0.35) }
+        let (r, g, b) = MoodColor.rgb(valence: t.valence, arousal: t.arousal, label: t.label)
+        return Color(red: r, green: g, blue: b)
     }
 }
 
@@ -52,61 +71,121 @@ struct NotesView: View {
 
     private var lineBudget: Int {
         switch family {
-        case .systemSmall: 3
-        case .systemMedium: 6
-        default: 14
+        case .systemSmall: 2
+        case .systemMedium: 4
+        default: 9
         }
     }
 
-    private var visible: ArraySlice<Note> { entry.snapshot.notes.prefix(lineBudget) }
+    /// Written thoughts first (they match the diary lines); fall back to plain notes
+    /// for a mirror made before memory.jsonl existed.
+    private var rows: [Row] {
+        let written = entry.snapshot.thoughts.filter(\.written)
+        if !written.isEmpty {
+            return written.prefix(lineBudget).map { Row(id: "t\($0.id)", time: $0.time, text: $0.thought, mood: $0,
+                                                        changed: $0.changed.first) }
+        }
+        return entry.snapshot.notes.prefix(lineBudget).map { Row(id: $0.id, time: $0.time, text: $0.text, mood: nil, changed: nil) }
+    }
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 6) {
-            HStack(alignment: .firstTextBaseline) {
-                Text("StackChan")
-                    .font(.headline)
-                Spacer()
-                Text("\(entry.snapshot.notes.count)")
-                    .font(.caption.monospacedDigit())
-                    .foregroundStyle(.secondary)
-            }
-            if visible.isEmpty {
+        VStack(alignment: .leading, spacing: family == .systemSmall ? 6 : 8) {
+            Header(mood: entry.snapshot.mood, count: max(entry.snapshot.notes.count, entry.snapshot.thoughts.filter(\.written).count),
+                   compact: family == .systemSmall)
+            if rows.isEmpty {
                 Spacer(minLength: 0)
-                Text("No notes yet — the robot explores when Claude is idle")
+                Text("Nothing noticed yet — buddy explores when Claude is idle.")
                     .font(.footnote)
-                    .foregroundStyle(.secondary)
+                    .foregroundStyle(.white.opacity(0.6))
                     .multilineTextAlignment(.leading)
                 Spacer(minLength: 0)
             } else {
-                ForEach(visible) { note in
-                    NoteRow(note: note, compact: family == .systemSmall)
+                VStack(alignment: .leading, spacing: family == .systemSmall ? 5 : 7) {
+                    ForEach(rows) { row in
+                        ThoughtRow(row: row, family: family)
+                    }
                 }
                 Spacer(minLength: 0)
+                if family != .systemSmall {
+                    Text("tap to open the diary")
+                        .font(.caption2)
+                        .foregroundStyle(.white.opacity(0.35))
+                }
+            }
+        }
+        .foregroundStyle(.white)
+    }
+}
+
+struct Row: Identifiable {
+    let id: String
+    let time: String
+    let text: String
+    let mood: Thought?
+    let changed: String?
+}
+
+private struct Header: View {
+    let mood: Thought?
+    let count: Int
+    let compact: Bool
+
+    var body: some View {
+        HStack(alignment: .center, spacing: 8) {
+            Circle()
+                .fill(Color.mood(mood))
+                .frame(width: compact ? 9 : 11, height: compact ? 9 : 11)
+                .shadow(color: Color.mood(mood).opacity(0.8), radius: 4)
+            Text("buddy")
+                .font(compact ? .subheadline.weight(.semibold) : .headline)
+            if let mood {
+                Text("\(MoodColor.emoji(for: mood.label)) \(mood.label)")
+                    .font(.caption)
+                    .foregroundStyle(.white.opacity(0.75))
+                    .lineLimit(1)
+            }
+            Spacer(minLength: 0)
+            if !compact {
+                Text("\(count)")
+                    .font(.caption.monospacedDigit())
+                    .foregroundStyle(.white.opacity(0.45))
             }
         }
     }
 }
 
-private struct NoteRow: View {
-    let note: Note
-    let compact: Bool
+private struct ThoughtRow: View {
+    let row: Row
+    let family: WidgetFamily
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 1) {
-            HStack(alignment: .firstTextBaseline, spacing: 6) {
-                Text(note.time)
-                    .font(.caption.monospacedDigit())
-                    .foregroundStyle(.secondary)
-                Text(note.text)
-                    .font(compact ? .caption : .footnote)
-                    .lineLimit(compact ? 2 : 1)
+        HStack(alignment: .top, spacing: 8) {
+            RoundedRectangle(cornerRadius: 1.5)
+                .fill(Color.mood(row.mood))
+                .frame(width: 3)
+                .padding(.vertical, 1)
+            VStack(alignment: .leading, spacing: 2) {
+                HStack(alignment: .firstTextBaseline, spacing: 6) {
+                    Text(row.time)
+                        .font(.caption2.monospacedDigit())
+                        .foregroundStyle(.white.opacity(0.5))
+                    if family == .systemLarge, let m = row.mood {
+                        Text(m.label)
+                            .font(.caption2)
+                            .foregroundStyle(Color.mood(m).opacity(0.9))
+                    }
+                }
+                Text(row.text)
+                    .font(family == .systemSmall ? .caption : .footnote)
+                    .lineLimit(family == .systemSmall ? 3 : family == .systemMedium ? 2 : 2)
                     .truncationMode(.tail)
-            }
-            if !compact, let pose = note.pose {
-                Text(pose)
-                    .font(.caption2)
-                    .foregroundStyle(.tertiary)
-                    .padding(.leading, 38)
+                    .fixedSize(horizontal: false, vertical: true)
+                if family == .systemLarge, let changed = row.changed {
+                    Text("changed: \(changed)")
+                        .font(.caption2)
+                        .foregroundStyle(.white.opacity(0.45))
+                        .lineLimit(1)
+                }
             }
         }
     }

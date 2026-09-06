@@ -377,7 +377,11 @@ host→board `{"cmd":"listen","on":bool}` (Option key), `{"cmd":"cam","on":bool,
 "fps":5,"w":160,"h":120}`, `{"cmd":"face","seq":n,"bx":±100,"by":±100,"size":
 0..100,"conf":0..100,"yaw":Y,"pitch":P,"who":"owner"|"unknown"}`,
 `{"cmd":"look","yaw":±60,"pitch":5..85,"hold":ms}`, `{"cmd":"mode","explore":
-bool}`, `{"cmd":"owner","op":"reset"}`. board→host `{"frame":{"seq":n,"w":160,
+bool}`, `{"cmd":"owner","op":"reset"}`, `{"cmd":"agent","state":"wake"|"listening"|
+"thinking"|"speaking"|"working"|"asking"|"done"|"error"|"idle"}` (the host
+voice / computer-control conversation; `body.cpp` / `eyes.cpp` act each phase
+out), `{"cmd":"emote","dv":±100,"da":±100,"label":".."}` (the diary's
+appraisal → `mood.cpp`, clamped to ±0.3). board→host `{"frame":{"seq":n,"w":160,
 "h":120,"fmt":"jpeg","b64":"...","yaw":Y,"pitch":P}}`, one line per frame from
 the camera task, paused while a character transfer owns the wire. The daemon
 sends `cam on` once per connect after the time sync and `listen off` on every

@@ -121,6 +121,11 @@ def main(argv: list[str] | None = None) -> int:
         "voice-check",
         help="Diagnose hold-the-pet push-to-talk (Accessibility grant, signing, pyobjc)",
     )
+    p_ears = sub.add_parser(
+        "ears-check",
+        help="Diagnose the \"hey buddy\" wake word (mic, model, then listen for the phrase)",
+    )
+    p_ears.add_argument("--seconds", type=float, default=8.0, help="How long to listen (default 8)")
 
     p_diag = sub.add_parser(
         "diag",
@@ -263,6 +268,9 @@ def main(argv: list[str] | None = None) -> int:
     if args.cmd == "voice-check":
         from .voice_trigger import VoiceHold
         return VoiceHold().diagnose()
+    if args.cmd == "ears-check":
+        from .ears import diagnose as ears_diagnose
+        return ears_diagnose(args.seconds)
     if args.cmd == "hud":
         from .hud import run as hud_run
         return hud_run(ascii_only=args.ascii, socket_path=args.socket)

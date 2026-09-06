@@ -91,7 +91,8 @@ connected → IDLE (awake, looking around).
 | HEART | head pat (front zone) | tilt toward the toucher, pitch +8 | HAPPY, curiosity | pink | trill |
 | DIZZY | (kept from the pet build) | 1.2 s yaw wobble | flicker, confused | off | wobble |
 | Listening | Option held on the Mac, or a push-to-talk hold | toward a toucher seen in the last 30 s, else centre; pitch 60 | wide (110 px) | blue (mic live) | one short up-chirp |
-| Explore | `{"cmd":"mode","explore":true}` | host `look`s when held; otherwise looks around on its own (random glance yaw ±45 / pitch 35..65 every 4–9 s) | curiosity, no eye wander | slow dim white breathe (6 s) | — |
+| Explore | `{"cmd":"mode","explore":true}` | host `look`s when held; otherwise looks around on its own — amplitude, tempo and a pitch bias follow the affect engine (`mood.cpp`) | openness, smile/droop, curiosity, blink and saccade tempo from the feeling | the feeling's colour and pulse (0.25 / 0.5 / 2.5 Hz) | one chirp per feeling change |
+| Agent phases | `{"cmd":"agent","state":..}` | listening: faces you · thinking: tilted, slow side-to-side · speaking: bobs · working: down at the desk, typing glances · asking: up · done: nod · error: wobble | per phase ([personality.md](personality.md) § 2) | blue · cyan slow · white · cyan 2.5 Hz · orange · green · red | wake / "hm?" / beep-boop / boop |
 
 Head motion: the BSP runs a spring per servo. On top of it `body.cpp` glides
 each target along `easeInOutCubic` and streams the pose at 25 Hz
@@ -159,6 +160,8 @@ Every other verb is the pet build's (`time`, `status`, `permission`, `focus`, `k
 | host → board | `{"cmd":"look","yaw":-60..60,"pitch":5..85,"hold":ms}` | absolute pose request (explorer) |
 | host → board | `{"cmd":"mode","explore":true\|false}` | enter/leave explore mode |
 | host → board | `{"cmd":"owner","op":"reset"}` | forget the owner memory |
+| host → board | `{"cmd":"agent","state":"wake"\|"listening"\|"thinking"\|"speaking"\|"working"\|"asking"\|"done"\|"error"\|"idle"}` | the voice / computer-control conversation's phase; the robot acts it out ([personality.md](personality.md) § 2) |
+| host → board | `{"cmd":"emote","dv":-100..100,"da":-100..100,"label":"curious"}` | the diary's appraisal of what the camera saw; nudges the affect engine by at most ±0.3 |
 
 Frames pause while a character transfer owns the wire. On this machine: ~4 fps,
 ~2.5 KB JPEGs (quality 60), macOS Vision detects faces in 5–20 ms per frame.
@@ -189,7 +192,10 @@ Knobs (all in `bridge/README.md`): `CC_BUDDY_LISTEN_KEY` (`option`, `fn`,
 `off`), `CC_BUDDY_OWNER_THRESHOLD` (0.9, lower is stricter), `CC_BUDDY_EXPLORE=0`,
 `CC_BUDDY_EXPLORE_AFTER_MIN` (10), `CC_BUDDY_EXPLORE_CYCLE_MIN` (15),
 `CC_BUDDY_NOTES_PER_HOUR` (6), `CC_BUDDY_NOTES_MODEL` (`gpt-5-mini`),
-`CC_BUDDY_NOTES_DIR`, `CC_BUDDY_SAVE_FRAMES`.
+`CC_BUDDY_NOTES_DIR`, `CC_BUDDY_SAVE_FRAMES`; the voice and computer-control
+knobs (`CC_BUDDY_VOICE`, `CC_BUDDY_WAKE_WORD`, `CC_BUDDY_COMPUTER_CONTROL`,
+`CC_BUDDY_AGENT_MODEL`, …) are in [voice.md](voice.md). The daemon's python also
+needs **Microphone** (wake word) and **Screen Recording** (computer use).
 
 ## Owner identity and explorer
 

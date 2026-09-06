@@ -631,7 +631,37 @@ cc-buddy-bridge identity reset      # forget the owner (in the daemon and on dis
 Without macOS Vision every face stays `unknown` and the daemon logs one
 warning at startup.
 
-## Idle explorer and notes
+## "hey buddy": voice and computer control
+
+Say **hey buddy** and the daemon opens a spoken conversation that can run your
+Mac. The wake word is spotted on-device (sherpa-onnx keyword spotting on the
+Mac microphone, ~1 % of a core, no cloud until you speak); the conversation is a
+Realtime session (`gpt-realtime-2.1-mini`, speech in and out, barge-in); a task
+on the computer is a `gpt-6-astra` loop that screenshots, writes PyAutoGUI and
+runs it in a worker process on the real desktop, up to 25 steps, asking out loud
+before anything consequential, stopping on "stop", taking corrections mid-task.
+The robot mirrors every phase (`{"cmd":"agent","state":..}`).
+
+Full guide, setup (Microphone / Accessibility / Screen Recording grants, the
+keyword model download), knobs and safety:
+[docs/stackchan/voice.md](../docs/stackchan/voice.md). Quick checks:
+
+```
+cc-buddy-bridge ears-check          # mic + model, then listen for the phrase
+cc-buddy-bridge voice-check         # Accessibility state (push-to-talk and the worker)
+tail -f ~/Library/Logs/cc-buddy-bridge.log | grep -E "ears|voice|agent"
+```
+
+| Variable | Default | Purpose |
+|---|---|---|
+| `CC_BUDDY_VOICE` | on | `0` disables the microphone and the wake word |
+| `CC_BUDDY_WAKE_WORD` | `hey buddy` | any short English phrase (tokenised at startup, no training) |
+| `CC_BUDDY_WAKE_THRESHOLD` | `0.25` | lower = more sensitive |
+| `CC_BUDDY_MIC` | default input | input device name substring |
+| `CC_BUDDY_REALTIME_MODEL` / `CC_BUDDY_VOICE_NAME` / `CC_BUDDY_VOICE_IDLE_SECS` | `gpt-realtime-2.1-mini` / `marin` / `20` | the conversation |
+| `CC_BUDDY_COMPUTER_CONTROL` / `CC_BUDDY_AGENT_MODEL` / `CC_BUDDY_AGENT_MAX_TURNS` | on / `gpt-6-astra` / `25` | computer use; action logs under `~/.config/cc-buddy-bridge/agent-runs/` |
+
+## Idle explorer and the diary
 
 When Claude has been quiet for a while the robot stops waiting and looks
 around. After `CC_BUDDY_EXPLORE_AFTER_MIN` minutes (default 10) with no
@@ -672,16 +702,29 @@ Every `cc-buddy-bridge` command reads it at startup and fills any variable
 that is not already set — a value from the shell always wins. Without a
 key the robot still pans but takes no notes (one warning at startup).
 
-**Budget.** One note is one Responses API request (`gpt-5-mini` by default,
-`CC_BUDDY_NOTES_MODEL` to change) with one low-detail image, minimal
-reasoning effort, and at most 60 output tokens. A token bucket caps notes at
-`CC_BUDDY_NOTES_PER_HOUR` (default 6; it starts full, so a fresh daemon can
-note a whole first cycle). The change detector keeps the bucket from being
-spent on a room that has not moved. Each call has a 20 s timeout and no
-retries; failures are logged once per 10 minutes and the note is skipped.
+**The diary (`diary.py`).** A note is no longer a caption. Each frame that
+passes the change detector and the token bucket (`CC_BUDDY_NOTES_PER_HOUR`,
+default 6) becomes one `gpt-5-mini` call (`CC_BUDDY_NOTES_MODEL`) that gets the
+whole memory in context — buddy's profile of the room and of you, what you have
+starred, the last three thoughts, five older memories retrieved by recency ×
+importance × relevance, the same hour on earlier days, today's unwritten
+candidates — and returns concrete observations, what changed, three candidate
+thoughts with a typicality score each, novelty, importance, tags and a feeling
+(valence, arousal, label). The least typical specific candidate is kept; it is
+**written to the day's file only if** novelty ≥ 5, importance ≥ 7, or the diary
+has been silent for three hours — otherwise it stays in `memory.jsonl` as an
+unwritten candidate. The feeling goes to the board as `{"cmd":"emote"}` and
+nudges its affect engine. Each evening (or after a busy day) a text-only
+**dreams** pass writes insights and ★ candidates under `## Dreams`, and rewrites
+`profile.md`; `highlights.md` holds what *you* starred from the widget's diary
+window and is always in context. Details and the research behind it:
+[docs/stackchan/personality.md](../docs/stackchan/personality.md) § 3. Each call
+has a 20 s timeout and no retries; failures are logged once per 10 minutes.
 
-**Where notes go.** `CC_BUDDY_NOTES_DIR` (default
-`~/.config/cc-buddy-bridge/notes`, created mode 700), one file per day:
+**Where it lives.** `CC_BUDDY_NOTES_DIR` (default
+`~/.config/cc-buddy-bridge/notes`, created mode 700): `YYYY-MM-DD.md` (the
+diary, one line per written thought, `## Dreams` at night), `memory.jsonl`
+(every record), `profile.md`, `highlights.md`. The dated files:
 
 ```
 $ cc-buddy-bridge notes --last 3

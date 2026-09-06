@@ -20,6 +20,12 @@ enum ChirpKind : uint8_t {
   CHIRP_OK,          // "beep-boop": card approved from the board
   CHIRP_NO,          // descending "boop": card denied
   CHIRP_CONFUSED,    // wobble: DIZZY
+  // Mood engine (mood.cpp) while exploring, one per feeling change:
+  CHIRP_CURIOUS,     // two rising notes: "oh?"
+  CHIRP_SURPRISE,    // one high blip: "!"
+  CHIRP_SIGH,        // slow falling sweep: bored / lonely
+  CHIRP_WARBLE,      // soft quick warble: happy / affection
+  CHIRP_STARTLE,     // sharp high double-blip: startled
 };
 
 // Allocates two 32 KB PSRAM buffers (double-buffered so a forced phrase never

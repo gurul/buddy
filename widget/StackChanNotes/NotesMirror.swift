@@ -23,6 +23,8 @@ final class NotesMirror {
 
     let notesDir: URL
     private(set) var count = 0
+    /// The last snapshot read (thoughts, notes, profile, reflections) — the diary window reads it.
+    private(set) var snapshot: NotesSnapshot = .empty
     private(set) var lastSync: Date?
     private(set) var lastError: String?
 
@@ -33,6 +35,9 @@ final class NotesMirror {
     private var timer: Timer?
     private var pending: Task<Void, Never>?
     private var lastNotes: [Note]?
+    private var lastThoughts: [Thought]?
+    private var lastProfile: String?
+    private var lastHighlights: [String]?
 
     private init() {
         if let override = ProcessInfo.processInfo.environment[Self.envKey], !override.isEmpty {
@@ -60,20 +65,37 @@ final class NotesMirror {
         }
     }
 
+    /// Star a claim into highlights.md, then re-sync so the widget and the diary window see it.
+    func star(_ claim: String) {
+        do {
+            try NoteStore.star(claim, notesDir: notesDir)
+            lastError = nil
+        } catch {
+            lastError = error.localizedDescription
+            log.error("star failed: \(error.localizedDescription, privacy: .public)")
+        }
+        sync()
+    }
+
     func sync() {
         armDirWatcher()
         let (snapshot, newest) = NoteStore.read(notesDir: notesDir)
         armFileWatcher(newest)
 
-        count = snapshot.notes.count
+        count = max(snapshot.notes.count, snapshot.thoughts.filter(\.written).count)
         lastSync = .now
-        guard snapshot.notes != lastNotes else { return }
+        self.snapshot = snapshot
+        guard snapshot.notes != lastNotes || snapshot.thoughts != lastThoughts || snapshot.profile != lastProfile
+              || snapshot.highlights != lastHighlights else { return }
 
         do {
             try NoteStore.save(snapshot)
             lastNotes = snapshot.notes
+            lastThoughts = snapshot.thoughts
+            lastProfile = snapshot.profile
+            lastHighlights = snapshot.highlights
             lastError = nil
-            log.info("mirrored \(snapshot.notes.count) notes → \(AppGroup.notesFileURL?.path ?? "?", privacy: .public)")
+            log.info("mirrored \(snapshot.notes.count) notes, \(snapshot.thoughts.count) thoughts → \(AppGroup.notesFileURL?.path ?? "?", privacy: .public)")
             WidgetCenter.shared.reloadAllTimelines()
         } catch {
             lastError = error.localizedDescription
