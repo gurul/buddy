@@ -381,7 +381,9 @@ bool}`, `{"cmd":"owner","op":"reset"}`. board→host `{"frame":{"seq":n,"w":160,
 "h":120,"fmt":"jpeg","b64":"...","yaw":Y,"pitch":P}}`, one line per frame from
 the camera task, paused while a character transfer owns the wire. The daemon
 sends `cam on` once per connect after the time sync and `listen off` on every
-connect so a reboot mid-hold never sticks the pose.
+connect so a reboot mid-hold never sticks the pose. `mode explore true` stays
+on through the explorer's rest between pan cycles; with no `look` held the
+body plays its own random look-around (`body.cpp`, `nextExploreAt`).
 
 ## Phases
 

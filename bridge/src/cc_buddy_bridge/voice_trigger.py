@@ -71,8 +71,12 @@ HOTKEYS: dict[str, list[tuple[int, int]]] = {
     "option": [(KEY_OPTION, FLAG_ALTERNATE)],
     "fn": [(KEY_FUNCTION, FLAG_SECONDARY_FN)],
     "opt-space": [(KEY_OPTION, 0), (KEY_SPACE, FLAG_ALTERNATE)],
+    # No chord at all: holding the pet never touches the keyboard, so buddy
+    # never starts your dictation app (and so never opens the mic). This is
+    # the default — push-to-talk is opt-in via CC_BUDDY_VOICE_HOTKEY.
+    "off": [],
 }
-DEFAULT_HOTKEY = "option"
+DEFAULT_HOTKEY = "off"
 
 
 def _configured_hotkey() -> str:
@@ -213,7 +217,18 @@ class VoiceHold:
     def active(self) -> bool:
         return self._held_since is not None
 
+    @property
+    def enabled(self) -> bool:
+        """False when the hotkey is ``off``: holds are logged and dropped."""
+        return bool(self._chord)
+
     def start(self) -> bool:
+        if not self.enabled:
+            if not self._prompted:
+                log.info("voice: push-to-talk is off (set CC_BUDDY_VOICE_HOTKEY to "
+                         "option/opt-space/fn to let the pet hold your dictation key)")
+                self._prompted = True
+            return False
         if self._poster is None:
             return False
         if self.active:
@@ -285,6 +300,10 @@ class VoiceHold:
             print("  grant to the signature. Remove every stale python entry in")
             print("  the Accessibility list, then re-add the resolved path above.")
 
+        print(f"hotkey:                {self._hotkey}")
+        if not self.enabled:
+            print("  push-to-talk is OFF (the default): holding the pet never presses a key.")
+            print("  Opt in with CC_BUDDY_VOICE_HOTKEY=option|opt-space|fn.")
         if self._poster is None:
             print("quartz poster:         UNAVAILABLE (pyobjc not installed?)")
             return 2
@@ -300,6 +319,9 @@ class VoiceHold:
             print("  4. restart the daemon:")
             print("     launchctl kickstart -k gui/$(id -u)/com.github.cc-buddy-bridge.daemon")
             return 1
+        if not self.enabled:
+            print("\nAccessibility is granted; set CC_BUDDY_VOICE_HOTKEY to enable push-to-talk.")
+            return 0
         print("\nReady — hold the pet to dictate.")
         return 0
 

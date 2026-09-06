@@ -91,7 +91,7 @@ connected → IDLE (awake, looking around).
 | HEART | head pat (front zone) | tilt toward the toucher, pitch +8 | HAPPY, curiosity | pink | trill |
 | DIZZY | (kept from the pet build) | 1.2 s yaw wobble | flicker, confused | off | wobble |
 | Listening | Option held on the Mac, or a push-to-talk hold | toward a toucher seen in the last 30 s, else centre; pitch 60 | wide (110 px) | blue (mic live) | one short up-chirp |
-| Explore | `{"cmd":"mode","explore":true}` | host drives it | curiosity, no idle wander | slow dim white breathe (6 s) | — |
+| Explore | `{"cmd":"mode","explore":true}` | host `look`s when held; otherwise looks around on its own (random glance yaw ±45 / pitch 35..65 every 4–9 s) | curiosity, no eye wander | slow dim white breathe (6 s) | — |
 
 Head motion: the BSP runs a spring per servo. On top of it `body.cpp` glides
 each target along `easeInOutCubic` and streams the pose at 25 Hz
@@ -181,7 +181,8 @@ empty `always_ask`, so no Bash command is routed to the board either.
 The launchd daemon does not read `.zshrc`: put `OPENAI_API_KEY=sk-...` in
 `~/.config/cc-buddy-bridge/env` (mode 600); a value already in the environment
 wins. The daemon's python needs **Input Monitoring** (listen key) and
-**Accessibility** (push-to-talk, Enter); the startup log names the binary.
+**Accessibility** (Enter, and push-to-talk if you opt in with
+`CC_BUDDY_VOICE_HOTKEY`; it is off by default); the startup log names the binary.
 Reload the plist with `launchctl unload` + `load -w`, not `kickstart`.
 
 Knobs (all in `bridge/README.md`): `CC_BUDDY_LISTEN_KEY` (`option`, `fn`,
@@ -200,8 +201,9 @@ later face `owner` or `unknown` (`cc-buddy-bridge identity`, `identity reset`).
 After 10 idle minutes the daemon sends `mode explore true`, walks ten `look`
 waypoints (yaw -45..45 at pitch 40, then 60), and when a view changed spends
 one note (OpenAI Responses API, one low-detail image, 60 output tokens max)
-on `~/.config/cc-buddy-bridge/notes/YYYY-MM-DD.md`. Any sign of the human
-stops it. `cc-buddy-bridge notes --last 3` reads them; the WidgetKit widget in
+on `~/.config/cc-buddy-bridge/notes/YYYY-MM-DD.md`. Between the host's looks
+and through the rest between cycles the robot stays in explore mode and looks
+around the room on its own. Any sign of the human stops it. `cc-buddy-bridge notes --last 3` reads them; the WidgetKit widget in
 `widget/` or `cc-buddy-bridge notes-widget` shows them on the desktop.
 
 ## Bench-verified conventions

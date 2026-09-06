@@ -26,6 +26,7 @@ from cc_buddy_bridge.explore import (
     Mode,
     Note,
     NoteTaker,
+    Rest,
     TokenBucket,
     append_note,
     build_look_cmd,
@@ -154,28 +155,54 @@ def test_waypoint_cadence_one_look_per_six_seconds() -> None:
     assert e.cycles == 1
 
 
-def test_cycle_end_leaves_explore_mode_and_rests() -> None:
+def test_cycle_end_rests_with_the_board_still_exploring() -> None:
+    """A finished pan cycle sends nothing over the wire: the board stays in
+    explore mode and looks around on its own until the next cycle."""
     e = Explorer(_cfg(cycle_wait_secs=100.0), now=0.0, notes_enabled=False)
     now = 0.0
     last: list = []
     while e.state != Explorer.RESTING:
         last = _tick(e, now)
         now += 1.0
-    assert last == [Mode(False, "cycle complete, next in 2 min")]
+    assert last == [Rest("cycle complete, board looks around on its own; next pan in 2 min")]
+    assert not any(isinstance(a, Mode) for a in last)
+    assert e.on_board and not e.active
     rest_started = now - 1.0
     assert _tick(e, rest_started + 50.0) == []
     actions = _tick(e, rest_started + 100.0)
     assert actions[0] == Mode(True, "idle 10 min") and isinstance(actions[1], Look)
 
 
-def test_activity_while_resting_goes_off_silently() -> None:
+@pytest.mark.parametrize("kw,reason", [
+    ({"idle": 0.0}, "activity"),
+    ({"card_pending": True}, "card pending"),
+    ({"listening": True}, "listen key"),
+    ({"connected": False}, "board disconnected"),
+])
+def test_activity_while_resting_leaves_explore_mode(kw, reason) -> None:
+    """The board was left exploring through the rest; a blocker must hand
+    the head back to the persona with an explicit mode-off."""
     e = _explorer(notes_enabled=False)
     now = 0.0
     while e.state != Explorer.RESTING:
         _tick(e, now)
         now += 1.0
-    assert _tick(e, now, idle=0.0) == []
-    assert e.state == Explorer.OFF
+    assert _tick(e, now, **kw) == [Mode(False, reason)]
+    assert e.state == Explorer.OFF and not e.on_board
+
+
+def test_on_board_tracks_exploring_and_resting() -> None:
+    e = Explorer(_cfg(cycle_wait_secs=0.0), now=0.0, notes_enabled=False)
+    assert not e.on_board
+    _tick(e, 0.0)
+    assert e.on_board and e.active
+    now = 1.0
+    while e.state != Explorer.RESTING:
+        _tick(e, now)
+        now += 1.0
+    assert e.on_board and not e.active
+    e.reset()
+    assert not e.on_board
 
 
 def test_frame_sampled_two_seconds_after_look_once_per_waypoint() -> None:

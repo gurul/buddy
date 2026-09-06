@@ -240,13 +240,32 @@ async def focus_session_terminal(cwd: str) -> None:
                 if result == "frontmost" and frontmost_app is None:
                     frontmost_app = proc_name
 
-        # A candidate is already frontmost and nothing matched by title —
-        # activating it would be an invisible no-op. Odds are the session is
-        # what's on screen (Claude Code retitles windows to the conversation
-        # summary, which never contains the cwd).
+        # A candidate is already frontmost and nothing matched by title.
+        # Claude Code retitles windows to the conversation summary, which
+        # never contains the cwd, so this is the common case — and "frontmost"
+        # does NOT mean visible: an app whose only window is minimized, or
+        # whose windows all live on another Space, stays the active app while
+        # the human looks at something else (every tap 2026-09-05 landed here
+        # and did nothing). Prove a window is on screen before standing down.
         if frontmost_app is not None:
-            log.info("focus: %s already frontmost, no window matched %r — "
-                     "assuming it's on screen", frontmost_app, needle)
+            unmin = await _osascript(_UNMINIMIZE_SCRIPT, frontmost_app)
+            if unmin == "visible":
+                log.info("focus: %s already frontmost with a window on screen, "
+                         "no window matched %r", frontmost_app, needle)
+                return
+            if unmin == "unminimized":
+                log.info("focus: %s frontmost but minimized — restored a window",
+                         frontmost_app)
+                return
+            # No window on this Space (or AX error): activate by bundle id,
+            # which switches to the Space holding the app's windows.
+            bundle_id = next((b for n, b in running if n == frontmost_app), None)
+            if bundle_id is not None:
+                result = await _osascript(_ACTIVATE_SCRIPT, bundle_id)
+            else:
+                result = await _osascript(_ACTIVATE_BY_NAME_SCRIPT, frontmost_app)
+            log.info("focus: %s frontmost with no visible window (%s) — activated (%s)",
+                     frontmost_app, unmin or "ax-error", result or "error")
             return
 
         # Pass 2: no window matched anywhere — raise the first running app,
