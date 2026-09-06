@@ -32,6 +32,7 @@ static void startBt() {
 #include "eyes.h"
 #include "chirp.h"
 #include "gaze.h"
+#include "look.h"
 #include "mood.h"
 // Landscape 320x240 (the robot's face). Portrait build was 240x320.
 const int W = SCREEN_W, H = SCREEN_H;
@@ -861,6 +862,14 @@ void loop() {
       tama.emoteReq = false;
       in.hostEmote = true; in.dv = tama.emoteDv; in.da = tama.emoteDa;
       diagLog("emote dv=%d da=%d %s", tama.emoteDv, tama.emoteDa, tama.emoteLabel);
+    }
+    if (tama.snapReq) {
+      // The host wants a photo of what buddy finds cool: the look task sends
+      // the next whole frame at full size; the shutter click is ours.
+      tama.snapReq = false;
+      look::requestSnap();
+      chirpBeep(2600, 25);
+      diagLog("snap");
     }
     MoodKind before = mood.kind;
     mood.step(in, dt);

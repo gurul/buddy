@@ -176,6 +176,14 @@ def main(argv: list[str] | None = None) -> int:
     p_notes.add_argument("-n", "--last", type=int, default=20,
                          help="Show the last N notes (default 20; 0 = all)")
 
+    p_photos = sub.add_parser(
+        "photos",
+        help="The pictures buddy kept of views it found cool: list them, or open the newest",
+    )
+    p_photos.add_argument("action", choices=("list", "open"), nargs="?", default="list")
+    p_photos.add_argument("-n", "--last", type=int, default=10,
+                          help="How many to list, newest first (default 10; 0 = all)")
+
     p_notes_test = sub.add_parser(
         "notes-test",
         help="Send one image to the notes model and print the sentence (one real API call)",
@@ -297,6 +305,8 @@ def main(argv: list[str] | None = None) -> int:
     if args.cmd == "notes":
         from .explore import run_notes_cli
         return run_notes_cli(args.last)
+    if args.cmd == "photos":
+        return _run_photos(args.action, args.last)
     if args.cmd == "notes-test":
         from .explore import run_notes_test
         return run_notes_test(args.image)
@@ -441,6 +451,36 @@ SPECIES = [
     "penguin", "turtle", "snail", "ghost", "axolotl", "cactus", "robot",
     "rabbit", "mushroom", "chonk",
 ]
+
+
+def _run_photos(action: str, last: int) -> int:
+    """``cc-buddy-bridge photos [list|open]``: the shelf, straight off disk."""
+    import subprocess
+
+    from .explore import configured as explore_configured
+    from .photos import format_usage, iter_recent
+
+    notes_dir = explore_configured().notes_dir
+    recent = list(iter_recent(notes_dir, last if action == "list" else 1))
+    if not recent:
+        print(f"no photos yet in {notes_dir / 'photos'}")
+        return 0
+    if action == "open":
+        newest = recent[0]
+        if sys.platform != "darwin":
+            print(newest)
+            return 0
+        subprocess.run(["open", str(newest)], check=False)
+        print(f"opened {newest}")
+        return 0
+    for path in recent:
+        try:
+            size = path.stat().st_size
+        except OSError:
+            size = 0
+        print(f"{path.parent.name} {path.stem.split('-')[0]}  {size / 1024:6.0f} KB  {path}")
+    print(f"({format_usage(notes_dir)})")
+    return 0
 
 
 def _run_explore(action: str, socket_path: Optional[str]) -> int:

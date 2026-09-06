@@ -83,9 +83,18 @@ struct NotesView: View {
         let written = entry.snapshot.thoughts.filter(\.written)
         if !written.isEmpty {
             return written.prefix(lineBudget).map { Row(id: "t\($0.id)", time: $0.time, text: $0.thought, mood: $0,
-                                                        changed: $0.changed.first) }
+                                                        changed: $0.changed.first, photo: AppGroup.photo($0.photo)) }
         }
-        return entry.snapshot.notes.prefix(lineBudget).map { Row(id: $0.id, time: $0.time, text: $0.text, mood: nil, changed: nil) }
+        return entry.snapshot.notes.prefix(lineBudget).map { Row(id: $0.id, time: $0.time, text: $0.text, mood: nil,
+                                                                 changed: nil, photo: nil) }
+    }
+
+    /// The newest photo among the shown rows — the medium and large widget lead
+    /// with it, because a picture is why buddy kept that moment.
+    private var lead: (row: Row, url: URL)? {
+        guard family != .systemSmall else { return nil }
+        for row in rows { if let url = row.photo { return (row, url) } }
+        return nil
     }
 
     var body: some View {
@@ -100,8 +109,11 @@ struct NotesView: View {
                     .multilineTextAlignment(.leading)
                 Spacer(minLength: 0)
             } else {
+                if let lead {
+                    PhotoStrip(url: lead.url, height: family == .systemLarge ? 96 : 64)
+                }
                 VStack(alignment: .leading, spacing: family == .systemSmall ? 5 : 7) {
-                    ForEach(rows) { row in
+                    ForEach(rows.prefix(lead == nil ? lineBudget : max(1, lineBudget - 2))) { row in
                         ThoughtRow(row: row, family: family)
                     }
                 }
@@ -117,12 +129,39 @@ struct NotesView: View {
     }
 }
 
+/// The mirrored photo, rounded and cropped to a wide strip.
+private struct PhotoStrip: View {
+    let url: URL
+    let height: CGFloat
+
+    var body: some View {
+        if let image = NSImage(contentsOf: url) {
+            Image(nsImage: image)
+                .resizable()
+                .aspectRatio(contentMode: .fill)
+                .frame(height: height)
+                .frame(maxWidth: .infinity)
+                .clipShape(RoundedRectangle(cornerRadius: 8))
+                .overlay(alignment: .topTrailing) {
+                    Image(systemName: "camera.fill")
+                        .font(.caption2)
+                        .foregroundStyle(.white.opacity(0.85))
+                        .padding(4)
+                        .background(.black.opacity(0.35), in: Circle())
+                        .padding(5)
+                }
+        }
+    }
+}
+
 struct Row: Identifiable {
     let id: String
     let time: String
     let text: String
     let mood: Thought?
     let changed: String?
+    /// The mirrored photo buddy kept for this thought, if it kept one.
+    var photo: URL? = nil
 }
 
 private struct Header: View {

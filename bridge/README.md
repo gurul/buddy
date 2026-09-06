@@ -743,10 +743,40 @@ window and is always in context. Details and the research behind it:
 [docs/stackchan/personality.md](../docs/stackchan/personality.md) § 3. Each call
 has a 20 s timeout and no retries; failures are logged once per 10 minutes.
 
+**Photos.** A few views are worth more than a sentence. When one scores high
+enough on the *cool factor* — unlike anything in memory, or unlike what this
+spot usually looks like, multiplied by how strongly buddy felt about it — the
+daemon asks the board for one full-resolution frame (`{"cmd":"snap"}`, 320x240)
+and keeps it:
+
+```
+cc-buddy-bridge photos              # what buddy has kept, newest first
+cc-buddy-bridge photos open         # open the newest
+```
+
+The picture lands in `photos/YYYY-MM-DD/HHMMSS-<id>.jpg` under the notes
+directory, its path goes into `memory.jsonl`, and the day's Markdown gets an
+image line under the diary line, which is itself unchanged:
+
+```
+- 14:12 yaw=+20 pitch=40 — Someone brought a plant to my desk.
+  ![](photos/2026-09-06/141207-118.jpg)
+```
+
+A photo always earns its diary line, even when the write gate would not have.
+Habituation stops repeats: the same picture again is refused, each earlier photo
+of the same subject is worth less than the last, and a spot goes dull for a few
+hours after buddy photographs it. The bar moves with how interesting the week has
+been, and the budget is 2 an hour and 8 a day. Everything buddy has ★-starred in
+the diary window tilts what it wants to photograph — the one part of the gate
+that grows with its life. `CC_BUDDY_PHOTOS_MAX` (300) and
+`CC_BUDDY_PHOTOS_MAX_MB` (100) cap the shelf, oldest first; the whole design and
+the research behind it is [personality.md](../docs/stackchan/personality.md) § 4.
+
 **Where it lives.** `CC_BUDDY_NOTES_DIR` (default
 `~/.config/cc-buddy-bridge/notes`, created mode 700): `YYYY-MM-DD.md` (the
 diary, one line per written thought, `## Dreams` at night), `memory.jsonl`
-(every record), `profile.md`, `highlights.md`. The dated files:
+(every record), `profile.md`, `highlights.md`, `photos/`. The dated files:
 
 ```
 $ cc-buddy-bridge notes --last 3

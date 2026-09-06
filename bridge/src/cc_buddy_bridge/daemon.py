@@ -53,7 +53,7 @@ from .read_policy import is_within, read_scope
 from .state import State
 from .version_check import check as version_check
 from .vision import STATS_INTERVAL_SECS as VISION_STATS_SECS
-from .vision import FaceTracker, build_cam_cmd, configured_save_dir, decode_frame, make_detector
+from .vision import FaceTracker, Frame, build_cam_cmd, build_snap_cmd, configured_save_dir, decode_frame, make_detector
 
 # Entry text is prefixed with a 2-byte marker ("> ", "@ ", "+ ") before being
 # stored. Budget the user-supplied portion so the full entry stays within the
@@ -168,6 +168,9 @@ class Daemon:
         # The newest raw {"frame":...} object, kept only while exploring so a
         # waypoint sample never costs a decode on the 5 fps path.
         self._explore_raw_frame: Optional[dict[str, Any]] = None
+        # A pending {"cmd":"snap"}: the diary asked for a photo and waits on
+        # this future for the one frame line the board answers with.
+        self._snap_waiter: Optional[asyncio.Future[Frame]] = None
         # Most recent {"diag":{...}} the board sent; served over IPC so
         # `cc-buddy-bridge diag` can show it without owning the serial port.
         self._last_diag: Optional[dict[str, Any]] = None
@@ -238,7 +241,8 @@ class Daemon:
         client = make_diary_client(self._explore_cfg.model)
         self._explorer.notes_enabled = client is not None
         if client is not None:
-            self._notes = DiaryTaker(client, self._explore_cfg.notes_dir, send_emote=self._send_emote)
+            self._notes = DiaryTaker(client, self._explore_cfg.notes_dir, send_emote=self._send_emote,
+                                     snapshot=self._take_snapshot)
         tasks.append(asyncio.create_task(self._explore_loop(), name="explore"))
         if not self._explore_cfg.enabled:
             log.info("explore: idle start disabled (CC_BUDDY_EXPLORE=0); "
@@ -655,6 +659,29 @@ class Daemon:
         """The diary's appraisal of what the camera saw → the board's mood engine."""
         if self.ble.connected:
             await self.ble.send(build_emote_cmd(e))
+
+    SNAP_TIMEOUT_SECS = 3.0
+
+    async def _take_snapshot(self) -> Optional[Frame]:
+        """The diary wants a photo: ask the board for one full-size frame and
+        wait for it. None when the board is away, busy with another snap, or
+        silent (older firmware) — the caller then keeps the stream frame."""
+        if not self.ble.connected or (self._snap_waiter is not None and not self._snap_waiter.done()):
+            return None
+        loop = asyncio.get_running_loop()
+        self._snap_waiter = loop.create_future()
+        try:
+            await self.ble.send(build_snap_cmd())
+            return await asyncio.wait_for(asyncio.shield(self._snap_waiter), timeout=self.SNAP_TIMEOUT_SECS)
+        except asyncio.TimeoutError:
+            log.info("diary: snap not answered in %.0f s (older firmware?) — keeping the stream frame",
+                     self.SNAP_TIMEOUT_SECS)
+            return None
+        except ValueError as e:
+            log.warning("diary: snap frame undecodable: %s", e)
+            return None
+        finally:
+            self._snap_waiter = None
 
     async def _request_explore(self, reason: str) -> None:
         """The owner asked (CLI or voice): start a manual explore now.
@@ -1123,6 +1150,17 @@ class Daemon:
     async def _handle_ble(self, obj: dict[str, Any]) -> None:
         frame = obj.get("frame")
         if isinstance(frame, dict):
+            if frame.get("snap") is True:
+                # The photo we asked for: hand it to the waiting diary, never
+                # to the face tracker (it is 320x240, and it is not a stream
+                # frame). An unasked-for snap is dropped.
+                waiter, self._snap_waiter = self._snap_waiter, None
+                if waiter is not None and not waiter.done():
+                    try:
+                        waiter.set_result(decode_frame(frame))
+                    except ValueError as e:
+                        waiter.set_exception(e)
+                return
             # Camera frame: hottest object on the link (5/s). Hand it to the
             # tracker, which parks or runs it and replies with the face cmd.
             # While exploring, also keep the newest one for the next waypoint

@@ -88,6 +88,7 @@ class Frame:
     data: bytes         # decoded payload: JPEG file bytes, or w*h luma bytes
     yaw: Optional[float] = None
     pitch: Optional[float] = None
+    snap: bool = False  # a one-off full-size photo answering {"cmd":"snap"}, not a stream frame
 
 
 @dataclass(frozen=True)
@@ -161,7 +162,13 @@ def decode_frame(obj: dict[str, Any]) -> Frame:
     return Frame(
         seq=seq, w=w, h=h, fmt=fmt, data=data,
         yaw=_opt_float(obj.get("yaw")), pitch=_opt_float(obj.get("pitch")),
+        snap=obj.get("snap") is True,
     )
+
+
+def build_snap_cmd() -> dict[str, Any]:
+    """Ask the board for one full-resolution photo (a frame line with ``"snap":true``)."""
+    return {"cmd": "snap"}
 
 
 def _opt_float(v: Any) -> Optional[float]:

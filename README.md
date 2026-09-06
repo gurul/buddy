@@ -39,6 +39,12 @@ all of them in context, picked for being specific and not typical, and only kept
 is interesting. At night it sleeps on the day: it rewrites what it knows about the room
 and about you, and proposes things it should never forget. Star one and it never does.
 
+**It takes pictures of things it finds cool.** Most of what it sees becomes a
+sentence. A few things — a first, someone in the room, its own things moved,
+anything that made it feel something — get a photo, taken at full resolution on
+its own judgment. It will not photograph the same thing twice, it loses interest
+in a corner it just shot, and what you star teaches it what to look for.
+
 **It shows you.** A macOS desktop widget carries the latest thoughts and the current
 feeling; click it for the whole diary — what it saw, what changed, how it felt over
 time, its profile of you, its dreams.

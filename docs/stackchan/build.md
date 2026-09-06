@@ -159,6 +159,7 @@ Every other verb is the pet build's (`time`, `status`, `permission`, `focus`, `k
 | host → board | `{"cmd":"face","seq":n,"bx":..,"by":..,"size":..,"conf":..,"yaw":Y,"pitch":P,"who":"owner"\|"unknown"}` | largest face; `conf:0` = no face |
 | host → board | `{"cmd":"look","yaw":-60..60,"pitch":5..85,"hold":ms}` | absolute pose request (explorer) |
 | host → board | `{"cmd":"mode","explore":true\|false}` | enter/leave explore mode |
+| host → board | `{"cmd":"snap"}` | one full-size photo: the look task answers with a single frame line at 320x240, quality 85, carrying `"snap":true` |
 | host → board | `{"cmd":"owner","op":"reset"}` | forget the owner memory |
 | host → board | `{"cmd":"agent","state":"wake"\|"listening"\|"thinking"\|"speaking"\|"working"\|"asking"\|"done"\|"error"\|"idle"}` | the voice / computer-control conversation's phase; the robot acts it out ([personality.md](personality.md) § 2) |
 | host → board | `{"cmd":"emote","dv":-100..100,"da":-100..100,"label":"curious"}` | the diary's appraisal of what the camera saw; nudges the affect engine by at most ±0.3 |
@@ -193,7 +194,8 @@ Knobs (all in `bridge/README.md`): `CC_BUDDY_LISTEN_KEY` (`option`, `fn`,
 `off`), `CC_BUDDY_OWNER_THRESHOLD` (0.9, lower is stricter), `CC_BUDDY_EXPLORE=0`,
 `CC_BUDDY_EXPLORE_AFTER_MIN` (10), `CC_BUDDY_EXPLORE_CYCLE_MIN` (15),
 `CC_BUDDY_NOTES_PER_HOUR` (6), `CC_BUDDY_NOTES_MODEL` (`gpt-5-mini`),
-`CC_BUDDY_NOTES_DIR`, `CC_BUDDY_SAVE_FRAMES`; the voice and computer-control
+`CC_BUDDY_NOTES_DIR`, `CC_BUDDY_SAVE_FRAMES`, `CC_BUDDY_PHOTOS_MAX` (300),
+`CC_BUDDY_PHOTOS_MAX_MB` (100); the voice and computer-control
 knobs (`CC_BUDDY_VOICE`, `CC_BUDDY_WAKE_WORD`, `CC_BUDDY_COMPUTER_CONTROL`,
 `CC_BUDDY_AGENT_MODEL`, …) are in [voice.md](voice.md). The daemon's python also
 needs **Microphone** (wake word) and **Screen Recording** (computer use).
@@ -220,6 +222,11 @@ starts the explore once the board has left the conversation pose. A manual
 explore ignores the idle clock; a touch, a card, the listen key, the next wake
 word, a disconnect or `explore stop` ends it. `CC_BUDDY_EXPLORE=0` only turns
 off the idle start.
+
+When a view scores high on the cool factor the daemon sends `{"cmd":"snap"}` and
+keeps the 320x240 frame the board answers with as a photo under
+`photos/YYYY-MM-DD/` in the notes directory (`cc-buddy-bridge photos`). The score,
+its research and the habituation rules are in [personality.md](personality.md) § 4.
 
 ## Bench-verified conventions
 

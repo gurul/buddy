@@ -12,7 +12,8 @@ struct DiaryView: View {
     @State private var tab: Tab = .thoughts
 
     enum Tab: String, CaseIterable, Identifiable {
-        case thoughts = "Thoughts", feelings = "Feelings", profile = "Profile", reflections = "Dreams"
+        case thoughts = "Thoughts", photos = "Photos", feelings = "Feelings", profile = "Profile",
+             reflections = "Dreams"
         var id: String { rawValue }
     }
 
@@ -23,6 +24,7 @@ struct DiaryView: View {
             Group {
                 switch tab {
                 case .thoughts: ThoughtsList(thoughts: mirror.snapshot.thoughts, notes: mirror.snapshot.notes)
+                case .photos: PhotosGrid(thoughts: mirror.snapshot.thoughts, notesDir: mirror.notesDir)
                 case .feelings: FeelingsView(thoughts: mirror.snapshot.thoughts)
                 case .profile: ProfileView(profile: mirror.snapshot.profile, highlights: mirror.snapshot.highlights)
                 case .reflections: ReflectionsView(reflections: mirror.snapshot.reflections)
@@ -55,7 +57,7 @@ struct DiaryView: View {
                 ForEach(Tab.allCases) { Text($0.rawValue).tag($0) }
             }
             .pickerStyle(.segmented)
-            .frame(width: 360)
+            .frame(width: 440)
             Button { mirror.sync() } label: { Image(systemName: "arrow.clockwise") }
                 .help("Refresh now")
         }
@@ -156,6 +158,10 @@ private struct ThoughtCard: View {
                         .help(starred ? "Starred — buddy will never forget this" : "Star: buddy must never forget this")
                     }
                     Text(thought.thought).font(.body).fixedSize(horizontal: false, vertical: true)
+                    if let photo = PhotoFile.url(thought.photo, notesDir: mirror.notesDir) {
+                        PhotoThumb(url: photo, height: open ? 220 : 96)
+                            .help("buddy thought this was worth a picture — click the card for the full size")
+                    }
                     if open {
                         Details(thought: thought)
                     }
@@ -376,6 +382,85 @@ private struct ReflectionsView: View {
                 }
             }
             .listStyle(.inset)
+        }
+    }
+}
+
+
+// MARK: - Photos
+
+/// Resolving a record's photo path. The helper app is not sandboxed, so it
+/// reads the daemon's own file; the mirrored copy in the App Group container
+/// is the fallback (and the only thing the widget extension can read).
+enum PhotoFile {
+    static func url(_ rel: String?, notesDir: URL) -> URL? {
+        guard let rel, !rel.isEmpty else { return nil }
+        let direct = notesDir.appendingPathComponent(rel, isDirectory: false)
+        if FileManager.default.fileExists(atPath: direct.path) { return direct }
+        return AppGroup.photo(rel)
+    }
+}
+
+private struct PhotoThumb: View {
+    let url: URL
+    var height: CGFloat = 96
+
+    var body: some View {
+        if let image = NSImage(contentsOf: url) {
+            Image(nsImage: image)
+                .resizable()
+                .aspectRatio(contentMode: .fit)
+                .frame(maxWidth: .infinity, maxHeight: height, alignment: .leading)
+                .clipShape(RoundedRectangle(cornerRadius: 6))
+                .overlay(RoundedRectangle(cornerRadius: 6).stroke(Color.secondary.opacity(0.25)))
+        }
+    }
+}
+
+/// Everything buddy photographed, newest first, with the thought it kept it for.
+private struct PhotosGrid: View {
+    let thoughts: [Thought]
+    let notesDir: URL
+
+    private var items: [(Thought, URL)] {
+        thoughts.compactMap { t in PhotoFile.url(t.photo, notesDir: notesDir).map { (t, $0) } }
+    }
+
+    var body: some View {
+        if items.isEmpty {
+            VStack(spacing: 8) {
+                Image(systemName: "camera").font(.system(size: 36)).foregroundStyle(.secondary)
+                Text("No photos yet").font(.title3)
+                Text("buddy keeps a picture when a view surprises it — not for every thought.")
+                    .font(.callout).foregroundStyle(.secondary).multilineTextAlignment(.center)
+            }
+            .frame(maxWidth: .infinity, maxHeight: .infinity)
+            .padding()
+        } else {
+            ScrollView {
+                LazyVGrid(columns: [GridItem(.adaptive(minimum: 240), spacing: 16)], spacing: 16) {
+                    ForEach(items, id: \.0.id) { thought, url in
+                        VStack(alignment: .leading, spacing: 6) {
+                            PhotoThumb(url: url, height: 180)
+                            HStack(spacing: 6) {
+                                Text("\(thought.day) \(thought.time)")
+                                    .font(.caption.monospacedDigit()).foregroundStyle(.secondary)
+                                Text("\(MoodColor.emoji(for: thought.label)) \(thought.label)")
+                                    .font(.caption).foregroundStyle(Color.moodColor(thought))
+                                Spacer()
+                                Text("novelty \(thought.novelty)")
+                                    .font(.caption2).foregroundStyle(.tertiary)
+                            }
+                            Text(thought.thought).font(.callout).fixedSize(horizontal: false, vertical: true)
+                        }
+                        .padding(10)
+                        .background(Color(nsColor: .controlBackgroundColor), in: RoundedRectangle(cornerRadius: 10))
+                        .onTapGesture { NSWorkspace.shared.open(url) }
+                        .help("Click to open the full picture")
+                    }
+                }
+                .padding(16)
+            }
         }
     }
 }
