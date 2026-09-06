@@ -21,6 +21,7 @@ from cc_buddy_bridge.explore import (
     WAYPOINTS,
     ChangeDetector,
     ExploreConfig,
+    ExploreRefused,
     Explorer,
     Look,
     Mode,
@@ -304,6 +305,103 @@ def test_frame_thumb_jpeg_without_imageio_is_none(monkeypatch) -> None:
     assert explore.frame_thumb(Frame(seq=1, w=4, h=2, fmt="jpeg", data=b"\xff\xd8")) is None
 
 
+# ---- manual explore (the owner asked) ---------------------------------------
+
+def test_request_starts_at_once_and_ignores_idle() -> None:
+    e = _explorer()
+    assert _tick(e, 1.0, idle=0.0) == []                      # idle: nothing
+    actions = e.request(1.0, "requested by cli")
+    assert actions == [Mode(True, "requested by cli"), Look(*WAYPOINTS[0])]
+    assert e.active and e.manual and e.started_reason == "requested by cli"
+    # activity (a hook event, a running session) does not end a manual explore
+    assert _tick(e, 2.0, idle=0.0) == []
+    assert _tick(e, 7.0, idle=0.0) == [Look(*WAYPOINTS[1])]
+    assert e.status()["manual"] is True and e.status()["waypoint"] == list(WAYPOINTS[1])
+
+
+def test_manual_explore_survives_rest_and_pans_again() -> None:
+    e = Explorer(_cfg(cycle_wait_secs=30.0), now=0.0)
+    e.request(0.0, "requested by voice")
+    now = 0.0
+    while e.active:
+        now += 6.0
+        _tick(e, now, idle=0.0)
+    assert e.state == Explorer.RESTING and e.manual and e.cycles == 1
+    assert _tick(e, now + 10.0, idle=0.0) == []
+    assert _tick(e, now + 31.0, idle=0.0) == [Mode(True, "requested by voice"), Look(*WAYPOINTS[0])]
+    assert e.manual
+
+
+@pytest.mark.parametrize("kw,reason", [
+    ({"card_pending": True}, "card pending"),
+    ({"listening": True}, "listen key"),
+    ({"connected": False}, "board disconnected"),
+])
+def test_hard_blockers_end_a_manual_explore_and_clear_manual(kw, reason) -> None:
+    e = _explorer()
+    e.request(0.0, "requested by cli")
+    assert _tick(e, 1.0, idle=0.0, **kw) == [Mode(False, reason)]
+    assert e.state == Explorer.OFF and not e.manual
+    # ... and afterwards the idle rule applies again
+    assert _tick(e, 2.0, idle=0.0) == []
+
+
+@pytest.mark.parametrize("kw,reason", [
+    ({"card_pending": True}, "card pending"),
+    ({"listening": True}, "listen key"),
+    ({"connected": False}, "board disconnected"),
+])
+def test_request_is_refused_on_a_hard_blocker(kw, reason) -> None:
+    e = _explorer()
+    with pytest.raises(ExploreRefused, match=reason):
+        e.request(0.0, "requested by cli", **kw)
+    assert e.state == Explorer.OFF and not e.manual
+
+
+def test_request_while_resting_sends_only_a_look() -> None:
+    e = _explorer()
+    now = 0.0
+    _tick(e, now)                            # idle start
+    while e.active:
+        now += 6.0
+        _tick(e, now)
+    assert e.state == Explorer.RESTING
+    assert e.request(now, "requested by cli") == [Look(*WAYPOINTS[0])]
+    assert e.active and e.manual
+
+
+def test_request_while_exploring_restarts_the_pan_without_mode() -> None:
+    e = _explorer()
+    _tick(e, 0.0)
+    _tick(e, 6.0)                            # at waypoint 1
+    assert e.waypoint == WAYPOINTS[1]
+    assert e.request(6.0, "requested by cli") == [Look(*WAYPOINTS[0])]
+    assert e.waypoint == WAYPOINTS[0] and e.manual
+
+
+def test_dismiss_sends_mode_off_only_when_on_board() -> None:
+    e = _explorer()
+    assert e.dismiss("touch") == []          # nothing to undo
+    e.request(0.0, "requested by cli")
+    assert e.dismiss("touch (voice)") == [Mode(False, "touch (voice)")]
+    assert e.state == Explorer.OFF and not e.manual
+    assert e.dismiss("again") == []
+
+
+def test_request_works_when_idle_start_is_disabled() -> None:
+    e = Explorer(_cfg(enabled=False), now=0.0)
+    assert _tick(e, 1.0) == []               # never starts on its own
+    assert e.request(1.0, "requested by cli")[0] == Mode(True, "requested by cli")
+    assert _tick(e, 2.0, idle=0.0) == []
+    assert e.active
+
+
+def test_status_when_off() -> None:
+    e = _explorer()
+    assert e.status() == {"state": "off", "manual": False, "reason": "", "waypoint": None,
+                          "cycles": 0, "notes": 0}
+
+
 # ---- token bucket -----------------------------------------------------------
 
 def test_token_bucket_starts_full_then_refills_at_rate() -> None:
@@ -460,7 +558,8 @@ def _daemon(connected: bool = True, running: int = 0, waiting: int = 0, pending:
         _last_activity_at=0.0,
         _explore_raw_frame=None,
     )
-    for name in ("_note_activity", "_idle_secs", "_explore_step", "_run_explore_action", "_stop_explore"):
+    for name in ("_note_activity", "_idle_secs", "_explore_step", "_run_explore_action", "_stop_explore",
+                 "_request_explore", "_dismiss_explore"):
         setattr(d, name, MethodType(getattr(Daemon, name), d))
     return d
 

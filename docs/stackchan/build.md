@@ -213,6 +213,14 @@ and through the rest between cycles the robot stays in explore mode and looks
 around the room on its own. Any sign of the human stops it. `cc-buddy-bridge notes --last 3` reads them; the WidgetKit widget in
 `widget/` or `cc-buddy-bridge notes-widget` shows them on the desktop.
 
+You can also send it off by hand: `cc-buddy-bridge explore` (`status`, `stop`)
+over IPC (`{"evt":"explore","action":"start|stop|status"}`), or say
+*"hey buddy, go explore"* — the voice tool `go_explore` ends the conversation and the daemon
+starts the explore once the board has left the conversation pose. A manual
+explore ignores the idle clock; a touch, a card, the listen key, the next wake
+word, a disconnect or `explore stop` ends it. `CC_BUDDY_EXPLORE=0` only turns
+off the idle start.
+
 ## Bench-verified conventions
 
 - BSP `+yaw` turns the head to the **robot's right** = the viewer's left. A

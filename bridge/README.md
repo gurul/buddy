@@ -652,6 +652,10 @@ cc-buddy-bridge voice-check         # Accessibility state (push-to-talk and the 
 tail -f ~/Library/Logs/cc-buddy-bridge.log | grep -E "ears|voice|agent"
 ```
 
+Besides running the computer, the conversation knows one more verb: *"hey
+buddy, go explore"* sends the robot off to look around the room right away
+(same as `cc-buddy-bridge explore`; see [Idle explorer](#idle-explorer-and-the-diary)).
+
 | Variable | Default | Purpose |
 |---|---|---|
 | `CC_BUDDY_VOICE` | on | `0` disables the microphone and the wake word |
@@ -686,9 +690,27 @@ false`: a hook event (a session running or waiting), a permission card, the
 listen key going down, a touch on the board, or the board disconnecting.
 The idle clock then has to reach `CC_BUDDY_EXPLORE_AFTER_MIN` again.
 
-Log lines, at most one per event: `explore: start (idle 10 min)`,
-`explore: look yaw=-45 pitch=40`, `explore: note -> <file>`,
-`explore: stop (<reason>)`.
+**Sending it off by hand.** You do not have to wait ten minutes:
+
+```
+cc-buddy-bridge explore            # go look around now
+cc-buddy-bridge explore status     # off / exploring / resting, which waypoint, cycles, notes
+cc-buddy-bridge explore stop       # come back
+```
+
+or say *"hey buddy, go explore"* (also "look around", "go play"): buddy answers
+with a two-word send-off, the conversation ends, and the explore starts. A
+manual explore ignores the idle clock — a running Claude session or a hook
+event does not end it — and keeps panning cycle after cycle (with the usual
+rest in between) until something says the human wants the robot back: a touch
+on the board, a permission card, the listen key, the next wake word, the board
+disconnecting, or `explore stop`. It cannot start while a card is waiting, the
+listen key is down, or the board is disconnected (the command says why). It
+works even with `CC_BUDDY_EXPLORE=0`, which only turns off the idle start.
+
+Log lines, at most one per event: `explore: start (idle 10 min)` or
+`explore: start (requested by cli|voice)`, `explore: look yaw=-45 pitch=40`,
+`explore: note -> <file>`, `explore: stop (<reason>)`.
 
 **The env file.** The service runs with a fixed environment, so the API key
 lives in `~/.config/cc-buddy-bridge/env` (make it `chmod 600`):
@@ -736,9 +758,9 @@ $ cc-buddy-bridge notes --last 3
 `cc-buddy-bridge notes-test photo.jpg` sends a single image and prints the
 sentence — one real call, for checking the key and model.
 
-**Disable** with `CC_BUDDY_EXPLORE=0` (in the env file or the service's
-environment). The daemon then logs `explore: disabled` and never sends
-`mode` or `look`.
+**Disable the idle start** with `CC_BUDDY_EXPLORE=0` (in the env file or the
+service's environment). The daemon then logs `explore: idle start disabled`
+and only explores when told to (`cc-buddy-bridge explore`, "go explore").
 
 ## Requirements
 

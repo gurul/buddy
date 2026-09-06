@@ -3,13 +3,15 @@
 One `VoiceSession` is one conversation. It opens a Realtime API session
 (gpt-realtime-2.1-mini, speech in / speech out, semantic turn detection),
 pipes the daemon's microphone into it (ears.py `subscribe()`), plays the
-replies through the Mac speaker, and gives the model five tools:
+replies through the Mac speaker, and gives the model seven tools:
 
     start_task(goal)      run a gpt-6-astra computer-use task (computer_agent.py)
     steer_task(text)      change what the running task is doing, mid-task
     stop_task()           cancel it
     task_status()         what the task is up to
     answer_question(text) relay the human's answer to the task's ask_user
+    go_explore()          "go explore" / "look around": ends the conversation and
+                          the daemon starts a manual explore (explore.py)
     end_conversation()    "bye buddy"
 
 The task runs in the background while the conversation continues, so the
@@ -78,6 +80,10 @@ You can operate your owner's Mac for them:
   their answer, then call answer_question with their answer as plain words ("yes", "no", "the second one").
 - When the owner says goodbye, thanks, "that's all", "stop listening", "go to sleep", "be quiet" or "never
   mind" with no task running, call end_conversation after a two-word farewell (or none if told to be quiet).
+- When the owner tells you to go explore, look around, go play, or check out the room, say a two-word
+  send-off like "Off exploring!" and call go_explore; you leave to look around and the conversation ends.
+  If they tell you to stop exploring or come back, you already stopped when you woke — say so in two words
+  and call end_conversation.
 Never claim to have done something you did not do."""
 
 TOOLS: list[dict[str, Any]] = [
@@ -101,6 +107,10 @@ TOOLS: list[dict[str, Any]] = [
      "description": "Relay the owner's answer to the task's pending question.",
      "parameters": {"type": "object", "properties": {"answer": {"type": "string"}},
                     "required": ["answer"], "additionalProperties": False}},
+    {"type": "function", "name": "go_explore",
+     "description": "The owner told you to go explore / look around the room. Ends the conversation; "
+                    "you then pan the room and take notes on your own.",
+     "parameters": {"type": "object", "properties": {}, "additionalProperties": False}},
     {"type": "function", "name": "end_conversation",
      "description": "End the conversation (the owner said goodbye or is done).",
      "parameters": {"type": "object", "properties": {}, "additionalProperties": False}},
@@ -270,9 +280,12 @@ class VoiceSession:
         agent_enabled: bool = True,
         on_caption: Optional[Callable[[dict], None]] = None,
         caption_tick_secs: float = 0.05,
+        on_explore: Optional[Callable[[], None]] = None,
     ) -> None:
         self.conn = connection
         self.on_caption = on_caption
+        self.on_explore = on_explore
+        self.explore_requested = False
         self._caption = ""
         self.mic = mic
         self.speaker = speaker
@@ -544,11 +557,26 @@ class VoiceSession:
         elif name == "end_conversation":
             result = {"ok": True}
             self._ended.set()
+        elif name == "go_explore":
+            # Same shape as end_conversation: the send-off has been said, the
+            # conversation closes, and the daemon starts the explore once
+            # the board is free of the conversation pose.
+            if self.task_running:
+                result = {"ok": False, "reason": "a task is running; stop it first"}
+            else:
+                self.explore_requested = True
+                if self.on_explore is not None:
+                    try:
+                        self.on_explore()
+                    except Exception:  # noqa: BLE001
+                        log.exception("voice: on_explore failed")
+                result = {"ok": True}
+                self._ended.set()
         else:
             result = {"ok": False, "reason": f"unknown tool {name}"}
         await self.conn.conversation.item.create(item={"type": "function_call_output", "call_id": call_id,
                                                        "output": json.dumps(result)})
-        if name != "end_conversation":
+        if not self._ended.is_set():
             await self._request_response()
 
     def _start_task(self, goal: str) -> dict[str, Any]:
@@ -634,6 +662,7 @@ async def open_session(
     agent_enabled: bool = True,
     api_key: Optional[str] = None,
     on_caption: Optional[Callable[[dict], None]] = None,
+    on_explore: Optional[Callable[[], None]] = None,
 ) -> None:
     """Run one full conversation on the real Realtime API — captions to the robot,
     or the real speaker in audio mode."""
@@ -646,7 +675,8 @@ async def open_session(
     try:
         async with client.realtime.connect(model=cfg.model) as conn:
             session = VoiceSession(conn, mic, speaker, agent_factory, on_state, config=cfg,
-                                   agent_enabled=agent_enabled, on_caption=on_caption)
+                                   agent_enabled=agent_enabled, on_caption=on_caption,
+                                   on_explore=on_explore)
             await session.run()
     finally:
         speaker.close()

@@ -177,7 +177,7 @@ def test_session_config_shape() -> None:
     assert s["audio"]["input"]["turn_detection"]["interrupt_response"] is True
     assert s["audio"]["output"]["voice"] == "marin"
     assert [t["name"] for t in s["tools"]] == ["start_task", "steer_task", "stop_task", "task_status",
-                                                "answer_question", "end_conversation"]
+                                                "answer_question", "go_explore", "end_conversation"]
     assert all(t["type"] == "function" for t in TOOLS)
 
 
@@ -644,3 +644,49 @@ def test_conversation_close_cancels_the_task_with_a_reason() -> None:
         await task
     asyncio.run(go())
     assert agent.cancelled and agent.reason == "the conversation closed"
+
+
+# ---- "go explore" -------------------------------------------------------------------------------
+
+def test_go_explore_ends_the_conversation_and_fires_the_callback() -> None:
+    fired: list[bool] = []
+    conn = FakeConnection([_tool_call("go_explore"), None])
+    s, states, _ = _session(conn, [FakeAgent(None, None)], on_explore=lambda: fired.append(True))
+    asyncio.run(s.run())
+    assert conn.tool_outputs() == [{"ok": True}]
+    assert fired == [True] and s.explore_requested
+    assert conn.kinds()[-1] == "conversation.item.create"     # no further response is requested
+    assert states[-1] == "idle"
+
+
+def test_go_explore_is_refused_while_a_task_runs() -> None:
+    agent = FakeAgent(None, None)
+    conn = FakeConnection([_tool_call("start_task", "c1", goal="open mail")])
+    fired: list[bool] = []
+    s, _, _ = _session(conn, [agent], on_explore=lambda: fired.append(True))
+
+    async def go():
+        task = asyncio.create_task(s.run())
+        await asyncio.sleep(0.02)
+        conn.feed(_tool_call("go_explore", "c2"))
+        await asyncio.sleep(0.02)
+        agent.release.set()
+        await asyncio.sleep(0.02)
+        conn.feed(_tool_call("end_conversation", "c3"), None)
+        await task
+    asyncio.run(go())
+    outs = conn.tool_outputs()
+    assert outs[1] == {"ok": False, "reason": "a task is running; stop it first"}
+    assert fired == [] and not s.explore_requested
+
+
+def test_go_explore_without_a_callback_still_ends() -> None:
+    conn = FakeConnection([_tool_call("go_explore"), None])
+    s, states, _ = _session(conn, [FakeAgent(None, None)])
+    asyncio.run(s.run())
+    assert s.explore_requested and states[-1] == "idle"
+
+
+def test_instructions_mention_go_explore() -> None:
+    from cc_buddy_bridge.voice_agent import INSTRUCTIONS
+    assert "go explore" in INSTRUCTIONS and "go_explore" in INSTRUCTIONS
