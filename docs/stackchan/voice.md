@@ -29,12 +29,15 @@ daemon ─{"cmd":"agent","state":…}─▶ robot: wake · listening · thinking
    holding the dictation key, while a conversation is already open, or while a
    permission card is waiting on the board.
 2. **Talk.** A Realtime session (`gpt-realtime-2.1-mini`, semantic turn detection)
-   hears the same microphone and answers through the Mac speaker. The robot faces
-   you while `listening`, glances aside for `thinking`, bobs while `speaking`. The
-   link is **half-duplex**: while buddy talks (and for 0.4 s after) the mic is not
-   forwarded, because the Mac mic hears the Mac speaker and, with no echo
-   cancellation, buddy answered its own greeting in a loop on the bench. Let it
-   finish a sentence, then talk.
+   hears the same microphone. **buddy does not speak through the Mac**: the model
+   answers in text, each reply streams to the robot as a caption in the band under
+   its eyes (three lines of 26 characters, the tail of the text, 8 s after the last
+   update) while the robot babbles beep-boops as the text grows (`CHIRP_TALK`, one
+   per ~24 characters). The robot faces you while `listening`, glances aside for
+   `thinking`, bobs while `speaking`. `CC_BUDDY_VOICE_OUTPUT=audio` brings back a
+   spoken voice through the Mac speaker; that path is **half-duplex** (the mic is
+   not forwarded while buddy talks plus 0.4 s, because the Mac mic hears the Mac
+   speaker and buddy answered its own greeting in a loop on the bench).
 3. **Work.** When you ask for something on the computer, the voice model calls
    `start_task(goal)`. A `gpt-6-astra` loop takes a screenshot, writes a few lines
    of PyAutoGUI, runs them in a persistent worker process, looks again, and so on,
@@ -86,7 +89,8 @@ HEARD IT at 1.4 s — ears are working.
 | `CC_BUDDY_MIC` | default input | substring of the input device name to use |
 | `CC_BUDDY_KWS_MODEL_DIR` | see above | where the sherpa-onnx model lives |
 | `CC_BUDDY_REALTIME_MODEL` | `gpt-realtime-2.1-mini` | the voice model (`gpt-realtime-2.1` for the larger one) |
-| `CC_BUDDY_VOICE_NAME` | `marin` | the Realtime voice |
+| `CC_BUDDY_VOICE_OUTPUT` | `captions` | `captions`: text to the robot's screen + beeps, silent Mac; `audio`: spoken through the Mac speaker |
+| `CC_BUDDY_VOICE_NAME` | `marin` | the Realtime voice (audio mode only) |
 | `CC_BUDDY_VOICE_IDLE_SECS` | `20` | close the conversation after this much silence with no task running (floor 5) |
 | `CC_BUDDY_COMPUTER_CONTROL` | on | `0` keeps the conversation but refuses `start_task` |
 | `CC_BUDDY_AGENT_MODEL` | `gpt-6-astra` | the computer-use model |

@@ -24,6 +24,12 @@ It is not the one doing the work — the daemon is — but it acts as if it
 were: head down toward the desk and quick eyes while working, a nod on
 done, a wince on error (firmware body.cpp / eyes.cpp).
 
+Output: by default buddy does NOT speak through the Mac — the model answers
+in text, every reply streams to the robot as a caption on its screen
+({"cmd":"caption"}) and the robot babbles beep-boops while the caption grows
+(owner request 2026-09-06). CC_BUDDY_VOICE_OUTPUT=audio brings the spoken
+voice back through the Mac speaker.
+
 The session ends on end_conversation, after IDLE_TIMEOUT with nothing said
 and no task running, or at MAX_SESSION. Every seam (connection, speaker,
 mic queue, agent factory, clock) is injectable, so the whole state machine
@@ -96,12 +102,17 @@ TOOLS: list[dict[str, Any]] = [
 ]
 
 
+CAPTION_MAX_CHARS = 240            # what fits the robot's caption band (3 lines) with a tail
+CAPTION_THROTTLE_SECS = 0.15
+
+
 @dataclass(frozen=True)
 class VoiceConfig:
     model: str = DEFAULT_MODEL
     voice: str = DEFAULT_VOICE
     idle_timeout_secs: float = DEFAULT_IDLE_TIMEOUT_SECS
     max_session_secs: float = DEFAULT_MAX_SESSION_SECS
+    output: str = "captions"      # "captions" (text → robot screen + beeps) or "audio" (Mac speaker)
 
 
 def configured(environ: Any = None) -> VoiceConfig:
@@ -115,24 +126,36 @@ def configured(environ: Any = None) -> VoiceConfig:
             idle = max(5.0, float(raw))
         except ValueError:
             log.warning("voice: CC_BUDDY_VOICE_IDLE_SECS=%r is not a number; using %s", raw, idle)
-    return VoiceConfig(model=model, voice=voice, idle_timeout_secs=idle)
+    out = (env.get("CC_BUDDY_VOICE_OUTPUT") or "captions").strip().lower()
+    if out not in ("captions", "audio"):
+        log.warning("voice: CC_BUDDY_VOICE_OUTPUT=%r is not captions|audio; using captions", out)
+        out = "captions"
+    return VoiceConfig(model=model, voice=voice, idle_timeout_secs=idle, output=out)
+
+
+CAPTION_INSTRUCTIONS = """
+Your replies are not spoken: they are shown as a caption on your own small screen (three lines of 26
+characters) while you beep. Keep every reply under 110 characters, plain words, no emoji."""
 
 
 def session_config(config: VoiceConfig) -> dict[str, Any]:
     """The session.update payload (GA Realtime shape, openai 3.8)."""
+    captions = config.output == "captions"
+    audio: dict[str, Any] = {
+        "input": {
+            "format": {"type": "audio/pcm", "rate": SAMPLE_RATE},
+            "turn_detection": {"type": "semantic_vad", "eagerness": "medium",
+                               "create_response": True, "interrupt_response": True},
+        },
+    }
+    if not captions:
+        audio["output"] = {"format": {"type": "audio/pcm", "rate": SAMPLE_RATE}, "voice": config.voice}
     return {
         "type": "realtime",
         "model": config.model,
-        "instructions": INSTRUCTIONS,
-        "output_modalities": ["audio"],
-        "audio": {
-            "input": {
-                "format": {"type": "audio/pcm", "rate": SAMPLE_RATE},
-                "turn_detection": {"type": "semantic_vad", "eagerness": "medium",
-                                   "create_response": True, "interrupt_response": True},
-            },
-            "output": {"format": {"type": "audio/pcm", "rate": SAMPLE_RATE}, "voice": config.voice},
-        },
+        "instructions": INSTRUCTIONS + (CAPTION_INSTRUCTIONS if captions else ""),
+        "output_modalities": ["text"] if captions else ["audio"],
+        "audio": audio,
         "tools": TOOLS,
         "tool_choice": "auto",
     }
@@ -197,6 +220,26 @@ class Speaker:
             self._stream = None
 
 
+class NullSpeaker:
+    """Captions mode: nothing is played on the Mac; the robot beeps instead."""
+
+    def start(self) -> bool:
+        return True
+
+    def play(self, pcm: bytes) -> None:
+        pass
+
+    def stop(self) -> None:
+        pass
+
+    @property
+    def busy(self) -> bool:
+        return False
+
+    def close(self) -> None:
+        pass
+
+
 def _to_frames(chunk: bytes, frames: int) -> Any:
     import numpy as np
 
@@ -219,8 +262,12 @@ class VoiceSession:
         agent_config: Optional[AgentConfig] = None,
         clock: Callable[[], float] = time.monotonic,
         agent_enabled: bool = True,
+        on_caption: Optional[Callable[[str, bool], None]] = None,
     ) -> None:
         self.conn = connection
+        self.on_caption = on_caption
+        self._caption = ""
+        self._caption_sent_at = float("-inf")
         self.mic = mic
         self.speaker = speaker
         self.agent_factory = agent_factory
@@ -346,6 +393,20 @@ class VoiceSession:
             if delta:
                 self.speaker.play(base64.b64decode(delta))
                 self._set("speaking")
+        elif t == "response.output_text.delta":
+            delta = _attr(event, "delta")
+            if delta:
+                self._caption += delta
+                self._set("speaking")
+                self._emit_caption(final=False)
+        elif t == "response.output_text.done":
+            text = _attr(event, "text")
+            if text:
+                self._caption = text
+                self.transcript.append(text)
+                log.info("buddy: %s", text)
+            self._emit_caption(final=True)
+            self._caption = ""
         elif t in ("response.output_audio_transcript.done", "response.audio_transcript.done"):
             text = _attr(event, "transcript")
             if text:
@@ -369,6 +430,19 @@ class VoiceSession:
         elif t == "error":
             err = _attr(event, "error")
             log.warning("voice: realtime error: %s", err)
+
+    def _emit_caption(self, final: bool) -> None:
+        """Throttled: the robot redraws on every line, ~7 a second is plenty."""
+        if self.on_caption is None:
+            return
+        now = self._clock()
+        if not final and now - self._caption_sent_at < CAPTION_THROTTLE_SECS:
+            return
+        self._caption_sent_at = now
+        try:
+            self.on_caption(self._caption[-CAPTION_MAX_CHARS:], final)
+        except Exception:  # noqa: BLE001
+            log.exception("voice: on_caption failed")
 
     # -- tools --
     async def _tool(self, name: str, call_id: str, arguments: str) -> None:
@@ -479,18 +553,20 @@ async def open_session(
     config: Optional[VoiceConfig] = None,
     agent_enabled: bool = True,
     api_key: Optional[str] = None,
+    on_caption: Optional[Callable[[str, bool], None]] = None,
 ) -> None:
-    """Run one full conversation on the real Realtime API and the real speaker."""
+    """Run one full conversation on the real Realtime API — captions to the robot,
+    or the real speaker in audio mode."""
     from openai import AsyncOpenAI
 
     cfg = config or configured()
     client = AsyncOpenAI(api_key=api_key) if api_key else AsyncOpenAI()
-    speaker = Speaker()
+    speaker: Any = NullSpeaker() if cfg.output == "captions" else Speaker()
     speaker.start()
     try:
         async with client.realtime.connect(model=cfg.model) as conn:
             session = VoiceSession(conn, mic, speaker, agent_factory, on_state, config=cfg,
-                                   agent_enabled=agent_enabled)
+                                   agent_enabled=agent_enabled, on_caption=on_caption)
             await session.run()
     finally:
         speaker.close()

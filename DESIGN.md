@@ -381,7 +381,9 @@ bool}`, `{"cmd":"owner","op":"reset"}`, `{"cmd":"agent","state":"wake"|"listenin
 "thinking"|"speaking"|"working"|"asking"|"done"|"error"|"idle"}` (the host
 voice / computer-control conversation; `body.cpp` / `eyes.cpp` act each phase
 out), `{"cmd":"emote","dv":±100,"da":±100,"label":".."}` (the diary's
-appraisal → `mood.cpp`, clamped to ±0.3). board→host `{"frame":{"seq":n,"w":160,
+appraisal → `mood.cpp`, clamped to ±0.3), `{"cmd":"caption","text":"..","final":bool}`
+(buddy's reply as text: the caption band under the eyes + `CHIRP_TALK` babble;
+the Mac stays silent unless `CC_BUDDY_VOICE_OUTPUT=audio`). board→host `{"frame":{"seq":n,"w":160,
 "h":120,"fmt":"jpeg","b64":"...","yaw":Y,"pitch":P}}`, one line per frame from
 the camera task, paused while a character transfer owns the wire. The daemon
 sends `cam on` once per connect after the time sync and `listen off` on every

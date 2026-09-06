@@ -22,7 +22,8 @@ camera frames ◀─────────▶ macOS Vision (faces) · diary (m
 ## What buddy does
 
 - **Talks, and runs your computer.** An on-device keyword spotter hears "hey buddy" (no
-  cloud until you speak). A `gpt-realtime-2.1-mini` conversation answers you and, when you
+  cloud until you speak). A `gpt-realtime-2.1-mini` conversation answers you — as captions on
+  the robot's own screen with beep-boops, not a voice from the Mac — and, when you
   ask for something on the Mac, hands a goal to `gpt-6-astra`, which screenshots, writes a
   few lines of PyAutoGUI, runs them, and looks again — up to 25 steps, asking out loud before
   anything consequential, taking corrections mid-task, stopping on "stop". The robot drops

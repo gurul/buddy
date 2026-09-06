@@ -149,7 +149,8 @@ def _session(conn: FakeConnection, agents: list[FakeAgent], clock: dict | None =
 
     mic: asyncio.Queue[bytes] = asyncio.Queue()
     s = VoiceSession(conn, mic, FakeSpeaker(), factory, states.append,
-                     config=kw.pop("config", VoiceConfig(idle_timeout_secs=20.0, max_session_secs=600.0)),
+                     config=kw.pop("config", VoiceConfig(idle_timeout_secs=20.0, max_session_secs=600.0,
+                                                          output="audio")),
                      clock=lambda: clock["now"], **kw)
     return s, states, mic
 
@@ -166,7 +167,7 @@ def test_configured_defaults_and_env() -> None:
 
 
 def test_session_config_shape() -> None:
-    s = session_config(VoiceConfig())
+    s = session_config(VoiceConfig(output="audio"))
     assert s["type"] == "realtime" and s["model"] == "gpt-realtime-2.1-mini"
     assert s["audio"]["input"]["format"] == {"type": "audio/pcm", "rate": 24000}
     assert s["audio"]["input"]["turn_detection"]["type"] == "semantic_vad"
@@ -433,3 +434,33 @@ def test_conversation_does_not_keep_listening_after_a_task() -> None:
     assert states[-1] == "idle"
     creates = [k for k, _ in conn.sent if k == "response.create"]
     assert len(creates) == 2          # greeting, then ONE reply covering "On it" + the result (both queued) — nothing after
+
+
+def test_captions_mode_streams_text_to_the_robot_and_plays_nothing() -> None:
+    conn = FakeConnection([
+        {"type": "response.created"},
+        {"type": "response.output_text.delta", "delta": "Ten past "},
+        {"type": "response.output_text.delta", "delta": "three."},
+        {"type": "response.output_text.done", "text": "Ten past three."},
+        {"type": "response.done"},
+        _tool_call("end_conversation"), None,
+    ])
+    captions: list[tuple[str, bool]] = []
+    clock = {"now": 0.0}
+    s, states, _ = _session(conn, [FakeAgent(None, None)], clock=clock, on_caption=lambda t, f: captions.append((t, f)))
+    asyncio.run(s.run())
+    # first delta goes out at once, the second is throttled (same instant), the done is final
+    assert captions == [("Ten past ", False), ("Ten past three.", True)]
+    assert s.speaker.played == b"" and s.transcript == ["Ten past three."]
+    assert "speaking" in states
+
+
+def test_session_config_captions_vs_audio() -> None:
+    cap = session_config(VoiceConfig(output="captions"))
+    assert cap["output_modalities"] == ["text"] and "output" not in cap["audio"]
+    assert "caption" in cap["instructions"]
+    aud = session_config(VoiceConfig(output="audio"))
+    assert aud["output_modalities"] == ["audio"] and aud["audio"]["output"]["voice"] == "marin"
+    assert configured({}).output == "captions"
+    assert configured({"CC_BUDDY_VOICE_OUTPUT": "audio"}).output == "audio"
+    assert configured({"CC_BUDDY_VOICE_OUTPUT": "loud"}).output == "captions"

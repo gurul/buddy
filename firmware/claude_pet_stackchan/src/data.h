@@ -49,6 +49,12 @@ struct TamaState {
   // Voice / computer-control conversation on the host: {"cmd":"agent","state":".."}
   uint8_t  agentState;       // AgentState (persona.h); AG_IDLE = none
   uint32_t agentAtMs;        // millis() of the last agent cmd
+  // Buddy's reply as text ({"cmd":"caption","text":"..","final":bool}): shown on the
+  // screen while it beeps, instead of a voice from the Mac.
+  char     caption[248];
+  uint32_t captionAtMs;      // millis() of the last caption cmd (0 = none)
+  bool     captionFinal;
+  uint16_t captionLen;       // strlen(caption), for the talk-chirp cadence
   // Host appraisal of what the camera saw: {"cmd":"emote","dv":..,"da":..,"label":".."}
   bool     emoteReq;         // pending; the consumer (main.cpp -> mood) clears it
   int8_t   emoteDv, emoteDa; // -100..100
@@ -156,6 +162,15 @@ static void _applyJson(const char* line, TamaState* out) {
   if (cmd && strcmp(cmd, "agent") == 0) {
     out->agentState = agentStateFrom(doc["state"] | "idle");
     out->agentAtMs = millis();
+    _lastLiveMs = millis();
+    return;
+  }
+  // {"cmd":"caption","text":"...","final":bool}: buddy's reply, streamed as it is written.
+  if (cmd && strcmp(cmd, "caption") == 0) {
+    strlcpy(out->caption, doc["text"] | "", sizeof(out->caption));
+    out->captionLen = (uint16_t)strlen(out->caption);
+    out->captionFinal = doc["final"] | false;
+    out->captionAtMs = millis();
     _lastLiveMs = millis();
     return;
   }

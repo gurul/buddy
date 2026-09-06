@@ -515,7 +515,8 @@ class Daemon:
         keepalive = asyncio.create_task(self._agent_keepalive(), name="agent-keepalive")
         try:
             await voice_agent.open_session(mic, self._on_agent_state, self._make_agent,
-                                           config=self._voice_cfg, agent_enabled=self._agent_cfg.enabled)
+                                           config=self._voice_cfg, agent_enabled=self._agent_cfg.enabled,
+                                           on_caption=self._on_caption)
         except asyncio.CancelledError:
             raise
         except Exception as e:  # noqa: BLE001
@@ -529,6 +530,11 @@ class Daemon:
 
     def _make_agent(self, on_event: Any, ask_user: Any) -> ComputerAgent:
         return ComputerAgent(make_response_creator(), config=self._agent_cfg, on_event=on_event, ask_user=ask_user)
+
+    def _on_caption(self, text: str, final: bool) -> None:
+        """Buddy's reply, as it streams, onto the robot's screen ({"cmd":"caption"})."""
+        if self.ble.connected:
+            asyncio.create_task(self.ble.send({"cmd": "caption", "text": text, "final": final}))
 
     def _on_agent_state(self, state: str) -> None:
         """Mirror the conversation/task phase on the board."""
