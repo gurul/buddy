@@ -25,10 +25,11 @@ were: head down toward the desk and quick eyes while working, a nod on
 done, a wince on error (firmware body.cpp / eyes.cpp).
 
 Output: by default buddy does NOT speak through the Mac — the model answers
-in text, every reply streams to the robot as a caption on its screen
-({"cmd":"caption"}) and the robot babbles beep-boops while the caption grows
-(owner request 2026-09-06). CC_BUDDY_VOICE_OUTPUT=audio brings the spoken
-voice back through the Mac speaker.
+in text; every reply is wrapped into pages of 4 lines x 17 chars and shown on
+the robot's screen one page at a time at reading pace (caption_pager.py); the
+robot chirps once per page and keeps its speaking pose until the last page has
+been held (owner request 2026-09-06). CC_BUDDY_VOICE_OUTPUT=audio brings the
+spoken voice back through the Mac speaker.
 
 The session ends on end_conversation, after IDLE_TIMEOUT with nothing said
 and no task running, or at MAX_SESSION. Every seam (connection, speaker,
@@ -48,6 +49,7 @@ import time
 from dataclasses import dataclass
 from typing import Any, Awaitable, Callable, Optional
 
+from .caption_pager import CaptionPager, Event, PagerConfig, caption_instructions
 from .computer_agent import AgentConfig, AgentEvent, ComputerAgent
 
 log = logging.getLogger(__name__)
@@ -64,8 +66,9 @@ You just heard your wake word. Answer in one or two short spoken sentences; no l
 offers of things you "can help with" — you are a pet, not an assistant menu. Wait for the owner to talk.
 
 You can operate your owner's Mac for them:
-- When they ask you to do something on the computer, call start_task with a precise goal in your own
-  words, then say one short line like "On it." Do not narrate steps you have not seen.
+- When they ask you to do something on the computer, call start_task at once — say nothing first — with the
+  goal in the owner's own words plus any app or site they named; never guess an app or hedge ("likely in a
+  music app"). After the tool result, say one short line like "On it." Do not narrate steps you have not seen.
 - While a task runs, keep listening. "stop" / "cancel" / "never mind" → call stop_task at once.
   Corrections or additions ("use Safari instead", "also save it") → call steer_task with the text.
   "How's it going?" → call task_status and summarise in one line.
@@ -81,7 +84,8 @@ TOOLS: list[dict[str, Any]] = [
     {"type": "function", "name": "start_task",
      "description": "Start a computer-use task on the owner's Mac. Returns immediately; the task runs in the background.",
      "parameters": {"type": "object", "properties": {"goal": {"type": "string",
-                    "description": "What to accomplish, precisely, in one or two sentences."}},
+                    "description": "What to accomplish, in the owner's own words, naming any app or site they "
+                                   "named. Do not add guesses."}},
                     "required": ["goal"], "additionalProperties": False}},
     {"type": "function", "name": "steer_task",
      "description": "Send a correction or extra instruction to the running task.",
@@ -102,9 +106,7 @@ TOOLS: list[dict[str, Any]] = [
      "parameters": {"type": "object", "properties": {}, "additionalProperties": False}},
 ]
 
-
-CAPTION_MAX_CHARS = 240            # what fits the robot's caption band (3 lines) with a tail
-CAPTION_THROTTLE_SECS = 0.15
+DEFAULT_CAPTION_CPS = PagerConfig().read_cps
 
 
 @dataclass(frozen=True)
@@ -114,6 +116,7 @@ class VoiceConfig:
     idle_timeout_secs: float = DEFAULT_IDLE_TIMEOUT_SECS
     max_session_secs: float = DEFAULT_MAX_SESSION_SECS
     output: str = "captions"      # "captions" (text → robot screen + beeps) or "audio" (Mac speaker)
+    caption_cps: float = DEFAULT_CAPTION_CPS   # reading rate the caption page holds derive from (5..30)
 
 
 def configured(environ: Any = None) -> VoiceConfig:
@@ -131,12 +134,14 @@ def configured(environ: Any = None) -> VoiceConfig:
     if out not in ("captions", "audio"):
         log.warning("voice: CC_BUDDY_VOICE_OUTPUT=%r is not captions|audio; using captions", out)
         out = "captions"
-    return VoiceConfig(model=model, voice=voice, idle_timeout_secs=idle, output=out)
-
-
-CAPTION_INSTRUCTIONS = """
-Your replies are not spoken: they are shown as a caption on your own small screen (three lines of 26
-characters) while you beep. Keep every reply under 110 characters, plain words, no emoji."""
+    cps = DEFAULT_CAPTION_CPS
+    raw = (env.get("CC_BUDDY_CAPTION_CPS") or "").strip()
+    if raw:
+        try:
+            cps = min(30.0, max(5.0, float(raw)))
+        except ValueError:
+            log.warning("voice: CC_BUDDY_CAPTION_CPS=%r is not a number; using %s", raw, cps)
+    return VoiceConfig(model=model, voice=voice, idle_timeout_secs=idle, output=out, caption_cps=cps)
 
 
 def session_config(config: VoiceConfig) -> dict[str, Any]:
@@ -154,7 +159,7 @@ def session_config(config: VoiceConfig) -> dict[str, Any]:
     return {
         "type": "realtime",
         "model": config.model,
-        "instructions": INSTRUCTIONS + (CAPTION_INSTRUCTIONS if captions else ""),
+        "instructions": INSTRUCTIONS + (caption_instructions(PagerConfig(read_cps=config.caption_cps)) if captions else ""),
         "output_modalities": ["text"] if captions else ["audio"],
         "audio": audio,
         "tools": TOOLS,
@@ -263,12 +268,12 @@ class VoiceSession:
         agent_config: Optional[AgentConfig] = None,
         clock: Callable[[], float] = time.monotonic,
         agent_enabled: bool = True,
-        on_caption: Optional[Callable[[str, bool], None]] = None,
+        on_caption: Optional[Callable[[dict], None]] = None,
+        caption_tick_secs: float = 0.05,
     ) -> None:
         self.conn = connection
         self.on_caption = on_caption
         self._caption = ""
-        self._caption_sent_at = float("-inf")
         self.mic = mic
         self.speaker = speaker
         self.agent_factory = agent_factory
@@ -276,6 +281,12 @@ class VoiceSession:
         self.config = config or VoiceConfig()
         self.agent_config = agent_config or AgentConfig()
         self._clock = clock
+        # Captions: the pager decides which page is up and for how long; the
+        # board only draws. Polled after every text event and by _pager_loop.
+        self._pager = CaptionPager(PagerConfig(read_cps=self.config.caption_cps))
+        self._captions = self.config.output == "captions" and on_caption is not None
+        self._caption_tick = caption_tick_secs
+        self._state_after_captions: Optional[str] = None
         self.agent_enabled = agent_enabled
         self.state = "idle"
         self.agent: Optional[ComputerAgent] = None
@@ -298,6 +309,7 @@ class VoiceSession:
         # Set when the [task finished] message goes in; acted on when the
         # response that speaks it is done.
         self._end_after_response = False
+        self._last_progress_at = float("-inf")
 
     # -- state --
     def _set(self, state: str) -> None:
@@ -323,16 +335,32 @@ class VoiceSession:
         self._response_active = True
         pump = asyncio.create_task(self._pump_mic(), name="voice-mic")
         watchdog = asyncio.create_task(self._watchdog(), name="voice-watchdog")
+        pager = asyncio.create_task(self._pager_loop(), name="voice-captions") if self._captions else None
+        cancelled = False
         try:
             await self._events()
+        except asyncio.CancelledError:
+            cancelled = True                        # hush (a touch on the robot): clear the board at once
+            raise
         finally:
             pump.cancel()
             watchdog.cancel()
             await asyncio.gather(pump, watchdog, return_exceptions=True)
             if self.task_running and self.agent is not None:
-                self.agent.cancel()
+                self.agent.cancel(reason="the conversation closed")
             if self._agent_task is not None:
                 await asyncio.gather(self._agent_task, return_exceptions=True)
+            if pager is not None:
+                pager.cancel()                      # one poller at a time: the loop stops before the drain
+                await asyncio.gather(pager, return_exceptions=True)
+                if cancelled:
+                    self._emit_events(self._pager.reset(self._clock()))
+                else:
+                    try:
+                        await self._drain_captions()
+                    except asyncio.CancelledError:
+                        self._emit_events(self._pager.reset(self._clock()))
+                        raise
             await self._drain_speaker()
             self.speaker.stop()
             self._set("idle")
@@ -345,6 +373,46 @@ class VoiceSession:
         deadline = self._clock() + timeout
         while self.speaker.busy and self._clock() < deadline:
             await asyncio.sleep(0.05)
+
+    # -- captions --
+    def _set_after_captions(self, state: str) -> None:
+        """The phase flips when the last caption page has been read, not when the model stops."""
+        if self._pager.busy:
+            self._state_after_captions = state
+        else:
+            self._set(state)
+
+    def _emit_events(self, events: list[Event]) -> None:
+        if self.on_caption is None:
+            return
+        for e in events:
+            try:
+                self.on_caption(e.to_wire())
+            except Exception:  # noqa: BLE001
+                log.exception("voice: on_caption failed")
+
+    def _flush_pager(self) -> None:
+        if not self._captions:
+            return
+        self._emit_events(self._pager.poll(self._clock()))
+        if not self._pager.busy and self._state_after_captions is not None:
+            st, self._state_after_captions = self._state_after_captions, None
+            if not self._response_active:
+                self._set(st)
+
+    async def _pager_loop(self) -> None:
+        while not self._ended.is_set():
+            await asyncio.sleep(self._caption_tick)
+            self._flush_pager()
+
+    async def _drain_captions(self, timeout: float = 15.0) -> None:
+        """Let the page on screen finish its hold before the session goes idle."""
+        deadline = self._clock() + timeout
+        while self._pager.busy and self._clock() < deadline:
+            await asyncio.sleep(self._caption_tick)
+            self._flush_pager()
+        if self._pager.busy:
+            self._emit_events(self._pager.reset(self._clock()))
 
     async def _pump_mic(self) -> None:
         # Half-duplex: the Mac mic hears the Mac speaker, and with no echo
@@ -368,7 +436,7 @@ class VoiceSession:
                 log.info("voice: session hit its %.0f s cap", self.config.max_session_secs)
                 self._ended.set()
             elif (not self.task_running and self._pending_answer is None and not self.speaker.busy
-                  and now - self._last_activity > self.config.idle_timeout_secs):
+                  and not self._pager.busy and now - self._last_activity > self.config.idle_timeout_secs):
                 log.info("voice: nothing said for %.0f s — closing", self.config.idle_timeout_secs)
                 self._ended.set()
 
@@ -385,10 +453,16 @@ class VoiceSession:
         if t == "input_audio_buffer.speech_started":
             self._last_activity = self._clock()
             self.speaker.stop()                     # barge-in: the human talks over buddy
+            if self._captions:
+                self._emit_events(self._pager.reset(self._clock()))   # ... and over the page on screen
+                self._state_after_captions = None
             self._set("listening")
         elif t == "response.created":
             self._response_active = True
-            self._set("thinking")
+            if self._captions:
+                self._pager.begin_reply(self._clock())   # queues behind the page on screen, if any
+            if not self._pager.busy:
+                self._set("thinking")
         elif t in ("response.output_audio.delta", "response.audio.delta"):
             delta = _attr(event, "delta")
             if delta:
@@ -399,14 +473,17 @@ class VoiceSession:
             if delta:
                 self._caption += delta
                 self._set("speaking")
-                self._emit_caption(final=False)
+                if self._captions:
+                    self._pager.update(self._clock(), self._caption, False)
+                    self._flush_pager()
         elif t == "response.output_text.done":
             text = _attr(event, "text")
             if text:
-                self._caption = text
                 self.transcript.append(text)
                 log.info("buddy: %s", text)
-            self._emit_caption(final=True)
+            if self._captions:
+                self._pager.update(self._clock(), text or self._caption, True)
+                self._flush_pager()
             self._caption = ""
         elif t in ("response.output_audio_transcript.done", "response.audio_transcript.done"):
             text = _attr(event, "transcript")
@@ -424,26 +501,16 @@ class VoiceSession:
                 self._end_after_response = False
                 self._ended.set()
                 return
-            self._set("working" if self.task_running else "listening")
+            if self._captions:
+                self._pager.end_reply(self._clock())     # a tool-only response has no page to wait for
+                self._flush_pager()
+            self._set_after_captions("working" if self.task_running else "listening")
             if self._response_wanted and not self._ended.is_set():
                 self._response_wanted = False
                 await self.conn.response.create()
         elif t == "error":
             err = _attr(event, "error")
             log.warning("voice: realtime error: %s", err)
-
-    def _emit_caption(self, final: bool) -> None:
-        """Throttled: the robot redraws on every line, ~7 a second is plenty."""
-        if self.on_caption is None:
-            return
-        now = self._clock()
-        if not final and now - self._caption_sent_at < CAPTION_THROTTLE_SECS:
-            return
-        self._caption_sent_at = now
-        try:
-            self.on_caption(self._caption[-CAPTION_MAX_CHARS:], final)
-        except Exception:  # noqa: BLE001
-            log.exception("voice: on_caption failed")
 
     # -- tools --
     async def _tool(self, name: str, call_id: str, arguments: str) -> None:
@@ -461,7 +528,7 @@ class VoiceSession:
             result = {"ok": ok} if ok else {"ok": False, "reason": "no task is running"}
         elif name == "stop_task":
             if self.task_running and self.agent is not None:
-                self.agent.cancel()
+                self.agent.cancel(reason="the conversation closed")
                 result = {"ok": True}
             else:
                 result = {"ok": False, "reason": "no task is running"}
@@ -505,6 +572,18 @@ class VoiceSession:
         return final
 
     def _on_agent_event(self, ev: AgentEvent) -> None:
+        if ev.kind == "progress":
+            # A helper sentence from the task ("opened Safari") as a caption page
+            # while the robot is working — when nothing else is on screen and at
+            # least progress_min_gap_secs after the previous one.
+            if self._captions and not self._pager.busy and self.state in ("working", "done", "idle", "listening"):
+                now = self._clock()
+                if now - self._last_progress_at >= self.agent_config.progress_min_gap_secs:
+                    self._last_progress_at = now
+                    self._pager.begin_reply(now)
+                    self._pager.update(now, ev.text[:120], True)
+                    self._flush_pager()
+            return
         if ev.kind in ("started", "exec", "commentary", "turn"):
             if self.state not in ("speaking", "listening", "thinking", "asking"):
                 self._set("working")
@@ -554,7 +633,7 @@ async def open_session(
     config: Optional[VoiceConfig] = None,
     agent_enabled: bool = True,
     api_key: Optional[str] = None,
-    on_caption: Optional[Callable[[str, bool], None]] = None,
+    on_caption: Optional[Callable[[dict], None]] = None,
 ) -> None:
     """Run one full conversation on the real Realtime API — captions to the robot,
     or the real speaker in audio mode."""

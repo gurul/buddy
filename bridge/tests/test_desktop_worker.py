@@ -1,15 +1,19 @@
 """desktop_worker.py with a fake pyautogui: exec semantics, output shaping,
-Retina normalisation, error and fail-safe handling, and the line protocol."""
+Retina normalisation, error and fail-safe handling, the line protocol, the
+auto-screenshot rule with helpers, the observe operation and --release."""
 
 from __future__ import annotations
 
 import base64
 import io
 import json
+from datetime import datetime
+from types import SimpleNamespace
 
 from PIL import Image
 
 from cc_buddy_bridge import desktop_worker as dw
+from cc_buddy_bridge.desktop_helpers import Frame, Helpers
 
 
 class FailSafeException(Exception):
@@ -23,6 +27,8 @@ class FakeAutoGUI:
         self._points = points
         self._pixels = pixels
         self.clicks: list[tuple[int, int]] = []
+        self.hotkeys: list[tuple] = []
+        self.presses: list[str] = []
 
     def size(self):
         return self._points
@@ -30,8 +36,14 @@ class FakeAutoGUI:
     def screenshot(self, **kwargs):
         return Image.new("RGB", self._pixels, (10, 20, 30))
 
-    def click(self, x, y):
+    def click(self, x, y, clicks=1):
         self.clicks.append((x, y))
+
+    def hotkey(self, *keys):
+        self.hotkeys.append(tuple(keys))
+
+    def press(self, key):
+        self.presses.append(key)
 
 
 def _ns(gui: FakeAutoGUI | None = None) -> dict:
@@ -122,3 +134,84 @@ def test_serve_after_failsafe_refuses_everything(monkeypatch) -> None:
                   json.dumps({"id": 2, "operation": "execute", "code": "log('again')"})], monkeypatch=monkeypatch)
     assert out[0]["error"]["code"] == "failsafe"
     assert out[1] == {"id": 2, "error": out[0]["error"]}
+
+
+# ---- helpers: auto-screenshot, observe, --release --------------------------------------
+
+def _helpers(gui: FakeAutoGUI) -> tuple[Helpers, dict, list[float]]:
+    """A Helpers on fakes (static screen, Warp frontmost) installed into a namespace."""
+    settled: list[float] = []
+    frame = Frame.from_pil(Image.new("RGB", (200, 100), (10, 20, 30)))
+    h = Helpers(gui, capture=lambda: frame, ocr=lambda f, level: [{"text": "Warp", "bx": 0.0, "by": 0.9,
+                                                                   "bw": 0.1, "bh": 0.05, "conf": 0.9}],
+                frontmost_fn=lambda: {"app": "Warp", "bundle": "dev.warp.Warp-Stable", "title": "zsh", "pid": 1},
+                run=lambda *a, **k: None, clipboard=SimpleNamespace(copy=lambda t: None, paste=lambda: ""),
+                clock=lambda: 0.0, sleep=lambda s: None,
+                now=lambda: datetime(2026, 9, 6, 14, 2))
+    original = h.settled_screenshot
+
+    def spy(max_wait: float):
+        settled.append(max_wait)
+        return original(max_wait)
+    h.settled_screenshot = spy      # type: ignore[method-assign]
+    ns = _ns(gui)
+    h.install(ns)
+    return h, ns, settled
+
+
+def _kinds(result: dict) -> list[str]:
+    return [o["type"] for o in result["output"]]
+
+
+def test_auto_screenshot_after_actions_errors_and_empty_calls() -> None:
+    gui = FakeAutoGUI()
+    h, ns, settled = _helpers(gui)
+    r = dw.execute("pyautogui.click(1,2)", ns, h)
+    assert _kinds(r) == ["input_image", "input_text"] and r["output"][1]["text"].startswith("[after] frontmost: Warp")
+    assert settled == [1.5] and gui.clicks == [(1, 2)]
+    r = dw.execute("x = screen_text()", ns, h)                       # text only: no image
+    assert _kinds(r) == ["input_text", "input_text"] and r["output"][0]["text"] == "screen_text: 1 lines"
+    assert settled == [1.5]
+    r = dw.execute("pass", ns, h)                                     # empty: a picture, no wait
+    assert _kinds(r) == ["input_image", "input_text"] and settled == [1.5, 0.0]
+    r = dw.execute("display(pyautogui.screenshot())", ns, h)          # displayed itself: exactly one image
+    assert _kinds(r) == ["input_image", "input_text"] and settled == [1.5, 0.0]
+    r = dw.execute("1/0", ns, h)
+    assert _kinds(r) == ["input_text", "input_image", "input_text"]
+    assert "ZeroDivisionError" in r["output"][0]["text"] and r["output"][2]["text"].startswith("[after]")
+    assert settled == [1.5, 0.0, 0.0]
+    r = dw.execute("type_text('hi')", ns, h)                          # helper actions count too
+    assert _kinds(r) == ["input_text", "input_image", "input_text"] and settled[-1] == 1.5
+    assert gui.hotkeys == [("command", "v")]
+
+
+def test_serve_observe_operation(monkeypatch) -> None:
+    gui = FakeAutoGUI()
+    h, ns, _ = _helpers(gui)
+    out: list[dict] = []
+    monkeypatch.setattr(dw, "emit", out.append)
+    dw.serve(ns, iter([json.dumps({"id": 1, "operation": "observe"}) + "\n",
+                       json.dumps({"id": 2, "operation": "ping"}) + "\n"]), h)
+    assert out[0]["id"] == 1
+    kinds = [o["type"] for o in out[0]["output"]]
+    assert kinds.count("input_image") == 1
+    assert out[0]["output"][1]["text"] == "frontmost: Warp — 'zsh'; screen 100x50; 14:02"
+    assert out[1]["error"]["code"] == "unsupported" and "observe" in out[1]["error"]["message"]
+
+
+def test_release_inputs_posts_key_and_mouse_ups() -> None:
+    posted: list[tuple] = []
+    quartz = SimpleNamespace(
+        kCGHIDEventTap="hid", kCGEventLeftMouseUp="lup", kCGEventRightMouseUp="rup", kCGEventOtherMouseUp="oup",
+        kCGMouseButtonLeft=0, kCGMouseButtonRight=1, kCGMouseButtonCenter=2,
+        CGEventCreateKeyboardEvent=lambda src, code, down: ("key", code, down),
+        CGEventCreate=lambda src: "ev", CGEventGetLocation=lambda ev: (3, 4),
+        CGEventCreateMouseEvent=lambda src, kind, loc, button: ("mouse", kind, loc, button),
+        CGEventPost=lambda tap, ev: posted.append((tap, ev)),
+    )
+    assert dw.release_inputs(quartz) == 131
+    keys = [ev for tap, ev in posted if ev[0] == "key"]
+    mice = [ev for tap, ev in posted if ev[0] == "mouse"]
+    assert len(keys) == 128 and all(ev[2] is False for ev in keys) and [ev[1] for ev in keys] == list(range(128))
+    assert mice == [("mouse", "lup", (3, 4), 0), ("mouse", "rup", (3, 4), 1), ("mouse", "oup", (3, 4), 2)]
+    assert all(tap == "hid" for tap, _ in posted)

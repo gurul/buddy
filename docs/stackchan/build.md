@@ -162,7 +162,7 @@ Every other verb is the pet build's (`time`, `status`, `permission`, `focus`, `k
 | host → board | `{"cmd":"owner","op":"reset"}` | forget the owner memory |
 | host → board | `{"cmd":"agent","state":"wake"\|"listening"\|"thinking"\|"speaking"\|"working"\|"asking"\|"done"\|"error"\|"idle"}` | the voice / computer-control conversation's phase; the robot acts it out ([personality.md](personality.md) § 2) |
 | host → board | `{"cmd":"emote","dv":-100..100,"da":-100..100,"label":"curious"}` | the diary's appraisal of what the camera saw; nudges the affect engine by at most ±0.3 |
-| host → board | `{"cmd":"caption","text":"...","final":bool}` | buddy's reply as it streams (≤ 240 chars); drawn under the eyes with talk chirps, 8 s after the last update |
+| host → board | `{"cmd":"caption","page":i,"of":n\|0,"lines":["..."],"hold_ms":ms,"chirp":bool,"final":bool}` / `{"cmd":"caption","clear":true}` | one page of buddy's reply, pre-wrapped by the host (≤ 4 lines × 17 chars, size-3 text at y 112); shown for `hold_ms` (+3 s grace), one talk chirp when `chirp` is true; `clear` removes it |
 
 Frames pause while a character transfer owns the wire. On this machine: ~4 fps,
 ~2.5 KB JPEGs (quality 60), macOS Vision detects faces in 5–20 ms per frame.

@@ -1198,48 +1198,42 @@ void loop() {
     // skip sprite render — face-down, powered off, or landscape clock
   } else {
     const Palette& p = characterPalette();
+    // Caption: one page of buddy's reply, wrapped and paced by the host (bridge caption_pager.py).
+    // Shown until the next page / clear, or hold_ms + grace if the host goes quiet. Listening eyes
+    // on the N row end at y 110, the band starts at 112. A permission card (y >= 126) wins.
+    const int CAP_Y = 112, CAP_LINES = 4, CAP_COLS = 17, CAP_LH = 23, CAP_SIZE = 3, CAP_X = 7;
+    const uint32_t CAP_GRACE_MS = 3000;
+    static_assert(CAP_Y + CAP_LINES * CAP_LH <= EYES_H, "caption band must stay above the HUD");
+    static_assert(CAP_X + CAP_COLS * 6 * CAP_SIZE <= W - 6, "caption text must leave the more-tick margin");
+    static_assert(CAP_LINES <= TamaState::CAP_MAX_LINES && CAP_COLS <= TamaState::CAP_MAX_COLS, "caption storage");
+    bool captionUp = tama.captionAtMs && tama.captionNLines
+                     && now - tama.captionAtMs < (uint32_t)tama.captionHoldMs + CAP_GRACE_MS
+                     && tama.promptId[0] == 0;
     eyesSet(activeState, baseState == P_ATTENTION, listenNow, tama.promptHot, bodyGazeSide(), tama.explore,
             tama.agentState, moodExprForEyes);
-    eyesCardUp(tama.promptId[0] != 0);   // card owns y >= 126: eyes park on the N row
+    // A card (y >= 126) or a caption page (y >= 112) owns the lower band: eyes park on the N row
+    // in the same frame (eyesCardUp only picks the row, so one call covers both).
+    eyesCardUp(tama.promptId[0] != 0 || captionUp);
     eyesLookAt((int8_t)bodyYawDeg(), (int8_t)bodyPitchDeg());
     eyesTick(now);
-    // Caption: buddy's reply as text in the band under the eyes (y 150..203,
-    // three lines of 26 chars, the tail of the text), while it beeps. Shown
-    // for 8 s after the last update, or while the conversation phase says
-    // speaking. Replaces the status word while it is up.
-    static uint16_t captionChirpedLen = 0;
     static uint32_t captionSeenAt = 0;
-    bool captionUp = tama.captionAtMs && now - tama.captionAtMs < 8000 && tama.caption[0];
-    if (!tama.captionAtMs) captionChirpedLen = 0;
+    if (captionUp && tama.captionAtMs != captionSeenAt) {
+      captionSeenAt = tama.captionAtMs;
+      if (tama.captionChirp) chirpPlay(CHIRP_TALK);            // one babble per page, host decides
+      diagLog("caption p%u/%u %u lines hold %u", (unsigned)tama.captionPage, (unsigned)tama.captionOf,
+              (unsigned)tama.captionNLines, (unsigned)tama.captionHoldMs);
+    }
+    if (!captionUp) captionSeenAt = 0;
     if (captionUp) {
-      if (tama.captionAtMs != captionSeenAt) {
-        captionSeenAt = tama.captionAtMs;
-        // babble as the text grows: one talk chirp per ~24 new characters
-        if (tama.captionLen + 24 <= captionChirpedLen || tama.captionLen >= captionChirpedLen + 24) {
-          captionChirpedLen = tama.captionLen;
-          chirpPlay(CHIRP_TALK);
-        }
-      }
-      const int CAP_Y = 150, CAP_LINES = 3, CAP_COLS = 26, CAP_LH = 17;
-      spr.fillRect(0, CAP_Y, W, EYES_H - CAP_Y, p.bg);
-      // greedy word wrap into up to 8 lines, keep the last CAP_LINES
-      char lines[8][CAP_COLS + 1]; int nl = 0; int col = 0; lines[0][0] = 0;
-      const char* t = tama.caption;
-      while (*t && nl < 8) {
-        const char* ws = t; while (*t && *t != ' ') t++;
-        int wl = (int)(t - ws);
-        if (col && col + 1 + wl > CAP_COLS) { lines[nl][col] = 0; nl++; col = 0; if (nl >= 8) break; lines[nl][0] = 0; }
-        if (col) { lines[nl][col++] = ' '; }
-        for (int i = 0; i < wl; i++) { if (col >= CAP_COLS) { lines[nl][col] = 0; nl++; col = 0; if (nl >= 8) break; lines[nl][0] = 0; } lines[nl][col++] = ws[i]; }
-        if (nl >= 8) break;
-        while (*t == ' ') t++;
-      }
-      if (nl < 8) { lines[nl][col] = 0; nl++; }
-      int first = nl > CAP_LINES ? nl - CAP_LINES : 0;
+      spr.fillRect(0, CAP_Y - 2, W, EYES_H - CAP_Y + 2, p.bg);
       spr.setTextDatum(TL_DATUM);
-      spr.setTextSize(2);
+      spr.setTextSize(CAP_SIZE);
       spr.setTextColor(eyesColor(), p.bg);
-      for (int i = first; i < nl; i++) spr.drawString(lines[i], 4, CAP_Y + 2 + (i - first) * CAP_LH);
+      for (int i = 0; i < tama.captionNLines && i < CAP_LINES; i++)
+        spr.drawString(tama.captionLines[i], CAP_X, CAP_Y + i * CAP_LH);
+      if (tama.captionOf == 0 || tama.captionPage + 1 < tama.captionOf)
+        spr.fillRect(W - 6, EYES_H - 8, 5, 5, eyesColor());   // "more follows" tick, in the free right margin
+      spr.setTextSize(1);
     }
     // Status word: cleared and redrawn each frame (the card band overwrites
     // it during a prompt, which is intended — the card is the status then).

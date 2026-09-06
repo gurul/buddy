@@ -156,6 +156,7 @@ class Daemon:
         self._ears: Optional[Ears] = None
         self._conversation: Optional[asyncio.Task[None]] = None
         self._agent_state = "idle"
+        self._active_agent: Optional[ComputerAgent] = None
         # Monotonic time of the last thing a human or a session did: any hook
         # event, a board touch, the listen key. Idle time is measured from it.
         self._last_activity_at = time.monotonic()
@@ -251,6 +252,7 @@ class Daemon:
                     pend.cancel()
             await asyncio.gather(*tasks, *self._pending_turn_ends.values(),
                                  return_exceptions=True)
+            await self._cancel_active_task("the daemon is restarting")
             if self._conversation is not None and not self._conversation.done():
                 self._conversation.cancel()
                 await asyncio.gather(self._conversation, return_exceptions=True)
@@ -475,9 +477,11 @@ class Daemon:
         if not (os.environ.get("OPENAI_API_KEY") or "").strip():
             log.warning("voice: OPENAI_API_KEY not set — buddy will hear its name but cannot talk back "
                         "(put it in ~/.config/cc-buddy-bridge/env)")
-        log.info("agent: computer control %s (model %s, %d steps max)",
+        log.info("agent: computer control %s (model %s, %d steps / %.0f s max, %.0f s per step, reasoning %s/%s)",
                  "ready" if self._agent_cfg.enabled else "disabled (CC_BUDDY_COMPUTER_CONTROL=0)",
-                 self._agent_cfg.model, self._agent_cfg.max_turns)
+                 self._agent_cfg.model, self._agent_cfg.max_turns, self._agent_cfg.max_secs,
+                 self._agent_cfg.exec_timeout_secs, self._agent_cfg.reasoning_effort,
+                 self._agent_cfg.plan_reasoning_effort)
         if self._agent_cfg.enabled:
             log_desktop_grants(prompt=True)
 
@@ -529,12 +533,26 @@ class Daemon:
             self._on_agent_state("idle")
 
     def _make_agent(self, on_event: Any, ask_user: Any) -> ComputerAgent:
-        return ComputerAgent(make_response_creator(), config=self._agent_cfg, on_event=on_event, ask_user=ask_user)
+        agent = ComputerAgent(make_response_creator(), config=self._agent_cfg, on_event=on_event, ask_user=ask_user)
+        self._active_agent = agent
+        return agent
 
-    def _on_caption(self, text: str, final: bool) -> None:
-        """Buddy's reply, as it streams, onto the robot's screen ({"cmd":"caption"})."""
+    async def _cancel_active_task(self, reason: str) -> None:
+        """Stop a running desktop task with a reason the owner can read (log + caption),
+        instead of letting a restart or a touch kill it silently (bench 2026-09-06 09:45)."""
+        agent = getattr(self, "_active_agent", None)
+        if agent is None or not agent.running:
+            return
+        log.warning("agent: cancelling the running task — %s", reason)
+        agent.cancel(reason=reason)
         if self.ble.connected:
-            asyncio.create_task(self.ble.send({"cmd": "caption", "text": text, "final": final}))
+            await self.ble.send({"cmd": "caption", "lines": [f"stopped: {reason}"[:17]], "page": 0, "of": 1,
+                                 "hold_ms": 4000, "final": True, "chirp": False})
+
+    def _on_caption(self, msg: dict) -> None:
+        """One page of buddy's reply (or a clear) onto the robot's screen; the pager owns the timing."""
+        if self.ble.connected:
+            asyncio.create_task(self.ble.send(msg))
 
     def _on_agent_state(self, state: str) -> None:
         """Mirror the conversation/task phase on the board."""
@@ -1099,6 +1117,7 @@ class Daemon:
             # conversation (and any task it is running) ends at once.
             if cmd in ("focus", "voice", "key") and self._conversation is not None and not self._conversation.done():
                 log.info("ears: hushed by a touch (%s)", cmd)
+                await self._cancel_active_task("hushed by a touch")
                 self._conversation.cancel()
                 if cmd == "voice":
                     return
