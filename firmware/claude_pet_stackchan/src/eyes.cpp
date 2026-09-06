@@ -27,9 +27,13 @@ static const int EYE_H_BUSY = 67, EYE_H_LISTEN = 110;
 
 struct EyesKey {
   uint8_t state = 0xFF; bool attn = false, listen = false, hot = false; int8_t side = 0; bool explore = false;
+  uint8_t agent = 0;
+  // Mood expression, quantised so a re-apply happens on a visible change only.
+  uint8_t moodKind = 0xFF, moodOpen = 0, moodFlags = 0, moodBlink = 0, moodSacc = 0;
   bool operator!=(const EyesKey& o) const {
     return state != o.state || attn != o.attn || listen != o.listen || hot != o.hot || side != o.side
-        || explore != o.explore;
+        || explore != o.explore || agent != o.agent || moodKind != o.moodKind || moodOpen != o.moodOpen
+        || moodFlags != o.moodFlags || moodBlink != o.moodBlink || moodSacc != o.moodSacc;
   }
 };
 static EyesKey  cur;
@@ -112,14 +116,49 @@ static void applyState(const EyesKey& k, uint32_t now) {
     eyes.setHeight(EYE_H_LISTEN, EYE_H_LISTEN);
     eyes.setAutoblinker(ON, 5, 1);
     eyes.setIdleMode(OFF);
-  } else if (k.explore && k.state != P_ATTENTION) {
-    // Exploring the room under host control: curious, awake, no idle wander
-    // (the host is steering the head; the eyes follow via eyesLookAt).
-    eyes.setMood(DEFAULT);
+  } else if (k.agent != AG_IDLE && k.state != P_ATTENTION) {
+    // The host conversation. Saccade tempo carries the mental energy
+    // (Vector's character guide): quick darts while thinking / working.
     eyes.open();
-    eyes.setCuriosity(ON);
-    eyes.setAutoblinker(ON, 3, 2);
-    eyes.setIdleMode(OFF);
+    switch ((AgentState)k.agent) {
+      case AG_LISTENING: eyes.setMood(DEFAULT); eyes.setHeight(EYE_H_LISTEN, EYE_H_LISTEN);
+                         eyes.setAutoblinker(ON, 5, 1); eyes.setIdleMode(OFF); break;
+      case AG_THINKING:  eyes.setMood(DEFAULT); eyes.setCuriosity(ON);
+                         eyes.setAutoblinker(ON, 2, 1); eyes.setIdleMode(ON, 1, 1); break;
+      case AG_SPEAKING:  eyes.setMood(HAPPY); eyes.setAutoblinker(ON, 3, 2); eyes.setIdleMode(OFF); break;
+      case AG_WORKING:   eyes.setMood(DEFAULT); eyes.setCuriosity(ON); eyes.setHeight(EYE_H_BUSY, EYE_H_BUSY);
+                         eyes.setAutoblinker(ON, 1, 1); eyes.setIdleMode(ON, 1, 1); break;
+      case AG_ASKING:    eyes.setMood(DEFAULT); eyes.setHeight(EYE_H_LISTEN, EYE_H_LISTEN);
+                         eyes.setAutoblinker(ON, 4, 1); eyes.setIdleMode(OFF); break;
+      case AG_DONE:      eyes.setMood(HAPPY); eyes.setAutoblinker(ON, 3, 2); eyes.setIdleMode(OFF);
+                         eyes.anim_laugh(); break;
+      case AG_ERROR:     eyes.setMood(TIRED); eyes.setHFlicker(ON, 3); eyes.setAutoblinker(OFF);
+                         eyes.setIdleMode(OFF); eyes.anim_confused(); break;
+      case AG_WAKE:
+      default:           eyes.setMood(DEFAULT); eyes.setCuriosity(ON); eyes.setAutoblinker(ON, 3, 2);
+                         eyes.setIdleMode(OFF); break;
+    }
+  } else if (k.explore && k.state != P_ATTENTION) {
+    // Exploring: the mood engine's expression when there is one, else the
+    // plain curious face. Eye-level saccades stay on: the head is wandering
+    // anyway and the gaze-shift tempo is how arousal reads (research notes).
+    if (k.moodKind != 0xFF) {
+      eyes.setMood((k.moodFlags & 1) ? HAPPY : (k.moodFlags & 2) ? TIRED : DEFAULT);
+      eyes.open();
+      int h = EYE_H * k.moodOpen / 100;
+      if (h < 24) h = 24;
+      eyes.setHeight(h, h);
+      eyes.setCuriosity((k.moodFlags & 4) ? ON : OFF);
+      eyes.setHFlicker((k.moodFlags & 8) ? ON : OFF, 2);
+      eyes.setAutoblinker(ON, k.moodBlink, 1);
+      eyes.setIdleMode(ON, k.moodSacc, 1);
+    } else {
+      eyes.setMood(DEFAULT);
+      eyes.open();
+      eyes.setCuriosity(ON);
+      eyes.setAutoblinker(ON, 3, 2);
+      eyes.setIdleMode(ON, 2, 2);
+    }
   } else switch ((PersonaState)k.state) {
     case P_SLEEP:
       sleepy = true;
@@ -179,13 +218,23 @@ static void applyState(const EyesKey& k, uint32_t now) {
 }
 
 void eyesSet(PersonaState s, bool needsAttention, bool listening, bool hotPrompt, int8_t gazeSide,
-             bool explore) {
+             bool explore, uint8_t agent, const MoodExpr* mood) {
   EyesKey k;
   k.state = (uint8_t)s; k.attn = needsAttention; k.listen = listening;
   k.hot = hotPrompt && (s == P_ATTENTION || needsAttention); k.side = gazeSide; k.explore = explore;
+  k.agent = agent;
+  if (mood && explore) {
+    k.moodKind  = (uint8_t)mood->kind;
+    k.moodOpen  = (uint8_t)((mood->openness / 10) * 10);       // 10 % steps
+    k.moodFlags = (mood->happy ? 1 : 0) | (mood->tired ? 2 : 0) | (mood->curious ? 4 : 0) | (mood->flicker ? 8 : 0);
+    k.moodBlink = mood->blinkSecs;
+    k.moodSacc  = mood->saccadeSecs;
+  }
   if (!(k != cur)) return;
   bool sideOnly = k.state == cur.state && k.attn == cur.attn && k.listen == cur.listen && k.hot == cur.hot
-               && k.explore == cur.explore;
+               && k.explore == cur.explore && k.agent == cur.agent && k.moodKind == cur.moodKind
+               && k.moodOpen == cur.moodOpen && k.moodFlags == cur.moodFlags && k.moodBlink == cur.moodBlink
+               && k.moodSacc == cur.moodSacc;
   cur = k;
   if (sideOnly) { lastPos = 0xFF; return; }   // gaze handled by eyesLookAt
   applyState(k, millis());
@@ -233,9 +282,22 @@ void eyesTick(uint32_t now) {
   canvas.pushSprite(&spr, 0, EYES_Y);  // palette → RGB565 into the frame
 }
 
-const char* eyesStatusText(PersonaState s, bool listening, bool explore) {
+const char* eyesStatusText(PersonaState s, bool listening, bool explore, uint8_t agent, const MoodExpr* mood) {
   if (listening) return "listening...";
-  if (explore && s != P_ATTENTION) return "exploring...";
+  if (agent != AG_IDLE && s != P_ATTENTION) {
+    switch ((AgentState)agent) {
+      case AG_WAKE:      return "yeah?";
+      case AG_LISTENING: return "listening...";
+      case AG_THINKING:  return "hmm...";
+      case AG_SPEAKING:  return "";
+      case AG_WORKING:   return "on it...";
+      case AG_ASKING:    return "yes / no?";
+      case AG_DONE:      return "done!";
+      case AG_ERROR:     return "oops";
+      default: break;
+    }
+  }
+  if (explore && s != P_ATTENTION) return mood ? mood->word : "exploring...";
   switch (s) {
     case P_SLEEP:     return "zzz";
     case P_BUSY:      return "working...";

@@ -13,8 +13,14 @@ from typing import TYPE_CHECKING, Any, Optional
 if TYPE_CHECKING:
     from .voice_trigger import VoiceHold
 
+from . import voice_agent
 from .audit import AuditLog
 from .ble import BuddyBLE
+from .computer_agent import ComputerAgent, make_response_creator
+from .computer_agent import configured as agent_configured
+from .diary import DiaryTaker, Emote, build_emote_cmd, make_diary_client
+from .ears import Ears
+from .ears import configured as ears_configured
 from .explore import (
     Action,
     Explorer,
@@ -25,7 +31,6 @@ from .explore import (
     Rest,
     build_look_cmd,
     build_mode_cmd,
-    make_note_client,
 )
 from .explore import configured as explore_configured
 from .identity import FaceIdentity, OwnerIdentity, configured_threshold, make_describer
@@ -141,6 +146,16 @@ class Daemon:
         self._explore_cfg = explore_configured()
         self._explorer = Explorer(self._explore_cfg, now=time.monotonic())
         self._notes: Optional[NoteTaker] = None
+        # "hey buddy": the wake word on the Mac mic (ears.py) opens a spoken
+        # conversation (voice_agent.py) that can run a computer-use task
+        # (computer_agent.py). One conversation at a time; the board mirrors
+        # its phases through {"cmd":"agent","state":...}.
+        self._ears_cfg = ears_configured()
+        self._voice_cfg = voice_agent.configured()
+        self._agent_cfg = agent_configured()
+        self._ears: Optional[Ears] = None
+        self._conversation: Optional[asyncio.Task[None]] = None
+        self._agent_state = "idle"
         # Monotonic time of the last thing a human or a session did: any hook
         # event, a board touch, the listen key. Idle time is measured from it.
         self._last_activity_at = time.monotonic()
@@ -195,6 +210,7 @@ class Daemon:
         _log_permission_config_summary(self.matchers)
         await self.ipc.start()
         self._listen_stop = start_listen_key(self._on_listen_key, asyncio.get_running_loop())
+        self._start_ears(asyncio.get_running_loop())
         self._vision.detect = make_detector()
         self._identity = self._make_identity()
         self._vision.identity = self._identity
@@ -210,10 +226,12 @@ class Daemon:
             asyncio.create_task(self._vision_stats_loop(), name="vision-stats"),
         ]
         if self._explore_cfg.enabled:
-            client = make_note_client(self._explore_cfg)
+            # The diary (diary.py): memory-aware thoughts plus an appraisal
+            # the board turns into a feeling. Same take() shape as NoteTaker.
+            client = make_diary_client(self._explore_cfg.model)
             self._explorer.notes_enabled = client is not None
             if client is not None:
-                self._notes = NoteTaker(client, self._explore_cfg.notes_dir)
+                self._notes = DiaryTaker(client, self._explore_cfg.notes_dir, send_emote=self._send_emote)
             tasks.append(asyncio.create_task(self._explore_loop(), name="explore"))
         else:
             log.info("explore: disabled (CC_BUDDY_EXPLORE=0)")
@@ -233,6 +251,11 @@ class Daemon:
                     pend.cancel()
             await asyncio.gather(*tasks, *self._pending_turn_ends.values(),
                                  return_exceptions=True)
+            if self._conversation is not None and not self._conversation.done():
+                self._conversation.cancel()
+                await asyncio.gather(self._conversation, return_exceptions=True)
+            if self._ears is not None:
+                self._ears.stop()
             if self._voice is not None:
                 self._voice.stop()   # idempotent; never exit with keys down
             if self._listen_stop is not None:
@@ -437,6 +460,66 @@ class Daemon:
             st = self._identity.status()
         return {"ok": True, "enabled": self._identity is not None, "identity": st}
 
+    # ---- "hey buddy" ----
+
+    def _start_ears(self, loop: asyncio.AbstractEventLoop) -> None:
+        if not self._ears_cfg.enabled:
+            log.info("ears: disabled (CC_BUDDY_VOICE=0)")
+            return
+        self._ears = Ears(self._ears_cfg, self._on_wake, loop, suppressed=self._wake_suppressed)
+        if not self._ears.start():
+            self._ears = None
+            return
+        if not (os.environ.get("OPENAI_API_KEY") or "").strip():
+            log.warning("voice: OPENAI_API_KEY not set — buddy will hear its name but cannot talk back "
+                        "(put it in ~/.config/cc-buddy-bridge/env)")
+        log.info("agent: computer control %s (model %s, %d steps max)",
+                 "ready" if self._agent_cfg.enabled else "disabled (CC_BUDDY_COMPUTER_CONTROL=0)",
+                 self._agent_cfg.model, self._agent_cfg.max_turns)
+
+    def _wake_suppressed(self) -> bool:
+        """Reasons not to wake: the human is dictating, a conversation is already
+        open, or a permission card is waiting on the board."""
+        return (self._listen_down
+                or (self._conversation is not None and not self._conversation.done())
+                or self.state.pending_count > 0)
+
+    def _on_wake(self, keyword: str) -> None:
+        log.info("ears: heard %r", keyword)
+        self._note_activity()          # a conversation is activity: the explorer stops
+        if self._conversation is not None and not self._conversation.done():
+            return
+        self._conversation = asyncio.create_task(self._converse(), name="voice-conversation")
+
+    async def _converse(self) -> None:
+        if self._ears is None:
+            return
+        mic = self._ears.subscribe()
+        try:
+            await voice_agent.open_session(mic, self._on_agent_state, self._make_agent,
+                                           config=self._voice_cfg, agent_enabled=self._agent_cfg.enabled)
+        except asyncio.CancelledError:
+            raise
+        except Exception as e:  # noqa: BLE001
+            log.warning("voice: conversation failed: %s: %s", type(e).__name__, e)
+            self._on_agent_state("error")
+        finally:
+            self._ears.unsubscribe(mic)
+            self._on_agent_state("idle")
+
+    def _make_agent(self, on_event: Any, ask_user: Any) -> ComputerAgent:
+        return ComputerAgent(make_response_creator(), config=self._agent_cfg, on_event=on_event, ask_user=ask_user)
+
+    def _on_agent_state(self, state: str) -> None:
+        """Mirror the conversation/task phase on the board."""
+        if state == self._agent_state:
+            return
+        self._agent_state = state
+        self._note_activity()
+        log.info("agent: %s", state)
+        if self.ble.connected:
+            asyncio.create_task(self.ble.send({"cmd": "agent", "state": state}))
+
     # ---- idle explorer ----
 
     def _note_activity(self) -> None:
@@ -504,6 +587,11 @@ class Daemon:
             # looks around on its own until the next pan cycle.
             log.info("explore: rest (%s)", action.reason)
             self._explore_raw_frame = None
+
+    async def _send_emote(self, e: Emote) -> None:
+        """The diary's appraisal of what the camera saw → the board's mood engine."""
+        if self.ble.connected:
+            await self.ble.send(build_emote_cmd(e))
 
     async def _stop_explore(self, reason: str) -> None:
         """Shutdown path: leave explore mode on the board if we put it there."""

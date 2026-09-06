@@ -43,10 +43,24 @@ dependencies = [
     # NSPanel. Cocoa bundles AppKit + Foundation. 12.2.2 current per
     # `pip index versions`, 2026-09-05.
     "pyobjc-framework-Cocoa>=12.0; sys_platform == 'darwin'",
-    # Idle explorer notes (explore.py): one Responses API call per note with
-    # an input_image data URL. 3.8.0 current per `pip index versions`,
-    # 2026-09-05. Imported lazily, only when OPENAI_API_KEY is set.
-    "openai>=3.8",
+    # Idle explorer notes (explore.py), the gpt-6-astra computer agent
+    # (computer_agent.py) and the realtime voice session (voice_agent.py,
+    # needs the [realtime] extra's websockets). 3.8.0 current per PyPI,
+    # 2026-09-06. Imported lazily, only when OPENAI_API_KEY is set.
+    "openai[realtime]>=3.8",
+    # "hey buddy" (ears.py): sherpa-onnx keyword spotting (1.13.7, 2026-09-01)
+    # with sentencepiece to tokenise the phrase; sounddevice (0.5.6,
+    # 2026-08-17, bundles PortAudio) for the mic and the speaker; numpy for
+    # PCM plumbing. All imported lazily — the daemon runs without them.
+    "sherpa-onnx>=1.13",
+    "sentencepiece>=0.2",
+    "sounddevice>=0.5.6",
+    "numpy>=2",
+    # Computer control (desktop_worker.py): PyAutoGUI 0.9.54 + Pillow, the
+    # same pair as openai/openai-cua-sample-app. Only the worker child
+    # process imports them.
+    "pyautogui>=0.9.54",
+    "pillow>=11",
 ]
 
 [project.optional-dependencies]

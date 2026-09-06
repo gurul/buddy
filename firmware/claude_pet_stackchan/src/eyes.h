@@ -8,6 +8,7 @@
 // one translation unit and never from a header.
 #include <stdint.h>
 #include "persona.h"
+#include "mood.h"
 
 // Eye area: full width, everything above the transcript HUD (y 0..203), so
 // RoboEyes' own centring puts the eye pair at the panel's visual centre.
@@ -40,9 +41,14 @@ uint16_t eyesColor();
 //   hotPrompt:      the pending permission is destructive (sweat while waiting)
 //   gazeSide:       -1 screen left, +1 screen right, 0 none — used when the
 //                   head is centred so the eyes still glance at the toucher
-//   explore:        {"cmd":"mode","explore":true} — DEFAULT mood, curiosity on
+//   explore:        {"cmd":"mode","explore":true} — the mood engine's expression
+//                   (mood != nullptr): openness, smile/droop, curiosity,
+//                   blink and saccade tempo, a flicker when startled
+//   agent:          the host conversation phase (AgentState): listening wide,
+//                   thinking with quick saccades, working = squint + fast
+//                   saccades, asking wide, done = laugh, error = confused
 void eyesSet(PersonaState s, bool needsAttention, bool listening, bool hotPrompt, int8_t gazeSide,
-             bool explore = false);
+             bool explore = false, uint8_t agent = 0, const MoodExpr* mood = nullptr);
 
 // Keep the eyes and the head agreeing: head yaw/pitch in degrees →
 // setPosition band (W / NW / N / NE / E, DEFAULT when centred).
@@ -59,4 +65,5 @@ void eyesTick(uint32_t now);
 
 // One short word for the status row: "zzz", "working...", "needs you!",
 // "listening...", "done!", "<3", "@_@". Empty for idle-without-daemon.
-const char* eyesStatusText(PersonaState s, bool listening, bool explore = false);
+const char* eyesStatusText(PersonaState s, bool listening, bool explore = false, uint8_t agent = 0,
+                           const MoodExpr* mood = nullptr);

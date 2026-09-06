@@ -3,6 +3,7 @@
 #include <ArduinoJson.h>
 #include "ble_bridge.h"
 #include "xfer.h"
+#include "persona.h"
 
 struct TamaState {
   uint8_t  sessionsTotal;
@@ -45,6 +46,13 @@ struct TamaState {
   int16_t  hostLookYaw, hostLookPitch;
   uint16_t hostLookHold;     // ms
   bool     explore;          // {"cmd":"mode","explore":true}
+  // Voice / computer-control conversation on the host: {"cmd":"agent","state":".."}
+  uint8_t  agentState;       // AgentState (persona.h); AG_IDLE = none
+  uint32_t agentAtMs;        // millis() of the last agent cmd
+  // Host appraisal of what the camera saw: {"cmd":"emote","dv":..,"da":..,"label":".."}
+  bool     emoteReq;         // pending; the consumer (main.cpp -> mood) clears it
+  int8_t   emoteDv, emoteDa; // -100..100
+  char     emoteLabel[12];
 };
 
 // ---------------------------------------------------------------------------
@@ -141,6 +149,24 @@ static void _applyJson(const char* line, TamaState* out) {
     out->hostLookPitch = doc["pitch"] | (int16_t)45;
     out->hostLookHold  = doc["hold"]  | (uint16_t)3000;
     out->hostLookReq   = true;
+    _lastLiveMs = millis();
+    return;
+  }
+  // {"cmd":"agent","state":"wake|listening|thinking|speaking|working|asking|done|error|idle"}
+  if (cmd && strcmp(cmd, "agent") == 0) {
+    out->agentState = agentStateFrom(doc["state"] | "idle");
+    out->agentAtMs = millis();
+    _lastLiveMs = millis();
+    return;
+  }
+  // {"cmd":"emote","dv":-100..100,"da":-100..100,"label":"curious"}: the host's
+  // vision-LLM appraisal nudges the mood engine (clamped there to +-0.3).
+  if (cmd && strcmp(cmd, "emote") == 0) {
+    int dv = doc["dv"] | 0, da = doc["da"] | 0;
+    out->emoteDv = (int8_t)(dv < -100 ? -100 : dv > 100 ? 100 : dv);
+    out->emoteDa = (int8_t)(da < -100 ? -100 : da > 100 ? 100 : da);
+    strlcpy(out->emoteLabel, doc["label"] | "", sizeof(out->emoteLabel));
+    out->emoteReq = true;
     _lastLiveMs = millis();
     return;
   }

@@ -180,6 +180,11 @@ static uint32_t nextIdleAt  = 0;
 static uint32_t nextNodAt   = 0;
 static uint32_t nextScanAt  = 0;
 static uint32_t nextExploreAt = 0;   // next self-driven look-around while exploring
+static AgentState agentState  = AG_IDLE;
+static uint32_t nextAgentBeat = 0;    // next micro-motion of the current agent phase
+static const MoodExpr* mood   = nullptr;
+static bool     touchedFlag   = false;
+static bool     newViewFlag   = false;
 static int8_t   toucherSide = 0;
 static uint32_t toucherAt   = 0;
 static bool     listening   = false;
@@ -218,7 +223,85 @@ bool bodySearchSweep() {
 void bodySetExplore(bool on) {
   if (on == exploring) return;
   exploring = on;
-  if (!on && lastState != 0xFF && !listening) onEnterSilent((PersonaState)lastState, millis());
+  if (!on && lastState != 0xFF && !listening && agentState == AG_IDLE) onEnterSilent((PersonaState)lastState, millis());
+}
+
+bool bodyTakeTouched() { bool t = touchedFlag; touchedFlag = false; return t; }
+bool bodyTakeNewView() { bool t = newViewFlag; newViewFlag = false; return t; }
+
+static const Key SEQ_AGENT_DONE[]  = { {0, KEEP, PITCH_LEVEL - 10, 500}, {350, KEEP, PITCH_LEVEL + 4, 500},
+                                       {700, KEEP, PITCH_LEVEL, 400} };
+static const Key SEQ_AGENT_ERROR[] = { {0, -14, KEEP, 700}, {220, 14, KEEP, 700}, {440, -8, KEEP, 700},
+                                       {660, 0, PITCH_LEVEL, 500} };
+
+void bodySetAgent(AgentState s) {
+  if (s == agentState) return;
+  uint32_t now = millis();
+  agentState = s;
+  seq = nullptr;
+  gazeUntil = 0; gazePending = false;
+  nextAgentBeat = now + 600;
+  switch (s) {
+    case AG_WAKE:      headTo(0, PITCH_LEVEL + 12, 700); chirpPlay(CHIRP_WAKE, true); break;
+    case AG_LISTENING: headTo((now - toucherAt < 30000) ? toucherSide * YAW_FOUND_YOU : 0, PITCH_LEVEL + 15, 500); break;
+    case AG_THINKING:  headTo(random(2) ? 14 : -14, PITCH_LEVEL + 6, 300); nextAgentBeat = now + 2500; break;
+    case AG_SPEAKING:  headTo(0, PITCH_LEVEL + 10, 400); break;
+    case AG_WORKING:   headTo(0, 30, 400); nextAgentBeat = now + 700; break;   // eyes down at the desk
+    case AG_ASKING:    headTo(0, PITCH_ATTENTION, 600); chirpPlay(CHIRP_LISTEN, true); break;
+    case AG_DONE:      play(SEQ_AGENT_DONE, NKEYS(SEQ_AGENT_DONE), now); chirpPlay(CHIRP_OK, true); break;
+    case AG_ERROR:     play(SEQ_AGENT_ERROR, NKEYS(SEQ_AGENT_ERROR), now); chirpPlay(CHIRP_NO, true); break;
+    case AG_IDLE:
+    default:
+      if (lastState != 0xFF && !listening) onEnterSilent((PersonaState)lastState, now);
+      break;
+  }
+}
+
+// Micro-motions that keep an agent phase alive: typing glances while
+// working, a bob while speaking, a slow side-to-side while thinking.
+static void agentBeat(uint32_t now) {
+  if (seq || (int32_t)(now - nextAgentBeat) < 0) return;
+  switch (agentState) {
+    case AG_WORKING:
+      dyn[0] = { 0, (int8_t)random(-6, 7), (int8_t)(28 + random(7)), 300 };
+      play(dyn, 1, now);
+      nextAgentBeat = now + 700 + random(500);
+      break;
+    case AG_SPEAKING:
+      dyn[0] = { 0, KEEP, (int8_t)(PITCH_LEVEL + 6 + random(9)), 350 };
+      play(dyn, 1, now);
+      nextAgentBeat = now + 500 + random(300);
+      break;
+    case AG_THINKING:
+      dyn[0] = { 0, (int8_t)(curYaw > 0 ? -14 : 14), (int8_t)(PITCH_LEVEL + 6), 250 };
+      play(dyn, 1, now);
+      nextAgentBeat = now + 2500 + random(1500);
+      break;
+    default: break;
+  }
+}
+
+static ChirpKind moodChirpKind(uint8_t c) {
+  switch (c) {
+    case MOODCHIRP_CURIOUS:  return CHIRP_CURIOUS;
+    case MOODCHIRP_SURPRISE: return CHIRP_SURPRISE;
+    case MOODCHIRP_SIGH:     return CHIRP_SIGH;
+    case MOODCHIRP_WARBLE:   return CHIRP_WARBLE;
+    default:                 return CHIRP_STARTLE;
+  }
+}
+
+void bodySetMood(const MoodExpr* e) {
+  mood = e;
+  if (e && e->chirp != MOODCHIRP_NONE && exploring && agentState == AG_IDLE && !listening) {
+    chirpPlay(moodChirpKind(e->chirp), e->chirp == MOODCHIRP_STARTLE);
+    if (e->chirp == MOODCHIRP_STARTLE) {          // the jerk: head back and up, fast
+      seq = nullptr;
+      dyn[0] = { 0, (int8_t)(curYaw / 2), (int8_t)(PITCH_LEVEL + 20), 900 };
+      dyn[1] = { 700, KEEP, (int8_t)(PITCH_LEVEL + 8), 400 };
+      play(dyn, 2, millis());
+    }
+  }
 }
 
 void bodyLookAt(int8_t yawDeg, uint16_t holdMs) {
@@ -238,6 +321,7 @@ void bodyNoteToucher(int8_t side) {
   toucherSide = side;
   toucherAt   = millis();
   gazeNoteTouch(side);     // a touch is an owner observation too
+  touchedFlag = true;
   if (listening) return;   // pose is pinned on the user; keep it
   // Attention: turn toward the toucher and hold ("found you"). Other states
   // only remember the side for the heart tilt; a card drag mid-busy should
@@ -260,8 +344,36 @@ void ledSet(uint8_t r, uint8_t g, uint8_t b);   // board_compat.cpp
 static void ledForState(PersonaState s, uint32_t now) {
   if (!ledEnabled) { ledSet(0, 0, 0); return; }
   if (micLive)     { ledSet(0, 30, 90); return; }
+  if (agentState != AG_IDLE && s != P_ATTENTION) {
+    // The conversation's phase, at a glance: blue = listening, cyan pulse =
+    // thinking (slow) / working (fast), white pulse = speaking, orange
+    // pulse = a question for you, green = done, red = error.
+    auto tri = [&](uint32_t periodMs) { uint32_t ph = (now % periodMs) * 16 / periodMs; return ph < 8 ? ph : 15 - ph; };
+    switch (agentState) {
+      case AG_WAKE:      ledSet(40, 40, 40); break;
+      case AG_LISTENING: ledSet(0, 30, 90); break;
+      case AG_THINKING:  { uint32_t k = tri(2000); ledSet(0, (uint8_t)(8 + k * 3), (uint8_t)(12 + k * 5)); break; }
+      case AG_SPEAKING:  { uint32_t k = tri(1000); uint8_t v = (uint8_t)(6 + k * 4); ledSet(v, v, v); break; }
+      case AG_WORKING:   { uint32_t k = tri(400);  ledSet(0, (uint8_t)(10 + k * 4), (uint8_t)(16 + k * 6)); break; }
+      case AG_ASKING:    { uint32_t k = tri(800);  ledSet((uint8_t)(40 + k * 12), (uint8_t)(12 + k * 4), 0); break; }
+      case AG_DONE:      ledSet(0, 60, 10); break;
+      case AG_ERROR:     ledSet(70, 0, 0); break;
+      default: break;
+    }
+    return;
+  }
   if (exploring && s != P_ATTENTION) {
-    // Explore: slow dim white breathe (6 s, 2..14), same quantised ramp idea.
+    if (mood) {
+      // The feeling: hue from valence, brightness from arousal, pulse rate
+      // 0.25 / 0.5 / 2.5 Hz (MiRo). Scaled down: the 12 LEDs are bright.
+      uint32_t period = (uint32_t)(1000.0f / mood->pulseHz);
+      uint32_t ph = (now % period) * 16 / period;
+      uint32_t k  = ph < 8 ? ph : 15 - ph;                 // 0..7..0
+      float    lv = 0.12f + 0.23f * (float)k / 7.0f;       // 12%..35% of the colour
+      ledSet((uint8_t)(mood->r * lv), (uint8_t)(mood->g * lv), (uint8_t)(mood->b * lv));
+      return;
+    }
+    // Explore without a mood: slow dim white breathe (6 s, 2..14).
     uint32_t ph = (now % 6000) * 16 / 6000;
     uint32_t k  = ph < 8 ? ph : 15 - ph;
     uint8_t  v  = (uint8_t)(2 + k * 12 / 7);
@@ -413,6 +525,7 @@ static void updateInner(PersonaState active, bool needsAttention, uint32_t now) 
     gazePending = false;
   }
   if (listening) { stepSeq(now); return; }  // no sway / nod while listening; sweeps from gaze.cpp still step
+  if (agentState != AG_IDLE && active != P_ATTENTION) { agentBeat(now); stepSeq(now); return; }
   if (exploring && active != P_ATTENTION) {
     // Host owns the head while one of its `look`s is held. Whenever it is
     // not — between waypoints, and through the host's rest between pan
@@ -420,13 +533,20 @@ static void updateInner(PersonaState active, bool needsAttention, uint32_t now) 
     // pitch 35..65, the same band the host pans) held 2..4 s, then another
     // spot, every 4..9 s. Checked against gazeHeld() directly rather than
     // `held`, which ignores the hold in SLEEP where explore still runs.
+    // With a mood: amplitude, tempo and a pitch bias follow the feeling
+    // (keen = wide and quick, bored = narrow, slow and drooping).
     if (!gazeHeld(now) && !seq && (int32_t)(now - nextExploreAt) >= 0) {
-      int8_t yaw1 = (int8_t)random(-45, 46), yaw2 = (int8_t)random(-45, 46);
-      int8_t pit1 = (int8_t)(35 + random(31)), pit2 = (int8_t)(35 + random(31));
-      dyn[0] = { 0, yaw1, pit1, 140 };
-      dyn[1] = { (uint16_t)(2000 + random(2000)), yaw2, pit2, 140 };
+      int   amp   = mood ? mood->amplitude : 45;
+      int   bias  = mood ? mood->pitchBias : 0;
+      float tempo = mood ? mood->tempo : 1.0f;
+      int8_t yaw1 = (int8_t)random(-amp, amp + 1), yaw2 = (int8_t)random(-amp, amp + 1);
+      int8_t pit1 = (int8_t)clampPitch(35 + random(31) + bias), pit2 = (int8_t)clampPitch(35 + random(31) + bias);
+      uint16_t speed = (uint16_t)(140 * tempo);
+      dyn[0] = { 0, yaw1, pit1, speed };
+      dyn[1] = { (uint16_t)((2000 + random(2000)) / tempo), yaw2, pit2, speed };
       play(dyn, 2, now);
-      nextExploreAt = now + 4000 + random(5000);
+      nextExploreAt = now + (uint32_t)((4000 + random(5000)) / tempo);
+      newViewFlag = true;
     }
     stepSeq(now);
     return;
