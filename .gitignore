@@ -9,6 +9,7 @@ __pycache__/
 
 # arduino build artifacts
 firmware/**/build/
+past-experiments/firmware/**/build/
 
 # macOS
 .DS_Store

@@ -1,7 +1,7 @@
 """Parametric shell v2 for the Claude Pet (Freenove FNK0104B) — FreeCAD headless.
 
-Run:  /Applications/FreeCAD.app/Contents/Resources/bin/freecadcmd case/shell_v2.py
-Out:  case/export/{frame_v2,back_v2,gauge_v2}.stl + case/export/claude_pet_shell_v2.FCStd
+Run:  /Applications/FreeCAD.app/Contents/Resources/bin/freecadcmd past-experiments/case/shell_v2.py
+Out:  past-experiments/case/export/{frame_v2,back_v2,gauge_v2}.stl + case/export/claude_pet_shell_v2.FCStd
 
 v2 — 2026-08-07, after the first print revealed the mounting holes off:
   * Hole grid RE-MEASURED with calipers on the bare board:

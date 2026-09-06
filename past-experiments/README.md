@@ -3,7 +3,9 @@
 buddy grew out of three earlier builds on two other boards. They still work,
 share the same NDJSON protocol and daemon, and are kept here for anyone with
 that hardware. The robot in the top-level README is the project; this folder is
-its history. Paths below are relative to the repository root.
+its history. It mirrors the repository layout (`firmware/`, `case/`, `tools/`), so the
+paths below are relative to this folder; run the flash scripts from the repository root
+(`past-experiments/tools/flash.sh`).
 
 ## Touch pet (Freenove FNK0104B, ESP32-S3 2.8" touch LCD)
 
@@ -53,7 +55,7 @@ solid blue while dictating.
 arduino-cli core install esp32:esp32          # tested with 3.3.10
 arduino-cli lib install ArduinoJson AnimatedGIF TFT_eSPI
 
-./tools/flash.sh                              # compile → archive ELF → flash → restart daemon
+past-experiments/tools/flash.sh                              # compile → archive ELF → flash → restart daemon
 ```
 
 `tools/flash.sh` handles the whole dance: it compiles, files the exact ELF away under
@@ -84,7 +86,7 @@ updates. The front controls (two buttons + a rocker/press "slider"):
 | MENU/HOME | raise the blocked session's terminal | raise the asking session's terminal (card stays pending) |
 
 ```bash
-./tools/flash_eink.sh    # compile + archive ELF + flash (through `hwlog flash` when its daemon owns the port)
+past-experiments/tools/flash_eink.sh    # compile + archive ELF + flash (through `hwlog flash` when its daemon owns the port)
 cc-buddy-bridge install --service --serial-port '/dev/cu.usbserial-*'   # CH340 enumerates as usbserial, not usbmodem
 ```
 
@@ -120,7 +122,7 @@ running, then idle — ordered by rank then name so rows don't hop between
 refreshes), and the transcript tail filling whatever is left.
 
 ```bash
-./tools/flash_eink_monitor.sh    # compile + archive ELF + flash
+past-experiments/tools/flash_eink_monitor.sh    # compile + archive ELF + flash
 CC_BUDDY_MONITOR_ONLY=1 cc-buddy-bridge daemon   # or add it to the service env
 ```
 
@@ -175,7 +177,7 @@ must keep.
 
 ### Printable shell
 
-![frame, back and stand as they come off the printer](../assets/shell-render.png)
+![frame, back and stand as they come off the printer](assets/shell-render.png)
 
 A parametric three-part case lives in `case/` — `shell.py` builds it headless in FreeCAD
 and exports STLs to `case/export/`. Frame (bezel + walls, print face down), back cover
