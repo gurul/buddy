@@ -92,7 +92,7 @@ connected → IDLE (awake, looking around).
 | DIZZY | (kept from the pet build) | 1.2 s yaw wobble | flicker, confused | off | wobble |
 | Listening | Option held on the Mac, or a push-to-talk hold | toward a toucher seen in the last 30 s, else centre; pitch 60 | wide (110 px) | blue (mic live) | one short up-chirp |
 | Explore | `{"cmd":"mode","explore":true}` | host `look`s when held; otherwise looks around on its own — amplitude, tempo and a pitch bias follow the affect engine (`mood.cpp`) | openness, smile/droop, curiosity, blink and saccade tempo from the feeling | the feeling's colour and pulse (0.25 / 0.5 / 2.5 Hz) | one chirp per feeling change |
-| Agent phases | `{"cmd":"agent","state":..}` | listening: faces you · thinking: tilted, slow side-to-side · speaking: bobs · working: down at the desk, typing glances · asking: up · done: nod · error: wobble | per phase ([personality.md](personality.md) § 2) | blue · cyan slow · white · cyan 2.5 Hz · orange · green · red | wake / "hm?" / beep-boop / boop |
+| Agent phases | `{"cmd":"agent","state":..}` | listening: faces you · thinking: tilted, slow side-to-side · speaking: bobs · working: down at the desk, typing glances · asking: up · done: nod · error: wobble | per phase ([personality.md](personality.md) § 2) | animations over the two back rows: blue wave · cyan scanner · white sparkle · cyan ripple · orange alternating · green sweep · red flash | wake / talk babble / "hm?" / beep-boop / boop |
 
 Head motion: the BSP runs a spring per servo. On top of it `body.cpp` glides
 each target along `easeInOutCubic` and streams the pose at 25 Hz

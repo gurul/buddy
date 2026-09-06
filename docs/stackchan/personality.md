@@ -41,14 +41,20 @@ minutes and lonely after a quarter of an hour alone.
 
 | Kind | When | Eyes | LEDs | Head | Chirp | Word |
 |---|---|---|---|---|---|---|
-| startled | a jolt < 1.5 s ago, or a > 0.6 with v < −0.2 | wide, horizontal flicker | red | back and up, fast | sharp double blip | `eek!` |
-| surprised | a new view while keen, < 2.5 s ago | wide, curious | bright | pitch +10 | one high blip | `!` |
-| affection | the owner seen < 20 s ago, v > 0.2 | curious, smile | pink | — | soft warble | `<3` |
-| happy | v > 0.4, a > −0.2 | HAPPY mood (lower-lid smile) | green | quicker wander | soft warble | `happy` |
-| curious | a > 0.2, v ≥ −0.2 | curious, quick blinks and saccades | green, 2.5 Hz pulse when keen | wide, quick wander | two rising notes | `curious...` |
-| lonely | v < −0.4, a < 0.2 | TIRED mood, droopy | dim orange, 0.25 Hz | pitch −10 | slow falling sigh | `lonely...` |
-| bored | a < −0.35 | half-closed, slow blinks and saccades | dim, 0.25 Hz | narrow, slow, pitch −10 | slow falling sigh | `bored...` |
-| calm | otherwise | default | cyan / white | normal | — | `exploring...` |
+| startled | a jolt < 1.5 s ago, or a > 0.6 with v < −0.2 | wide, horizontal flicker | red flash, fades over 1.5 s | back and up, fast | sharp double blip | `eek!` |
+| surprised | a new view while keen, < 2.5 s ago | wide, curious | white flash, fades | pitch +10 | one high blip | `!` |
+| affection | the owner seen < 20 s ago, v > 0.2 | curious, smile | pink heartbeat from the middle of each row outward | — | soft warble | `<3` |
+| happy | v > 0.4, a > −0.2 | HAPPY mood (lower-lid smile) | green sparkle | quicker wander | soft warble | `happy` |
+| curious | a > 0.2, v ≥ −0.2 | curious, quick blinks and saccades | scanner dot bouncing along each row, faster with arousal | wide, quick wander | two rising notes | `curious...` |
+| lonely | v < −0.4, a < 0.2 | TIRED mood, droopy | only the middle two LEDs, dim purple, slow | pitch −10 | slow falling sigh | `lonely...` |
+| bored | a < −0.35 | half-closed, slow blinks and saccades | only the middle two LEDs, dim, 0.25 Hz | narrow, slow, pitch −10 | slow falling sigh | `bored...` |
+| calm | otherwise | default | breathing wave travelling along the rows, in the feeling's colour and pulse rate | normal | — | `exploring...` |
+
+**The back LEDs** are twelve WS2812 in two rows of six (0–5 left, 6–11 right).
+Every state is an animation over the rows — `body.cpp` `patWave` (a glow that
+travels along the row), `patScanner`, `patHeartbeat`, `patSparkle`, `patDroop`,
+`patAlternate`, `patFlashFade` — composed at 20 Hz; only the LEDs that changed
+are written to the PY32 expander.
 
 **Continuous expression** is read off (v, a) every frame, not looked up per kind:
 eyelid openness 0.55 + 0.4·a; blink interval 1.5 s/(1 + a); saccade tempo
@@ -73,14 +79,14 @@ constant in one file and the other.
 
 | Phase | Head | Eyes | LEDs | Status word | Chirp |
 |---|---|---|---|---|---|
-| wake | up (+12) | open, curious | white | `yeah?` | wake whistle |
-| listening | faces you (last toucher side), pitch +15 | wide (110 px) | blue | `listening...` | — |
-| thinking | tilted 14° aside, slow side-to-side every 2.5–4 s | quick saccades | cyan, slow pulse | `hmm...` | — |
-| speaking | up (+10), small bobs every 0.5–0.8 s | HAPPY | white, 1 Hz pulse | — | — |
-| working | down at the desk (pitch 30), typing glances every 0.7–1.2 s | squint + curious, fast saccades | cyan, 2.5 Hz pulse | `on it...` | — |
-| asking | up (attention pitch) | wide | orange pulse | `yes / no?` | "hm?" |
-| done | nod | HAPPY + laugh | green | `done!` | beep-boop |
-| error | side-to-side wobble | TIRED + flicker + confused | red | `oops` | descending boop |
+| wake | up (+12) | open, curious | white flash, fades | `yeah?` | wake whistle |
+| listening | faces you (last toucher side), pitch +15 | wide (110 px) | blue breathing wave | `listening...` | — |
+| thinking | tilted 14° aside, slow side-to-side every 2.5–4 s | quick saccades | cyan scanner dot | `hmm...` | — |
+| speaking | up (+10), small bobs every 0.5–0.8 s | HAPPY | white sparkle (the caption streams on screen, talk chirps) | caption | beep-boop babble |
+| working | down at the desk (pitch 30), typing glances every 0.7–1.2 s | squint + curious, fast saccades | fast cyan ripple | `on it...` | — |
+| asking | up (attention pitch) | wide | left row / right row alternating orange | `yes / no?` | "hm?" |
+| done | nod | HAPPY + laugh | green sweep, then solid green | `done!` | beep-boop |
+| error | side-to-side wobble | TIRED + flicker + confused | red double flash | `oops` | descending boop |
 | idle | back to the persona state | — | — | — | — |
 
 A phase older than 15 minutes with no follow-up (the daemon died mid-conversation)
