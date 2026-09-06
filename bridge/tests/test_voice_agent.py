@@ -9,6 +9,8 @@ import base64
 import json
 from types import SimpleNamespace
 
+import pytest
+
 from cc_buddy_bridge.computer_agent import AgentEvent
 from cc_buddy_bridge.voice_agent import (
     TOOLS,
@@ -125,8 +127,9 @@ class FakeAgent:
         self.steers.append(text)
         return True
 
-    def cancel(self) -> None:
+    def cancel(self, reason: str = "") -> None:
         self.cancelled = True
+        self.reason = reason
         self.release.set()
 
     def status(self) -> dict:
@@ -436,31 +439,208 @@ def test_conversation_does_not_keep_listening_after_a_task() -> None:
     assert len(creates) == 2          # greeting, then ONE reply covering "On it" + the result (both queued) — nothing after
 
 
+CAPTIONS = VoiceConfig(idle_timeout_secs=20.0, max_session_secs=600.0, output="captions")
+
+
+def _reply(*deltas: str) -> list[dict]:
+    text = "".join(deltas)
+    return [{"type": "response.created"},
+            *({"type": "response.output_text.delta", "delta": d} for d in deltas),
+            {"type": "response.output_text.done", "text": text},
+            {"type": "response.done"}]
+
+
+def _captions_session(conn: FakeConnection, clock: dict, **kw):
+    captions: list[dict] = []
+    s, states, mic = _session(conn, [FakeAgent(None, None)], clock=clock, on_caption=captions.append,
+                              caption_tick_secs=0.001, config=kw.pop("config", CAPTIONS), **kw)
+    return s, states, captions
+
+
 def test_captions_mode_streams_text_to_the_robot_and_plays_nothing() -> None:
-    conn = FakeConnection([
-        {"type": "response.created"},
-        {"type": "response.output_text.delta", "delta": "Ten past "},
-        {"type": "response.output_text.delta", "delta": "three."},
-        {"type": "response.output_text.done", "text": "Ten past three."},
-        {"type": "response.done"},
-        _tool_call("end_conversation"), None,
-    ])
-    captions: list[tuple[str, bool]] = []
+    conn = FakeConnection(_reply("Ten past ", "three."))
     clock = {"now": 0.0}
-    s, states, _ = _session(conn, [FakeAgent(None, None)], clock=clock, on_caption=lambda t, f: captions.append((t, f)))
-    asyncio.run(s.run())
-    # first delta goes out at once, the second is throttled (same instant), the done is final
-    assert captions == [("Ten past ", False), ("Ten past three.", True)]
+    s, states, captions = _captions_session(conn, clock)
+
+    async def go():
+        task = asyncio.create_task(s.run())
+        await asyncio.sleep(0.02)
+        # page 0 goes up at the first whole word (hold 2 s while it fills), then the final
+        # text refills it as the last page: 15 chars -> clamp(15/12 + 0.8 + 3, 6, 10) = 6 s
+        assert captions == [
+            {"cmd": "caption", "page": 0, "of": 0, "lines": ["Ten past"], "hold_ms": 2000, "chirp": True, "final": False},
+            {"cmd": "caption", "page": 0, "of": 1, "lines": ["Ten past three."], "hold_ms": 6000, "chirp": False,
+             "final": True},
+        ]
+        assert states[-1] == "speaking"                 # the phase holds while the page is read
+        clock["now"] = 6.1
+        await asyncio.sleep(0.01)
+        assert captions[-1] == {"cmd": "caption", "clear": True}
+        assert states[-1] == "listening"
+        conn.feed(_tool_call("end_conversation"), None)
+        await task
+    asyncio.run(go())
     assert s.speaker.played == b"" and s.transcript == ["Ten past three."]
-    assert "speaking" in states
+    assert states[-1] == "idle"
+
+
+def test_state_stays_speaking_until_the_last_page_is_held() -> None:
+    conn = FakeConnection(_reply("Ten past ", "three."))
+    clock = {"now": 0.0}
+    s, states, captions = _captions_session(conn, clock)
+
+    async def go():
+        task = asyncio.create_task(s.run())
+        await asyncio.sleep(0.02)
+        assert states[-1] == "speaking" and captions[-1]["final"] is True
+        clock["now"] = 3.0
+        await asyncio.sleep(0.01)
+        assert states[-1] == "speaking"                 # 3 s in: still on the page
+        conn.feed({"type": "input_audio_buffer.speech_started"})   # barge-in
+        await asyncio.sleep(0.01)
+        assert states[-1] == "listening" and captions[-1] == {"cmd": "caption", "clear": True}
+        conn.feed(_tool_call("end_conversation"), None)
+        await task
+    asyncio.run(go())
+
+
+def test_idle_watchdog_waits_for_captions() -> None:
+    conn = FakeConnection(_reply("Ten past ", "three."))
+    clock = {"now": 0.0}
+    s, _, captions = _captions_session(conn, clock, config=VoiceConfig(idle_timeout_secs=5.0, max_session_secs=600.0,
+                                                                        output="captions"))
+
+    async def go():
+        task = asyncio.create_task(s.run())
+        await asyncio.sleep(0.02)
+        assert captions[-1]["hold_ms"] == 6000
+        clock["now"] = 5.5                              # > idle 5 s, but the page is still held
+        await asyncio.sleep(0.6)
+        assert not s._ended.is_set()
+        clock["now"] = 7.0                              # page cleared at 6 s; idle since 0
+        await asyncio.sleep(0.6)
+        assert s._ended.is_set() and captions[-1] == {"cmd": "caption", "clear": True}
+        conn.feed(None)
+        await task
+    asyncio.run(go())
+
+
+def test_run_drains_captions_before_idle() -> None:
+    conn = FakeConnection(_reply("Ten past ", "three.") + [_tool_call("end_conversation"), None])
+    clock = {"now": 0.0}
+    s, states, captions = _captions_session(conn, clock)
+
+    async def go():
+        task = asyncio.create_task(s.run())
+        await asyncio.sleep(0.05)
+        assert not task.done() and states[-1] != "idle"       # holding the page, not idle yet
+        assert captions[-1]["final"] is True
+        clock["now"] = 6.5
+        await asyncio.sleep(0.05)
+        assert task.done()
+        await task
+    asyncio.run(go())
+    assert captions[-1] == {"cmd": "caption", "clear": True} and states[-1] == "idle"
+
+
+def test_hush_clears_the_caption_at_once() -> None:
+    conn = FakeConnection(_reply("Ten past ", "three."))
+    clock = {"now": 0.0}
+    s, states, captions = _captions_session(conn, clock)
+
+    async def go():
+        task = asyncio.create_task(s.run())
+        await asyncio.sleep(0.02)
+        assert captions[-1]["final"] is True
+        task.cancel()                                   # the daemon's touch hush
+        with pytest.raises(asyncio.CancelledError):
+            await task
+    asyncio.run(go())
+    assert captions[-1] == {"cmd": "caption", "clear": True} and states[-1] == "idle"
+
+
+def test_new_response_chains_pages() -> None:
+    conn = FakeConnection(_reply("Ten past ", "three."))
+    clock = {"now": 0.0}
+    s, states, captions = _captions_session(conn, clock)
+
+    async def go():
+        task = asyncio.create_task(s.run())
+        await asyncio.sleep(0.02)
+        n = len(captions)
+        clock["now"] = 0.5
+        conn.feed(*_reply("Sure, ", "on it."))          # a second reply while the page is held
+        await asyncio.sleep(0.02)
+        assert states[-1] == "speaking" and "thinking" not in states[states.index("speaking"):]
+        assert captions[n:] == []                       # nothing until the demoted first page ran out
+        clock["now"] = 2.9                              # clamp(15/12 + 0.8, 2, 9) = 2.05 s after 0, dwell 2 s
+        await asyncio.sleep(0.02)
+        assert captions[n]["page"] == 0 and captions[n]["chirp"] is True and captions[n]["lines"] == ["Sure, on it."]
+        assert not any("clear" in c for c in captions)
+        clock["now"] = 9.0
+        await asyncio.sleep(0.02)
+        assert captions[-1] == {"cmd": "caption", "clear": True} and states[-1] == "listening"
+        conn.feed(_tool_call("end_conversation"), None)
+        await task
+    asyncio.run(go())
+
+
+def test_configured_caption_cps() -> None:
+    assert configured({"CC_BUDDY_CAPTION_CPS": "8"}).caption_cps == 8.0
+    assert configured({"CC_BUDDY_CAPTION_CPS": "2"}).caption_cps == 5.0
+    assert configured({"CC_BUDDY_CAPTION_CPS": "99"}).caption_cps == 30.0
+    assert configured({"CC_BUDDY_CAPTION_CPS": "fast"}).caption_cps == 12.0
+    assert configured({}).caption_cps == 12.0
 
 
 def test_session_config_captions_vs_audio() -> None:
     cap = session_config(VoiceConfig(output="captions"))
     assert cap["output_modalities"] == ["text"] and "output" not in cap["audio"]
-    assert "caption" in cap["instructions"]
+    assert "17 characters" in cap["instructions"] and "one page at a time" in cap["instructions"]
     aud = session_config(VoiceConfig(output="audio"))
     assert aud["output_modalities"] == ["audio"] and aud["audio"]["output"]["voice"] == "marin"
+    assert "17 characters" not in aud["instructions"]
     assert configured({}).output == "captions"
     assert configured({"CC_BUDDY_VOICE_OUTPUT": "audio"}).output == "audio"
     assert configured({"CC_BUDDY_VOICE_OUTPUT": "loud"}).output == "captions"
+    # audio mode never touches the caption callback, even when one is wired
+    captions: list[dict] = []
+    conn = FakeConnection(_reply("Yeah?") + [_tool_call("end_conversation"), None])
+    s, _, _ = _session(conn, [FakeAgent(None, None)], on_caption=captions.append)
+    asyncio.run(s.run())
+    assert captions == [] and s.transcript == ["Yeah?"]
+
+
+def test_progress_events_become_caption_pages_while_working() -> None:
+    """A task's helper sentences ("opened Safari") show on the robot as pages, at most
+    one per progress_min_gap_secs, only when no reply page is up."""
+    from cc_buddy_bridge.computer_agent import AgentEvent as Ev
+
+    clock = {"now": 0.0}
+    conn = FakeConnection()
+    s, states, captions = _captions_session(conn, clock)
+    s.state = "working"
+    s._on_agent_event(Ev("progress", "opened Safari", 1))
+    assert captions and captions[-1]["lines"] == ["opened Safari"] and captions[-1]["final"] is True
+    n = len(captions)
+    s._on_agent_event(Ev("progress", "typed the search", 1))      # same instant: gap not elapsed → dropped
+    assert len(captions) == n
+    clock["now"] = 20.0
+    s._pager.reset(clock["now"])                                   # the page has cleared
+    s._on_agent_event(Ev("progress", "typed the search", 2))
+    assert captions[-1]["lines"] == ["typed the search"]
+
+
+def test_conversation_close_cancels_the_task_with_a_reason() -> None:
+    agent = FakeAgent(None, None)
+    conn = FakeConnection([_tool_call("start_task", "c1", goal="g")])
+    s, _, _ = _session(conn, [agent])
+
+    async def go():
+        task = asyncio.create_task(s.run())
+        await asyncio.sleep(0.01)
+        s.end()
+        conn.feed(None)
+        await task
+    asyncio.run(go())
+    assert agent.cancelled and agent.reason == "the conversation closed"

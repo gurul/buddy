@@ -82,7 +82,7 @@ constant in one file and the other.
 | wake | up (+12) | open, curious | white flash, fades | `yeah?` | wake whistle |
 | listening | faces you (last toucher side), pitch +15 | wide (110 px) | blue breathing wave | `listening...` | — |
 | thinking | tilted 14° aside, slow side-to-side every 2.5–4 s | quick saccades | cyan scanner dot | `hmm...` | — |
-| speaking | up (+10), small bobs every 0.5–0.8 s | HAPPY | white sparkle (the caption streams on screen, talk chirps) | caption | beep-boop babble |
+| speaking | up (+10), small bobs every 0.5–0.8 s | HAPPY | white sparkle | caption pages (4 lines × 17, held at reading pace) | one beep-boop phrase per page |
 | working | down at the desk (pitch 30), typing glances every 0.7–1.2 s | squint + curious, fast saccades | fast cyan ripple | `on it...` | — |
 | asking | up (attention pitch) | wide | left row / right row alternating orange | `yes / no?` | "hm?" |
 | done | nod | HAPPY + laugh | green sweep, then solid green | `done!` | beep-boop |

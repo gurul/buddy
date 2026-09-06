@@ -381,8 +381,10 @@ bool}`, `{"cmd":"owner","op":"reset"}`, `{"cmd":"agent","state":"wake"|"listenin
 "thinking"|"speaking"|"working"|"asking"|"done"|"error"|"idle"}` (the host
 voice / computer-control conversation; `body.cpp` / `eyes.cpp` act each phase
 out), `{"cmd":"emote","dv":±100,"da":±100,"label":".."}` (the diary's
-appraisal → `mood.cpp`, clamped to ±0.3), `{"cmd":"caption","text":"..","final":bool}`
-(buddy's reply as text: the caption band under the eyes + `CHIRP_TALK` babble;
+appraisal → `mood.cpp`, clamped to ±0.3), `{"cmd":"caption","page":i,"of":n|0,
+"lines":[".."],"hold_ms":ms,"chirp":bool,"final":bool}` / `{"cmd":"caption","clear":true}`
+(one pre-wrapped page of buddy's reply; the host's `caption_pager.py` owns the
+pacing, the board draws, chirps once per page and parks the eyes on the N row;
 the Mac stays silent unless `CC_BUDDY_VOICE_OUTPUT=audio`). board→host `{"frame":{"seq":n,"w":160,
 "h":120,"fmt":"jpeg","b64":"...","yaw":Y,"pitch":P}}`, one line per frame from
 the camera task, paused while a character transfer owns the wire. The daemon

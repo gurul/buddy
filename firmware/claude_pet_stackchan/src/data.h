@@ -49,12 +49,15 @@ struct TamaState {
   // Voice / computer-control conversation on the host: {"cmd":"agent","state":".."}
   uint8_t  agentState;       // AgentState (persona.h); AG_IDLE = none
   uint32_t agentAtMs;        // millis() of the last agent cmd
-  // Buddy's reply as text ({"cmd":"caption","text":"..","final":bool}): shown on the
-  // screen while it beeps, instead of a voice from the Mac.
-  char     caption[248];
-  uint32_t captionAtMs;      // millis() of the last caption cmd (0 = none)
-  bool     captionFinal;
-  uint16_t captionLen;       // strlen(caption), for the talk-chirp cadence
+  // Buddy's reply, one pre-wrapped page at a time ({"cmd":"caption","page","of","lines":[..],
+  // "hold_ms","chirp","final"}; {"cmd":"caption","clear":true} removes it). The host paces it.
+  static constexpr uint8_t CAP_MAX_LINES = 6, CAP_MAX_COLS = 26;   // storage; the host sends <= 4 x 17
+  char     captionLines[CAP_MAX_LINES][CAP_MAX_COLS + 1];
+  uint8_t  captionNLines;    // 0 = nothing to show
+  uint8_t  captionPage, captionOf;   // of == 0: page count not known yet (still streaming)
+  uint16_t captionHoldMs;    // host's planned hold, clamped 500..15000; board expires at hold + grace
+  bool     captionFinal, captionChirp;
+  uint32_t captionAtMs;      // millis() of the last caption cmd with lines (0 = none)
   // Host appraisal of what the camera saw: {"cmd":"emote","dv":..,"da":..,"label":".."}
   bool     emoteReq;         // pending; the consumer (main.cpp -> mood) clears it
   int8_t   emoteDv, emoteDa; // -100..100
@@ -165,13 +168,26 @@ static void _applyJson(const char* line, TamaState* out) {
     _lastLiveMs = millis();
     return;
   }
-  // {"cmd":"caption","text":"...","final":bool}: buddy's reply, streamed as it is written.
+  // {"cmd":"caption","page":i,"of":n,"lines":[".."],"hold_ms":ms,"chirp":bool,"final":bool}: one
+  // page of buddy's reply, wrapped and paced by the host; {"cmd":"caption","clear":true} removes it.
   if (cmd && strcmp(cmd, "caption") == 0) {
-    strlcpy(out->caption, doc["text"] | "", sizeof(out->caption));
-    out->captionLen = (uint16_t)strlen(out->caption);
-    out->captionFinal = doc["final"] | false;
-    out->captionAtMs = millis();
     _lastLiveMs = millis();
+    if (doc["clear"] | false) { out->captionNLines = 0; out->captionAtMs = 0; return; }
+    JsonArrayConst ls = doc["lines"].as<JsonArrayConst>();
+    uint8_t n = 0;
+    for (JsonVariantConst v : ls) {
+      if (n >= TamaState::CAP_MAX_LINES) break;
+      strlcpy(out->captionLines[n], v | "", TamaState::CAP_MAX_COLS + 1);
+      n++;
+    }
+    out->captionNLines = n;
+    out->captionPage = doc["page"] | 0;
+    out->captionOf   = doc["of"] | 0;
+    uint32_t h = doc["hold_ms"] | 8000u;
+    out->captionHoldMs = (uint16_t)(h < 500 ? 500 : h > 15000 ? 15000 : h);
+    out->captionFinal = doc["final"] | false;
+    out->captionChirp = doc["chirp"] | false;
+    out->captionAtMs = n ? millis() : 0;
     return;
   }
   // {"cmd":"emote","dv":-100..100,"da":-100..100,"label":"curious"}: the host's

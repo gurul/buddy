@@ -61,6 +61,9 @@ dependencies = [
     # process imports them.
     "pyautogui>=0.9.54",
     "pillow>=11",
+    # type_text() pastes through the clipboard (desktop_helpers.py); pyperclip
+    # 1.11 comes with PyAutoGUI's MouseInfo already, pinned explicitly here.
+    "pyperclip>=1.9; sys_platform == 'darwin'",
 ]
 
 [project.optional-dependencies]

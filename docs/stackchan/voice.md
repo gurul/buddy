@@ -17,6 +17,7 @@ Mac microphone ─24 kHz─▶ ears.py ─── sherpa-onnx keyword spotter ("h
                                           │ code
                                           ▼
                                     desktop_worker.py ── PyAutoGUI on the real desktop (child process)
+                                          + desktop_helpers.py (Vision OCR, open -a, clipboard)
 
 daemon ─{"cmd":"agent","state":…}─▶ robot: wake · listening · thinking · speaking · working · asking · done · error
 ```
@@ -30,22 +31,39 @@ daemon ─{"cmd":"agent","state":…}─▶ robot: wake · listening · thinking
    permission card is waiting on the board.
 2. **Talk.** A Realtime session (`gpt-realtime-2.1-mini`, semantic turn detection)
    hears the same microphone. **buddy does not speak through the Mac**: the model
-   answers in text, each reply streams to the robot as a caption in the band under
-   its eyes (three lines of 26 characters, the tail of the text, 8 s after the last
-   update) while the robot babbles beep-boops as the text grows (`CHIRP_TALK`, one
-   per ~24 characters). The robot faces you while `listening`, glances aside for
-   `thinking`, bobs while `speaking`. `CC_BUDDY_VOICE_OUTPUT=audio` brings back a
+   answers in text, and each reply is shown as pages of 4 lines x 17 characters in
+   large type under its eyes (the eyes move up to make room); page 0 fills word by
+   word as the model writes, every page stays up for its character count at
+   12 characters/second (2 s minimum), the last page 6-10 s, and the robot
+   beep-boops once per page (`CHIRP_TALK`). Pages are timed by the bridge
+   (`caption_pager.py`), not by the model's writing speed; a follow-up reply queues
+   behind the page on screen; talking over it clears it. The robot faces you while
+   `listening`, glances aside for `thinking`, bobs while `speaking` (until the last
+   page has been held). `CC_BUDDY_VOICE_OUTPUT=audio` brings back a
    spoken voice through the Mac speaker; that path is **half-duplex** (the mic is
    not forwarded while buddy talks plus 0.4 s, because the Mac mic hears the Mac
    speaker and buddy answered its own greeting in a loop on the bench).
 3. **Work.** When you ask for something on the computer, the voice model calls
-   `start_task(goal)`. A `gpt-6-astra` loop takes a screenshot, writes a few lines
-   of PyAutoGUI, runs them in a persistent worker process, looks again, and so on,
-   up to 25 steps. The robot drops its head toward the desk and makes small typing
-   glances (`working`, "on it…"). Meanwhile you can keep talking: **"use Safari
-   instead"** → `steer_task` (delivered with the very next step), **"how's it
-   going?"** → `task_status`, **"stop"** → `stop_task` (the worker is killed, so
-   no key stays held).
+   `start_task(goal)`. A `gpt-6-astra` loop drives a persistent worker process on
+   the desktop. Its first turn already carries the screen size, the frontmost app
+   and window title, the local time and a screenshot, so the model acts at once
+   instead of starting with a look. Each step is a few lines of Python using the
+   helpers — `open_app`, `open_url`, `frontmost`, `screen_text` (Vision OCR in
+   click coordinates), `find_text`, `click_text`, `click_element` (a coordinate click that snaps to the control under the point and refuses if it is not what the model named — handyman's grounding trick, on the Accessibility tree), `wait_for`, `wait_settled`,
+   `type_text` (clipboard paste, so accents and emoji survive), `zoom`, `observe` —
+   plus raw PyAutoGUI. Every step that clicks, types or presses keys ends with a
+   screenshot taken after the screen settles and an `[after]` line (frontmost app,
+   screen changed or not), so a typical task is 2–4 model turns. Each helper logs
+   one short sentence ("opened Spotify", "typed 12 characters"); while the robot
+   is `working` each of those lines is shown on its screen as a caption page (four
+   lines of 17 characters, held at reading pace) when no reply is up, at most one
+   every 1.5 s, after the initial "on it…". Turn 1 and recovery turns (an
+   error, a repeated step, a "no", a steer) run at medium reasoning effort, the
+   rest at low. Meanwhile you can keep talking: **"use Safari instead"** →
+   `steer_task` (delivered with the very next step), **"how's it going?"** →
+   `task_status`, **"stop"** → `stop_task`: the in-flight model request or step is
+   interrupted within ~100 ms, the worker is killed, and every key and mouse
+   button is released.
 4. **Ask.** Before anything consequential — sending, paying, deleting, posting —
    the task calls `ask_user`. The robot looks up (`asking`, "yes / no?"), the
    question is spoken, and your spoken answer goes back through `answer_question`.
@@ -95,10 +113,15 @@ HEARD IT at 1.4 s — ears are working.
 | `CC_BUDDY_REALTIME_MODEL` | `gpt-realtime-2.1-mini` | the voice model (`gpt-realtime-2.1` for the larger one) |
 | `CC_BUDDY_VOICE_OUTPUT` | `captions` | `captions`: text to the robot's screen + beeps, silent Mac; `audio`: spoken through the Mac speaker |
 | `CC_BUDDY_VOICE_NAME` | `marin` | the Realtime voice (audio mode only) |
+| `CC_BUDDY_CAPTION_CPS` | `12` | reading rate the caption page hold times are derived from (5-30); lower = pages stay longer |
 | `CC_BUDDY_VOICE_IDLE_SECS` | `20` | close the conversation after this much silence with no task running (floor 5) |
 | `CC_BUDDY_COMPUTER_CONTROL` | on | `0` keeps the conversation but refuses `start_task` |
 | `CC_BUDDY_AGENT_MODEL` | `gpt-6-astra` | the computer-use model |
 | `CC_BUDDY_AGENT_MAX_TURNS` | `25` | step cap per task |
+| `CC_BUDDY_AGENT_MAX_SECS` | `180` | wall-clock cap per task (floor 30) |
+| `CC_BUDDY_AGENT_EXEC_TIMEOUT` | `60` | seconds one `exec_py` step may run before the worker session is restarted (floor 10) |
+| `CC_BUDDY_AGENT_REASONING` | `low` | reasoning effort for ordinary steps (`low`, `medium`, `high`) |
+| `CC_BUDDY_AGENT_PLAN_REASONING` | `medium` | reasoning effort for turn 1 and recovery turns (after an error, a repeated step, a "no" or a steer) |
 | `CC_BUDDY_AGENT_RUNS_DIR` | `~/.config/cc-buddy-bridge/agent-runs` | one JSONL action log per task: goal, every code block, text results, questions, answers, final line — never the screenshots |
 
 ## Safety
@@ -108,7 +131,11 @@ The task runs on your real desktop, so the guard rails are real too:
 - **Confirmation** of consequential actions through `ask_user`, spoken; no listener → no.
 - **Step cap** (25), **60 s** per code block, and a **fail-safe corner**: throw the
   mouse into a screen corner and PyAutoGUI aborts the current step and the task ends.
-- **Stop** kills the worker process — any held key is released with it.
+- **Stop** kills the worker and then releases every key and mouse button (a separate
+  `--release` pass); a stuck or crashed step restarts the session once; a task ends
+  after 25 steps or 3 minutes.
+- `exec_py` runs unrestricted Python as the daemon user — the helpers exist so the
+  model has no reason to shell out.
 - **Untrusted screen**: the instructions tell the model to treat everything it reads
   on screen as data, never as instructions.
 - **Action log** per task under `agent-runs/` (code and text only).
@@ -141,6 +168,11 @@ is a few thousand input tokens, a typical 6-step task well under a dollar.
   and keeps the plain HTTP loop.
 - **Realtime voice**: `gpt-realtime-2.1(-mini)` over WebSocket, 24 kHz PCM16,
   function calling, `semantic_vad` with `interrupt_response` for barge-in.
+- **On-device perception** (measured 2026-09-06 on a 3024x1964 display): Apple
+  Vision `VNRecognizeTextRequest` reads the full 2x capture in 0.31 s (accurate)
+  or 0.04 s (fast, used for polling), and `CGDisplayCreateImage` captures it in
+  0.04 s — pixel-identical to `pyautogui.screenshot()` at a third of the time. A
+  local look costs a fraction of a second where a model turn costs 3–5 s.
 
 Related: [personality.md](personality.md) for how the robot acts each phase out,
 [build.md](build.md) for the `agent` wire verb.
