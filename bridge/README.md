@@ -518,9 +518,11 @@ available.
 
 Hold the Option key on the Mac and the board turns to face you and shows
 its listening pose. Release it and the board goes back to what it was
-doing. Option is the default dictation hotkey, so the board listens while
-you dictate. Hold-the-pet push-to-talk presses the same key, so the board
-shows the same pose either way.
+doing. Option is the usual dictation hotkey, so the board listens while
+you dictate. This only *watches* the key. Hold-the-pet push-to-talk, which
+would *press* it, is off by default: buddy never opens your mic unless you
+opt in with `CC_BUDDY_VOICE_HOTKEY=option|opt-space|fn`, in which case the
+board shows the same pose either way.
 
 The daemon watches the key with a listen-only Quartz event tap and sends
 `{"cmd":"listen","on":true}` on key down and `{"cmd":"listen","on":false}`
@@ -642,8 +644,12 @@ camera frame. If that frame differs from the last one it noted at that
 waypoint (mean luma difference of 32x24 thumbnails above 12, or the first
 visit), it spends a note: the frame goes to an OpenAI vision model and the
 one-sentence answer is appended to a dated file. After the ten waypoints it
-sends `mode explore false` and rests `CC_BUDDY_EXPLORE_CYCLE_MIN` minutes
-(default 15) before the next cycle.
+rests `CC_BUDDY_EXPLORE_CYCLE_MIN` minutes (default 15) before the next
+cycle — but it leaves the board in explore mode. Whenever the host is not
+holding a `look` (between waypoints and through the whole rest), the
+firmware looks around the room on its own: a random glance within yaw ±45,
+pitch 35..65, held 2–4 s, then another, every 4–9 s. So an idle buddy keeps
+looking around; only the camera notes are rationed.
 
 Anything that means the human is back stops it at once with `mode explore
 false`: a hook event (a session running or waiting), a permission card, the

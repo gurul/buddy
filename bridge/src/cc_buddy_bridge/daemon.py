@@ -22,6 +22,7 @@ from .explore import (
     Mode,
     Note,
     NoteTaker,
+    Rest,
     build_look_cmd,
     build_mode_cmd,
     make_note_client,
@@ -498,10 +499,15 @@ class Daemon:
         elif isinstance(action, Note):
             if self._notes is not None:
                 asyncio.create_task(self._notes.take(action))
+        elif isinstance(action, Rest):
+            # Nothing over the wire: the board stays in explore mode and
+            # looks around on its own until the next pan cycle.
+            log.info("explore: rest (%s)", action.reason)
+            self._explore_raw_frame = None
 
     async def _stop_explore(self, reason: str) -> None:
         """Shutdown path: leave explore mode on the board if we put it there."""
-        if self._explorer.active:
+        if self._explorer.on_board:
             await self._run_explore_action(Mode(False, reason))
         self._explorer.reset()
         if self._notes is not None:

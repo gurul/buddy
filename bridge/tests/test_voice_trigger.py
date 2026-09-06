@@ -100,7 +100,7 @@ def test_untrusted_never_posts_and_stays_armed() -> None:
         return False
 
     p = FakePoster()
-    v = VoiceHold(poster=p, trust_check=deny)
+    v = VoiceHold(poster=p, hotkey="opt-space", trust_check=deny)
     assert not v.start()
     assert not v.start()
     assert p.events == []          # no half-held hotkey without permission
@@ -172,9 +172,38 @@ def test_fn_hotkey_holds_the_function_key() -> None:
     assert p.events[-1] == (KEY_FUNCTION, False, 0)
 
 
-def test_option_is_the_default() -> None:
+def test_off_is_the_default() -> None:
+    """Buddy never controls the mic unless asked: no chord by default."""
     v = VoiceHold(poster=FakePoster(), trust_check=None)
-    assert v._hotkey == "option"
+    assert v._hotkey == "off" and not v.enabled
+
+
+def test_off_start_and_stop_post_nothing() -> None:
+    p = FakePoster()
+    v = VoiceHold(poster=p, hotkey="off", trust_check=None)
+    assert v.start() is False
+    assert not v.active
+    v.stop()
+    assert p.events == []
+    assert not v.overdue()
+
+
+def test_off_never_prompts_for_accessibility() -> None:
+    calls: list[bool] = []
+
+    def trust(prompt: bool = True) -> bool:
+        calls.append(prompt)
+        return True
+
+    v = VoiceHold(poster=FakePoster(), hotkey="off", trust_check=trust)
+    v.start()
+    assert calls == []
+
+
+def test_env_opts_in_to_option(monkeypatch) -> None:
+    monkeypatch.setenv("CC_BUDDY_VOICE_HOTKEY", "option")
+    v = VoiceHold(poster=FakePoster(), trust_check=None)
+    assert v._hotkey == "option" and v.enabled
 
 
 def test_option_chord_holds_and_clears_on_release() -> None:
@@ -190,7 +219,7 @@ def test_option_chord_holds_and_clears_on_release() -> None:
 def test_unknown_hotkey_env_falls_back(monkeypatch) -> None:
     monkeypatch.setenv("CC_BUDDY_VOICE_HOTKEY", "banana")
     v = VoiceHold(poster=FakePoster(), trust_check=None)
-    assert v._hotkey == "option"
+    assert v._hotkey == "off"
 
 
 def test_env_selects_opt_space(monkeypatch) -> None:

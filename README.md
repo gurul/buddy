@@ -43,8 +43,9 @@ Claude Code CLI ─hooks→ unix socket → bridge daemon ─NDJSON over USB ser
   AppleScript for iTerm2/Terminal.app, Accessibility (AXRaise) for Ghostty, Warp, cmux and
   friends — falling back to raising the app; the app order is configurable via
   `CC_BUDDY_FOCUS_APPS`.
-- **Push-to-talk dictation.** Hold the pet and the daemon holds your dictation app's global
-  hotkey until you let go — app-agnostic, it just holds a chord.
+- **Push-to-talk dictation (opt-in).** Set `CC_BUDDY_VOICE_HOTKEY` and holding the pet makes
+  the daemon hold your dictation app's global hotkey until you let go — app-agnostic, it just
+  holds a chord. Off by default: out of the box buddy never presses a key or opens the mic.
 - **Hands-on-pet option picking.** Swipe left/right to walk Claude Code's option pickers
   (Up/Down arrows), swipe down for Enter — so the loop is: hold to dictate, release,
   swipe to choose, swipe down to send.
@@ -319,7 +320,7 @@ never receives session state. Run both.
 |---|---|
 | `CLAUDE_CONFIG_DIR` | which Claude config home `install`/`status` target (default `~/.claude`) |
 | `CC_BUDDY_CLAUDE_CONFIG_DIRS` | `os.pathsep`-separated homes the daemon serves — it runs outside any session, so it can't inherit the above |
-| `CC_BUDDY_VOICE_HOTKEY` | `option` (default and recommended), `opt-space`, or `fn` — prefer rebinding your dictation app to Option over changing this. Bake it in with `install --service --voice-hotkey …`; a hand-edited unit file is wiped by the next `--service` install |
+| `CC_BUDDY_VOICE_HOTKEY` | `off` (default — holding the pet never touches the keyboard or your mic), `option` (recommended when enabling), `opt-space`, or `fn`. Bake it in with `install --service --voice-hotkey …`; a hand-edited unit file is wiped by the next `--service` install |
 | `CC_BUDDY_KEY_METHOD` | `osascript` routes Enter through System Events, for apps that swallow synthetic key events (Warp) |
 | `CC_BUDDY_FOCUS_APPS` | comma-separated app names, in priority order, that tap-to-focus raises (e.g. `Warp,cmux,Composer`) — default: Ghostty, Warp, cmux, Composer, Cursor, VS Code |
 | `CC_BUDDY_MONITOR_ONLY` | `1`/`true`/`yes`/`on` → never surface a permission card; defer to Claude Code's own prompt immediately. **Required by the e-ink agent-monitor firmware**, whose buttons can't answer. Env-gated rather than a CLI flag because it's a property of which firmware is flashed, not of how the daemon was invoked |
@@ -327,11 +328,11 @@ never receives session state. Run both.
 Installing into the wrong config home **fails silently** — hooks written, board animating,
 no session ever prompting. `status` prints the home it resolved; check it first.
 
-Push-to-talk needs **Accessibility permission** for the daemon's python (macOS filters
-synthetic events from untrusted processes). `voice-check` prints the exact binary to grant.
-Avoid `fn` as a hotkey: it's a secondary-fn modifier that many apps read from raw HID, which
-synthetic events can't reach — rebind your dictation app to a bare **Option** hold, the
-default, which synthesizes reliably.
+Push-to-talk is off unless `CC_BUDDY_VOICE_HOTKEY` names a chord. When enabled it needs
+**Accessibility permission** for the daemon's python (macOS filters synthetic events from
+untrusted processes). `voice-check` prints the exact binary to grant. Avoid `fn` as a hotkey:
+it's a secondary-fn modifier that many apps read from raw HID, which synthetic events can't
+reach — rebind your dictation app to a bare **Option** hold, which synthesizes reliably.
 
 Granting that permission has two traps worth knowing before you fight them:
 

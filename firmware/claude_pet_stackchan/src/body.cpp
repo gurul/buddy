@@ -179,6 +179,7 @@ static uint32_t enteredAt   = 0;
 static uint32_t nextIdleAt  = 0;
 static uint32_t nextNodAt   = 0;
 static uint32_t nextScanAt  = 0;
+static uint32_t nextExploreAt = 0;   // next self-driven look-around while exploring
 static int8_t   toucherSide = 0;
 static uint32_t toucherAt   = 0;
 static bool     listening   = false;
@@ -412,7 +413,24 @@ static void updateInner(PersonaState active, bool needsAttention, uint32_t now) 
     gazePending = false;
   }
   if (listening) { stepSeq(now); return; }  // no sway / nod while listening; sweeps from gaze.cpp still step
-  if (exploring && active != P_ATTENTION) { stepSeq(now); return; }   // host owns the head
+  if (exploring && active != P_ATTENTION) {
+    // Host owns the head while one of its `look`s is held. Whenever it is
+    // not — between waypoints, and through the host's rest between pan
+    // cycles — look around the room on our own: a random glance (yaw ±45,
+    // pitch 35..65, the same band the host pans) held 2..4 s, then another
+    // spot, every 4..9 s. Checked against gazeHeld() directly rather than
+    // `held`, which ignores the hold in SLEEP where explore still runs.
+    if (!gazeHeld(now) && !seq && (int32_t)(now - nextExploreAt) >= 0) {
+      int8_t yaw1 = (int8_t)random(-45, 46), yaw2 = (int8_t)random(-45, 46);
+      int8_t pit1 = (int8_t)(35 + random(31)), pit2 = (int8_t)(35 + random(31));
+      dyn[0] = { 0, yaw1, pit1, 140 };
+      dyn[1] = { (uint16_t)(2000 + random(2000)), yaw2, pit2, 140 };
+      play(dyn, 2, now);
+      nextExploreAt = now + 4000 + random(5000);
+    }
+    stepSeq(now);
+    return;
+  }
 
   switch (active) {
     case P_IDLE:

@@ -157,7 +157,15 @@ class Note:
     pitch: int
 
 
-Action = Union[Mode, Look, Note]
+@dataclass(frozen=True)
+class Rest:
+    """A pan cycle finished. The board stays in explore mode and looks around
+    the room on its own until the next cycle; nothing goes over the wire."""
+
+    reason: str
+
+
+Action = Union[Mode, Look, Note, Rest]
 
 
 def _clamp(v: float, lo: int, hi: int) -> int:
@@ -325,8 +333,11 @@ class Explorer:
 
     States: OFF (watching the user) -> EXPLORING (walking the pan plan) ->
     RESTING (cycle done, waiting ``cycle_wait_secs`` before the next one).
-    Any activity — ``idle_secs`` dropping below ``after_secs``, a card, the
-    listen key, a disconnect — sends it back to OFF from either state.
+    The board is in explore mode through both EXPLORING and RESTING: while
+    resting the host holds no ``look``, so the firmware looks around the room
+    on its own. Any activity — ``idle_secs`` dropping below ``after_secs``, a
+    card, the listen key, a disconnect — sends it back to OFF from either
+    state, and that is when ``mode explore false`` goes to the board.
     """
 
     OFF = "off"
@@ -368,6 +379,11 @@ class Explorer:
         return self.state == self.EXPLORING
 
     @property
+    def on_board(self) -> bool:
+        """True while the board has been put in explore mode (panning or resting)."""
+        return self.state in (self.EXPLORING, self.RESTING)
+
+    @property
     def waypoint(self) -> tuple[int, int]:
         return self.waypoints[self._wp]
 
@@ -406,8 +422,10 @@ class Explorer:
             return []
         if self.state == self.RESTING:
             if blocker is not None:
+                # The board is still in explore mode (looking around on its
+                # own); hand the head back to the persona.
                 self.state = self.OFF
-                return []
+                return [Mode(False, blocker)]
             if now >= self._rest_until:
                 return self._start(now, idle_secs)
             return []
@@ -427,7 +445,9 @@ class Explorer:
                 self.cycles += 1
                 self.state = self.RESTING
                 self._rest_until = now + self.config.cycle_wait_secs
-                actions.append(Mode(False, f"cycle complete, next in {self.config.cycle_wait_secs / 60:.0f} min"))
+                actions.append(Rest(
+                    f"cycle complete, board looks around on its own; "
+                    f"next pan in {self.config.cycle_wait_secs / 60:.0f} min"))
             else:
                 self._look_at = now
                 yaw, pitch = self.waypoint
