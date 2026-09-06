@@ -181,8 +181,12 @@ static uint32_t nextNodAt   = 0;
 static uint32_t nextScanAt  = 0;
 static uint32_t nextExploreAt = 0;   // next self-driven look-around while exploring
 static AgentState agentState  = AG_IDLE;
+static uint32_t agentSince    = 0;    // when the current agent phase began
 static uint32_t nextAgentBeat = 0;    // next micro-motion of the current agent phase
 static const MoodExpr* mood   = nullptr;
+static uint8_t  moodKindSeen  = 0xFF;
+static uint32_t moodKindAt    = 0;
+static uint32_t moodSince(uint32_t now) { return now - moodKindAt; }
 static bool     touchedFlag   = false;
 static bool     newViewFlag   = false;
 static int8_t   toucherSide = 0;
@@ -238,6 +242,7 @@ void bodySetAgent(AgentState s) {
   if (s == agentState) return;
   uint32_t now = millis();
   agentState = s;
+  agentSince = now;
   seq = nullptr;
   gazeUntil = 0; gazePending = false;
   nextAgentBeat = now + 600;
@@ -293,6 +298,7 @@ static ChirpKind moodChirpKind(uint8_t c) {
 
 void bodySetMood(const MoodExpr* e) {
   mood = e;
+  if (e && (uint8_t)e->kind != moodKindSeen) { moodKindSeen = (uint8_t)e->kind; moodKindAt = millis(); }
   if (e && e->chirp != MOODCHIRP_NONE && exploring && agentState == AG_IDLE && !listening) {
     chirpPlay(moodChirpKind(e->chirp), e->chirp == MOODCHIRP_STARTLE);
     if (e->chirp == MOODCHIRP_STARTLE) {          // the jerk: head back and up, fast
@@ -335,72 +341,165 @@ void bodyNoteToucher(int8_t side) {
 void bodyLedPolicy(bool enabled, bool mic) { ledEnabled = enabled; micLive = mic; }
 
 // ---- LED choreography ----
-// Three at-a-glance states: sleep = very dim slow blue breathe, busy =
-// steady dim cyan, attention = full-brightness orange pulse on all 12.
-// One-shots: heart pink, celebrate green, dizzy off. Written through ledSet()
-// (board_compat.cpp), which drops unchanged colours, so the quantised ramps
-// below cost one I2C write per step, not one per frame.
-void ledSet(uint8_t r, uint8_t g, uint8_t b);   // board_compat.cpp
+// Twelve WS2812 on the back: index 0-5 the left row, 6-11 the right row.
+// Every state is a small animation over the two rows rather than one flat
+// colour: a breathing wave that runs along the row, a scanner dot, a
+// heartbeat from the middle outward, sparkles, a flash that fades, the two
+// rows alternating. Frames are composed at up to 20 Hz and only the LEDs
+// that changed are written (each write is an I2C transaction to the PY32
+// expander; the refresh strobe is one more).
+struct LedFrame { uint8_t c[12][3]; };
+static uint8_t  ledLast[12][3];
+static bool     ledLastValid = false;
+static uint32_t ledLastMs = 0;
+
+static void ledPush(const LedFrame& f, uint32_t now) {
+  if (now - ledLastMs < 50) return;                     // 20 Hz max
+  ledLastMs = now;
+  bool any = false;
+  for (int i = 0; i < 12; i++) {
+    if (!ledLastValid || f.c[i][0] != ledLast[i][0] || f.c[i][1] != ledLast[i][1] || f.c[i][2] != ledLast[i][2]) {
+      M5StackChan.setRgbColor((uint8_t)i, f.c[i][0], f.c[i][1], f.c[i][2]);
+      ledLast[i][0] = f.c[i][0]; ledLast[i][1] = f.c[i][1]; ledLast[i][2] = f.c[i][2];
+      any = true;
+    }
+  }
+  if (any) M5StackChan.refreshRgb();
+  ledLastValid = true;
+}
+
+static inline void ledPix(LedFrame& f, int i, uint8_t r, uint8_t g, uint8_t b, float k) {
+  if (k < 0) k = 0; if (k > 1) k = 1;
+  f.c[i][0] = (uint8_t)(r * k); f.c[i][1] = (uint8_t)(g * k); f.c[i][2] = (uint8_t)(b * k);
+}
+static inline float ledTri(uint32_t now, uint32_t periodMs, float phase01) {   // 0..1..0
+  float t = fmodf((float)(now % periodMs) / (float)periodMs + phase01, 1.0f);
+  return t < 0.5f ? t * 2.0f : 2.0f - t * 2.0f;
+}
+// Breathing wave: each LED along the row is a little later than the one
+// before, so the glow travels; both rows in step. `floor` keeps a dim base.
+static void patWave(LedFrame& f, uint8_t r, uint8_t g, uint8_t b, uint32_t periodMs, uint32_t now,
+                    float floor = 0.15f, float spread = 0.5f) {
+  for (int i = 0; i < 12; i++) {
+    int pos = i % 6;
+    float k = floor + (1.0f - floor) * ledTri(now, periodMs, spread * pos / 6.0f);
+    ledPix(f, i, r, g, b, k);
+  }
+}
+// Scanner: one bright dot bouncing along each row with a short tail.
+static void patScanner(LedFrame& f, uint8_t r, uint8_t g, uint8_t b, uint32_t periodMs, uint32_t now) {
+  float head = ledTri(now, periodMs, 0.0f) * 5.0f;      // 0..5..0
+  for (int i = 0; i < 12; i++) {
+    float d = fabsf((float)(i % 6) - head);
+    ledPix(f, i, r, g, b, d < 0.5f ? 1.0f : d < 1.5f ? 0.35f : d < 2.5f ? 0.08f : 0.0f);
+  }
+}
+// Flash then fade: full at `sinceMs` = 0, gone after `fadeMs`.
+static void patFlashFade(LedFrame& f, uint8_t r, uint8_t g, uint8_t b, uint32_t sinceMs, uint32_t fadeMs) {
+  float k = sinceMs >= fadeMs ? 0.0f : 1.0f - (float)sinceMs / (float)fadeMs;
+  k *= k;
+  for (int i = 0; i < 12; i++) ledPix(f, i, r, g, b, k);
+}
+// Heartbeat: lub-dub from the middle of each row outward, once a second.
+static void patHeartbeat(LedFrame& f, uint8_t r, uint8_t g, uint8_t b, uint32_t now) {
+  uint32_t t = now % 1000;
+  float beat = t < 120 ? 1.0f : t < 260 ? 0.4f : t < 380 ? 0.9f : t < 600 ? 0.25f : 0.12f;
+  for (int i = 0; i < 12; i++) {
+    float dist = fabsf((float)(i % 6) - 2.5f);         // 0.5 .. 2.5 from the middle
+    float k = beat * (1.0f - 0.25f * (dist - 0.5f));
+    ledPix(f, i, r, g, b, k);
+  }
+}
+// Sparkle: a few LEDs twinkle, re-rolled every 120 ms.
+static void patSparkle(LedFrame& f, uint8_t r, uint8_t g, uint8_t b, uint32_t now, float floor = 0.1f) {
+  uint32_t seed = now / 120;
+  for (int i = 0; i < 12; i++) {
+    uint32_t h = (seed * 2654435761u) ^ ((uint32_t)i * 40503u);
+    h ^= h >> 13; h *= 0x5bd1e995u; h ^= h >> 15;
+    float k = (h % 100) < 25 ? 1.0f : floor;
+    ledPix(f, i, r, g, b, k);
+  }
+}
+// Droop: only the middle two of each row, dim, slow.
+static void patDroop(LedFrame& f, uint8_t r, uint8_t g, uint8_t b, uint32_t periodMs, uint32_t now) {
+  float k = 0.05f + 0.25f * ledTri(now, periodMs, 0.0f);
+  for (int i = 0; i < 12; i++) {
+    int pos = i % 6;
+    ledPix(f, i, r, g, b, (pos == 2 || pos == 3) ? k : 0.0f);
+  }
+}
+// Alternate: the left row and the right row take turns.
+static void patAlternate(LedFrame& f, uint8_t r, uint8_t g, uint8_t b, uint32_t periodMs, uint32_t now) {
+  bool left = (now % periodMs) < periodMs / 2;
+  for (int i = 0; i < 12; i++) ledPix(f, i, r, g, b, ((i < 6) == left) ? 1.0f : 0.12f);
+}
+static void patSolid(LedFrame& f, uint8_t r, uint8_t g, uint8_t b) {
+  for (int i = 0; i < 12; i++) ledPix(f, i, r, g, b, 1.0f);
+}
+
+void ledSet(uint8_t r, uint8_t g, uint8_t b);   // board_compat.cpp (all LEDs, deduped)
 static void ledForState(PersonaState s, uint32_t now) {
-  if (!ledEnabled) { ledSet(0, 0, 0); return; }
-  if (micLive)     { ledSet(0, 30, 90); return; }
+  LedFrame f = {};
+  if (!ledEnabled) { ledPush(f, now); return; }
+  if (micLive) { patSolid(f, 0, 30, 90); ledPush(f, now); return; }
   if (agentState != AG_IDLE && s != P_ATTENTION) {
-    // The conversation's phase, at a glance: blue = listening, cyan pulse =
-    // thinking (slow) / working (fast), white pulse = speaking, orange
-    // pulse = a question for you, green = done, red = error.
-    auto tri = [&](uint32_t periodMs) { uint32_t ph = (now % periodMs) * 16 / periodMs; return ph < 8 ? ph : 15 - ph; };
+    // The conversation's phase, at a glance: blue breath = listening, cyan
+    // scanner = thinking, white sparkle = talking, cyan ripple = working,
+    // orange alternating = a question for you, green = done, red = error.
+    uint32_t since = now - agentSince;
     switch (agentState) {
-      case AG_WAKE:      ledSet(40, 40, 40); break;
-      case AG_LISTENING: ledSet(0, 30, 90); break;
-      case AG_THINKING:  { uint32_t k = tri(2000); ledSet(0, (uint8_t)(8 + k * 3), (uint8_t)(12 + k * 5)); break; }
-      case AG_SPEAKING:  { uint32_t k = tri(1000); uint8_t v = (uint8_t)(6 + k * 4); ledSet(v, v, v); break; }
-      case AG_WORKING:   { uint32_t k = tri(400);  ledSet(0, (uint8_t)(10 + k * 4), (uint8_t)(16 + k * 6)); break; }
-      case AG_ASKING:    { uint32_t k = tri(800);  ledSet((uint8_t)(40 + k * 12), (uint8_t)(12 + k * 4), 0); break; }
-      case AG_DONE:      ledSet(0, 60, 10); break;
-      case AG_ERROR:     ledSet(70, 0, 0); break;
+      case AG_WAKE:      patFlashFade(f, 90, 90, 90, since, 700); break;
+      case AG_LISTENING: patWave(f, 0, 40, 110, 3000, now, 0.2f, 0.4f); break;
+      case AG_THINKING:  patScanner(f, 0, 70, 90, 1400, now); break;
+      case AG_SPEAKING:  patSparkle(f, 80, 80, 90, now, 0.08f); break;
+      case AG_WORKING:   patWave(f, 0, 60, 90, 450, now, 0.1f, 0.8f); break;
+      case AG_ASKING:    patAlternate(f, 110, 40, 0, 800, now); break;
+      case AG_DONE:      if (since < 900) patScanner(f, 0, 100, 20, 1800, now); else patSolid(f, 0, 60, 10); break;
+      case AG_ERROR:     patFlashFade(f, 110, 0, 0, since % 500, 500); break;
       default: break;
     }
+    ledPush(f, now);
     return;
   }
   if (exploring && s != P_ATTENTION) {
     if (mood) {
-      // The feeling: hue from valence, brightness from arousal, pulse rate
-      // 0.25 / 0.5 / 2.5 Hz (MiRo). Scaled down: the 12 LEDs are bright.
+      // The feeling: colour from valence/arousal (mood.cpp), the animation
+      // from the kind. Scaled down: twelve of these are bright.
+      uint8_t r = (uint8_t)(mood->r * 0.4f), g = (uint8_t)(mood->g * 0.4f), b = (uint8_t)(mood->b * 0.4f);
       uint32_t period = (uint32_t)(1000.0f / mood->pulseHz);
-      uint32_t ph = (now % period) * 16 / period;
-      uint32_t k  = ph < 8 ? ph : 15 - ph;                 // 0..7..0
-      float    lv = 0.12f + 0.23f * (float)k / 7.0f;       // 12%..35% of the colour
-      ledSet((uint8_t)(mood->r * lv), (uint8_t)(mood->g * lv), (uint8_t)(mood->b * lv));
+      switch (mood->kind) {
+        case MOOD_STARTLED:  patFlashFade(f, 120, 0, 0, moodSince(now), 1500); break;
+        case MOOD_SURPRISED: patFlashFade(f, 100, 100, 100, moodSince(now), 900); break;
+        case MOOD_AFFECTION: patHeartbeat(f, 110, 20, 60, now); break;
+        case MOOD_HAPPY:     patSparkle(f, r, g, b, now, 0.15f); break;
+        case MOOD_CURIOUS:   patScanner(f, r, g, b, (uint32_t)(1600.0f / mood->tempo), now); break;
+        case MOOD_BORED:     patDroop(f, r, g, b, period, now); break;
+        case MOOD_LONELY:    patDroop(f, 40, 20, 80, period, now); break;
+        default:             patWave(f, r, g, b, period, now, 0.12f, 0.5f); break;
+      }
+      ledPush(f, now);
       return;
     }
-    // Explore without a mood: slow dim white breathe (6 s, 2..14).
-    uint32_t ph = (now % 6000) * 16 / 6000;
-    uint32_t k  = ph < 8 ? ph : 15 - ph;
-    uint8_t  v  = (uint8_t)(2 + k * 12 / 7);
-    ledSet(v, v, v);
+    patWave(f, 16, 16, 16, 6000, now, 0.15f, 0.5f);   // explore without a mood: slow white wave
+    ledPush(f, now);
     return;
   }
   switch (s) {
     case P_ATTENTION: {
-      // 800 ms triangle between a dim ember and full orange, 16 steps.
-      uint32_t ph = (now % 800) * 32 / 800;         // 0..31
-      uint32_t k  = ph < 16 ? ph : 31 - ph;         // 0..15..0
-      ledSet(40 + k * 215 / 15, 12 + k * 68 / 15, 0);
+      // Orange, urgent: the two rows alternate at 800 ms on top of a pulse.
+      float k = 0.35f + 0.65f * ledTri(now, 800, 0.0f);
+      patAlternate(f, (uint8_t)(255 * k), (uint8_t)(80 * k), 0, 800, now);
       break;
     }
-    case P_BUSY:      ledSet(0, 28, 40); break;
-    case P_HEART:     ledSet(60, 0, 20); break;
-    case P_CELEBRATE: ledSet(0, 60, 10); break;
+    case P_BUSY:      patWave(f, 0, 28, 40, 4000, now, 0.5f, 0.5f); break;     // cyan, gentle
+    case P_HEART:     patHeartbeat(f, 90, 0, 30, now); break;
+    case P_CELEBRATE: patSparkle(f, 0, 90, 15, now, 0.2f); break;
+    case P_DIZZY:     patScanner(f, 90, 30, 0, 600, now); break;
     case P_SLEEP:
-    case P_IDLE: {
-      // 4 s breathe, 0..6 brightness, 8 steps: visible in a dark room only.
-      uint32_t ph = (now % 4000) * 16 / 4000;       // 0..15
-      uint32_t k  = ph < 8 ? ph : 15 - ph;          // 0..7..0
-      ledSet(0, 0, (uint8_t)(k * 6 / 7));
-      break;
-    }
-    default:          ledSet(0, 0, 0); break;
+    case P_IDLE:      patWave(f, 0, 0, 8, 4000, now, 0.0f, 0.5f); break;       // dim blue breathe, dark-room only
+    default:          break;
   }
+  ledPush(f, now);
 }
 
 // ---- lifecycle ----
