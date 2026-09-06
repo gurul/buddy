@@ -1203,10 +1203,48 @@ void loop() {
     eyesCardUp(tama.promptId[0] != 0);   // card owns y >= 126: eyes park on the N row
     eyesLookAt((int8_t)bodyYawDeg(), (int8_t)bodyPitchDeg());
     eyesTick(now);
+    // Caption: buddy's reply as text in the band under the eyes (y 150..203,
+    // three lines of 26 chars, the tail of the text), while it beeps. Shown
+    // for 8 s after the last update, or while the conversation phase says
+    // speaking. Replaces the status word while it is up.
+    static uint16_t captionChirpedLen = 0;
+    static uint32_t captionSeenAt = 0;
+    bool captionUp = tama.captionAtMs && now - tama.captionAtMs < 8000 && tama.caption[0];
+    if (!tama.captionAtMs) captionChirpedLen = 0;
+    if (captionUp) {
+      if (tama.captionAtMs != captionSeenAt) {
+        captionSeenAt = tama.captionAtMs;
+        // babble as the text grows: one talk chirp per ~24 new characters
+        if (tama.captionLen + 24 <= captionChirpedLen || tama.captionLen >= captionChirpedLen + 24) {
+          captionChirpedLen = tama.captionLen;
+          chirpPlay(CHIRP_TALK);
+        }
+      }
+      const int CAP_Y = 150, CAP_LINES = 3, CAP_COLS = 26, CAP_LH = 17;
+      spr.fillRect(0, CAP_Y, W, EYES_H - CAP_Y, p.bg);
+      // greedy word wrap into up to 8 lines, keep the last CAP_LINES
+      char lines[8][CAP_COLS + 1]; int nl = 0; int col = 0; lines[0][0] = 0;
+      const char* t = tama.caption;
+      while (*t && nl < 8) {
+        const char* ws = t; while (*t && *t != ' ') t++;
+        int wl = (int)(t - ws);
+        if (col && col + 1 + wl > CAP_COLS) { lines[nl][col] = 0; nl++; col = 0; if (nl >= 8) break; lines[nl][0] = 0; }
+        if (col) { lines[nl][col++] = ' '; }
+        for (int i = 0; i < wl; i++) { if (col >= CAP_COLS) { lines[nl][col] = 0; nl++; col = 0; if (nl >= 8) break; lines[nl][0] = 0; } lines[nl][col++] = ws[i]; }
+        if (nl >= 8) break;
+        while (*t == ' ') t++;
+      }
+      if (nl < 8) { lines[nl][col] = 0; nl++; }
+      int first = nl > CAP_LINES ? nl - CAP_LINES : 0;
+      spr.setTextDatum(TL_DATUM);
+      spr.setTextSize(2);
+      spr.setTextColor(eyesColor(), p.bg);
+      for (int i = first; i < nl; i++) spr.drawString(lines[i], 4, CAP_Y + 2 + (i - first) * CAP_LH);
+    }
     // Status word: cleared and redrawn each frame (the card band overwrites
     // it during a prompt, which is intended — the card is the status then).
-    spr.fillRect(0, EYES_STATUS_Y, W, 18, p.bg);
-    const char* st = eyesStatusText(activeState, listenNow, tama.explore, tama.agentState, moodExprForEyes);
+    if (!captionUp) spr.fillRect(0, EYES_STATUS_Y, W, 18, p.bg);
+    const char* st = captionUp ? "" : eyesStatusText(activeState, listenNow, tama.explore, tama.agentState, moodExprForEyes);
     if (st[0]) {
       spr.setTextDatum(MC_DATUM);
       spr.setTextSize(2);

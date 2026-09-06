@@ -144,6 +144,16 @@ static void build(ChirpKind kind) {
       note(k, 60); gap(25); note(k + 300, 80);
       break;
     }
+    case CHIRP_TALK: {                          // babble: 4-6 short beeps, R2D2 cadence, ~0.6 s
+      amp = 0.5f;
+      int base = random(1100, 1900), n = random(4, 7);
+      for (int i = 0; i < n; i++) {
+        int f = base + random(-500, 700);
+        if (random(3) == 0) seg(f, f + random(-300, 300), random(50, 90)); else note(f, random(45, 80));
+        gap(random(15, 45));
+      }
+      break;
+    }
     case CHIRP_CONFUSED: {                      // wobble around a base
       int k = random(1000, 1500);
       for (int i = 0; i < 6; i++) seg(k + (i & 1 ? 400 : -400), k + (i & 1 ? -400 : 400), 80);
