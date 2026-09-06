@@ -11,7 +11,7 @@ Mac microphone ─24 kHz─▶ ears.py ─── sherpa-onnx keyword spotter ("h
                             │ subscribe()           ▼
                             └──────▶ voice_agent.py ── gpt-realtime-2.1-mini (speech ↔ speech, WebSocket)
                                           │ tools: start_task / steer_task / stop_task / task_status /
-                                          │        answer_question / end_conversation
+                                          │        answer_question / go_explore / end_conversation
                                           ▼
                                     computer_agent.py ── gpt-6-astra (Responses API, exec_py tool)
                                           │ code
@@ -75,6 +75,14 @@ daemon ─{"cmd":"agent","state":…}─▶ robot: wake · listening · thinking
    sleep* or *be quiet*; **touch the robot** (a tap or a hold on the pet ends the
    conversation and any task it is running, at once); 20 quiet seconds with no task
    running; the 10-minute cap. `CC_BUDDY_VOICE=0` turns the microphone off entirely.
+7. **Sending it exploring.** *"hey buddy, go explore"* (or *look around*, *go play*):
+   buddy answers with a two-word send-off and calls `go_explore`, which closes the
+   conversation like `end_conversation`; once the robot has dropped the conversation
+   pose the daemon starts a manual explore — the same pan-and-diary loop it runs
+   when Claude has been idle, but right now and for as long as you leave it (a
+   touch, a card, the listen key, the next wake word or `cc-buddy-bridge explore
+   stop` end it). Refused while a task is running: stop the task first. The same
+   thing from the shell is `cc-buddy-bridge explore`.
 
 ## Setup
 

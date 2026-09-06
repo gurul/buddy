@@ -17,6 +17,15 @@ Wire contract (fixed; the firmware side is built against it):
 Frames keep arriving as ``{"frame":{...}}`` lines (see vision.py); the
 explorer only reads them, it never asks for them.
 
+The owner can also send it off by hand: ``cc-buddy-bridge explore`` (IPC
+``{"evt":"explore","action":"start"}``) or "hey buddy, go explore" (the
+voice tool ``go_explore``) call ``Explorer.request``, which starts a pan at
+once and marks the explore *manual*: the idle timer no longer applies, so
+a running Claude session or a hook event does not end it. What does end a
+manual explore is a hard sign that the human wants the robot back — a
+permission card, the listen key, a touch on the board, a new wake word, a
+disconnect — or an explicit ``Explorer.dismiss`` (``explore stop``).
+
 Two halves, kept apart so the schedule and the budget are testable without
 a board, a Mac, or a network (same shape as listen_key.py / vision.py):
 
@@ -166,6 +175,10 @@ class Rest:
 
 
 Action = Union[Mode, Look, Note, Rest]
+
+
+class ExploreRefused(Exception):
+    """``Explorer.request`` cannot start: the reason is the message."""
 
 
 def _clamp(v: float, lo: int, hi: int) -> int:
@@ -338,6 +351,11 @@ class Explorer:
     on its own. Any activity — ``idle_secs`` dropping below ``after_secs``, a
     card, the listen key, a disconnect — sends it back to OFF from either
     state, and that is when ``mode explore false`` goes to the board.
+
+    ``request`` (the owner asked) enters EXPLORING from OFF or RESTING at
+    once and sets ``manual``: while manual, ``idle_secs`` is ignored, so only
+    a card, the listen key, a disconnect or ``dismiss`` ends it. ``manual``
+    clears on every return to OFF.
     """
 
     OFF = "off"
@@ -365,6 +383,8 @@ class Explorer:
         self.hold_ms = hold_ms
         self.notes_enabled = notes_enabled
         self.state = self.OFF
+        self.manual = False         # the owner asked; the idle timer does not apply
+        self.started_reason = ""    # why the current explore began (for status)
         self.cycles = 0             # completed pan cycles
         self.notes = 0              # Note actions emitted
         self.skipped_same = 0       # frames that matched the reference
@@ -393,6 +413,7 @@ class Explorer:
 
     def reset(self) -> None:
         self.state = self.OFF
+        self.manual = False
         self._sampled = False
 
     def _blocker(self, idle_secs: float, card_pending: bool, listening: bool, connected: bool) -> Optional[str]:
@@ -402,9 +423,52 @@ class Explorer:
             return "card pending"
         if listening:
             return "listen key"
-        if idle_secs < self.config.after_secs:
+        if idle_secs < self.config.after_secs and not self.manual:
             return "activity"
         return None
+
+    def status(self) -> dict[str, Any]:
+        """A snapshot for ``cc-buddy-bridge explore status`` and the log."""
+        return {
+            "state": self.state,
+            "manual": self.manual,
+            "reason": self.started_reason,
+            "waypoint": list(self.waypoint) if self.active else None,
+            "cycles": self.cycles,
+            "notes": self.notes,
+        }
+
+    def request(
+        self,
+        now: float,
+        reason: str,
+        card_pending: bool = False,
+        listening: bool = False,
+        connected: bool = True,
+    ) -> list[Action]:
+        """The owner asked for an explore: start a pan now, ignoring idle time.
+
+        From OFF the actions include ``Mode(True)``; from RESTING the board is
+        already in explore mode, so only the first ``Look`` goes out; while
+        EXPLORING the current pan restarts from its first waypoint (no
+        ``Mode``). Raises ``ExploreRefused`` on a hard blocker.
+        """
+        blocker = self._blocker(float("inf"), card_pending, listening, connected)
+        if blocker is not None:
+            raise ExploreRefused(blocker)
+        was_on_board = self.on_board
+        self.manual = True
+        actions = self._start(now, float("inf"), reason=reason)
+        if was_on_board:
+            return [a for a in actions if not isinstance(a, Mode)]
+        return actions
+
+    def dismiss(self, reason: str) -> list[Action]:
+        """End an explore (manual or idle) now. ``Mode(False)`` goes out only
+        when the board was put in explore mode; ``manual`` always clears."""
+        on_board = self.on_board
+        self.reset()
+        return [Mode(False, reason)] if on_board else []
 
     def tick(
         self,
@@ -424,15 +488,15 @@ class Explorer:
             if blocker is not None:
                 # The board is still in explore mode (looking around on its
                 # own); hand the head back to the persona.
-                self.state = self.OFF
+                self.reset()
                 return [Mode(False, blocker)]
             if now >= self._rest_until:
-                return self._start(now, idle_secs)
+                # A manual explore keeps its reason across cycles.
+                return self._start(now, idle_secs, reason=self.started_reason if self.manual else None)
             return []
         # EXPLORING
         if blocker is not None:
-            self.state = self.OFF
-            self._sampled = False
+            self.reset()
             return [Mode(False, blocker)]
         actions: list[Action] = []
         if frame is not None and self.wants_frame(now):
@@ -454,13 +518,14 @@ class Explorer:
                 actions.append(Look(yaw, pitch, self.hold_ms))
         return actions
 
-    def _start(self, now: float, idle_secs: float) -> list[Action]:
+    def _start(self, now: float, idle_secs: float, reason: Optional[str] = None) -> list[Action]:
         self.state = self.EXPLORING
         self._wp = 0
         self._look_at = now
         self._sampled = False
+        self.started_reason = reason if reason is not None else f"idle {idle_secs / 60:.0f} min"
         yaw, pitch = self.waypoint
-        return [Mode(True, f"idle {idle_secs / 60:.0f} min"), Look(yaw, pitch, self.hold_ms)]
+        return [Mode(True, self.started_reason), Look(yaw, pitch, self.hold_ms)]
 
     def _consider(self, now: float, frame: Frame) -> list[Action]:
         if not self.notes_enabled:

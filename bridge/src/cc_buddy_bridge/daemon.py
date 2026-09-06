@@ -23,6 +23,7 @@ from .ears import Ears
 from .ears import configured as ears_configured
 from .explore import (
     Action,
+    ExploreRefused,
     Explorer,
     Look,
     Mode,
@@ -157,6 +158,10 @@ class Daemon:
         self._conversation: Optional[asyncio.Task[None]] = None
         self._agent_state = "idle"
         self._active_agent: Optional[ComputerAgent] = None
+        # "hey buddy, go explore": the voice tool sets this; the explore
+        # starts when the conversation has closed, so the board is never
+        # asked to hold a conversation pose and pan the room at once.
+        self._explore_after_conversation: Optional[str] = None
         # Monotonic time of the last thing a human or a session did: any hook
         # event, a board touch, the listen key. Idle time is measured from it.
         self._last_activity_at = time.monotonic()
@@ -226,16 +231,18 @@ class Daemon:
             asyncio.create_task(self._voice_watchdog(), name="voice-watchdog"),
             asyncio.create_task(self._vision_stats_loop(), name="vision-stats"),
         ]
-        if self._explore_cfg.enabled:
-            # The diary (diary.py): memory-aware thoughts plus an appraisal
-            # the board turns into a feeling. Same take() shape as NoteTaker.
-            client = make_diary_client(self._explore_cfg.model)
-            self._explorer.notes_enabled = client is not None
-            if client is not None:
-                self._notes = DiaryTaker(client, self._explore_cfg.notes_dir, send_emote=self._send_emote)
-            tasks.append(asyncio.create_task(self._explore_loop(), name="explore"))
-        else:
-            log.info("explore: disabled (CC_BUDDY_EXPLORE=0)")
+        # The diary (diary.py): memory-aware thoughts plus an appraisal
+        # the board turns into a feeling. Same take() shape as NoteTaker.
+        # The loop always runs so `cc-buddy-bridge explore` and "hey buddy,
+        # go explore" work; CC_BUDDY_EXPLORE=0 only turns off the idle start.
+        client = make_diary_client(self._explore_cfg.model)
+        self._explorer.notes_enabled = client is not None
+        if client is not None:
+            self._notes = DiaryTaker(client, self._explore_cfg.notes_dir, send_emote=self._send_emote)
+        tasks.append(asyncio.create_task(self._explore_loop(), name="explore"))
+        if not self._explore_cfg.enabled:
+            log.info("explore: idle start disabled (CC_BUDDY_EXPLORE=0); "
+                     "`cc-buddy-bridge explore` and \"go explore\" still work")
         try:
             await self._shutdown.wait()
         finally:
@@ -497,6 +504,9 @@ class Daemon:
         self._note_activity()          # a conversation is activity: the explorer stops
         if self._conversation is not None and not self._conversation.done():
             return
+        # A manual explore ignores activity, so end it here: the board
+        # cannot pan the room and hold the conversation pose at once.
+        asyncio.create_task(self._dismiss_explore("wake word"))
         self._conversation = asyncio.create_task(self._converse(), name="voice-conversation")
 
     async def _resync_agent(self) -> None:
@@ -520,8 +530,9 @@ class Daemon:
         try:
             await voice_agent.open_session(mic, self._on_agent_state, self._make_agent,
                                            config=self._voice_cfg, agent_enabled=self._agent_cfg.enabled,
-                                           on_caption=self._on_caption)
+                                           on_caption=self._on_caption, on_explore=self._on_voice_explore)
         except asyncio.CancelledError:
+            self._explore_after_conversation = None      # hushed: stay put
             raise
         except Exception as e:  # noqa: BLE001
             log.warning("voice: conversation failed: %s: %s", type(e).__name__, e)
@@ -531,6 +542,14 @@ class Daemon:
             await asyncio.gather(keepalive, return_exceptions=True)
             self._ears.unsubscribe(mic)
             self._on_agent_state("idle")
+            reason, self._explore_after_conversation = self._explore_after_conversation, None
+            if reason is not None:
+                await self._request_explore(reason)
+
+    def _on_voice_explore(self) -> None:
+        """The voice tool go_explore: remember the wish; it is granted in
+        _converse once the conversation has closed."""
+        self._explore_after_conversation = "requested by voice"
 
     def _make_agent(self, on_event: Any, ask_user: Any) -> ComputerAgent:
         agent = ComputerAgent(make_response_creator(), config=self._agent_cfg, on_event=on_event, ask_user=ask_user)
@@ -637,11 +656,27 @@ class Daemon:
         if self.ble.connected:
             await self.ble.send(build_emote_cmd(e))
 
+    async def _request_explore(self, reason: str) -> None:
+        """The owner asked (CLI or voice): start a manual explore now.
+        Raises ExploreRefused when a card, the listen key or a disconnect
+        stands in the way."""
+        actions = self._explorer.request(
+            time.monotonic(), reason,
+            card_pending=self.state.pending_count > 0,
+            listening=bool(self._listen_sent),
+            connected=self.ble.connected,
+        )
+        for action in actions:
+            await self._run_explore_action(action)
+
+    async def _dismiss_explore(self, reason: str) -> None:
+        """End an explore now (a touch, a wake word, `explore stop`)."""
+        for action in self._explorer.dismiss(reason):
+            await self._run_explore_action(action)
+
     async def _stop_explore(self, reason: str) -> None:
         """Shutdown path: leave explore mode on the board if we put it there."""
-        if self._explorer.on_board:
-            await self._run_explore_action(Mode(False, reason))
-        self._explorer.reset()
+        await self._dismiss_explore(reason)
         if self._notes is not None:
             self._notes.stop()
 
@@ -719,8 +754,25 @@ class Daemon:
             log.info("ipc evt=%r session=%s", evt, (req.get("session_id") or "?")[:8])
         # Every hook event is activity for the idle explorer, except the
         # polls that fire on their own (statusline, diag watch).
-        if evt not in ("get_state", "diag"):
+        if evt not in ("get_state", "diag", "explore"):
             self._note_activity()
+
+        if evt == "explore":
+            # `cc-buddy-bridge explore [start|stop|status]`: the owner sends
+            # the robot off to look around (or calls it back) by hand.
+            action = str(req.get("action") or "start")
+            if action == "start":
+                try:
+                    await self._request_explore("requested by cli")
+                except ExploreRefused as e:
+                    return {"ok": False, "error": str(e), "connected": self.ble.connected,
+                            "explore": self._explorer.status()}
+            elif action == "stop":
+                self._note_activity()   # the human is here
+                await self._dismiss_explore("requested by cli")
+            elif action != "status":
+                return {"ok": False, "error": f"unknown explore action: {action!r}"}
+            return {"ok": True, "connected": self.ble.connected, "explore": self._explorer.status()}
 
         if evt == "celebrate":
             # Host-triggered celebration. Reuses the same `completed: true`
@@ -1111,8 +1163,10 @@ class Daemon:
             return
         cmd = obj.get("cmd")
         if cmd in ("focus", "key", "voice", "permission"):
-            # A touch on the board: the human is here, stop exploring.
+            # A touch on the board: the human is here, stop exploring — at
+            # once, and even a manual explore, which ignores the idle clock.
             self._note_activity()
+            await self._dismiss_explore(f"touch ({cmd})")
             # ... and a touch while buddy is in a conversation is "hush": the
             # conversation (and any task it is running) ends at once.
             if cmd in ("focus", "voice", "key") and self._conversation is not None and not self._conversation.done():

@@ -82,7 +82,8 @@ tail -f ~/Library/Logs/cc-buddy-bridge.log | grep -E "ears|agent|voice|diary"
 
 *"hey buddy … what time is it?"* — *"hey buddy, open a new tab and search for the
 weather"* — *"actually use Bing"* — *"stop"*. Leave it for ten minutes and it starts
-exploring; the widget fills up.
+exploring; the widget fills up. Or send it off yourself: *"hey buddy, go explore"*
+(or `cc-buddy-bridge explore` from a shell).
 
 ## Under the hood
 

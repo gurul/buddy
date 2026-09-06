@@ -160,6 +160,15 @@ def main(argv: list[str] | None = None) -> int:
     p_identity.add_argument("action", choices=("status", "reset"), nargs="?", default="status")
     p_identity.add_argument("--socket", default=None, help="IPC path or host:port override")
 
+    p_explore = sub.add_parser(
+        "explore",
+        help="Send the robot off to look around the room now (or call it back / ask what it is doing)",
+    )
+    p_explore.add_argument("action", choices=("start", "stop", "status"), nargs="?", default="start",
+                           help="start (default): explore now, ignoring the idle timer; "
+                                "stop: come back; status: what the explorer is doing")
+    p_explore.add_argument("--socket", default=None, help="IPC path or host:port override")
+
     p_notes = sub.add_parser(
         "notes",
         help="Print the idle explorer's recent notes (what the robot saw while Claude was quiet)",
@@ -283,6 +292,8 @@ def main(argv: list[str] | None = None) -> int:
         from .identity import run_identity
         return run_identity(args.action, args.socket)
 
+    if args.cmd == "explore":
+        return _run_explore(args.action, args.socket)
     if args.cmd == "notes":
         from .explore import run_notes_cli
         return run_notes_cli(args.last)
@@ -430,6 +441,35 @@ SPECIES = [
     "penguin", "turtle", "snail", "ghost", "axolotl", "cactus", "robot",
     "rabbit", "mushroom", "chonk",
 ]
+
+
+def _run_explore(action: str, socket_path: Optional[str]) -> int:
+    """``cc-buddy-bridge explore [start|stop|status]``: talk to the daemon."""
+    from .hooks._client import post
+
+    resp = post({"evt": "explore", "action": action}, socket_path=socket_path, timeout=3.0)
+    if resp is None:
+        print("cc-buddy-bridge: daemon not reachable", file=sys.stderr)
+        return 2
+    st = resp.get("explore") or {}
+    if not resp.get("ok"):
+        print(f"explore: {resp.get('error') or 'refused'}", file=sys.stderr)
+        return 1
+    state = st.get("state", "?")
+    how = "manual" if st.get("manual") else "idle"
+    if action == "start":
+        print(f"buddy is off exploring ({state}, {how}; explore stop brings it back)")
+    elif action == "stop":
+        print("buddy is back" if state == "off" else f"explore: {state}")
+    else:
+        if state == "off":
+            print("buddy is not exploring" + ("" if resp.get("connected") else " (board not connected)"))
+        else:
+            wp = st.get("waypoint")
+            where = f" at yaw={wp[0]:+d} pitch={wp[1]}" if wp else ""
+            print(f"buddy is {state} ({how}: {st.get('reason')}){where}; "
+                  f"{st.get('cycles', 0)} cycle(s), {st.get('notes', 0)} note(s) this run")
+    return 0
 
 
 def _run_species(name: str, socket_path: str | None) -> int:
