@@ -3,10 +3,10 @@
 Event-driven Claude status display for the **Elecrow CrowPanel ESP32 4.2"
 E-Paper HMI** (ESP32-S3-WROOM-1-N8R8, SSD1683, 400×300 B/W, CH340 UART on the
 USB-C port) — portrait, purely functional, no pet. Speaks the same NDJSON
-protocol as `firmware/claude_pet`, so the bridge daemon drives it unchanged —
+protocol as `../claude_pet`, so the bridge daemon drives it unchanged —
 point it at `/dev/cu.usbserial-*`.
 
-Build/flash: `./tools/flash_eink.sh` (arduino-cli, FQBN
+Build/flash: `past-experiments/tools/flash_eink.sh` (from the repository root) (arduino-cli, FQBN
 `esp32:esp32:esp32s3:FlashSize=8M,PartitionScheme=default_8MB` — `Serial` is
 UART0 through the CH340; USB CDC stays off).
 

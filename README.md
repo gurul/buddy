@@ -112,4 +112,4 @@ wake word by [sherpa-onnx](https://github.com/k2-fsa/sherpa-onnx); the computer-
 [openai/openai-cua-sample-app](https://github.com/openai/openai-cua-sample-app); chirps after Marcelo
 Larios' R2D2 sound generator. The research behind the feelings and the diary is cited in
 [personality.md](docs/stackchan/personality.md). The boards buddy grew out of are kept in
-[docs/experiments](docs/experiments/README.md).
+[past-experiments](past-experiments/README.md).

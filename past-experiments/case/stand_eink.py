@@ -1,7 +1,7 @@
 """Prop-up stand for the CrowPanel 4.2" e-ink pet — FreeCAD headless.
 
-Run:  /Applications/FreeCAD.app/Contents/Resources/bin/freecadcmd case/stand_eink.py
-Out:  case/export/stand_eink.stl (+ FCStd)
+Run:  /Applications/FreeCAD.app/Contents/Resources/bin/freecadcmd past-experiments/case/stand_eink.py
+Out:  past-experiments/case/export/stand_eink.stl (+ FCStd)
 
 Print BASE DOWN, support-free. Same design language as the v1 FNK stand
 (65-degree pocket wedge, open cable mouth): the device drops into an inclined
