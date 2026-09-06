@@ -233,11 +233,15 @@ def test_start_task_runs_agent_and_reports_result() -> None:
         assert states[-1] == "working"
         agent.release.set()
         await asyncio.sleep(0.01)
-        conn.feed(_tool_call("end_conversation", "c9"), None)
+        assert conn.user_messages() == ["[task finished] Your mail is open."]
+        assert not s._ended.is_set()                    # still speaking the result
+        conn.feed({"type": "response.created"}, {"type": "response.done"})   # the result, spoken
+        await asyncio.sleep(0.01)
+        assert s._ended.is_set()                        # ... and the conversation closes by itself
+        conn.feed(None)
         await task
     asyncio.run(go())
     assert conn.tool_outputs()[0] == {"ok": True, "goal": "open mail"}
-    assert conn.user_messages() == ["[task finished] Your mail is open."]
     assert "done" in states and states[-1] == "idle"
     assert s.tool_calls[0] == ("start_task", {"goal": "open mail"})
 
@@ -358,3 +362,74 @@ def test_unknown_tool_and_error_events_are_harmless() -> None:
     s, _, _ = _session(conn, [FakeAgent(None, None)])
     asyncio.run(s.run())
     assert conn.tool_outputs()[0] == {"ok": False, "reason": "unknown tool teleport"}
+
+
+def test_tool_result_defers_response_create_until_response_done() -> None:
+    """function_call_arguments.done arrives before response.done; the API rejects a
+    second response.create while one is active (bench 2026-09-06 09:01)."""
+    conn = FakeConnection([{"type": "response.created"}, _tool_call("task_status", "c1")])
+    s, _, _ = _session(conn, [FakeAgent(None, None)])
+
+    async def go():
+        task = asyncio.create_task(s.run())
+        await asyncio.sleep(0.01)
+        creates_before = sum(1 for k, _ in conn.sent if k == "response.create")
+        assert creates_before == 1                       # the greeting only; the tool result waited
+        conn.feed({"type": "response.done"})
+        await asyncio.sleep(0.01)
+        creates_after = sum(1 for k, _ in conn.sent if k == "response.create")
+        assert creates_after == 2                        # created once the response finished
+        conn.feed(_tool_call("end_conversation", "c2"), None)
+        await task
+    asyncio.run(go())
+
+
+def test_mic_is_muted_while_buddy_speaks_and_for_a_tail() -> None:
+    clock = {"now": 0.0}
+    conn = FakeConnection()
+    s, _, mic = _session(conn, [FakeAgent(None, None)], clock=clock)
+    s.speaker._busy = True
+
+    async def go():
+        task = asyncio.create_task(s.run())
+        mic.put_nowait(b"\x01" * 100)                     # while speaking: dropped
+        await asyncio.sleep(0.01)
+        s.speaker._busy = False
+        clock["now"] = 0.2                                # inside the 0.4 s tail: dropped
+        mic.put_nowait(b"\x02" * 100)
+        await asyncio.sleep(0.01)
+        clock["now"] = 1.0                                # after the tail: forwarded
+        mic.put_nowait(b"\x03" * 100)
+        await asyncio.sleep(0.01)
+        conn.feed(_tool_call("end_conversation"), None)
+        await task
+    asyncio.run(go())
+    appended = [base64.b64decode(kw["audio"]) for k, kw in conn.sent if k == "input_audio_buffer.append"]
+    assert appended == [b"\x03" * 100]
+
+
+def test_conversation_does_not_keep_listening_after_a_task() -> None:
+    """Owner request: after the result is spoken the session ends — no 20 s of listening."""
+    agent = FakeAgent(None, None, final="Done.")
+    conn = FakeConnection([_tool_call("start_task", "c1", goal="g")])
+    s, states, _ = _session(conn, [agent])
+
+    async def go():
+        task = asyncio.create_task(s.run())
+        await asyncio.sleep(0.01)
+        agent.release.set()
+        await asyncio.sleep(0.01)
+        # the "On it" reply was still queued behind the greeting: it plays first ...
+        conn.feed({"type": "response.created"}, {"type": "response.done"})
+        await asyncio.sleep(0.01)
+        assert not s._ended.is_set()
+        # ... then the result is spoken, and that ends the conversation
+        conn.feed({"type": "response.created"}, {"type": "response.done"})
+        await asyncio.sleep(0.01)
+        assert s._ended.is_set()
+        conn.feed(None)
+        await task
+    asyncio.run(go())
+    assert states[-1] == "idle"
+    creates = [k for k, _ in conn.sent if k == "response.create"]
+    assert len(creates) == 2          # greeting, then ONE reply covering "On it" + the result (both queued) — nothing after

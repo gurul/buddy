@@ -830,11 +830,16 @@ void loop() {
   chirpUpdate();
   bodyLedPolicy(settings().led, listenNow);
   // The host conversation ({"cmd":"agent"}): the robot acts the phase out.
-  // A phase older than 15 min with no follow-up is stale (daemon died
-  // mid-conversation): fall back to the persona.
+  // The daemon re-sends the current phase every 10 s while a conversation
+  // is open; a phase that goes 30 s without one is stale (the daemon died,
+  // restarted, or the link dropped mid-conversation — bench 2026-09-06: the
+  // head sat in "listening..." for a quarter hour). Fall back to the persona.
   {
     uint8_t ag = tama.agentState;
-    if (ag != AG_IDLE && now - tama.agentAtMs > 15UL * 60UL * 1000UL) { tama.agentState = AG_IDLE; ag = AG_IDLE; }
+    if (ag != AG_IDLE && now - tama.agentAtMs > 30000UL) {
+      diagLog("agent phase stale -> idle");
+      tama.agentState = AG_IDLE; ag = AG_IDLE;
+    }
     bodySetAgent((AgentState)ag);
   }
   // The mood engine: what the camera saw, touches, new views and the host's

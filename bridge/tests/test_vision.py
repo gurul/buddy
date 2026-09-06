@@ -365,9 +365,10 @@ def _daemon(detect, connected: bool = True) -> SimpleNamespace:
     ble = _StubBle(connected)
     # _explorer/_note_activity: the idle explorer's hooks in _handle_ble (explore.py).
     d = SimpleNamespace(ble=ble, _listen_sent=None, _shutdown=asyncio.Event(),
-                        _explorer=SimpleNamespace(active=False), _note_activity=lambda: None)
+                        _explorer=SimpleNamespace(active=False), _note_activity=lambda: None,
+                        _agent_state="idle")
     d._vision = FaceTracker(detect=detect, send=ble.send)
-    for name in ("_reset_listen", "_send_cam"):
+    for name in ("_reset_listen", "_resync_agent", "_send_cam"):
         setattr(d, name, MethodType(getattr(Daemon, name), d))
     return d
 

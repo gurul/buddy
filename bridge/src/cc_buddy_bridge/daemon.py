@@ -16,7 +16,7 @@ if TYPE_CHECKING:
 from . import voice_agent
 from .audit import AuditLog
 from .ble import BuddyBLE
-from .computer_agent import ComputerAgent, make_response_creator
+from .computer_agent import ComputerAgent, log_desktop_grants, make_response_creator
 from .computer_agent import configured as agent_configured
 from .diary import DiaryTaker, Emote, build_emote_cmd, make_diary_client
 from .ears import Ears
@@ -320,6 +320,7 @@ class Daemon:
         await self._push_heartbeat(force=True)
         await self.ble.send({"cmd": "status"})
         await self._reset_listen()
+        await self._resync_agent()
         await self._send_cam(True)
 
     async def _on_ble_connected(self) -> None:
@@ -338,6 +339,7 @@ class Daemon:
             await self._push_heartbeat(force=True)
             await self.ble.send({"cmd": "status"})
             await self._reset_listen()
+            await self._resync_agent()
             await self._send_cam(True)
             # Wait for the connection to drop before waiting again.
             while self.ble.connected and not self._shutdown.is_set():
@@ -476,6 +478,8 @@ class Daemon:
         log.info("agent: computer control %s (model %s, %d steps max)",
                  "ready" if self._agent_cfg.enabled else "disabled (CC_BUDDY_COMPUTER_CONTROL=0)",
                  self._agent_cfg.model, self._agent_cfg.max_turns)
+        if self._agent_cfg.enabled:
+            log_desktop_grants(prompt=True)
 
     def _wake_suppressed(self) -> bool:
         """Reasons not to wake: the human is dictating, a conversation is already
@@ -491,10 +495,24 @@ class Daemon:
             return
         self._conversation = asyncio.create_task(self._converse(), name="voice-conversation")
 
+    async def _resync_agent(self) -> None:
+        """Tell a (re)connected or rebooted board which conversation phase is live —
+        idle when none. The board drops a phase that goes 30 s without a word from
+        us, so a lost 'idle' can no longer pin the listening pose (bench 2026-09-06)."""
+        if self.ble.connected:
+            await self.ble.send({"cmd": "agent", "state": self._agent_state})
+
+    async def _agent_keepalive(self) -> None:
+        """While a conversation is open, repeat the current phase every 10 s."""
+        while True:
+            await asyncio.sleep(10.0)
+            await self._resync_agent()
+
     async def _converse(self) -> None:
         if self._ears is None:
             return
         mic = self._ears.subscribe()
+        keepalive = asyncio.create_task(self._agent_keepalive(), name="agent-keepalive")
         try:
             await voice_agent.open_session(mic, self._on_agent_state, self._make_agent,
                                            config=self._voice_cfg, agent_enabled=self._agent_cfg.enabled)
@@ -504,6 +522,8 @@ class Daemon:
             log.warning("voice: conversation failed: %s: %s", type(e).__name__, e)
             self._on_agent_state("error")
         finally:
+            keepalive.cancel()
+            await asyncio.gather(keepalive, return_exceptions=True)
             self._ears.unsubscribe(mic)
             self._on_agent_state("idle")
 
