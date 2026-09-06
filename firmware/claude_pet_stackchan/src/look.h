@@ -88,10 +88,15 @@ int fps();
 // Every 30 s the task prints `[cam] %d frames, %d KB, %d ms/encode`.
 void setStream(bool on, uint8_t fps, uint16_t w, uint16_t h);
 void setStreamPaused(bool paused);
+// {"cmd":"snap"}: the next whole frame goes out once at full sensor size
+// (320x240, quality kSnapJpegQ) as a frame line with "snap":true, on the same
+// seq counter, regardless of the stream state. The host keeps it as a photo.
+void requestSnap();
 // Head pose echoed into each frame line (the pose the servos were streamed
 // at capture time, so host latency cannot corrupt the absolute angles).
 void setHeadPose(int yawDeg, int pitchDeg);
 constexpr uint8_t kStreamJpegQ = 60;
+constexpr uint8_t kSnapJpegQ = 85;
 constexpr uint16_t kStreamMaxW = 160, kStreamMaxH = 120;
 
 // Fusion: face when face_conf >= kFuseFaceMinConf (a still face keeps the

@@ -43,6 +43,7 @@ struct TamaState {
   bool     faceOwner;        // "who":"owner" (else unknown)
   uint32_t faceAtMs;         // millis() when the last face cmd arrived (0 = never)
   bool     hostLookReq;      // {"cmd":"look"} pending; consumer clears it
+  bool     snapReq;          // {"cmd":"snap"}: one full-size photo; consumer (main -> look) clears it
   int16_t  hostLookYaw, hostLookPitch;
   uint16_t hostLookHold;     // ms
   bool     explore;          // {"cmd":"mode","explore":true}
@@ -158,6 +159,13 @@ static void _applyJson(const char* line, TamaState* out) {
     out->hostLookPitch = doc["pitch"] | (int16_t)45;
     out->hostLookHold  = doc["hold"]  | (uint16_t)3000;
     out->hostLookReq   = true;
+    _lastLiveMs = millis();
+    return;
+  }
+  // {"cmd":"snap"}: the host wants one full-resolution photo (a diary picture).
+  // The look task answers with a single frame line carrying "snap":true.
+  if (cmd && strcmp(cmd, "snap") == 0) {
+    out->snapReq = true;
     _lastLiveMs = millis();
     return;
   }

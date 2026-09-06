@@ -46,17 +46,21 @@ the thoughts unchanged.
 from __future__ import annotations
 
 import asyncio
+import base64
+import binascii
 import concurrent.futures
 import json
 import logging
+import math
 import os
 import re
 import time
 from dataclasses import dataclass, field
 from datetime import datetime
 from pathlib import Path
-from typing import Any, Awaitable, Callable, Optional, Protocol
+from typing import Any, Awaitable, Callable, Optional, Protocol, Sequence
 
+from . import photos
 from .explore import (
     ERROR_LOG_INTERVAL_SECS,
     NOTE_TIMEOUT_SECS,
@@ -64,7 +68,9 @@ from .explore import (
     append_note,
     data_url,
     frame_image,
+    normalise,
 )
+from .vision import Frame
 
 log = logging.getLogger(__name__)
 
@@ -78,11 +84,54 @@ SAME_HOUR_SAMPLES = 2
 WRITE_NOVELTY = 5
 WRITE_IMPORTANCE = 7
 SILENCE_WRITE_HOURS = 3.0
+
+# ---- the cool factor (photos) -------------------------------------------------------------------
+# What makes buddy keep a picture rather than only a sentence. The weights and
+# cut-offs below are explained, with their sources, in
+# docs/stackchan/personality.md § "Photos: what buddy finds cool".
+COOL_WEIGHTS = {
+    "novelty": 0.30,       # unlike anything in the diary (absolute novelty)
+    "importance": 0.20,    # buddy would tell its human about it
+    "surprise": 0.20,      # unlike what THIS waypoint usually looks like
+    "presence": 0.15,      # a person, an animal, or something of buddy's that moved
+    "want": 0.15,          # buddy's own vote — bounded, never the whole decision
+}
+AROUSAL_GAIN = 0.5         # arousal multiplies the score, it never adds to it
+FIRST_TIME_NOVELTY = 9     # novelty this high, sharing at most one tag with memory,
+FIRST_TIME_SHARED_TAGS = 1 # ... is a first: floored so it clears any threshold
+FIRST_TIME_FLOOR = 0.70
+
+# Quality: the frames a photo would be wasted on.
+QUALITY_MIN_MEAN = 24      # darker than this and there is nothing in it
+QUALITY_MAX_MEAN = 232     # blown out
+QUALITY_MIN_STD = 10       # a flat wall, a lens against a surface
+DULL_SUBJECTS = ("nothing", "screen")
+
+# Habituation.
+ALBUM_DAYS = 14.0          # how far back "have I photographed this?" looks
+DUPLICATE_DIFF = 10.0      # mean abs luma diff below this is the same picture again
+DUPLICATE_OVERRIDE = 9     # ... unless it is this important, which supersedes the old one
+SUBJECT_OVERLAP = 0.5      # Jaccard over tags: the same subject
+WAYPOINT_DROP = 0.45       # one photo here drops this spot's interest by this much
+WAYPOINT_RECOVERY_HOURS = 8.0
+WAYPOINT_FLOOR = 0.05
+
+# Threshold and budget.
+COOL_THRESHOLD = 0.55      # until there is a distribution to measure
+COOL_THRESHOLD_MIN = 0.40
+COOL_THRESHOLD_MAX = 0.75
+COOL_MAD_GAIN = 1.5
+COOL_WINDOW = 40           # records the adaptive threshold is measured over
+PHOTOS_PER_HOUR = 2
+PHOTOS_PER_DAY = 8
+CAPTION_CHARS = 60
+ALBUM_IN_CONTEXT = 8       # photos shown to the model so it knows what it already has
+TASTE_BONUS = 0.10         # tags the human starred are worth this much extra want
 REPEAT_JACCARD = 0.6                    # near-duplicate of a recent thought
 REFLECT_IMPORTANCE_SUM = 150            # Park's reflection trigger
 REFLECT_HOUR = 21                       # ... or once a day from this hour
 PROFILE_BLOCK_CHARS = 2000              # Letta-style hard limit per block
-THINK_MAX_OUTPUT_TOKENS = 600
+THINK_MAX_OUTPUT_TOKENS = 700
 REFLECT_MAX_OUTPUT_TOKENS = 1200
 
 DEFAULT_PROFILE = """## ROOM
@@ -123,10 +172,17 @@ Do, in order:
 5. tags: 2-6 lowercase entity words (objects, people, states) for memory retrieval.
 6. feeling: valence and arousal, each -100..100, and a one-word label (curious, happy, surprised,
    bored, lonely, startled, affection, calm) — how this view makes you feel right now.
+7. photo: would you keep this picture for your human? want 0-1 (1 = you would run to show them).
+   Keep pictures of first-times, of people and animals, of your own things moved or changed, and of
+   moments that made you feel something. Never for screen contents, lighting, reflections, or
+   anything already in your ALBUM unless it has changed. subject: one of person, animal, object,
+   room, screen, nothing. caption: up to 60 characters in your own voice, naming the thing
+   ("the blue mug has a friend now").
 
 Output JSON only:
 {"observations":[...],"changed":[...],"thoughts":[{"text":"...","p":0.7},...],"novelty":n,
- "importance":n,"tags":[...],"valence":n,"arousal":n,"label":"..."}"""
+ "importance":n,"tags":[...],"valence":n,"arousal":n,"label":"...",
+ "photo":{"want":0.3,"subject":"object","caption":"..."}}"""
 
 REFLECT_PROMPT = """You are buddy, a small desk robot keeping a diary (see PROFILE). Below are today's memory records
 (observations, changes, thoughts, tags, with ids) and your current PROFILE.
@@ -168,6 +224,14 @@ class Record:
     arousal: int = 0
     label: str = "calm"
     last_accessed: float = 0.0
+    # Photos. ``cool`` is stored on every record, photographed or not, because
+    # the adaptive threshold is measured from the distribution of all of them.
+    cool: float = 0.0
+    surprise: float = 0.0
+    photo: str = ""            # notes-dir-relative path, "" when none was kept
+    caption: str = ""          # up to 60 characters, buddy's words for the picture
+    thumb: str = ""            # base64 of the 32x24 luma, photo records only
+    superseded_by: int = 0     # this photo was replaced by that record's
 
     def to_json(self) -> str:
         return json.dumps(self.__dict__, ensure_ascii=False)
@@ -386,6 +450,11 @@ def _fmt(rec: Record) -> str:
         f" (changed: {'; '.join(rec.changed)})" if rec.changed else "")
 
 
+def _fmt_photo(rec: Record) -> str:
+    when = datetime.fromtimestamp(rec.ts)
+    return f"[{rec.id}] {when:%a %H:%M} yaw={rec.yaw:+d} — {rec.caption or rec.thought}"
+
+
 def build_context(memory: Memory, when: datetime, yaw: int, pitch: int, guess_tags: set[str]) -> str:
     """The text the vision call gets alongside the photo (~2k tokens)."""
     now_ts = when.timestamp()
@@ -402,6 +471,8 @@ def build_context(memory: Memory, when: datetime, yaw: int, pitch: int, guess_ta
         "OLDER MEMORIES:\n" + ("\n".join(_fmt(r) for r in older) or "(none)"),
         f"SAME HOUR ON EARLIER DAYS ({when:%H}:00):\n" + ("\n".join(_fmt(r) for r in same) or "(none)"),
         "TODAY'S UNWRITTEN CANDIDATES (do not repeat):\n" + ("\n".join(f"- {r.thought}" for r in unwritten[-6:]) or "(none)"),
+        "MY ALBUM (pictures I already keep — do not ask for one of these again unless it changed):\n"
+        + ("\n".join(_fmt_photo(r) for r in album(memory.records, now_ts)[-ALBUM_IN_CONTEXT:]) or "(no photos yet)"),
         f"NOW: {when:%A %H:%M}, head yaw={yaw:+d} pitch={pitch} (pitch < 45 looks down at the desk, > 45 up at the room).",
     ]
     return "\n\n".join(parts)
@@ -451,6 +522,201 @@ def should_write(novelty: int, importance: int, last_written_ts: Optional[float]
     if novelty >= WRITE_NOVELTY or importance >= WRITE_IMPORTANCE:
         return True
     return last_written_ts is None or (now_ts - last_written_ts) >= SILENCE_WRITE_HOURS * 3600.0
+
+
+# ---- the cool factor: is this worth a picture? ---------------------------------------------------
+
+def _clip(v: float, lo: float = 0.0, hi: float = 1.0) -> float:
+    return max(lo, min(hi, v))
+
+
+def median(xs: Sequence[float]) -> float:
+    s = sorted(xs)
+    n = len(s)
+    if not n:
+        return 0.0
+    return s[n // 2] if n % 2 else (s[n // 2 - 1] + s[n // 2]) / 2.0
+
+
+def mad(xs: Sequence[float]) -> float:
+    """Median absolute deviation: a spread that a couple of odd values cannot move."""
+    if not xs:
+        return 0.0
+    m = median(xs)
+    return median([abs(x - m) for x in xs])
+
+
+def thumb_quality(thumb: Optional[bytes]) -> bool:
+    """False for a frame there is no point keeping: too dark to read, blown
+    out, or so flat it is a wall. Roughly two in five frames from a camera
+    nobody is aiming are unusable this way (Doherty et al., CIVR 2008), and a
+    picture of nothing is worse than no picture."""
+    if not thumb:
+        return False
+    n = len(thumb)
+    mean = sum(thumb) / n
+    if mean < QUALITY_MIN_MEAN or mean > QUALITY_MAX_MEAN:
+        return False
+    var = sum((v - mean) ** 2 for v in thumb) / n
+    return var ** 0.5 >= QUALITY_MIN_STD
+
+
+def novelty_component(novelty: int, recent: Sequence[int]) -> float:
+    """The model's novelty rating, ranked against its own recent ratings.
+
+    A model that only ever answers 4 to 6 still produces the full range here,
+    because the spread it is measured against shrinks with it. Clipping at
+    zero rather than allowing negatives keeps an ordinary frame from
+    subtracting from the other evidence."""
+    if len(recent) < 20:
+        med, spread = 5.0, 1.0
+    else:
+        med, spread = median(list(recent)), max(1.0, 1.4826 * mad(list(recent)))
+    return _clip((novelty - med) / spread / 3.0)
+
+
+def presence_component(subject: str, changed: Sequence[str]) -> float:
+    """People and animals first; then buddy's own things having moved."""
+    if subject in ("person", "animal"):
+        return 1.0
+    return 0.4 if changed else 0.0
+
+
+def taste_bonus(tags: Sequence[str], highlights: Sequence[str]) -> float:
+    """buddy's own taste, learned from its human rather than shipped with it.
+
+    Every claim the human starred is read as a small standing vote for the
+    words in it: a tag that appears in a starred line adds ``TASTE_BONUS`` to
+    what buddy wanted, capped so taste tilts the score without deciding it.
+    This is the one part of the gate that changes with buddy's life instead of
+    being fixed at build time."""
+    if not tags or not highlights:
+        return 0.0
+    starred: set[str] = set()
+    for line in highlights:
+        starred |= words(line)
+    hits = sum(1 for t in tags if t in starred)
+    return min(2 * TASTE_BONUS, hits * TASTE_BONUS)
+
+
+def cool_factor(
+    novelty: int,
+    importance: int,
+    arousal: int,
+    surprise: Optional[float],
+    subject: str,
+    changed: Sequence[str],
+    want: float,
+    recent_novelty: Sequence[int],
+    thumb: Optional[bytes] = None,
+    observations: Sequence[str] = (),
+) -> tuple[float, dict[str, float]]:
+    """How much buddy wants to keep this picture, in 0..1, with its parts.
+
+    Two channels open the gate and either can do it on its own: the view is
+    unlike anything in memory (novelty), or unlike what this spot usually
+    looks like (surprise). What buddy feels about it multiplies the result
+    rather than adding to it, so a strong feeling makes an interesting view
+    much more keepable and a dull one only slightly. A frame that is too dark,
+    blown out, flat, or that the model itself called nothing scores zero
+    whatever else is true.
+    """
+    parts = {
+        "novelty": novelty_component(novelty, recent_novelty),
+        "importance": _clip((importance - 4) / 5.0),
+        "surprise": 0.5 if surprise is None else _clip((surprise - 1.0) / 3.0),
+        "presence": presence_component(subject, changed),
+        "want": _clip(want),
+    }
+    raw = sum(COOL_WEIGHTS[k] * v for k, v in parts.items())
+    cool = raw * (1.0 + AROUSAL_GAIN * abs(arousal) / 100.0)
+    if not thumb_quality(thumb) or subject in DULL_SUBJECTS or not observations:
+        cool = 0.0
+    parts["arousal"] = abs(arousal) / 100.0
+    return round(cool, 3), parts
+
+
+def album(records: Sequence[Record], now_ts: float, days: float = ALBUM_DAYS) -> list[Record]:
+    """The photos buddy still has in mind: every photographed record inside the
+    window, not superseded."""
+    horizon = now_ts - days * 86400.0
+    return [r for r in records if r.photo and r.ts >= horizon and not r.superseded_by]
+
+
+def habituation(
+    album_records: Sequence[Record],
+    tags: Sequence[str],
+    yaw: int,
+    pitch: int,
+    thumb: Optional[bytes],
+    now_ts: float,
+    importance: int = 0,
+) -> tuple[float, Optional[Record]]:
+    """How much of the score survives the fact that buddy has been here before.
+
+    Three layers, all read back out of the memory file, so restarting the
+    daemon cannot make buddy forget what it already photographed:
+
+    * the same picture again is refused outright, unless it is important
+      enough to supersede the one already kept (the returned record);
+    * each earlier photo of the same subject divides the score by a growing
+      root, so a second picture of the cat is worth about seven tenths of the
+      first and a fifth about four tenths;
+    * each recent photo at this waypoint dulls the spot for a few hours,
+      which is what keeps a burst of pictures from coming out of one corner.
+    """
+    here = [r for r in album_records if (r.yaw, r.pitch) == (yaw, pitch)]
+    duplicate: Optional[Record] = None
+    if thumb is not None:
+        cur = normalise(thumb)
+        for r in here:
+            other = _thumb_bytes(r)
+            if other is not None and len(other) == len(cur) and _mean_abs(cur, normalise(other)) < DUPLICATE_DIFF:
+                duplicate = r
+                break
+    if duplicate is not None:
+        if importance < DUPLICATE_OVERRIDE:
+            return 0.0, None
+        return 1.0, duplicate                     # keep the new one, retire the old
+    tagset = set(tags)
+    same_subject = sum(1 for r in album_records if tagset and jaccard(tagset, set(r.tags)) >= SUBJECT_OVERLAP)
+    spent = sum(WAYPOINT_DROP * math.exp(-(now_ts - r.ts) / (WAYPOINT_RECOVERY_HOURS * 3600.0)) for r in here)
+    spot = max(WAYPOINT_FLOOR, 1.0 - spent)
+    return spot / math.sqrt(1 + same_subject), None
+
+
+def _thumb_bytes(rec: Record) -> Optional[bytes]:
+    if not rec.thumb:
+        return None
+    try:
+        return base64.b64decode(rec.thumb, validate=True)
+    except (binascii.Error, ValueError):
+        return None
+
+
+def _mean_abs(a: bytes, b: bytes) -> float:
+    return sum(abs(x - y) for x, y in zip(a, b, strict=True)) / len(a)
+
+
+def cool_threshold(recent_cools: Sequence[float]) -> float:
+    """How cool a view has to be today. The bar is the middle of what buddy has
+    been seeing plus a margin, so a lively week makes it pickier and a dull one
+    does not make it desperate; the clamp keeps it from drifting anywhere silly."""
+    if len(recent_cools) < 20:
+        return COOL_THRESHOLD
+    t = median(list(recent_cools)) + COOL_MAD_GAIN * 1.4826 * mad(list(recent_cools))
+    return round(max(COOL_THRESHOLD_MIN, min(COOL_THRESHOLD_MAX, t)), 3)
+
+
+def photo_budget_left(album_records: Sequence[Record], when: datetime) -> bool:
+    """At most two in any hour and eight in a day, counted from the records
+    themselves so a restart cannot reset the allowance."""
+    now_ts = when.timestamp()
+    last_hour = sum(1 for r in album_records if now_ts - r.ts < 3600.0)
+    today = when.strftime("%Y-%m-%d")
+    same_day = sum(1 for r in album_records
+                   if datetime.fromtimestamp(r.ts).strftime("%Y-%m-%d") == today)
+    return last_hour < PHOTOS_PER_HOUR and same_day < PHOTOS_PER_DAY
 
 
 # ---- the network seam ----------------------------------------------------------------------------
@@ -520,17 +786,25 @@ class DiaryTaker:
         timeout: float = NOTE_TIMEOUT_SECS,
         clock: Callable[[], float] = time.monotonic,
         wall: Callable[[], datetime] = datetime.now,
+        snapshot: Optional[Callable[[], Awaitable[Optional[Frame]]]] = None,
+        photo_config: Optional[photos.PhotoConfig] = None,
     ) -> None:
         self.client = client
         self.memory = Memory(notes_dir, wall=wall)
         self.notes_dir = notes_dir
         self.send_emote = send_emote
+        # Asks the board for one full-resolution frame. None (or a None answer)
+        # means buddy keeps the small streamed frame instead — a slightly worse
+        # picture is better than no picture.
+        self.snapshot = snapshot
+        self.photo_config = photo_config if photo_config is not None else photos.configured()
         self.timeout = timeout
         self.clock = clock
         self.wall = wall
         self.taken = 0            # records added
         self.written = 0          # diary lines written
         self.failed = 0
+        self.photographed = 0     # pictures kept
         self.reflections = 0
         self._err_logged_at = float("-inf")
         self._executor: Optional[concurrent.futures.ThreadPoolExecutor] = None
@@ -572,13 +846,16 @@ class DiaryTaker:
             self.failed += 1
             self._log_error(RuntimeError("no usable thought in the reply"))
             return None
-        write = should_write(rec.novelty, rec.importance, self.memory.last_written_ts(), now_ts)
+        keep_photo = await self._consider_photo(rec, note, reply, when)
+        write = keep_photo or should_write(
+            rec.novelty, rec.importance, self.memory.last_written_ts(), now_ts)
         rec.written = write
         self.memory.add(rec)
         self.taken += 1
         path: Optional[Path] = None
         if write:
-            path = append_note(self.notes_dir, when, note.yaw, note.pitch, rec.thought)
+            path = append_note(self.notes_dir, when, note.yaw, note.pitch, rec.thought,
+                               extra=photos.photo_line(rec.photo) if rec.photo else None)
             self.written += 1
             log.info("diary: %s (novelty %d, importance %d) -> %s", rec.label, rec.novelty, rec.importance, path)
         else:
@@ -592,6 +869,85 @@ class DiaryTaker:
         if self._reflection_due(when):
             asyncio.create_task(self.reflect(when), name="diary-reflect")
         return path
+
+    async def _consider_photo(self, rec: Record, note: Note, reply: dict[str, Any], when: datetime) -> bool:
+        """Score the view, and if buddy finds it cool enough, keep the picture.
+
+        Writes ``cool`` and ``surprise`` onto the record whether or not a photo
+        is kept — the threshold is measured from that distribution — and sets
+        ``photo``, ``caption`` and ``thumb`` when one is.
+        """
+        now_ts = when.timestamp()
+        photo = reply.get("photo")
+        photo = photo if isinstance(photo, dict) else {}
+        subject = str(photo.get("subject") or "").strip().lower()
+        caption = " ".join(str(photo.get("caption") or "").split())[:CAPTION_CHARS]
+        try:
+            want = float(photo.get("want", 0.0))
+        except (TypeError, ValueError):
+            want = 0.0
+        want = min(1.0, want + taste_bonus(rec.tags, self.memory.load_highlights()))
+
+        recent = self.memory.records[-COOL_WINDOW:]
+        cool, parts = cool_factor(
+            rec.novelty, rec.importance, rec.arousal, note.surprise, subject, rec.changed, want,
+            [r.novelty for r in recent], thumb=note.thumb, observations=rec.observations,
+        )
+        # A genuine first — nothing in memory shares more than one tag with it —
+        # is kept whatever the arithmetic says.
+        if cool > 0 and rec.novelty >= FIRST_TIME_NOVELTY:
+            shared = max((len(set(rec.tags) & set(r.tags)) for r in recent), default=0)
+            if shared <= FIRST_TIME_SHARED_TAGS:
+                cool = max(cool, FIRST_TIME_FLOOR)
+
+        shelf = album(self.memory.records, now_ts)
+        h, superseded = habituation(shelf, rec.tags, note.yaw, note.pitch, note.thumb, now_ts, rec.importance)
+        cool = round(cool * h, 3)
+        rec.cool = cool
+        rec.surprise = round(note.surprise or 0.0, 3)
+
+        threshold = cool_threshold([r.cool for r in recent if r.cool])
+        if cool < threshold:
+            log.debug("diary: no photo (cool %.2f < %.2f)", cool, threshold)
+            return False
+        if not photo_budget_left(shelf, when):
+            log.info("diary: cool %.2f but the photo budget is spent (%d/h, %d/day)",
+                     cool, PHOTOS_PER_HOUR, PHOTOS_PER_DAY)
+            return False
+
+        frame = await self._photo_frame(note)
+        if frame is None or frame.fmt != "jpeg":
+            log.info("diary: cool %.2f but no picture to keep (fmt %s)", cool,
+                     frame.fmt if frame else "none")
+            return False
+        rel = photos.save(self.notes_dir, when, rec.id, frame.data, self.photo_config)
+        if rel is None:
+            return False
+        rec.photo = rel
+        rec.caption = caption or (rec.observations[0][:CAPTION_CHARS] if rec.observations else rec.thought[:CAPTION_CHARS])
+        if note.thumb:
+            rec.thumb = base64.b64encode(note.thumb).decode("ascii")
+        if superseded is not None:
+            superseded.superseded_by = rec.id
+        self.photographed += 1
+        log.info("diary: photo (cool %.2f >= %.2f; %s h=%.2f) -> %s", cool, threshold,
+                 " ".join(f"{k[0].upper()}{v:.2f}" for k, v in parts.items()), h, rel)
+        return True
+
+    async def _photo_frame(self, note: Note) -> Optional[Frame]:
+        """The best picture available: the board's full-size snapshot, or the
+        streamed frame buddy already has."""
+        if self.snapshot is not None:
+            try:
+                shot = await self.snapshot()
+            except asyncio.CancelledError:
+                raise
+            except Exception as e:  # noqa: BLE001 — a failed snapshot is not a failed thought
+                log.warning("diary: snapshot failed: %s: %s", type(e).__name__, e)
+                shot = None
+            if shot is not None:
+                return shot
+        return note.frame
 
     def _record(self, reply: dict[str, Any], when: datetime, yaw: int, pitch: int) -> Optional[Record]:
         cands = reply.get("thoughts")

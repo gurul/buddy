@@ -6,6 +6,7 @@ no network: the same SimpleNamespace + MethodType stub test_explore.py uses."""
 from __future__ import annotations
 
 import asyncio
+import logging
 from pathlib import Path
 from types import MethodType, SimpleNamespace
 
@@ -234,4 +235,102 @@ def test_voice_go_explore_is_dropped_when_the_conversation_is_hushed(monkeypatch
             pass
         assert d._explorer.state == "off" and d._explore_after_conversation is None
         assert not any(m == MODE_ON for m in d.ble.sent)
+    asyncio.run(go())
+
+
+# ---- photos: {"cmd":"snap"} and the one frame line that answers it ----------------------------
+
+import base64 as _b64
+
+from cc_buddy_bridge.daemon import Daemon as _Daemon
+
+_JPEG = b"\xff\xd8\xff\xe0" + b"\x00" * 16 + b"\xff\xd9"
+
+
+def _snap_daemon(connected: bool = True) -> SimpleNamespace:
+    d = _daemon(connected=connected)
+    d._snap_waiter = None
+    d._vision = SimpleNamespace(on_frame=_record_stream_frame(d))
+    for name in ("_take_snapshot",):
+        setattr(d, name, MethodType(getattr(_Daemon, name), d))
+    d.SNAP_TIMEOUT_SECS = 0.05
+    return d
+
+
+def _record_stream_frame(d):
+    d.stream_frames = []
+
+    async def on_frame(obj):
+        d.stream_frames.append(obj)
+    return on_frame
+
+
+def _snap_line(snap: bool = True, w: int = 320, h: int = 240) -> dict:
+    f = {"seq": 7, "w": w, "h": h, "fmt": "jpeg", "b64": _b64.b64encode(_JPEG).decode(), "yaw": 20, "pitch": 40}
+    if snap:
+        f["snap"] = True
+    return {"frame": f}
+
+
+def test_take_snapshot_sends_snap_and_returns_the_answering_frame() -> None:
+    async def go():
+        d = _snap_daemon()
+
+        async def board():
+            await asyncio.sleep(0.01)
+            assert d.ble.sent[-1] == {"cmd": "snap"}
+            await d._handle_ble(_snap_line())
+
+        asyncio.create_task(board())
+        frame = await d._take_snapshot()
+        assert frame is not None and frame.snap and (frame.w, frame.h) == (320, 240)
+        assert frame.data == _JPEG and frame.yaw == 20.0
+        assert d.stream_frames == []                 # never fed to the face tracker
+        assert d._snap_waiter is None
+    asyncio.run(go())
+
+
+def test_take_snapshot_times_out_on_old_firmware_and_leaves_no_waiter(caplog) -> None:
+    async def go():
+        d = _snap_daemon()
+        with caplog.at_level(logging.INFO):
+            frame = await d._take_snapshot()
+        assert frame is None and d.ble.sent == [{"cmd": "snap"}]
+        assert d._snap_waiter is None
+        assert any("snap not answered" in r.message for r in caplog.records)
+        # a late answer after the timeout is dropped, not an error
+        await d._handle_ble(_snap_line())
+        assert d.stream_frames == []
+    asyncio.run(go())
+
+
+def test_take_snapshot_refuses_while_disconnected_or_busy() -> None:
+    async def go():
+        assert await _snap_daemon(connected=False)._take_snapshot() is None
+        d = _snap_daemon()
+        d.SNAP_TIMEOUT_SECS = 0.2
+        first = asyncio.create_task(d._take_snapshot())
+        await asyncio.sleep(0.01)
+        assert await d._take_snapshot() is None      # one at a time
+        await d._handle_ble(_snap_line())
+        assert (await first) is not None
+        assert d.ble.sent.count({"cmd": "snap"}) == 1
+    asyncio.run(go())
+
+
+def test_stream_frames_still_go_to_the_tracker_and_bad_snaps_are_none() -> None:
+    async def go():
+        d = _snap_daemon()
+        await d._handle_ble(_snap_line(snap=False, w=160, h=120))
+        assert len(d.stream_frames) == 1
+
+        async def board():
+            await asyncio.sleep(0.01)
+            bad = _snap_line()
+            bad["frame"]["b64"] = "not base64!"
+            await d._handle_ble(bad)
+
+        asyncio.create_task(board())
+        assert await d._take_snapshot() is None
+        assert d._snap_waiter is None
     asyncio.run(go())

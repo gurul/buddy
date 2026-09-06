@@ -143,7 +143,139 @@ immutable); `YYYY-MM-DD.md` = the day (episodic, immutable once written);
 `{"cmd":"emote"}` and nudges the affect engine (±0.3 max), so a lonely-looking
 empty room and the owner walking in feel different on the robot's face.
 
-## 4. What the literature says (fetched 2026-09-06)
+## 4. Photos: what buddy finds cool (`diary.py`, `photos.py`)
+
+A few views are worth more than a sentence. For those buddy asks the board for a
+full-resolution frame (`{"cmd":"snap"}` → 320×240 at JPEG quality 85, `look.cpp`)
+and keeps it. What follows is why the gate is shaped the way it is; every claim
+below was checked against its source.
+
+**The default is not to keep.** The brain's default is not to store either:
+information enters the hippocampus as early LTP that fades, and is converted to a
+lasting memory only when a systems-wide check finds high novelty **or** high
+motivational salience, releasing the dopamine that makes it stick (Lisman & Grace,
+*The hippocampal-VTA loop*, Neuron 46(5), 2005). buddy's gate has the same shape:
+two channels either of which can open it, one arithmetic score, one threshold.
+
+**Two kinds of new.** Novelty and surprise are different quantities with different
+machinery: novelty is finding no representation of the thing in memory, surprise is
+a mismatch with what was predicted here (Barto, Mirolli & Baldassarre, *Novelty or
+Surprise?*, Frontiers in Psychology 4:907, 2013). Both feed the score. Novelty is
+the model's own 1–10 rating, ranked against its recent ratings — necessary because
+LLM ordinal ratings compress hard toward the middle of any rubric (Zhang et al.,
+*Auditing Multimodal LLM Raters: Central Tendency Bias*, arXiv:2605.16386, 2026).
+Surprise is computed on the robot, from pixels, per waypoint.
+
+**Surprise without a noisy TV.** `ChangeDetector.surprise` keeps the last 30
+thumbnails of each waypoint and scores a new one cell by cell: the distance from
+that cell's median, divided by its own spread. A cell that always flickers — a
+monitor, a fan, leaves in a window — has a large spread, so it contributes almost
+nothing. This is the fix for the failure that kills plain prediction-error
+curiosity: an agent rewarded for prediction error parks itself in front of a TV
+whose channel changes at random and never leaves (Burda et al., *Large-Scale Study
+of Curiosity-Driven Learning*, arXiv:1808.04355, 2018, where the maze-with-a-TV was
+tested literally; the normalisation trick is from *Exploration by Random Network
+Distillation*, arXiv:1810.12894). Bayesian surprise resolves the same paradox for
+attention — TV snow carries about twenty times more Shannon information per second
+than ordinary television and attracts far less attention (Itti & Baldi, *Bayesian
+surprise attracts human attention*, Vision Research 49(10), 2009, which also
+reports 72% of human gaze shifts landing on above-average-surprise locations).
+Thumbnails are brightness-normalised first, so the sun going in is not a discovery.
+
+**A small change on a still background beats a big change on a busy one.** That
+asymmetry is the isolation effect: an item that differs from a uniform context is
+remembered better (Hunt, *The subtlety of distinctiveness: What von Restorff really
+did*, Psychonomic Bulletin & Review 2(1), 1995). The per-cell spread produces it
+for free.
+
+**Feeling multiplies, it does not add.** Emotional arousal acts on consolidation
+*after* the event, through noradrenergic modulation of the amygdala — it makes an
+event more likely to last rather than being another kind of interest (McGaugh, *The
+amygdala modulates the consolidation of memories of emotionally arousing
+experiences*, Annual Review of Neuroscience 27, 2004). So `cool = raw × (1 + 0.5 ×
+|arousal|)`, sign-independent: being startled counts as much as being delighted.
+
+**Uninterpretable frames score zero.** Attention is not monotone in surprise —
+infants look away from events that are too simple *and* from those too complex to
+follow (Kidd, Piantadosi & Aslin, *The Goldilocks Effect*, PLoS ONE 7(5), 2012) —
+and about 39–40% of frames from a camera nobody is aiming are unusable through
+blur, darkness or saturation (Doherty et al., CIVR 2008). A thumbnail whose mean
+luma is outside 24–232 or whose spread is under 10 is refused, as is a frame the
+model itself labelled `screen` or `nothing`.
+
+**Habituation, in three layers.** Everything is read back out of `memory.jsonl`, so
+restarting the daemon cannot make buddy forget what it has already photographed.
+
+| Layer | Rule | Why |
+|---|---|---|
+| The same picture again | brightness-normalised difference below 10 → refused outright, unless importance ≥ 9, which supersedes the old record | a lamp that toggles or a chair that fills every afternoon must not be photographed twice; Mem0's UPDATE rather than ADD (arXiv:2504.19413) |
+| The same subject | score ÷ √(1 + photos in 14 days whose tags overlap by ≥ 0.5) | pseudo-counts: the bonus for a state falls as its count grows (Bellemare et al., *Unifying Count-Based Exploration and Intrinsic Motivation*, NeurIPS 2016) |
+| The same spot | each recent photo here costs 0.45, recovering over 8 hours, floored at 0.05 | Stanley's 1976 habituation equation as used by Marsland, Nehmzow & Shapiro, *Novelty detection on a mobile robot using habituation* (arXiv:cs/0006007), whose robot stopped reacting to a corridor after a few passes; Kismet habituates its fixation the same way (Breazeal & Scassellati, IJCAI-99) |
+
+The surprise bank habituates on its own: a frame is scored **before** it is banked,
+so a change is surprising exactly once and is the new normal within about five
+looks. Reading before writing is the order Wang et al. use for exactly this
+(*Visual Memorability for Robotic Interestingness via Unsupervised Online
+Learning*, ECCV 2020, which defines interestingness as the negative of memory
+reading confidence).
+
+**The bar moves with the week.** The threshold is the middle of buddy's recent
+scores plus 1.5 robust deviations, clamped to 0.40–0.75 and fixed at 0.55 until
+there are twenty scores to measure. Surprise-gated robot memory sets its threshold
+the same way (Gorlo, Wise, Speranzon & Carlone, *Worth Remembering: Surprise-Gated
+Robot Episodic Memory*, 2026), as does EM-LLM's event segmentation (ICLR 2025:
+rolling mean plus γ deviations). A lively week makes buddy pickier; a dull one does
+not make it desperate.
+
+**A first is kept whatever the arithmetic says.** Novelty ≥ 9 with at most one tag
+shared with anything in memory floors the score at 0.70. Human midbrain dopamine
+responses code absolute stimulus novelty rather than rareness or emotional salience
+(Bunzeck & Düzel, *Absolute coding of stimulus novelty in the human substantia
+nigra/VTA*, Neuron 51(3), 2006).
+
+**Taste buddy learns rather than ships with.** Every claim you ★ in the diary
+window is read as a standing vote for the words in it: a tag appearing in a starred
+line adds 0.10 to what buddy wanted, capped at 0.20. It is the one part of the gate
+that changes with buddy's life instead of being fixed at build time — the smallest
+honest answer to the judge problem, where the metric of what matters is imported
+and frozen rather than grown from experience.
+
+**Budget.** At most 2 photos an hour and 8 a day, counted from the records, so a
+restart cannot reset the allowance; photos are a strict subset of the 6 diary calls
+an hour, so the only extra cost is disk. `CC_BUDDY_PHOTOS_MAX` (300) and
+`CC_BUDDY_PHOTOS_MAX_MB` (100) cap the shelf; the oldest go first.
+
+**The score.**
+
+```
+raw  = 0.30·novelty + 0.20·importance + 0.20·surprise + 0.15·presence + 0.15·want
+cool = raw × (1 + 0.5·|arousal|) × quality × habituation
+keep = cool ≥ threshold and the budget allows
+```
+
+`presence` is 1.0 for a person or an animal, 0.4 for something of buddy's that
+moved, 0 otherwise. `want` is buddy's own 0–1 vote plus the taste bonus — one
+bounded input among five, never the decision, because a model asked to score its
+own output is not calibrated. Vector, the closest commercial relative, only ever
+took a photo when told to (Digital Dream Labs KB, *Photos taken by Vector*, 2020);
+this is the same feature with the shutter on the robot's own judgment.
+
+**Where a photo lives.** `photos/YYYY-MM-DD/HHMMSS-<record id>.jpg` under the notes
+directory, with the path in `memory.jsonl` and an indented Markdown image line
+under the diary line:
+
+```
+- 14:12 yaw=+20 pitch=40 — Someone brought a plant to my desk.
+  ![](photos/2026-09-06/141207-118.jpg)
+```
+
+The diary line itself is unchanged, so every existing reader still parses it, and
+the image line has no timestamp so both readers skip it. The macOS helper copies
+the newest 24 referenced photos into the App Group container; the widget leads with
+the newest one and the diary window has a Photos tab. `cc-buddy-bridge photos` lists
+them, `photos open` opens the newest.
+
+## 5. What the literature says (fetched 2026-09-06)
 
 - **Model**: Breazeal 2003 (Kismet: arousal/valence/stance + drives),
   Mitchinson & Prescott (MiRo: one V/A point for emotion, mood and temperament;

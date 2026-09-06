@@ -89,6 +89,8 @@ final class NotesMirror {
               || snapshot.highlights != lastHighlights else { return }
 
         do {
+            let photos = NoteStore.mirrorPhotos(snapshot.thoughts, notesDir: notesDir)
+            if photos > 0 { log.info("mirrored \(photos) new photo(s)") }
             try NoteStore.save(snapshot)
             lastNotes = snapshot.notes
             lastThoughts = snapshot.thoughts

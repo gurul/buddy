@@ -20,6 +20,8 @@ from cc_buddy_bridge import explore
 from cc_buddy_bridge.explore import (
     WAYPOINTS,
     ChangeDetector,
+    frame_thumb,
+    normalise,
     ExploreConfig,
     ExploreRefused,
     Explorer,
@@ -60,6 +62,16 @@ def _explorer(**kw) -> Explorer:
 
 
 IDLE = 601.0   # past after_secs
+
+
+def _note_at(actions, level: int, yaw: int, pitch: int) -> bool:
+    """The actions are exactly one Note of this frame at this gaze. The
+    detector's measurements (thumb, diff, surprise) ride along on the Note
+    and are asserted separately where they matter."""
+    if len(actions) != 1 or not isinstance(actions[0], Note):
+        return False
+    n = actions[0]
+    return n.frame == _frame(level) and (n.yaw, n.pitch) == (yaw, pitch)
 
 
 def _tick(e: Explorer, now: float, idle: float = IDLE, frame=None, **kw):
@@ -213,12 +225,13 @@ def test_frame_sampled_two_seconds_after_look_once_per_waypoint() -> None:
     assert _tick(e, 1.0, frame=_frame(10)) == []          # too early: ignored
     assert e.wants_frame(2.0)
     actions = _tick(e, 2.0, frame=_frame(10))
-    assert actions == [Note(_frame(10), -45, 40)]
+    assert _note_at(actions, 10, -45, 40)
+    assert actions[0].thumb is not None and actions[0].surprise is None   # bank still cold
     assert not e.wants_frame(3.0)
     assert _tick(e, 3.0, frame=_frame(200)) == []         # already sampled here
     # Next waypoint, new sample window.
     assert _tick(e, 6.0) == [Look(-20, 40, 6000)]
-    assert _tick(e, 8.0, frame=_frame(10)) == [Note(_frame(10), -20, 40)]
+    assert _note_at(_tick(e, 8.0, frame=_frame(10)), 10, -20, 40)
 
 
 def test_unchanged_view_spends_no_note_on_the_next_cycle() -> None:
@@ -242,7 +255,7 @@ def test_changed_view_spends_a_note() -> None:
     e = Explorer(_cfg(cycle_wait_secs=0.0), now=0.0)
     e.bucket = TokenBucket(1000.0, 0.0)
     _tick(e, 0.0)
-    assert _tick(e, 2.0, frame=_frame(50)) == [Note(_frame(50), -45, 40)]
+    assert _note_at(_tick(e, 2.0, frame=_frame(50)), 50, -45, 40)
     # Run the cycle out, rest is zero, restart at the same waypoint with a new view.
     now = 3.0
     while e.state != Explorer.RESTING:
@@ -250,7 +263,7 @@ def test_changed_view_spends_a_note() -> None:
         now += 1.0
     _tick(e, now)                                   # restart -> Look(-45, 40)
     assert e.active and e.waypoint == (-45, 40)
-    assert _tick(e, now + 2.0, frame=_frame(120)) == [Note(_frame(120), -45, 40)]
+    assert _note_at(_tick(e, now + 2.0, frame=_frame(120)), 120, -45, 40)
 
 
 def test_budget_exhausted_skips_note_but_keeps_reference_unchanged() -> None:
@@ -639,3 +652,98 @@ def test_daemon_stop_explore_leaves_mode_on_shutdown() -> None:
     sent = asyncio.run(go())
     assert sent[-1] == {"cmd": "mode", "explore": False}
     assert sent.count({"cmd": "mode", "explore": False}) == 1
+
+
+# ---- surprise: what this waypoint usually looks like -------------------------
+
+def _room(seed: int, level: int = 0, block=None) -> Frame:
+    """A frame of a plausible room: a bright half, a dark half, a bright band
+    across the middle, plus a couple of luma units of sensor wobble that move
+    with ``seed``. ``level`` shifts the whole frame (the lights changing);
+    ``block`` paints (x0, y0, x1, y1, value) over it (something moved)."""
+    data = bytearray(W * H)
+    for y in range(H):
+        for x in range(W):
+            base = 70 if x < W // 2 else 150
+            if 50 <= y < 70:
+                base = 200
+            data[y * W + x] = max(0, min(255, base + level + ((x + y + seed * 3) % 3)))
+    if block is not None:
+        x0, y0, x1, y1, value = block
+        for y in range(y0, y1):
+            for x in range(x0, x1):
+                data[y * W + x] = value
+    return Frame(seq=seed, w=W, h=H, fmt="gray", data=bytes(data))
+
+
+def _noise(level: int, seed: int) -> Frame:
+    """Kept for the callers that only need "a frame that differs a bit"."""
+    return _room(seed, level=level - 100)
+
+
+def test_surprise_is_none_until_the_bank_has_five_frames() -> None:
+    d = ChangeDetector()
+    for i in range(5):
+        assert d.surprise(0, frame_thumb(_noise(100, i))) is None
+    assert d.banked(0) == 5
+    assert d.surprise(0, frame_thumb(_noise(100, 6))) is not None
+
+
+def test_surprise_stays_low_for_the_usual_view_and_jumps_for_a_change() -> None:
+    d = ChangeDetector()
+    for i in range(12):
+        d.surprise(0, frame_thumb(_noise(100, i)))
+    usual = d.surprise(0, frame_thumb(_room(99)))
+    # Something the size of a mug appears low on the left, where the wall has
+    # never been anything but flat.
+    odd = d.surprise(0, frame_thumb(_room(100, block=(10, 80, 50, 115, 240))))
+    assert usual is not None and odd is not None
+    assert usual < 1.5 < odd
+
+
+def test_a_flickering_cell_stops_counting_as_surprise() -> None:
+    """The noisy-TV case: a region that changes wildly every look raises its
+    own spread, so it cannot keep buying attention."""
+    def flicker(seed: int) -> Frame:
+        # A screen in the corner: black one look, white the next.
+        return _room(seed, block=(10, 80, 50, 115, 0 if seed % 2 else 255))
+
+    d = ChangeDetector()
+    for i in range(20):
+        d.surprise(0, frame_thumb(flicker(i)))
+    flickering = d.surprise(0, frame_thumb(flicker(21)))
+    # The same-sized change where the wall has always been still scores far higher.
+    still = d.surprise(0, frame_thumb(_room(22, block=(100, 80, 140, 115, 240))))
+    assert flickering < 1.5 < still
+
+
+def test_surprise_ignores_the_lights_going_down() -> None:
+    d = ChangeDetector()
+    for i in range(12):
+        d.surprise(0, frame_thumb(_room(i)))
+    dimmer = _room(99, level=-45)                  # same room, much darker
+    assert d.surprise(0, frame_thumb(dimmer)) < 1.5
+
+
+def test_banks_are_per_waypoint() -> None:
+    d = ChangeDetector()
+    for i in range(12):
+        d.surprise(0, frame_thumb(_room(i)))
+    assert d.banked(0) == 12 and d.banked(1) == 0
+    assert d.surprise(1, frame_thumb(_room(3))) is None
+
+
+def test_normalise_centres_on_mid_grey() -> None:
+    assert set(normalise(bytes([10]) * 16)) == {128}
+    assert set(normalise(bytes([200]) * 16)) == {128}
+
+
+def test_every_considered_frame_is_banked_even_when_no_note_is_spent() -> None:
+    e = _explorer()
+    e.bucket = TokenBucket(0.0, 0.0)              # no budget: nothing is ever spent
+    _tick(e, 0.0)
+    for i in range(3):
+        _tick(e, 2.0 + i * 6.0, frame=_noise(100, i))
+        _tick(e, 6.0 + i * 6.0)
+    assert e.notes == 0
+    assert sum(e.detector.banked(w) for w in range(len(WAYPOINTS))) >= 3

@@ -7,8 +7,12 @@
 //                   thought, observations, what changed, tags, novelty,
 //                   importance, whether it was written, valence/arousal/label
 //   profile.md      ROOM / HUMAN / SELF / RULES blocks buddy rewrites nightly
+//   photos/YYYY-MM-DD/HHMMSS-<id>.jpg  the pictures buddy kept of views it
+//                   found cool (bridge/src/cc_buddy_bridge/photos.py); a record
+//                   references one by a path relative to the notes directory
 // The (unsandboxed) helper mirrors all of it into `notes.json` inside the App
-// Group container; the (sandboxed) widget only ever reads that JSON.
+// Group container — and copies the referenced photos in beside it, because the
+// (sandboxed) widget can read nothing but that container.
 
 import Foundation
 
@@ -25,6 +29,18 @@ enum AppGroup {
 
     static var notesFileURL: URL? {
         containerURL?.appendingPathComponent(fileName, isDirectory: false)
+    }
+
+    /// Mirrored photos live here, under the same relative paths the records use.
+    static var photosURL: URL? {
+        containerURL?.appendingPathComponent("photos", isDirectory: true)
+    }
+
+    /// The mirrored copy of a record's photo, or nil when it has not been copied.
+    static func photo(_ relPath: String?) -> URL? {
+        guard let relPath, !relPath.isEmpty, let container = containerURL else { return nil }
+        let url = container.appendingPathComponent(relPath, isDirectory: false)
+        return FileManager.default.fileExists(atPath: url.path) ? url : nil
     }
 }
 
@@ -70,6 +86,9 @@ struct Thought: Codable, Hashable, Identifiable, Sendable {
     var valence: Int = 0
     var arousal: Int = 0
     var label: String = "calm"
+    /// `photos/YYYY-MM-DD/HHMMSS-<id>.jpg`, relative to the notes directory —
+    /// set when buddy found this view cool enough to photograph.
+    var photo: String? = nil
 
     var date: Date { Date(timeIntervalSince1970: ts) }
     var day: String {
@@ -84,16 +103,17 @@ struct Thought: Codable, Hashable, Identifiable, Sendable {
     }
 
     enum CodingKeys: String, CodingKey {
-        case id, ts, yaw, pitch, thought, observations, changed, tags, novelty, importance, written, valence, arousal, label
+        case id, ts, yaw, pitch, thought, observations, changed, tags, novelty, importance, written, valence,
+             arousal, label, photo
     }
 
     init(id: Int, ts: Double, yaw: Int, pitch: Int, thought: String, observations: [String] = [], changed: [String] = [],
          tags: [String] = [], novelty: Int = 5, importance: Int = 3, written: Bool = false, valence: Int = 0,
-         arousal: Int = 0, label: String = "calm") {
+         arousal: Int = 0, label: String = "calm", photo: String? = nil) {
         self.id = id; self.ts = ts; self.yaw = yaw; self.pitch = pitch; self.thought = thought
         self.observations = observations; self.changed = changed; self.tags = tags; self.novelty = novelty
         self.importance = importance; self.written = written; self.valence = valence; self.arousal = arousal
-        self.label = label
+        self.label = label; self.photo = photo
     }
 
     /// Tolerant decoding: the daemon may add fields; older lines may lack some.
@@ -113,6 +133,7 @@ struct Thought: Codable, Hashable, Identifiable, Sendable {
         valence = (try? c.decode(Int.self, forKey: .valence)) ?? 0
         arousal = (try? c.decode(Int.self, forKey: .arousal)) ?? 0
         label = (try? c.decode(String.self, forKey: .label)) ?? "calm"
+        photo = try? c.decodeIfPresent(String.self, forKey: .photo)
     }
 }
 
@@ -328,6 +349,51 @@ enum NoteStore {
               let snap = try? decoder.decode(NotesSnapshot.self, from: data)
         else { return .empty }
         return snap
+    }
+
+    /// How many of the newest photos are mirrored into the container. The
+    /// widget shows at most a handful; the diary window reads the originals.
+    static let mirroredPhotos = 24
+
+    /// Copies the photos the newest records reference into the container, and
+    /// removes copies nothing references any more. Failures are not fatal: a
+    /// missing copy just means no thumbnail in the widget.
+    @discardableResult
+    static func mirrorPhotos(_ thoughts: [Thought], notesDir: URL) -> Int {
+        guard let root = AppGroup.photosURL else { return 0 }
+        let fm = FileManager.default
+        let wanted = Array(thoughts.compactMap(\.photo).prefix(mirroredPhotos))
+        var copied = 0
+        for rel in wanted {
+            let dst = root.appendingPathComponent(rel, isDirectory: false)
+            if fm.fileExists(atPath: dst.path) { continue }
+            let src = notesDir.appendingPathComponent(rel, isDirectory: false)
+            guard fm.fileExists(atPath: src.path) else { continue }
+            do {
+                try fm.createDirectory(at: dst.deletingLastPathComponent(), withIntermediateDirectories: true)
+                try fm.copyItem(at: src, to: dst)
+                copied += 1
+            } catch {
+                continue
+            }
+        }
+        pruneMirroredPhotos(keeping: Set(wanted), root: root)
+        return copied
+    }
+
+    private static func pruneMirroredPhotos(keeping wanted: Set<String>, root: URL) {
+        let fm = FileManager.default
+        guard let days = try? fm.contentsOfDirectory(at: root, includingPropertiesForKeys: nil) else { return }
+        for day in days where (try? day.resourceValues(forKeys: [.isDirectoryKey]).isDirectory) == true {
+            let files = (try? fm.contentsOfDirectory(at: day, includingPropertiesForKeys: nil)) ?? []
+            for file in files {
+                let rel = "photos/\(day.lastPathComponent)/\(file.lastPathComponent)"
+                if !wanted.contains(rel) { try? fm.removeItem(at: file) }
+            }
+            if ((try? fm.contentsOfDirectory(at: day, includingPropertiesForKeys: nil)) ?? []).isEmpty {
+                try? fm.removeItem(at: day)
+            }
+        }
     }
 
     /// Atomically writes the snapshot into the group container.

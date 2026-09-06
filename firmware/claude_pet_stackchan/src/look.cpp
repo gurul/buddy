@@ -295,9 +295,57 @@ volatile uint16_t s_streamW = 160, s_streamH = 120;
 volatile int s_headYaw = 0, s_headPitch = 45;
 uint8_t* s_sub = nullptr;        // PSRAM: subsampled RGB565, kStreamMaxW*kStreamMaxH*2
 char*    s_line = nullptr;       // PSRAM: NDJSON line, base64 payload
-constexpr size_t kLineCap = 24 * 1024;
+// 64 KB: a 160x120 q60 stream frame is ~4 KB of JPEG (~6 KB of line); a
+// 320x240 q85 snapshot of a busy desk is ~25-35 KB of JPEG (~45 KB of line).
+constexpr size_t kLineCap = 64 * 1024;
+volatile bool s_snapReq = false;
 uint32_t s_streamSeq = 0, s_lastFrameMs = 0;
 uint32_t s_statFrames = 0, s_statBytes = 0, s_statEncodeUs = 0, s_statAt = 0;
+
+// JPEG-encode an RGB565 image and write ONE frame line. Returns the bytes
+// written, 0 when the encode or the base64 did not fit. Bumps the seq.
+size_t writeFrameLine(const uint8_t* rgb565, uint16_t w, uint16_t h, uint8_t quality,
+                      int yaw, int pitch, bool snap) {
+    uint8_t* jpg = nullptr;
+    size_t jpgLen = 0;
+    // fmt2jpg takes a non-const source pointer; it only reads it.
+    if (!fmt2jpg(const_cast<uint8_t*>(rgb565), (size_t)w * h * 2, w, h, PIXFORMAT_RGB565, quality,
+                 &jpg, &jpgLen) || !jpg) {
+        if (jpg) free(jpg);
+        return 0;
+    }
+    // The line starts with '\n' so a half-written loop() line (println is
+    // two writes) is terminated before our JSON, and ends with '\n'.
+    int head = snprintf(s_line, kLineCap,
+                        "\n{\"frame\":{\"seq\":%lu,\"w\":%u,\"h\":%u,\"fmt\":\"jpeg\",\"b64\":\"",
+                        (unsigned long)s_streamSeq, (unsigned)w, (unsigned)h);
+    size_t b64Len = 0;
+    size_t cap = kLineCap - head - 64;
+    int rc = mbedtls_base64_encode((unsigned char*)s_line + head, cap, &b64Len, jpg, jpgLen);
+    free(jpg);
+    if (rc != 0) {
+        if (snap) Serial.printf("[cam] snap did not fit: %u B jpeg\n", (unsigned)jpgLen);
+        return 0;
+    }
+    int tail = snprintf(s_line + head + b64Len, 64, "\",\"yaw\":%d,\"pitch\":%d%s}}\n",
+                        yaw, pitch, snap ? ",\"snap\":true" : "");
+    size_t total = head + b64Len + tail;
+    s_streamSeq++;
+    Serial.write((const uint8_t*)s_line, total);   // one write: HWCDC holds tx_lock for the whole buffer
+    return total;
+}
+
+// One full-size photo for the host's diary, on request. Independent of the
+// stream (works with the stream off) but respects the wire pause.
+void snapFrame(const uint8_t* buf, uint32_t nowMs) {
+    if (!s_snapReq || s_streamPaused || !s_line) return;
+    s_snapReq = false;
+    uint32_t e0 = micros();
+    size_t total = writeFrameLine(buf, kFrameW, kFrameH, kSnapJpegQ, s_headYaw, s_headPitch, true);
+    Serial.printf("[cam] snap %ux%u q=%u: %u B line, %lu ms\n", (unsigned)kFrameW, (unsigned)kFrameH,
+                  (unsigned)kSnapJpegQ, (unsigned)total, (unsigned long)((micros() - e0) / 1000));
+    (void)nowMs;
+}
 
 void streamFrame(const uint8_t* buf, uint32_t nowMs) {
     if (!s_streamOn || s_streamPaused || !s_sub || !s_line) return;
@@ -319,28 +367,10 @@ void streamFrame(const uint8_t* buf, uint32_t nowMs) {
         const uint16_t* row = src + (size_t)(y * sy) * kFrameW;
         for (int x = 0; x < w; ++x) dst[y * w + x] = row[x * sx];
     }
-    uint8_t* jpg = nullptr;
-    size_t jpgLen = 0;
-    if (!fmt2jpg(s_sub, (size_t)w * h * 2, w, h, PIXFORMAT_RGB565, kStreamJpegQ, &jpg, &jpgLen) || !jpg) {
-        if (jpg) free(jpg);
-        return;
-    }
-    // The line starts with '\n' so a half-written loop() line (println is
-    // two writes) is terminated before our JSON, and ends with '\n'.
-    int head = snprintf(s_line, kLineCap,
-                        "\n{\"frame\":{\"seq\":%lu,\"w\":%u,\"h\":%u,\"fmt\":\"jpeg\",\"b64\":\"",
-                        (unsigned long)s_streamSeq, (unsigned)w, (unsigned)h);
-    size_t b64Len = 0;
-    size_t cap = kLineCap - head - 64;
-    int rc = mbedtls_base64_encode((unsigned char*)s_line + head, cap, &b64Len, jpg, jpgLen);
-    free(jpg);
-    if (rc != 0) return;
-    int tail = snprintf(s_line + head + b64Len, 64, "\",\"yaw\":%d,\"pitch\":%d}}\n", yaw, pitch);
-    size_t total = head + b64Len + tail;
+    size_t total = writeFrameLine(s_sub, w, h, kStreamJpegQ, yaw, pitch, false);
+    if (!total) return;
     uint32_t encodeUs = micros() - e0;
     s_lastFrameMs = nowMs;
-    s_streamSeq++;
-    Serial.write((const uint8_t*)s_line, total);   // one write: HWCDC holds tx_lock for the whole buffer
     s_statFrames++; s_statBytes += total; s_statEncodeUs += encodeUs;
     if (s_statAt == 0) s_statAt = nowMs;
     if (nowMs - s_statAt >= 30000) {
@@ -363,6 +393,7 @@ void task(void*) {
         }
         if (fb->format == PIXFORMAT_RGB565 && fb->width == kFrameW && fb->height == kFrameH) {
             streamFrame(fb->buf, millis());   // host stream first: the frame is still whole
+            snapFrame(fb->buf, millis());     // a requested photo, same whole frame
             uint32_t c0 = micros();
             const bool swap = s_swap;
             downscale(fb->buf, swap);
@@ -470,6 +501,7 @@ void setStream(bool on, uint8_t fps, uint16_t w, uint16_t h) {
     }
 }
 void setStreamPaused(bool paused) { s_streamPaused = paused; }
+void requestSnap() { s_snapReq = true; }
 void setHeadPose(int yawDeg, int pitchDeg) { s_headYaw = yawDeg; s_headPitch = pitchDeg; }
 
 void requestDump(bool oppositeOrder) { s_dumpReq = oppositeOrder ? 2 : 1; }

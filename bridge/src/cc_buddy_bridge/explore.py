@@ -52,6 +52,7 @@ import logging
 import os
 import sys
 import time
+from collections import deque
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
@@ -88,6 +89,15 @@ PITCH_RANGE = (5, 85)
 # room, below a person walking in or the lights changing.
 THUMB_W, THUMB_H = 32, 24
 CHANGE_THRESHOLD = 12.0
+# Per-waypoint thumbnail bank behind ChangeDetector.surprise: 30 frames is
+# about three pan cycles, enough for a median and a spread per cell; below 5
+# there is no opinion to give.
+BANK_SIZE = 30
+BANK_MIN = 5
+# Added to every per-cell spread so a perfectly still cell cannot divide by
+# zero and turn sensor noise into surprise. 6 luma units is the observed
+# frame-to-frame noise of the GC0308 on a static scene.
+NOISE_FLOOR = 6.0
 
 NOTE_TIMEOUT_SECS = 20.0
 NOTE_MAX_OUTPUT_TOKENS = 60
@@ -159,11 +169,19 @@ class Look:
 
 @dataclass(frozen=True)
 class Note:
-    """Spend one note on this frame, taken at this gaze."""
+    """Spend one note on this frame, taken at this gaze.
+
+    ``thumb``, ``diff`` and ``surprise`` are what the change detector already
+    worked out about the frame and used to discard; the diary's photo gate
+    (diary.py) needs them, so they ride along instead of being recomputed.
+    """
 
     frame: Frame
     yaw: int
     pitch: int
+    thumb: Optional[bytes] = None      # 32x24 luma, or None when undecodable
+    diff: Optional[float] = None       # mean abs luma diff vs the last kept frame here
+    surprise: Optional[float] = None   # robust z against this waypoint's history
 
 
 @dataclass(frozen=True)
@@ -303,6 +321,40 @@ def _quartz_thumb(image: bytes, tw: int = THUMB_W, th: int = THUMB_H) -> Optiona
     return b"".join(raw[y * stride:y * stride + tw] for y in range(th))
 
 
+def normalise(thumb: bytes) -> bytes:
+    """Centre a thumbnail on mid-grey, so the sun going in or a lamp being
+    dimmed does not read as the room changing."""
+    mean = sum(thumb) / len(thumb)
+    return bytes(min(255, max(0, int(v - mean + 128))) for v in thumb)
+
+
+def robust_z(thumb: bytes, bank: "deque[bytes]", noise_floor: float = NOISE_FLOOR) -> float:
+    """How odd this thumbnail is against what this waypoint usually looks like.
+
+    Per cell: |value - median| / (1.4826 * MAD + noise floor), averaged over
+    the 768 cells. Around 1 for a typical view of a familiar spot, 4 and up
+    when something real has changed.
+
+    The per-cell MAD is what makes this safe to act on. A cell that always
+    flickers — a monitor, a fan, leaves in a window — has a large MAD, so its
+    contribution collapses towards zero: the "noisy TV" that defeats plain
+    prediction-error curiosity cannot hold buddy's attention (Burda et al.
+    2018, Random Network Distillation). A small change against a still
+    background, on the other hand, scores high, which is the isolation effect
+    the memory literature describes (von Restorff).
+    """
+    cur = normalise(thumb)
+    n = len(cur)
+    total = 0.0
+    for c in range(n):
+        col = sorted(b[c] for b in bank)
+        mid = len(col) // 2
+        median = col[mid]
+        mad = sorted(abs(v - median) for v in col)[mid]
+        total += abs(cur[c] - median) / (1.4826 * mad + noise_floor)
+    return total / n
+
+
 class ChangeDetector:
     """Per-waypoint memory of the last frame a note was spent on.
 
@@ -310,12 +362,22 @@ class ChangeDetector:
     None when there is nothing to compare with (first visit, or a frame the
     host cannot decode) — the caller treats None as "changed". ``keep``
     records a frame as the new reference for its waypoint.
+
+    It also keeps a small bank of recent thumbnails per waypoint, which
+    ``surprise`` scores a new one against (see ``robust_z``). The bank holds
+    every frame the explorer considered, not only the ones a note was spent
+    on, and a frame is scored *before* it is banked, so a view is surprising
+    exactly once and then becomes the new normal within a few looks.
     """
 
-    def __init__(self, threshold: float = CHANGE_THRESHOLD, thumb: Thumbnailer = frame_thumb) -> None:
+    def __init__(self, threshold: float = CHANGE_THRESHOLD, thumb: Thumbnailer = frame_thumb,
+                 bank_size: int = BANK_SIZE, bank_min: int = BANK_MIN) -> None:
         self.threshold = threshold
         self.thumb = thumb
+        self.bank_size = bank_size
+        self.bank_min = bank_min
         self._ref: dict[int, bytes] = {}
+        self._bank: dict[int, "deque[bytes]"] = {}
 
     def measure(self, key: int, frame: Frame) -> Optional[float]:
         ref = self._ref.get(key)
@@ -336,6 +398,19 @@ class ChangeDetector:
             self._ref.pop(key, None)
         else:
             self._ref[key] = cur
+
+    def surprise(self, key: int, thumb: Optional[bytes]) -> Optional[float]:
+        """Score this thumbnail against the waypoint's bank, then bank it.
+        None while the bank is too small to have an opinion."""
+        if thumb is None:
+            return None
+        bank = self._bank.setdefault(key, deque(maxlen=self.bank_size))
+        score = robust_z(thumb, bank) if len(bank) >= self.bank_min else None
+        bank.append(normalise(thumb))          # read before write: score, then learn
+        return score
+
+    def banked(self, key: int) -> int:
+        return len(self._bank.get(key, ()))
 
 
 # ---- the state machine --------------------------------------------------------
@@ -530,7 +605,12 @@ class Explorer:
     def _consider(self, now: float, frame: Frame) -> list[Action]:
         if not self.notes_enabled:
             return []
-        if not self.detector.changed(self._wp, frame):
+        # Every considered frame is measured and banked, spent or not: the
+        # waypoint's idea of "usual" should include the boring views too.
+        thumb = self.detector.thumb(frame)
+        diff = self.detector.measure(self._wp, frame)
+        surprise = self.detector.surprise(self._wp, thumb)
+        if not (diff is None or diff > self.detector.threshold):
             self.skipped_same += 1
             return []
         if not self.bucket.take(now):
@@ -539,7 +619,7 @@ class Explorer:
         self.detector.keep(self._wp, frame)
         self.notes += 1
         yaw, pitch = self.waypoint
-        return [Note(frame, yaw, pitch)]
+        return [Note(frame, yaw, pitch, thumb=thumb, diff=diff, surprise=surprise)]
 
 
 # ---- note client (the network) ------------------------------------------------
@@ -621,8 +701,10 @@ def notes_path(notes_dir: Path, when: datetime) -> Path:
     return notes_dir / f"{when:%Y-%m-%d}.md"
 
 
-def append_note(notes_dir: Path, when: datetime, yaw: int, pitch: int, text: str) -> Path:
-    """Append one line to today's file. The directory is created private (0700)."""
+def append_note(notes_dir: Path, when: datetime, yaw: int, pitch: int, text: str,
+                extra: Optional[str] = None) -> Path:
+    """Append one line to today's file, and ``extra`` (a Markdown image line
+    for a photo) under it. The directory is created private (0700)."""
     if not notes_dir.exists():
         notes_dir.mkdir(parents=True, exist_ok=True)
         try:
@@ -632,6 +714,8 @@ def append_note(notes_dir: Path, when: datetime, yaw: int, pitch: int, text: str
     path = notes_path(notes_dir, when)
     with path.open("a", encoding="utf-8") as f:
         f.write(note_line(when, yaw, pitch, text) + "\n")
+        if extra:
+            f.write(extra + "\n")
     return path
 
 
