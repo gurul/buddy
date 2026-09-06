@@ -1095,6 +1095,13 @@ class Daemon:
         if cmd in ("focus", "key", "voice", "permission"):
             # A touch on the board: the human is here, stop exploring.
             self._note_activity()
+            # ... and a touch while buddy is in a conversation is "hush": the
+            # conversation (and any task it is running) ends at once.
+            if cmd in ("focus", "voice", "key") and self._conversation is not None and not self._conversation.done():
+                log.info("ears: hushed by a touch (%s)", cmd)
+                self._conversation.cancel()
+                if cmd == "voice":
+                    return
         if cmd == "focus":
             # Two senders, same verb. Swipe UP on the permission card carries
             # the prompt id: raise the terminal of the session that is asking

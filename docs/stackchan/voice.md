@@ -50,9 +50,13 @@ daemon ─{"cmd":"agent","state":…}─▶ robot: wake · listening · thinking
    the task calls `ask_user`. The robot looks up (`asking`, "yes / no?"), the
    question is spoken, and your spoken answer goes back through `answer_question`.
    With nobody listening the answer is always no.
-5. **Done.** The task's final sentence is handed back to the voice model to say
-   out loud; the robot nods (`done`) or winces (`error`). The conversation closes
-   on "bye", after 20 quiet seconds with no task running, or at 10 minutes.
+5. **Done.** The task's final sentence is handed back to the voice model to show
+   as a caption; the robot nods (`done`) or winces (`error`), and the conversation
+   closes right after.
+6. **Stopping it listening.** Any of: say *bye*, *thanks*, *stop listening*, *go to
+   sleep* or *be quiet*; **touch the robot** (a tap or a hold on the pet ends the
+   conversation and any task it is running, at once); 20 quiet seconds with no task
+   running; the 10-minute cap. `CC_BUDDY_VOICE=0` turns the microphone off entirely.
 
 ## Setup
 

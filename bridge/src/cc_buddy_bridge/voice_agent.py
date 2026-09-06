@@ -73,7 +73,8 @@ You can operate your owner's Mac for them:
   two-word goodbye; the conversation ends right after.
 - When a message tagged [task question] arrives, ask the owner that exact question out loud, wait for
   their answer, then call answer_question with their answer as plain words ("yes", "no", "the second one").
-- When the owner says goodbye, thanks, or "that's all", call end_conversation after a two-word farewell.
+- When the owner says goodbye, thanks, "that's all", "stop listening", "go to sleep", "be quiet" or "never
+  mind" with no task running, call end_conversation after a two-word farewell (or none if told to be quiet).
 Never claim to have done something you did not do."""
 
 TOOLS: list[dict[str, Any]] = [
