@@ -16,6 +16,7 @@ if TYPE_CHECKING:
 from . import voice_agent
 from .audit import AuditLog
 from .ble import BuddyBLE
+from .caption_pager import CaptionPager, PagerConfig
 from .computer_agent import ComputerAgent, log_desktop_grants, make_response_creator
 from .computer_agent import configured as agent_configured
 from .diary import DiaryTaker, Emote, build_emote_cmd, make_diary_client
@@ -162,6 +163,11 @@ class Daemon:
         # starts when the conversation has closed, so the board is never
         # asked to hold a conversation pose and pan the room at once.
         self._explore_after_conversation: Optional[str] = None
+        # Thoughts on the robot's own screen while it explores: the same pager
+        # the conversation uses (caption_pager.py), so a thought is wrapped to
+        # 4 lines x 17 chars and held at reading pace. A conversation owns the
+        # screen when one is open; this only ever draws between them.
+        self._thought_pager = CaptionPager(PagerConfig(read_cps=self._voice_cfg.caption_cps))
         # Monotonic time of the last thing a human or a session did: any hook
         # event, a board touch, the listen key. Idle time is measured from it.
         self._last_activity_at = time.monotonic()
@@ -242,8 +248,9 @@ class Daemon:
         self._explorer.notes_enabled = client is not None
         if client is not None:
             self._notes = DiaryTaker(client, self._explore_cfg.notes_dir, send_emote=self._send_emote,
-                                     snapshot=self._take_snapshot)
+                                     snapshot=self._take_snapshot, on_thought=self._show_thought)
         tasks.append(asyncio.create_task(self._explore_loop(), name="explore"))
+        tasks.append(asyncio.create_task(self._thought_caption_loop(), name="thought-captions"))
         if not self._explore_cfg.enabled:
             log.info("explore: idle start disabled (CC_BUDDY_EXPLORE=0); "
                      "`cc-buddy-bridge explore` and \"go explore\" still work")
@@ -655,6 +662,54 @@ class Daemon:
             log.info("explore: rest (%s)", action.reason)
             self._explore_raw_frame = None
 
+    def _show_thought(self, thought: str, photographed: bool) -> None:
+        """Put a thought buddy just had on its own screen, if the screen is free.
+
+        The conversation owns the screen while one is open, and a pending
+        permission card outranks anything buddy has to say to itself; in either
+        case the thought is skipped rather than queued, because by the time the
+        screen frees up buddy is looking somewhere else.
+        """
+        if not self._explorer.on_board or not self.ble.connected:
+            return
+        if self.state.pending_count > 0 or self._listen_down:
+            return
+        if self._conversation is not None and not self._conversation.done():
+            return
+        text = " ".join(thought.split())
+        if photographed:
+            text = f"{text} [photo]"
+        now = time.monotonic()
+        self._thought_pager.begin_reply(now)
+        self._thought_pager.update(now, text, True)
+        self._flush_thought_pager()
+        log.info("explore: thought on screen — %s", text[:70])
+
+    def _flush_thought_pager(self) -> None:
+        for event in self._thought_pager.poll(time.monotonic()):
+            self._on_caption(event.to_wire())
+
+    async def _thought_caption_loop(self) -> None:
+        """Turn the pages of whatever thought is on screen, and take it down
+        the moment buddy stops exploring."""
+        while not self._shutdown.is_set():
+            try:
+                await asyncio.wait_for(self._shutdown.wait(), timeout=0.1)
+                return
+            except asyncio.TimeoutError:
+                pass
+            try:
+                if self._thought_pager.busy and not self._explorer.on_board:
+                    self._clear_thought()
+                else:
+                    self._flush_thought_pager()
+            except Exception:  # noqa: BLE001
+                log.exception("thought captions: step failed")
+
+    def _clear_thought(self) -> None:
+        for event in self._thought_pager.reset(time.monotonic()):
+            self._on_caption(event.to_wire())
+
     async def _send_emote(self, e: Emote) -> None:
         """The diary's appraisal of what the camera saw → the board's mood engine."""
         if self.ble.connected:
@@ -698,6 +753,7 @@ class Daemon:
 
     async def _dismiss_explore(self, reason: str) -> None:
         """End an explore now (a touch, a wake word, `explore stop`)."""
+        self._clear_thought()
         for action in self._explorer.dismiss(reason):
             await self._run_explore_action(action)
 
@@ -1203,8 +1259,15 @@ class Daemon:
         if cmd in ("focus", "key", "voice", "permission"):
             # A touch on the board: the human is here, stop exploring — at
             # once, and even a manual explore, which ignores the idle clock.
-            self._note_activity()
-            await self._dismiss_explore(f"touch ({cmd})")
+            # A `voice` message with on=false is the finger coming *off* (or a
+            # stale release after a reboot); only the press means someone is
+            # there, and a release must not end an explore nobody touched
+            # (bench 2026-09-06: a reboot's release stopped a manual explore
+            # seven seconds in).
+            touched = cmd != "voice" or bool(obj.get("on"))
+            if touched:
+                self._note_activity()
+                await self._dismiss_explore(f"touch ({cmd})")
             # ... and a touch while buddy is in a conversation is "hush": the
             # conversation (and any task it is running) ends at once.
             if cmd in ("focus", "voice", "key") and self._conversation is not None and not self._conversation.done():

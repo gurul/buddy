@@ -70,18 +70,42 @@ DEFAULT_MODEL = "gpt-5-mini"
 DEFAULT_NOTES_DIR = "~/.config/cc-buddy-bridge/notes"
 DEFAULT_CYCLE_MIN = 15.0
 
-# Pan plan: five yaws at a level gaze, then the same five looking down at the
-# desk. One ``look`` every LOOK_INTERVAL_SECS with the hold matching it, so
+# Pan plan: the whole room the neck can reach. Nine yaws across the servo's
+# usable travel at a level gaze, then the same nine coming back while looking
+# down at the desk — a serpentine, so no two consecutive waypoints are more
+# than 30 degrees apart and the head never has to swing the full span in one
+# hold. One ``look`` every LOOK_INTERVAL_SECS with the hold matching it, so
 # the board never falls back to its own idle motion between waypoints.
+#
+# The span is the yaw servo's own: the BSP configures the Feetech SCS0009 at
+# id 1 with angleLimit ±128 degrees in position mode, so ±120 is everything
+# there is minus a margin. There is no full turn-around to be had — 360
+# degrees needs continuous-rotation mode, which gives up position feedback
+# and winds the neck loom.
+#
+# Four pitch rows, not two. The old plan used 40 and 60, both of which turned
+# out to point over the desk at the ceiling: the firmware's PITCH_LEVEL of 45
+# is only a guess, because level depends on how the head was zeroed (NVS
+# ``servo/zero_pos_2``). Bench, 2026-09-06: at pitch 40 buddy wrote "I can see
+# two recessed lights above", and at pitch 20 it still reported "most of frame
+# is ceiling" with a standing person's head at the bottom edge. So the rows
+# start at the neck's floor and climb in even steps across the usable band —
+# whatever level turns out to be on a given head, some rows are below it.
+# An even number of rows also means the serpentine ends where it began, so the
+# next cycle opens without a long swing back.
+PAN_YAWS: tuple[int, ...] = (-120, -90, -60, -30, 0, 30, 60, 90, 120)
+PAN_PITCHES: tuple[int, ...] = (5, 25, 45, 65)
 WAYPOINTS: tuple[tuple[int, int], ...] = tuple(
-    (yaw, pitch) for pitch in (40, 60) for yaw in (-45, -20, 0, 20, 45)
+    (yaw, pitch)
+    for i, pitch in enumerate(PAN_PITCHES)
+    for yaw in (PAN_YAWS if i % 2 == 0 else tuple(reversed(PAN_YAWS)))
 )
 LOOK_INTERVAL_SECS = 6.0
 LOOK_HOLD_MS = 6000
 # The head needs a moment to arrive; sample the frame this long after the look.
 SETTLE_SECS = 2.0
 
-YAW_RANGE = (-60, 60)
+YAW_RANGE = (-120, 120)
 PITCH_RANGE = (5, 85)
 
 # Change detector: mean absolute luma difference (0..255) between 32x24

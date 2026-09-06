@@ -17,8 +17,13 @@ from types import MethodType, SimpleNamespace
 import pytest
 
 from cc_buddy_bridge import explore
+from cc_buddy_bridge.caption_pager import CaptionPager
 from cc_buddy_bridge.explore import (
+    LOOK_INTERVAL_SECS,
+    PAN_PITCHES,
+    PAN_YAWS,
     WAYPOINTS,
+    YAW_RANGE,
     ChangeDetector,
     frame_thumb,
     normalise,
@@ -83,7 +88,8 @@ def _tick(e: Explorer, now: float, idle: float = IDLE, frame=None, **kw):
 # ---- wire builders ----------------------------------------------------------
 
 def test_build_look_clamps_to_wire_ranges() -> None:
-    assert build_look_cmd(-90, 0, 6000) == {"cmd": "look", "yaw": -60, "pitch": 5, "hold": 6000}
+    assert build_look_cmd(-200, 0, 6000) == {"cmd": "look", "yaw": YAW_RANGE[0], "pitch": 5, "hold": 6000}
+    assert build_look_cmd(200, 999, 6000) == {"cmd": "look", "yaw": YAW_RANGE[1], "pitch": 85, "hold": 6000}
     assert build_look_cmd(20.4, 100, -1) == {"cmd": "look", "yaw": 20, "pitch": 85, "hold": 0}
 
 
@@ -127,7 +133,7 @@ def test_starts_only_when_idle_and_unblocked() -> None:
     assert _tick(e, 4.0, connected=False) == []
     assert e.state == Explorer.OFF
     actions = _tick(e, 5.0)
-    assert actions == [Mode(True, "idle 10 min"), Look(-45, 40, 6000)]
+    assert actions == [Mode(True, "idle 10 min"), Look(*WAYPOINTS[0], 6000)]
     assert e.active
 
 
@@ -164,7 +170,7 @@ def test_waypoint_cadence_one_look_per_six_seconds() -> None:
     assert [(lk.yaw, lk.pitch) for _, lk in looks] == list(WAYPOINTS)
     assert all(lk.hold_ms == 6000 for _, lk in looks)
     times = [t for t, _ in looks]
-    assert [b - a for a, b in zip(times[:-1], times[1:], strict=True)] == [6.0] * 9
+    assert [b - a for a, b in zip(times[:-1], times[1:], strict=True)] == [6.0] * (len(WAYPOINTS) - 1)
     assert e.cycles == 1
 
 
@@ -225,13 +231,13 @@ def test_frame_sampled_two_seconds_after_look_once_per_waypoint() -> None:
     assert _tick(e, 1.0, frame=_frame(10)) == []          # too early: ignored
     assert e.wants_frame(2.0)
     actions = _tick(e, 2.0, frame=_frame(10))
-    assert _note_at(actions, 10, -45, 40)
+    assert _note_at(actions, 10, *WAYPOINTS[0])
     assert actions[0].thumb is not None and actions[0].surprise is None   # bank still cold
     assert not e.wants_frame(3.0)
     assert _tick(e, 3.0, frame=_frame(200)) == []         # already sampled here
     # Next waypoint, new sample window.
-    assert _tick(e, 6.0) == [Look(-20, 40, 6000)]
-    assert _note_at(_tick(e, 8.0, frame=_frame(10)), 10, -20, 40)
+    assert _tick(e, 6.0) == [Look(*WAYPOINTS[1], 6000)]
+    assert _note_at(_tick(e, 8.0, frame=_frame(10)), 10, *WAYPOINTS[1])
 
 
 def test_unchanged_view_spends_no_note_on_the_next_cycle() -> None:
@@ -255,15 +261,15 @@ def test_changed_view_spends_a_note() -> None:
     e = Explorer(_cfg(cycle_wait_secs=0.0), now=0.0)
     e.bucket = TokenBucket(1000.0, 0.0)
     _tick(e, 0.0)
-    assert _note_at(_tick(e, 2.0, frame=_frame(50)), 50, -45, 40)
+    assert _note_at(_tick(e, 2.0, frame=_frame(50)), 50, *WAYPOINTS[0])
     # Run the cycle out, rest is zero, restart at the same waypoint with a new view.
     now = 3.0
     while e.state != Explorer.RESTING:
         _tick(e, now)
         now += 1.0
-    _tick(e, now)                                   # restart -> Look(-45, 40)
-    assert e.active and e.waypoint == (-45, 40)
-    assert _note_at(_tick(e, now + 2.0, frame=_frame(120)), 120, -45, 40)
+    _tick(e, now)                                   # restart at the first waypoint
+    assert e.active and e.waypoint == WAYPOINTS[0]
+    assert _note_at(_tick(e, now + 2.0, frame=_frame(120)), 120, *WAYPOINTS[0])
 
 
 def test_budget_exhausted_skips_note_but_keeps_reference_unchanged() -> None:
@@ -571,8 +577,11 @@ def _daemon(connected: bool = True, running: int = 0, waiting: int = 0, pending:
         _last_activity_at=0.0,
         _explore_raw_frame=None,
     )
+    d._thought_pager = CaptionPager()
+    d._on_caption = lambda msg: d.ble.sent.append(msg)
     for name in ("_note_activity", "_idle_secs", "_explore_step", "_run_explore_action", "_stop_explore",
-                 "_request_explore", "_dismiss_explore"):
+                 "_request_explore", "_dismiss_explore", "_clear_thought", "_flush_thought_pager",
+                 "_show_thought"):
         setattr(d, name, MethodType(getattr(Daemon, name), d))
     return d
 
@@ -585,7 +594,7 @@ def test_daemon_sends_mode_and_look_when_idle() -> None:
 
     assert asyncio.run(go()) == [
         {"cmd": "mode", "explore": True},
-        {"cmd": "look", "yaw": -45, "pitch": 40, "hold": 6000},
+        {"cmd": "look", "yaw": WAYPOINTS[0][0], "pitch": WAYPOINTS[0][1], "hold": 6000},
     ]
 
 
@@ -637,7 +646,8 @@ def test_daemon_samples_frame_and_takes_note(tmp_path: Path) -> None:
     sent = asyncio.run(go())
     taker.stop()
     assert sent[-1]["cmd"] == "look"
-    assert (tmp_path / "2026-09-05.md").read_text() == "- 16:00 yaw=-45 pitch=40 — A desk lamp.\n"
+    yaw, pitch = WAYPOINTS[0]
+    assert (tmp_path / "2026-09-05.md").read_text() == f"- 16:00 yaw={yaw:+d} pitch={pitch} — A desk lamp.\n"
 
 
 def test_daemon_stop_explore_leaves_mode_on_shutdown() -> None:
@@ -747,3 +757,53 @@ def test_every_considered_frame_is_banked_even_when_no_note_is_spent() -> None:
         _tick(e, 6.0 + i * 6.0)
     assert e.notes == 0
     assert sum(e.detector.banked(w) for w in range(len(WAYPOINTS))) >= 3
+
+
+# ---- the pan plan against the neck it has to run on -----------------------------------------
+
+def test_the_pan_plan_stays_inside_the_servos_own_limit() -> None:
+    """The BSP configures the yaw servo with angleLimit +-128 degrees, and the
+    firmware clamps to +-120 (body.cpp YAW_MAX). Every waypoint and everything
+    build_look_cmd can emit has to fit inside that, or the head is asking for a
+    place it cannot go."""
+    assert YAW_RANGE == (-120, 120)
+    for yaw, pitch in WAYPOINTS:
+        assert YAW_RANGE[0] <= yaw <= YAW_RANGE[1], (yaw, pitch)
+        assert 5 <= pitch <= 85, (yaw, pitch)
+    for yaw in (-1000, -121, 0, 121, 1000):
+        assert YAW_RANGE[0] <= build_look_cmd(yaw, 40)["yaw"] <= YAW_RANGE[1]
+
+
+def test_the_pan_sweeps_the_whole_range_in_small_steps() -> None:
+    """Both extremes are visited at both heights, and no two consecutive
+    waypoints are far apart — the head never swings the full span inside one
+    hold, which it could not finish in six seconds."""
+    yaws = [w[0] for w in WAYPOINTS]
+    assert min(yaws) == YAW_RANGE[0] and max(yaws) == YAW_RANGE[1]
+    for pitch in PAN_PITCHES:
+        row = [y for y, p in WAYPOINTS if p == pitch]
+        assert min(row) == YAW_RANGE[0] and max(row) == YAW_RANGE[1]
+        assert len(row) == len(PAN_YAWS)
+    # Inside a cycle every move is small; the one long swing back to the first
+    # waypoint happens after the rest, with minutes to make it.
+    steps = [abs(b[0] - a[0]) for a, b in zip(WAYPOINTS[:-1], WAYPOINTS[1:], strict=True)]
+    assert max(steps) <= 30
+
+
+def test_a_cycle_is_still_a_sane_length() -> None:
+    assert 60.0 <= len(WAYPOINTS) * LOOK_INTERVAL_SECS <= 240.0
+
+
+def test_the_rows_straddle_wherever_level_turns_out_to_be() -> None:
+    """PITCH_LEVEL in the firmware is 45 and its own comment calls that a
+    guess — it depends on how the head was zeroed. So the plan must not assume
+    it: one row has to sit below any plausible level and one above, or a head
+    zeroed slightly low spends the whole pan on the ceiling (bench 2026-09-06,
+    which is exactly what happened with rows at 40 and 60)."""
+    assert len(PAN_PITCHES) >= 3
+    assert min(PAN_PITCHES) <= 25, "no row looks down at the desk"
+    assert max(PAN_PITCHES) >= 65, "no row looks up at the room"
+    assert min(PAN_PITCHES) >= 5 and max(PAN_PITCHES) <= 85, "outside the neck's travel"
+    for guess_at_level in (35, 45, 55):
+        assert any(p < guess_at_level for p in PAN_PITCHES), guess_at_level
+        assert any(p > guess_at_level for p in PAN_PITCHES), guess_at_level

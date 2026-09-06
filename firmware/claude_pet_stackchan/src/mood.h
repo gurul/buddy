@@ -65,7 +65,7 @@ struct MoodExpr {
   // head
   float    tempo;             // wander speed multiplier 0.5..1.6 (period /= tempo)
   int8_t   pitchBias;         // degrees added to the wander pitch (down = sad/bored, up = surprise)
-  uint8_t  amplitude;         // wander yaw amplitude 15..45
+  uint8_t  amplitude;         // wander yaw amplitude 25..110 (neck allows ±120)
   // sound / word
   uint8_t  chirp;             // MoodChirp below, or MOODCHIRP_NONE
   const char* word;           // status row: "curious...", "!", "bored...", ...

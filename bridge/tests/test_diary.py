@@ -639,3 +639,12 @@ def test_records_with_photos_survive_a_reload(tmp_path: Path) -> None:
     rec = fresh.memory.records[0]
     assert rec.photo and rec.caption and rec.cool > 0 and rec.thumb
     assert [r.id for r in album(fresh.memory.records, clock.now.timestamp())] == [rec.id]
+
+
+def test_the_context_asks_for_json_in_the_input_itself(tmp_path: Path) -> None:
+    """The Responses API refuses `json_object` unless the word is in the input
+    messages; the instructions alone are not enough (bench 2026-09-06)."""
+    memory = Memory(tmp_path / "notes")
+    memory.load()
+    context = build_context(memory, datetime(2026, 9, 6, 14, 0), 20, 40, set())
+    assert "json" in context.lower()

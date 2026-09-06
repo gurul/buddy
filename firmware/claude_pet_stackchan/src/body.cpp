@@ -9,10 +9,18 @@
 // ---- servo limits (degrees) ----
 // M5Stack advises 5..85 on the pitch axis; the BSP itself allows 0..90.
 // Every pitch write goes through clampPitch(). Yaw is free on the bus but
-// the choreography stays inside ±YAW_MAX so the cable loom never binds.
+// the choreography stays inside ±YAW_MAX.
+//
+// The yaw servo (Feetech SCS0009, id 1) is configured by the BSP with
+// angleLimit -1280..1280 in tenths of a degree — ±128° in position mode, and
+// that is the whole swivel there is: a full 360° turn needs continuous
+// rotation (PWM mode), which has no position feedback and would wind the
+// neck loom, so it is not what an unattended desk robot should do. ±120
+// keeps 8° of margin under the servo's own clamp and lets buddy look behind
+// its own shoulders on both sides, which is most of a room.
 static const int PITCH_MIN = 5;
 static const int PITCH_MAX = 85;
-static const int YAW_MAX   = 60;
+static const int YAW_MAX   = 120;
 
 // ---- poses (degrees) — bench-tune these on the real robot ----
 // Pitch 0 is the bottom of the servo range (chin down), 90 is straight up.
@@ -155,15 +163,17 @@ static const Key SEQ_SLEEP[]     = { {0, 0, PITCH_SLEEP, 150} };
 static const Key SEQ_LEVEL[]     = { {0, 0, PITCH_LEVEL, 250} };
 static const Key SEQ_ATTN_UP[]   = { {0, 0, PITCH_ATTENTION, 500} };
 // "Where are you?" search, two rows so a face above the current gaze is
-// found: row 1 at pitch 45 (far left, hold 0.9 s, near left, near right,
-// far right), row 2 at pitch 65 (right to left), then centre. ~4.3 s,
-// repeated every 5 s while the owner is wanted and not found.
+// found: row 1 at pitch 45 sweeps left to right across the full ±100 the
+// neck allows, row 2 at pitch 65 comes back right to left, then centre.
+// ~5.7 s, repeated every 5 s while the owner is wanted and not found. The
+// wide sweep is the point: the owner is often not in front of the desk.
 static const int PITCH_SCAN_LOW = 45, PITCH_SCAN_HIGH = 65;
 static const Key SEQ_ATTN_SCAN[] = {
-  {0,    -40, PITCH_SCAN_LOW,  500}, {900,  -12, PITCH_SCAN_LOW,  400},
-  {1400,  15, PITCH_SCAN_LOW,  400}, {1900,  40, PITCH_SCAN_LOW,  500},
-  {2500,  40, PITCH_SCAN_HIGH, 400}, {2900,   0, PITCH_SCAN_HIGH, 400},
-  {3400, -40, PITCH_SCAN_HIGH, 500}, {4000,   0, PITCH_SCAN_HIGH, 400} };
+  {0,   -100, PITCH_SCAN_LOW,  500}, {900,  -45, PITCH_SCAN_LOW,  400},
+  {1400,   0, PITCH_SCAN_LOW,  400}, {1900,  45, PITCH_SCAN_LOW,  400},
+  {2400, 100, PITCH_SCAN_LOW,  500}, {3000, 100, PITCH_SCAN_HIGH, 400},
+  {3500,  45, PITCH_SCAN_HIGH, 400}, {4000, -45, PITCH_SCAN_HIGH, 500},
+  {4600,-100, PITCH_SCAN_HIGH, 500}, {5200,   0, PITCH_SCAN_HIGH, 500} };
 static const Key SEQ_NOD[]       = { {0, KEEP, PITCH_LEVEL - 8, 400}, {450, KEEP, PITCH_LEVEL, 400} };
 static const Key SEQ_CELEBRATE[] = {
   {0, 20, PITCH_LEVEL + 10, 900}, {150, -20, KEEP, 900}, {300, 12, KEEP, 900},
@@ -628,18 +638,21 @@ static void updateInner(PersonaState active, bool needsAttention, uint32_t now) 
   if (exploring && active != P_ATTENTION) {
     // Host owns the head while one of its `look`s is held. Whenever it is
     // not — between waypoints, and through the host's rest between pan
-    // cycles — look around the room on our own: a random glance (yaw ±45,
-    // pitch 35..65, the same band the host pans) held 2..4 s, then another
+    // cycles — look around the room on our own: a random glance (yaw up to
+    // ±YAW_MAX with the feeling, pitch 15..75, the same band the host pans)
+    // held 2..4 s, then another
     // spot, every 4..9 s. Checked against gazeHeld() directly rather than
     // `held`, which ignores the hold in SLEEP where explore still runs.
     // With a mood: amplitude, tempo and a pitch bias follow the feeling
     // (keen = wide and quick, bored = narrow, slow and drooping).
     if (!gazeHeld(now) && !seq && (int32_t)(now - nextExploreAt) >= 0) {
-      int   amp   = mood ? mood->amplitude : 45;
+      int   amp   = mood ? mood->amplitude : 90;
       int   bias  = mood ? mood->pitchBias : 0;
       float tempo = mood ? mood->tempo : 1.0f;
       int8_t yaw1 = (int8_t)random(-amp, amp + 1), yaw2 = (int8_t)random(-amp, amp + 1);
-      int8_t pit1 = (int8_t)clampPitch(35 + random(31) + bias), pit2 = (int8_t)clampPitch(35 + random(31) + bias);
+      // 15..75: the desk as well as the room. The old band started at 35,
+      // which on a head zeroed a little low never looked down at all.
+      int8_t pit1 = (int8_t)clampPitch(15 + random(61) + bias), pit2 = (int8_t)clampPitch(15 + random(61) + bias);
       uint16_t speed = (uint16_t)(140 * tempo);
       dyn[0] = { 0, yaw1, pit1, speed };
       dyn[1] = { (uint16_t)((2000 + random(2000)) / tempo), yaw2, pit2, speed };
