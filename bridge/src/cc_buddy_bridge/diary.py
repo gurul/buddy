@@ -139,7 +139,13 @@ REFLECT_IMPORTANCE_SUM = 150            # Park's reflection trigger
 REFLECT_HOUR = 21                       # ... or once a day from this hour
 PROFILE_BLOCK_CHARS = 2000              # Letta-style hard limit per block
 THINK_MAX_OUTPUT_TOKENS = 700
-EXAMINE_MAX_OUTPUT_TOKENS = 500
+# Reasoning counts against this cap, and it varies: the same photo and prompt
+# spent 128 reasoning tokens on one call and 256 on the next (bench
+# 2026-09-06), against 500. A short draw truncated the JSON mid-string and the
+# closer look was thrown away for "no JSON object in the reply". The answer
+# itself is about 150 tokens, so this is headroom for the thinking, not for a
+# longer reply.
+EXAMINE_MAX_OUTPUT_TOKENS = 1200
 REFLECT_MAX_OUTPUT_TOKENS = 1200
 
 DEFAULT_PROFILE = """## ROOM
