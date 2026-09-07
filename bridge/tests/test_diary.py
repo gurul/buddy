@@ -648,3 +648,18 @@ def test_the_context_asks_for_json_in_the_input_itself(tmp_path: Path) -> None:
     memory.load()
     context = build_context(memory, datetime(2026, 9, 6, 14, 0), 20, 40, set())
     assert "json" in context.lower()
+
+
+def test_every_json_call_says_json_in_its_own_input(tmp_path: Path) -> None:
+    """The Responses API refuses `json_object` unless the word is in the input
+    messages; the instructions do not count. Both calls build their input
+    separately, so both have to carry it (bench 2026-09-06: the thought path
+    was fixed and the dreams path went on failing for hours)."""
+    clock = Clock(datetime(2026, 9, 6, 21, 30))
+    client = FakeClient([_reply([("A thing happened.", 0.3)])],
+                        reflection=json.dumps({"insights": ["i"], "profile": "", "star_candidates": []}))
+    t = _taker(tmp_path, client, clock)
+    asyncio.run(t.take(Note(_frame(), 0, 40)))
+    assert "json" in client.contexts[0].lower()
+    asyncio.run(t.reflect(clock.now))
+    assert client.reflect_prompts and "json" in client.reflect_prompts[0].lower()

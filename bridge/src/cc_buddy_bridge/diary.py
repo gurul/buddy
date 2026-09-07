@@ -244,6 +244,19 @@ class Record:
 
 
 @dataclass(frozen=True)
+class Thought:
+    """What buddy just thought, handed to whoever wants to show it."""
+
+    text: str
+    tags: tuple[str, ...]
+    written: bool          # the diary kept it, rather than only the memory
+    photographed: bool
+    cool: float
+    novelty: int = 5
+    importance: int = 3
+
+
+@dataclass(frozen=True)
 class Emote:
     """The board-side nudge from one appraisal. dv/da are -100..100 ints."""
 
@@ -455,8 +468,14 @@ def _fmt_photo(rec: Record) -> str:
     return f"[{rec.id}] {when:%a %H:%M} yaw={rec.yaw:+d} — {rec.caption or rec.thought}"
 
 
-def build_context(memory: Memory, when: datetime, yaw: int, pitch: int, guess_tags: set[str]) -> str:
-    """The text the vision call gets alongside the photo (~2k tokens)."""
+def build_context(memory: Memory, when: datetime, yaw: int, pitch: int, guess_tags: set[str],
+                  heard: Optional[str] = None) -> str:
+    """The text the vision call gets alongside the photo (~2k tokens).
+
+    ``heard`` is one phrase about what the room sounded like while the head
+    was settling here (hearing.py), or None when buddy has no reading. It is
+    deliberately vague — buddy has a loudness number, not a classifier, and a
+    diary that guessed "a door" from a number would be inventing things."""
     now_ts = when.timestamp()
     last3 = memory.written()[-3:]
     exclude = {r.id for r in last3}
@@ -473,7 +492,10 @@ def build_context(memory: Memory, when: datetime, yaw: int, pitch: int, guess_ta
         "TODAY'S UNWRITTEN CANDIDATES (do not repeat):\n" + ("\n".join(f"- {r.thought}" for r in unwritten[-6:]) or "(none)"),
         "MY ALBUM (pictures I already keep — do not ask for one of these again unless it changed):\n"
         + ("\n".join(_fmt_photo(r) for r in album(memory.records, now_ts)[-ALBUM_IN_CONTEXT:]) or "(no photos yet)"),
-        f"NOW: {when:%A %H:%M}, head yaw={yaw:+d} pitch={pitch} (pitch < 45 looks down at the desk, > 45 up at the room).",
+        f"NOW: {when:%A %H:%M}, head yaw={yaw:+d} pitch={pitch} (a low pitch looks down at the desk, "
+        f"a high one up at the room)."
+        + (f"\nWHAT YOU HEARD JUST NOW: {heard} (a loudness reading, not a recording — never guess what "
+           f"made the sound, but you may notice that there was one)." if heard else ""),
         # The Responses API refuses a json_object response format unless the
         # word appears in the input itself, not only in the instructions
         # (bench 2026-09-06: every thought came back 400 without this line).
@@ -792,7 +814,7 @@ class DiaryTaker:
         wall: Callable[[], datetime] = datetime.now,
         snapshot: Optional[Callable[[], Awaitable[Optional[Frame]]]] = None,
         photo_config: Optional[photos.PhotoConfig] = None,
-        on_thought: Optional[Callable[[str, bool], Any]] = None,
+        on_thought: Optional[Callable[["Thought"], Any]] = None,
     ) -> None:
         self.client = client
         self.memory = Memory(notes_dir, wall=wall)
@@ -803,8 +825,10 @@ class DiaryTaker:
         # picture is better than no picture.
         self.snapshot = snapshot
         self.photo_config = photo_config if photo_config is not None else photos.configured()
-        # Every thought buddy has, with whether it kept a picture of it, so the
-        # daemon can put it on the robot's own screen while it is exploring.
+        # Every thought buddy has, so the daemon can decide whether to put it
+        # on the robot's own screen (thought_screen.py). The diary does not
+        # decide that: what is worth remembering and what is worth showing a
+        # human are different questions.
         self.on_thought = on_thought
         self.timeout = timeout
         self.clock = clock
@@ -837,7 +861,7 @@ class DiaryTaker:
         # A first cheap guess at relevance for retrieval: the last note's tags.
         last = self.memory.written()[-1:]
         guess = set(last[0].tags) if last else set()
-        context = build_context(self.memory, when, note.yaw, note.pitch, guess)
+        context = build_context(self.memory, when, note.yaw, note.pitch, guess, heard=note.heard)
         loop = asyncio.get_running_loop()
         try:
             raw = await asyncio.wait_for(
@@ -871,7 +895,8 @@ class DiaryTaker:
                      rec.novelty, rec.importance, rec.thought)
         if self.on_thought is not None:
             try:
-                self.on_thought(rec.thought, bool(rec.photo))
+                self.on_thought(Thought(rec.thought, tuple(rec.tags), rec.written, bool(rec.photo),
+                                        rec.cool, rec.novelty, rec.importance))
             except Exception:  # noqa: BLE001 — a caption is never worth a thought
                 log.exception("diary: on_thought failed")
         if self.send_emote is not None:
@@ -1008,8 +1033,14 @@ class DiaryTaker:
                 f"changed: {'; '.join(r.changed) or '-'} | thought: {r.thought} | tags: {', '.join(r.tags)}"
                 for r in todays[-60:])
             stars = "\n".join(f"★ {h}" for h in self.memory.load_highlights()) or "(nothing starred yet)"
+            # The trailing line is not decoration: the Responses API refuses a
+            # json_object response format unless the word appears in the input
+            # itself, and the instructions do not count (bench 2026-09-06 — the
+            # thought path hit this first, and the dreams path hit it again
+            # hours later, because the two build their input separately).
             prompt = (f"PROFILE:\n{self.memory.profile.strip()}\n\nSTARRED BY MY HUMAN:\n{stars}\n\n"
-                      f"TODAY ({when:%A %Y-%m-%d}):\n{body}")
+                      f"TODAY ({when:%A %Y-%m-%d}):\n{body}\n\n"
+                      f"Answer with one json object in the shape given above, and nothing else.")
             loop = asyncio.get_running_loop()
             raw = await asyncio.wait_for(loop.run_in_executor(self._pool(), self.client.reflect, prompt),
                                          timeout=self.timeout * 3)

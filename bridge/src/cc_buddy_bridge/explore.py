@@ -206,6 +206,7 @@ class Note:
     thumb: Optional[bytes] = None      # 32x24 luma, or None when undecodable
     diff: Optional[float] = None       # mean abs luma diff vs the last kept frame here
     surprise: Optional[float] = None   # robust z against this waypoint's history
+    heard: Optional[str] = None        # what the room sounded like here (hearing.py)
 
 
 @dataclass(frozen=True)
