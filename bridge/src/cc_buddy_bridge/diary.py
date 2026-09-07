@@ -85,6 +85,13 @@ WRITE_NOVELTY = 5
 WRITE_IMPORTANCE = 7
 SILENCE_WRITE_HOURS = 3.0
 
+# Every call that asks for a json_object response has to carry this in its own
+# INPUT, not only in its instructions — the Responses API refuses otherwise.
+# Three separate calls have now been caught by that rule (the thought, the
+# dreams pass, and the closer look at a photo), each built in a different
+# place, so it lives here and every input ends with it.
+ASK_FOR_JSON = "Answer with one json object in the shape given above, and nothing else."
+
 # ---- the cool factor (photos) -------------------------------------------------------------------
 # What makes buddy keep a picture rather than only a sentence. The weights and
 # cut-offs below are explained, with their sources, in
@@ -132,6 +139,7 @@ REFLECT_IMPORTANCE_SUM = 150            # Park's reflection trigger
 REFLECT_HOUR = 21                       # ... or once a day from this hour
 PROFILE_BLOCK_CHARS = 2000              # Letta-style hard limit per block
 THINK_MAX_OUTPUT_TOKENS = 700
+EXAMINE_MAX_OUTPUT_TOKENS = 500
 REFLECT_MAX_OUTPUT_TOKENS = 1200
 
 DEFAULT_PROFILE = """## ROOM
@@ -159,6 +167,9 @@ pose it was taken at.
 
 Do, in order:
 1. observations: 3-6 concrete facts about the photo (colours, positions, counts, states). Specific.
+   Name what things ARE when you can recognise them — "a sewing machine on a side table", not "a white
+   object" — including small things across the room. If you genuinely cannot tell what something is, say
+   what it looks like and that you are unsure; never invent a specific object to fill the gap.
 2. changed: what is different from the profile and the last notes, as short facts — or an empty list.
 3. thoughts: THREE candidate diary thoughts, each one sentence, each with your estimate of how typical
    it is (p, 0-1; 1 = the most obvious thing to say). Rules for every candidate: it must contain a
@@ -183,6 +194,26 @@ Output JSON only:
 {"observations":[...],"changed":[...],"thoughts":[{"text":"...","p":0.7},...],"novelty":n,
  "importance":n,"tags":[...],"valence":n,"arousal":n,"label":"...",
  "photo":{"want":0.3,"subject":"object","caption":"..."}}"""
+
+EXAMINE_PROMPT = """You are buddy, a small desk robot with the temperament of a curious cat, looking properly at
+a picture you decided to keep. The glance you took while panning was a 160x120 thumbnail and you could only
+make out shapes. This is the full picture, and you have time.
+
+Say what is actually in it. Name things: "a sewing machine on a side table", not "a white object"; a couch,
+a light switch, a mug, a bicycle, a person. Small things across the room count — they are usually the
+interesting ones. Read any text you can make out. If you genuinely cannot tell what something is, say what
+it resembles and that you are unsure; never invent a specific object to fill a gap, and never describe
+something that is not there.
+
+Then, knowing what it really is:
+- caption: up to 60 characters in your own voice, naming the thing you kept the picture for.
+- thought: one sentence for your diary, replacing the guess you made from the thumbnail. Same voice as ever
+  — a small inference about your human, a question you now have, or a dry joke — but now about the thing
+  that is actually there. If your first thought was already right, say it better rather than repeating it.
+- objects: 2-8 lowercase nouns for the things you named, for your memory index.
+- confident: true only if you are sure what the main thing is.
+
+Output json only: {"sees":["..."],"caption":"...","thought":"...","objects":["..."],"confident":true}"""
 
 REFLECT_PROMPT = """You are buddy, a small desk robot keeping a diary (see PROFILE). Below are today's memory records
 (observations, changes, thoughts, tags, with ids) and your current PROFILE.
@@ -496,10 +527,7 @@ def build_context(memory: Memory, when: datetime, yaw: int, pitch: int, guess_ta
         f"a high one up at the room)."
         + (f"\nWHAT YOU HEARD JUST NOW: {heard} (a loudness reading, not a recording — never guess what "
            f"made the sound, but you may notice that there was one)." if heard else ""),
-        # The Responses API refuses a json_object response format unless the
-        # word appears in the input itself, not only in the instructions
-        # (bench 2026-09-06: every thought came back 400 without this line).
-        "Answer with one json object in the shape given above, and nothing else.",
+        ASK_FOR_JSON,
     ]
     return "\n\n".join(parts)
 
@@ -756,9 +784,20 @@ class DiaryClient(Protocol):
         """Blocking. The JSON reply text for a text-only reflection."""
         ...
 
+    def examine(self, image: bytes, mime: str, context: str) -> str:
+        """Blocking. A proper look at a full-size photo buddy kept. Raises on failure."""
+        ...
+
 
 class OpenAIDiaryClient:
-    """Responses API; one low-detail image per thought, JSON object output."""
+    """Responses API; one low-detail image per thought, JSON object output.
+
+    ``examine`` is the exception: a photo buddy decided to keep is worth
+    looking at properly, so that one call sends the full-size frame at high
+    detail. Low detail collapses a picture into about 85 tokens, which is
+    enough to say "a room" and not enough to say "a sewing machine" — which is
+    exactly what happened on the bench, 2026-09-06.
+    """
 
     def __init__(self, model: str, api_key: Optional[str] = None, timeout: float = NOTE_TIMEOUT_SECS) -> None:
         import openai
@@ -777,6 +816,23 @@ class OpenAIDiaryClient:
             text={"format": {"type": "json_object"}},
             max_output_tokens=THINK_MAX_OUTPUT_TOKENS,
             reasoning={"effort": "minimal"},
+        )
+        text = (resp.output_text or "").strip()
+        if not text:
+            raise RuntimeError(f"empty answer (status={resp.status}, incomplete={resp.incomplete_details})")
+        return text
+
+    def examine(self, image: bytes, mime: str, context: str) -> str:
+        resp = self._client.responses.create(
+            model=self.model,
+            instructions=EXAMINE_PROMPT,
+            input=[{"role": "user", "content": [
+                {"type": "input_text", "text": context},
+                {"type": "input_image", "image_url": data_url(image, mime), "detail": "high"},
+            ]}],
+            text={"format": {"type": "json_object"}},
+            max_output_tokens=EXAMINE_MAX_OUTPUT_TOKENS,
+            reasoning={"effort": "low"},
         )
         text = (resp.output_text or "").strip()
         if not text:
@@ -837,6 +893,7 @@ class DiaryTaker:
         self.written = 0          # diary lines written
         self.failed = 0
         self.photographed = 0     # pictures kept
+        self.examined = 0         # ... and looked at properly afterwards
         self.reflections = 0
         self._err_logged_at = float("-inf")
         self._executor: Optional[concurrent.futures.ThreadPoolExecutor] = None
@@ -857,6 +914,9 @@ class DiaryTaker:
         when = self.wall()
         now_ts = when.timestamp()
         self.memory.decay(now_ts)
+        # The pan stays cheap: buddy thinks about the small streamed frame it
+        # already has. Recognising things is not this call's job — a photo it
+        # decides to keep gets a proper look afterwards (see _look_closer).
         image, mime = frame_image(note.frame)
         # A first cheap guess at relevance for retrieval: the last note's tags.
         last = self.memory.written()[-1:]
@@ -965,6 +1025,11 @@ class DiaryTaker:
         rec.caption = caption or (rec.observations[0][:CAPTION_CHARS] if rec.observations else rec.thought[:CAPTION_CHARS])
         if note.thumb:
             rec.thumb = base64.b64encode(note.thumb).decode("ascii")
+        # The picture is kept; now look at it properly. The pan is over for
+        # this waypoint either way, so the extra call costs nothing the human
+        # waits for, and it is the difference between "a white object" and "a
+        # sewing machine".
+        await self._look_closer(rec, frame)
         if superseded is not None:
             superseded.superseded_by = rec.id
         self.photographed += 1
@@ -972,9 +1037,61 @@ class DiaryTaker:
                  " ".join(f"{k[0].upper()}{v:.2f}" for k, v in parts.items()), h, rel)
         return True
 
-    async def _photo_frame(self, note: Note) -> Optional[Frame]:
-        """The best picture available: the board's full-size snapshot, or the
-        streamed frame buddy already has."""
+    async def _look_closer(self, rec: Record, frame: Frame) -> bool:
+        """A second, unhurried look at a photo buddy decided to keep.
+
+        The thought that came out of the pan was formed from a 160x120
+        thumbnail at the API's coarsest setting: enough to notice that
+        something changed, not enough to say what it is. This call sends the
+        full-size picture at high detail and asks what is actually there, then
+        replaces the guess with what it found — the caption, the diary
+        sentence, and the tags a future retrieval will match on.
+
+        Failure is not fatal: the thumbnail's thought stands, and the photo is
+        still kept. buddy is allowed to have looked and still not be sure.
+        """
+        image, mime = frame_image(frame)
+        context = (f"What you thought when you glanced at this while panning: {rec.thought}\n"
+                   f"What you thought you saw: {'; '.join(rec.observations) or '(nothing specific)'}\n"
+                   f"Head at yaw={rec.yaw:+d} pitch={rec.pitch}.\n\n{ASK_FOR_JSON}")
+        loop = asyncio.get_running_loop()
+        try:
+            raw = await asyncio.wait_for(
+                loop.run_in_executor(self._pool(), self.client.examine, image, mime, context),
+                timeout=self.timeout)
+            reply = parse_reply(raw)
+        except asyncio.CancelledError:
+            raise
+        except Exception as e:  # noqa: BLE001 — the first thought stands
+            self._log_error(e)
+            log.info("diary: could not look closer at %s (%s)", rec.photo, type(e).__name__)
+            return False
+
+        sees = [str(o)[:120] for o in (reply.get("sees") or []) if str(o).strip()][:8]
+        caption = " ".join(str(reply.get("caption") or "").split())[:CAPTION_CHARS]
+        thought = " ".join(str(reply.get("thought") or "").split())[:400]
+        objects = [str(o).lower()[:24] for o in (reply.get("objects") or []) if str(o).strip()][:8]
+        confident = reply.get("confident") is True
+
+        if sees:
+            rec.observations = sees
+        if caption:
+            rec.caption = caption
+        if objects:
+            # The named things lead: retrieval and the photo gate's "same
+            # subject again" both match on tags, and "sewing machine" is worth
+            # more to both than "object".
+            rec.tags = list(dict.fromkeys(objects + list(rec.tags)))[:8]
+        if thought and confident:
+            log.info("diary: looked closer — %r becomes %r", rec.thought[:40], thought[:40])
+            rec.thought = thought
+        self.examined += 1
+        return True
+
+    async def _photo_frame(self, note: Note) -> Frame:
+        """The best picture available right now: the board's full-size
+        snapshot, or the streamed frame buddy already has when the board
+        cannot take one."""
         if self.snapshot is not None:
             try:
                 shot = await self.snapshot()
@@ -1033,14 +1150,8 @@ class DiaryTaker:
                 f"changed: {'; '.join(r.changed) or '-'} | thought: {r.thought} | tags: {', '.join(r.tags)}"
                 for r in todays[-60:])
             stars = "\n".join(f"★ {h}" for h in self.memory.load_highlights()) or "(nothing starred yet)"
-            # The trailing line is not decoration: the Responses API refuses a
-            # json_object response format unless the word appears in the input
-            # itself, and the instructions do not count (bench 2026-09-06 — the
-            # thought path hit this first, and the dreams path hit it again
-            # hours later, because the two build their input separately).
             prompt = (f"PROFILE:\n{self.memory.profile.strip()}\n\nSTARRED BY MY HUMAN:\n{stars}\n\n"
-                      f"TODAY ({when:%A %Y-%m-%d}):\n{body}\n\n"
-                      f"Answer with one json object in the shape given above, and nothing else.")
+                      f"TODAY ({when:%A %Y-%m-%d}):\n{body}\n\n{ASK_FOR_JSON}")
             loop = asyncio.get_running_loop()
             raw = await asyncio.wait_for(loop.run_in_executor(self._pool(), self.client.reflect, prompt),
                                          timeout=self.timeout * 3)
