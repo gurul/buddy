@@ -32,6 +32,7 @@ static void startBt() {
 #include "eyes.h"
 #include "chirp.h"
 #include "gaze.h"
+#include "hearing.h"
 #include "look.h"
 #include "mood.h"
 // Landscape 320x240 (the robot's face). Portrait build was 240x320.
@@ -716,6 +717,7 @@ void setup() {
   M5.Imu.Init();
   M5.Beep.begin();
   chirpBegin();                      // R2D2 phrase buffers in PSRAM
+  hearingBegin();                    // the ear's sample buffer; the speaker keeps the bus
   bodyBegin();                       // servo rail on, goHome, LEDs dark
   diagLog("body up");
   gazeBegin();                       // owner memory from NVS + camera task (core 0)
@@ -863,6 +865,9 @@ void loop() {
       in.hostEmote = true; in.dv = tama.emoteDv; in.da = tama.emoteDa;
       diagLog("emote dv=%d da=%d %s", tama.emoteDv, tama.emoteDa, tama.emoteLabel);
     }
+    // buddy listens between its own noises: one short window at a time, only
+    // while exploring, and never while a chirp is playing (they share a bus).
+    hearingUpdate(tama.explore, now);
     if (tama.snapReq) {
       // The host wants a photo of what buddy finds cool: the look task sends
       // the next whole frame at full size; the shutter click is ours.
@@ -949,11 +954,30 @@ void loop() {
     // must not eat the tap while a session is actually waiting.
     if (M5.petTapped()) {
       wake();
-      if (baseState == P_ATTENTION) {
+      bool body = M5.petTapWasBody();
+      // Two quick taps on the panel also call buddy back, but the panel is
+      // the unreliable half of this: the Si12T pad on the robot's head
+      // registers a pat every time, and reaching for the keyboard to type
+      // "stop" at a robot you can touch is not a gesture at all.
+      static uint32_t lastTapMs = 0;
+      constexpr uint32_t kDoubleTapMs = 450;
+      bool doubleTap = lastTapMs && (now - lastTapMs) < kDoubleTapMs;
+      lastTapMs = now;
+      if (tama.explore && (body || doubleTap)) {
+        // Pat it and it comes back: the head stops panning, the host drops
+        // explore mode, and it answers with the heart one-shot so the gesture
+        // reads as "come here", not as an error.
+        lastTapMs = 0;
+        diagLog(body ? "pat -> stop exploring" : "double tap -> stop exploring");
+        sendCmd("{\"cmd\":\"explore\",\"stop\":true}");
+        bodyNoteToucher(0);
+        triggerOneShot(P_HEART, 2000);
+        beep(1800, 45);
+      } else if (baseState == P_ATTENTION) {
         diagLog("tap -> focus");
         sendCmd("{\"cmd\":\"focus\"}");
         beep(1600, 40);
-      } else if (M5.petTapWasBody()) {
+      } else if (body) {
         // A pat on the robot's head (front touch zone) is a real physical
         // gesture, unlike poking the panel: answer it with the heart
         // one-shot (screen art + head tilt + pink LEDs).

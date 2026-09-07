@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+from dataclasses import replace
 import logging
 import os
 import re
@@ -19,7 +20,7 @@ from .ble import BuddyBLE
 from .caption_pager import CaptionPager, PagerConfig
 from .computer_agent import ComputerAgent, log_desktop_grants, make_response_creator
 from .computer_agent import configured as agent_configured
-from .diary import DiaryTaker, Emote, build_emote_cmd, make_diary_client
+from .diary import DiaryTaker, Emote, Thought, build_emote_cmd, make_diary_client
 from .ears import Ears
 from .ears import configured as ears_configured
 from .explore import (
@@ -51,6 +52,8 @@ from .protocol import (
     truncate_utf8_bytes,
 )
 from .read_policy import is_within, read_scope
+from .hearing import Hearing, parse as parse_sound
+from .thought_screen import ThoughtScreen
 from .state import State
 from .version_check import check as version_check
 from .vision import STATS_INTERVAL_SECS as VISION_STATS_SECS
@@ -168,6 +171,17 @@ class Daemon:
         # 4 lines x 17 chars and held at reading pace. A conversation owns the
         # screen when one is open; this only ever draws between them.
         self._thought_pager = CaptionPager(PagerConfig(read_cps=self._voice_cfg.caption_cps))
+        # ... and what is worth putting there. The diary writes down far more
+        # than a person sitting beside the robot wants to read.
+        self._screen = ThoughtScreen()
+        # What the room sounds like (hearing.py). The board reports a loudness
+        # reading while it explores; a frame cannot tell a silent afternoon
+        # from one where a door just banged.
+        self._room = Hearing()
+        self._room_logged_at = float("-inf")
+        # When the head arrived at the waypoint it is looking at now, so a
+        # thought is told what buddy heard while it was there, not an hour ago.
+        self._waypoint_since = 0.0
         # Monotonic time of the last thing a human or a session did: any hook
         # event, a board touch, the listen key. Idle time is measured from it.
         self._last_activity_at = time.monotonic()
@@ -650,25 +664,29 @@ class Daemon:
             if self.ble.connected:
                 await self.ble.send(build_mode_cmd(action.explore))
         elif isinstance(action, Look):
+            self._waypoint_since = time.monotonic()
             log.info("explore: look yaw=%+d pitch=%d", action.yaw, action.pitch)
             if self.ble.connected:
                 await self.ble.send(build_look_cmd(action.yaw, action.pitch, action.hold_ms))
         elif isinstance(action, Note):
             if self._notes is not None:
-                asyncio.create_task(self._notes.take(action))
+                # What the room sounded like while the head was settling here.
+                heard = self._room.describe(time.monotonic(), since=self._waypoint_since)
+                asyncio.create_task(self._notes.take(replace(action, heard=heard)))
         elif isinstance(action, Rest):
             # Nothing over the wire: the board stays in explore mode and
             # looks around on its own until the next pan cycle.
             log.info("explore: rest (%s)", action.reason)
             self._explore_raw_frame = None
 
-    def _show_thought(self, thought: str, photographed: bool) -> None:
-        """Put a thought buddy just had on its own screen, if the screen is free.
+    def _show_thought(self, thought: Thought) -> None:
+        """Put a thought buddy just had on its own screen, if it earns it.
 
         The conversation owns the screen while one is open, and a pending
         permission card outranks anything buddy has to say to itself; in either
         case the thought is skipped rather than queued, because by the time the
-        screen frees up buddy is looking somewhere else.
+        screen frees up buddy is looking somewhere else. Everything that gets
+        past those is then judged on its own merits by thought_screen.py.
         """
         if not self._explorer.on_board or not self.ble.connected:
             return
@@ -676,10 +694,18 @@ class Daemon:
             return
         if self._conversation is not None and not self._conversation.done():
             return
-        text = " ".join(thought.split())
-        if photographed:
-            text = f"{text} [photo]"
         now = time.monotonic()
+        text = " ".join(thought.text.split())
+        judged = dict(importance=thought.importance, novelty=thought.novelty,
+                      cool=1.0 if thought.photographed else thought.cool)
+        why = self._screen.refusal(now, text, thought.tags, **judged)
+        if why is not None:
+            self._screen.refused += 1
+            log.info("explore: thought kept to itself (%s) — %s", why, text[:50])
+            return
+        self._screen.offer(now, text, thought.tags, **judged)
+        if thought.photographed:
+            text = f"{text} [photo]"
         self._thought_pager.begin_reply(now)
         self._thought_pager.update(now, text, True)
         self._flush_thought_pager()
@@ -1225,6 +1251,19 @@ class Daemon:
                 self._explore_raw_frame = frame
             await self._vision.on_frame(frame)
             return
+        sound = obj.get("sound")
+        if isinstance(sound, dict):
+            reading = parse_sound(sound, time.monotonic())
+            if reading is not None:
+                self._room.hear(reading)
+                # One line a minute, like the vision stats: enough to see the
+                # ear is alive without a log full of loudness numbers.
+                now = time.monotonic()
+                if now - self._room_logged_at >= 60.0:
+                    self._room_logged_at = now
+                    log.info("ear: rms %d peak %d (this room's quiet is %d)",
+                             reading.rms, reading.peak, reading.quiet)
+            return
         diag = obj.get("diag")
         if isinstance(diag, dict):
             # Crash/hang report from the board (see firmware diag.h). Logged at
@@ -1256,6 +1295,13 @@ class Daemon:
                         "  pre-reset event: %s", ev)
             return
         cmd = obj.get("cmd")
+        if cmd == "explore":
+            # Two quick taps on the screen: come back. The board only sends
+            # this while it is exploring, so it always means stop.
+            self._note_activity()
+            log.info("explore: called back by a double tap")
+            await self._dismiss_explore("double tap")
+            return
         if cmd in ("focus", "key", "voice", "permission"):
             # A touch on the board: the human is here, stop exploring — at
             # once, and even a manual explore, which ignores the idle clock.
