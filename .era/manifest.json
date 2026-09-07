@@ -1,0 +1,23 @@
+{
+  "version": "3.33.0",
+  "initialized": "2026-08-04T03:00:30.868Z",
+  "lastUpdated": "2026-09-05T19:43:15.128Z",
+  "tools": [
+    "opencode"
+  ],
+  "profile": "core-service",
+  "features": {
+    "directives": true,
+    "workflows": true
+  },
+  "mcpServers": {
+    "selected": [
+      "notion-docs-reader",
+      "context7",
+      "linear",
+      "slack",
+      "observability",
+      "figma"
+    ]
+  }
+}
