@@ -17,6 +17,10 @@ past-experiments/firmware/**/build/
 # personal session memory — never committed
 debrief/
 
+# tooling caches — never committed
+.opencode/node_modules/
+.claude/worktrees/
+
 # Era - Generated files (do not edit this section)
 .era/memory/DIRECTIVES.md
 .era/memory/.directives-build-hash
