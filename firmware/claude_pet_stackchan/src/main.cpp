@@ -62,7 +62,6 @@ uint8_t brightLevel = 4;           // 0..4 → ScreenBreath 20..100
 
 uint8_t msgScroll = 0;
 uint16_t lastLineGen = 0;
-char     lastPromptId[40] = "";
 uint32_t lastInteractMs = 0;
 bool     dimmed = false;
 bool     screenOff = false;
@@ -75,7 +74,6 @@ const uint32_t SCREEN_OFF_MS = 30000;
 
 bool     napping = false;
 uint32_t napStartMs = 0;
-uint32_t promptArrivedMs = 0;
 
 // Face-down = Z-axis dominant and negative. Debounced so a toss doesn't count.
 static bool isFaceDown() {
@@ -96,7 +94,6 @@ static void wake() {
   }
   if (dimmed) { applyBrightness(); dimmed = false; }
 }
-bool     responseSent = false;
 
 static void beep(uint16_t freq, uint16_t dur) {
   if (settings().sound) M5.Beep.tone(freq, dur);
@@ -369,280 +366,7 @@ static uint8_t wrapInto(const char* in, char out[][40], uint8_t maxRows, uint8_t
   return row;
 }
 
-// ---- swipe-to-decide card ----
-// The pending permission renders on a card you swipe like a dating app:
-// drag right = approve, drag left = deny. The card follows the finger
-// with a tilt (pushRotated via a second sprite), an APPROVE/DENY stamp
-// appears past the commit threshold, and release either flies the card
-// off-screen or springs it back to center.
-//
-// Geometry: the band (y >= CARD_BAND_Y) is cleared every frame while a
-// prompt is up — same self-clearing model the old panel used, just taller.
-// A 210x80 card at ±9° has a rotated half-height of ~56px
-// (40·cos9° + 105·sin9°), so centering it at y=183 keeps every rotated
-// pixel inside the 126..240 band on the landscape panel. The pet's 2×
-// strip ends at y=126, so the compact view shows pet above, card below.
-enum CardPhase : uint8_t { CARD_REST, CARD_DRAG, CARD_SNAP, CARD_FLY };
-static CardPhase   cardPhase = CARD_REST;
-static TFT_eSprite cardSpr(&halDisplay());   // same static-init reason as spr
-static float cardX = 0, cardVel = 0;
-static int   cardGrabX = 0;
-static int   cardGrabY = 0;   // for the swipe-up focus gesture
-static uint32_t cardGrabMs = 0;  // press start — distinguishes tap from drag
-static bool  cardExpanded = false;  // tap: full-screen detail view
-static bool  cardTouchPrev = false;
-static bool  cardArmed = false;        // past-threshold beep latch
-static uint32_t cardArmedAtMs = 0;     // when the approve threshold was crossed
-static bool  cardAlways = false;       // held at the edge 700ms: approve → "always"
-const int    CARD_W = 210, CARD_H = 80;
-const int    CARD_BAND_Y = 126;
-const int    CARD_CX = 160, CARD_CY = 183;
-const float  CARD_COMMIT = 60.0f;      // px of drag that commits a decision
-
-// Hot (destructive) prompts need ~1.7x the drag to approve — deny stays
-// cheap. Muscle memory should not flick away `rm -rf` like `git status`.
-static float cardApproveCommit() {
-  return tama.promptHot ? CARD_COMMIT * 1.7f : CARD_COMMIT;
-}
-
-// Horizontal commit ratio for border/stamp, direction-aware: the approve
-// side is scaled by the hot tier. (An up-swipe approve existed briefly and
-// was removed at the owner's request — right is enough.)
-static float cardRatio() {
-  float r = cardX / (cardX > 0 ? cardApproveCommit() : CARD_COMMIT);
-  if (r > 1) r = 1; if (r < -1) r = -1;
-  return r;
-}
-
-// decision: "once" | "always" | "deny". "always" is an approve that also
-// asks the daemon to stop prompting for this command shape (daemon-lifetime).
-static void sendDecision(const char* decision) {
-  bool approve = strcmp(decision, "deny") != 0;
-  char cmd[104];
-  snprintf(cmd, sizeof(cmd), "{\"cmd\":\"permission\",\"id\":\"%s\",\"decision\":\"%s\"}",
-           tama.promptId, decision);
-  diagLog("decision %s", decision);
-  sendCmd(cmd);
-  responseSent = true;
-  if (approve) {
-    uint32_t tookS = (millis() - promptArrivedMs) / 1000;
-    statsOnApproval(tookS);
-    if (settings().sound) chirpPlay(CHIRP_OK, true);     // "beep-boop"
-    if (tookS < 5) triggerOneShot(P_HEART, 2000);
-  } else {
-    statsOnDenial();
-    if (settings().sound) chirpPlay(CHIRP_NO, true);     // descending "boop"
-  }
-}
-
-// Card face, drawn at (ox,oy) on any surface — cardSpr normally, spr
-// directly when the card sprite failed to allocate (no tilt then).
-static void drawCardFace(TFT_eSPI* g, int ox, int oy, const Palette& p) {
-  float r = cardRatio();
-  uint16_t edge = (r > 0.3f) ? GREEN : (r < -0.3f) ? HOT
-                : (tama.promptHot ? HOT : p.textDim);
-  g->fillRoundRect(ox, oy, CARD_W, CARD_H, 8, PANEL);
-  g->drawRoundRect(ox, oy, CARD_W, CARD_H, 8, edge);
-  if (fabsf(r) >= 1.0f) g->drawRoundRect(ox + 1, oy + 1, CARD_W - 2, CARD_H - 2, 7, edge);
-
-  // Size 2 only if the tool name fits one line (~16 chars at 12px)
-  int toolLen = strlen(tama.promptTool);
-  g->setTextColor(p.text, PANEL);
-  g->setTextSize(toolLen <= 16 ? 2 : 1);
-  g->setCursor(ox + 10, oy + 8);
-  g->print(tama.promptTool);
-  g->setTextSize(1);
-  // Which session is asking — cwd basename, top-right. With several
-  // concurrent sessions the cards queue, and this is how you tell them apart.
-  if (tama.promptSess[0]) {
-    int sw = (int)strlen(tama.promptSess) * 6;
-    g->setTextColor(p.textDim, PANEL);
-    g->setCursor(ox + CARD_W - 10 - sw, oy + 6);
-    g->print(tama.promptSess);
-  }
-
-  // Hint wraps at 31 chars to two lines under the tool name
-  g->setTextColor(p.textDim, PANEL);
-  int hlen = strlen(tama.promptHint);
-  g->setCursor(ox + 10, oy + 30);
-  g->printf("%.31s", tama.promptHint);
-  if (hlen > 31) {
-    g->setCursor(ox + 10, oy + 40);
-    g->printf("%.31s", tama.promptHint + 31);
-  }
-
-  // Bottom row: swipe affordances + timer in the middle. The bridge sends
-  // prompt.ttl (seconds until it gives up and falls back to the terminal);
-  // count down locally between heartbeats. Timer shows elapsed until the
-  // last minute, then flips to time-left in HOT. The 2px bar along the
-  // bottom edge drains toward the deadline the whole time.
-  g->setTextColor(HOT, PANEL);
-  g->setCursor(ox + 10, oy + CARD_H - 14);
-  g->print("< deny");
-  g->setTextColor(GREEN, PANEL);
-  g->setCursor(ox + CARD_W - 10 - 9 * 6, oy + CARD_H - 14);
-  g->print("approve >");
-  int remain = (int)tama.promptTtl - (int)((millis() - tama.promptTtlAtMs) / 1000);
-  if (remain < 0) remain = 0;
-  bool closing = tama.promptTtl && remain <= 60;
-  uint32_t waited = (millis() - promptArrivedMs) / 1000;
-  char wb[12];
-  if (closing) snprintf(wb, sizeof(wb), "%ds left", remain);
-  else         snprintf(wb, sizeof(wb), "%lus", (unsigned long)waited);
-  g->setTextColor(closing ? HOT : p.textDim, PANEL);
-  g->setCursor(ox + (CARD_W - (int)strlen(wb) * 6) / 2, oy + CARD_H - 14);
-  g->print(wb);
-  if (tama.promptTtlMax) {
-    int bw = (CARD_W - 16) * remain / tama.promptTtlMax;
-    if (bw > 0) g->fillRect(ox + 8, oy + CARD_H - 5, bw, 2, closing ? HOT : p.textDim);
-  }
-
-  // Stamp fades in past ~30% of the commit distance. Holding at the right
-  // edge for 700ms upgrades it to ALWAYS (chirp + label swap).
-  if (fabsf(r) > 0.3f) {
-    bool ok = r > 0;
-    const char* s = ok ? (cardAlways ? "ALWAYS" : "APPROVE") : "DENY";
-    uint16_t c = ok ? GREEN : HOT;
-    int tw = (int)strlen(s) * 12;
-    int sx = ox + (CARD_W - tw) / 2, sy = oy + CARD_H / 2 - 8;
-    g->setTextSize(2);
-    g->setTextColor(c, PANEL);
-    g->setCursor(sx, sy);
-    g->print(s);
-    g->drawRoundRect(sx - 6, sy - 5, tw + 12, 26, 4, c);
-    g->setTextSize(1);
-  }
-}
-
-// Full-screen detail — the DEFAULT view while a request is up: the whole
-// command (prompt.detail from the bridge, falling back to the hint) wrapped
-// over ~66% of the screen, with the same swipe-to-decide still live and only
-// minimal deny/approve affordances. Tap toggles the compact pet view.
-static void drawCardDetail(const Palette& p) {
-  float r = cardRatio();
-  uint16_t edge = (r > 0.3f) ? GREEN : (r < -0.3f) ? HOT
-                : (tama.promptHot ? HOT : p.textDim);
-  spr.fillSprite(p.bg);
-  spr.fillRoundRect(4, 30, W - 8, H - 40, 8, PANEL);
-  spr.drawRoundRect(4, 30, W - 8, H - 40, 8, edge);
-  spr.setTextColor(p.text, PANEL);
-  spr.setTextSize(2);
-  spr.setCursor(14, 40);
-  spr.printf("%.14s", tama.promptTool);
-  spr.setTextSize(1);
-  if (tama.promptSess[0]) {
-    int sw = (int)strlen(tama.promptSess) * 6;
-    spr.setTextColor(p.textDim, PANEL);
-    spr.setCursor(W - 14 - sw, 44);
-    spr.print(tama.promptSess);
-  }
-
-  // Meta row under the header: elapsed/left timer, queued count, pet hint.
-  int remain = (int)tama.promptTtl - (int)((millis() - tama.promptTtlAtMs) / 1000);
-  if (remain < 0) remain = 0;
-  bool closing = tama.promptTtl && remain <= 60;
-  uint32_t waited = (millis() - promptArrivedMs) / 1000;
-  char wb[12];
-  if (closing) snprintf(wb, sizeof(wb), "%ds left", remain);
-  else         snprintf(wb, sizeof(wb), "%lus", (unsigned long)waited);
-  spr.setTextColor(closing ? HOT : p.textDim, PANEL);
-  spr.setCursor(14, 58);
-  spr.print(wb);
-  if (tama.promptQueued) {
-    spr.setTextColor(p.body, PANEL);
-    spr.setCursor((W - 3 * 6) / 2, 58);
-    spr.printf("+%u", tama.promptQueued);
-  }
-  spr.setTextColor(p.textDim, PANEL);
-  spr.setCursor(W - 14 - 8 * 6, 58);
-  spr.print("tap: pet");
-
-  const char* src = tama.promptDetail[0] ? tama.promptDetail : tama.promptHint;
-  static char rows[24][40];
-  uint8_t n = wrapInto(src, rows, 24, 36);
-  spr.setTextColor(p.text, PANEL);
-  int y = 72;
-  for (uint8_t i = 0; i < n && y <= H - 38; i++, y += 10) {
-    spr.setCursor(14, y);
-    spr.print(rows[i]);
-  }
-  spr.setTextColor(HOT, PANEL);
-  spr.setCursor(14, H - 24);
-  spr.print("< deny");
-  spr.setTextColor(GREEN, PANEL);
-  spr.setCursor(W - 14 - 9 * 6, H - 24);
-  spr.print("approve >");
-  // TTL drain bar along the panel's bottom edge, same scale as the compact
-  // card, so the terminal-fallback deadline stays visible in this view too.
-  if (tama.promptTtlMax) {
-    int bw = (W - 28) * remain / tama.promptTtlMax;
-    if (bw > 0) spr.fillRect(14, H - 14, bw, 2, closing ? HOT : p.textDim);
-  }
-  if (fabsf(r) > 0.3f) {
-    bool ok = r > 0;
-    const char* s = ok ? (cardAlways ? "ALWAYS" : "APPROVE") : "DENY";
-    uint16_t c = ok ? GREEN : HOT;
-    int tw = (int)strlen(s) * 12;
-    int sx = (W - tw) / 2, sy = H / 2 - 8;
-    spr.setTextSize(2);
-    spr.setTextColor(c, PANEL);
-    spr.setCursor(sx, sy);
-    spr.print(s);
-    spr.drawRoundRect(sx - 6, sy - 5, tw + 12, 26, 4, c);
-    spr.setTextSize(1);
-  }
-}
-
-static void drawApproval() {
-  const Palette& p = characterPalette();
-  spr.fillRect(0, CARD_BAND_Y, W, H - CARD_BAND_Y, p.bg);
-  spr.drawFastHLine(0, CARD_BAND_Y, W, p.textDim);
-
-  if (responseSent && cardPhase != CARD_FLY) {
-    spr.setTextSize(1);
-    spr.setTextColor(p.textDim, p.bg);
-    spr.setCursor(4, H - 12);
-    spr.print("sent...");
-    return;
-  }
-
-  if (cardExpanded) { drawCardDetail(p); return; }
-
-  // Peeking deck: more prompts wait behind this card. Only the top edges
-  // show (the card covers the rest); the badge carries the exact count.
-  // Deliberately static while the card tilts/flies — swiping the top card
-  // away visually reveals the deck it came from.
-  uint8_t deck = tama.promptQueued > 2 ? 2 : tama.promptQueued;
-  for (int8_t i = deck; i >= 1; i--) {
-    int inset = 12 * i, lift = 5 * i;
-    int dx = CARD_CX - CARD_W / 2 + inset, dy = CARD_CY - CARD_H / 2 - lift;
-    spr.fillRoundRect(dx, dy, CARD_W - 2 * inset, CARD_H / 2, 8, PANEL);
-    spr.drawRoundRect(dx, dy, CARD_W - 2 * inset, CARD_H / 2, 8, p.textDim);
-  }
-  if (tama.promptQueued) {
-    spr.setTextSize(1);
-    spr.setTextColor(p.body, p.bg);
-    spr.setCursor(W - 26, CARD_BAND_Y + 5);
-    spr.printf("+%u", tama.promptQueued);
-  }
-
-  int16_t ang = (int16_t)(cardX * 0.075f);
-  if (ang > 9) ang = 9; if (ang < -9) ang = -9;
-
-  spr.setTextSize(1);
-  if (cardSpr.created()) {
-    cardSpr.fillSprite(TFT_TRANSPARENT);
-    drawCardFace(&cardSpr, 0, 0, p);
-    cardSpr.setPivot(CARD_W / 2, CARD_H / 2);
-    spr.setPivot(CARD_CX + (int)cardX, CARD_CY);
-    cardSpr.pushRotated(&spr, ang, TFT_TRANSPARENT);
-  } else {
-    drawCardFace(&spr, CARD_CX + (int)cardX - CARD_W / 2, CARD_CY - CARD_H / 2, p);
-  }
-}
-
 void drawHUD() {
-  if (tama.promptId[0]) { drawApproval(); return; }
   const Palette& p = characterPalette();
   // 4 rows on the landscape panel: y 204..240 (STRIP_Y), under the pet.
   const int SHOW = 4, LH = 8, WIDTH = 38;
@@ -896,27 +620,18 @@ void loop() {
     hin.faceOwner = tama.faceOwner; hin.faceAtMs = tama.faceAtMs;
     hin.hostLookReq = tama.hostLookReq; hin.hostLookYaw = tama.hostLookYaw;
     hin.hostLookPitch = tama.hostLookPitch; hin.hostLookHold = tama.hostLookHold;
-    hin.explore = tama.explore; hin.cardUp = tama.promptId[0] != 0;
+    hin.explore = tama.explore; hin.cardUp = false;
     gazeUpdate(activeState, baseState == P_ATTENTION, listenNow, now, &tama.ownerReset, &hin);
     tama.hostLookReq = hin.hostLookReq;      // consumed by gaze
   }
 
   diagPhase(DP_GESTURE);
-  // touch gestures on the pet: tap = pet it (heart), scrub = dizzy,
-  // press-and-hold = push-to-talk (the bridge holds Opt+Space for
-  // VoiceFlow while the finger is down).
-  // Drained during a prompt — the swipe card's band overlaps the pet
-  // zone, and a card drag must not read as a scrub.
-  static bool voiceHold = false;
-  bool gesturesLive = !screenOff && !tama.promptId[0];
+  // touch gestures on the pet: swipe down for Enter, left/right to walk an
+  // option picker, tap to raise a waiting terminal or to pat it.
+  // Hold-to-talk is gone (owner request): a finger on the pet no longer
+  // holds a dictation hotkey, and the board sends no voice frames at all.
+  bool gesturesLive = !screenOff;
   if (gesturesLive) {
-    if (M5.petHoldStarted()) {
-      wake();
-      voiceHold = true;
-      diagLog("voice start");
-      sendCmd("{\"cmd\":\"voice\",\"state\":\"start\"}");
-      beep(1200, 30);
-    }
     if (M5.petSwipedDown()) {
       wake();
       diagLog("swipe down -> enter");
@@ -943,8 +658,7 @@ void loop() {
     // moods come from Claude's state, not from being poked). The events are
     // still drained so the compat-layer state machine can't latch.
     // The one functional tap: while the pet demands attention (a session is
-    // blocked on the human but no card is up — cards own the screen and have
-    // their own swipe-up focus), tapping it raises that session's terminal.
+    // blocked on the human), tapping it raises that session's terminal.
     // baseState, not activeState: a one-shot overlay (level-up celebrate)
     // must not eat the tap while a session is actually waiting.
     if (M5.petTapped()) {
@@ -983,162 +697,15 @@ void loop() {
     }
     M5.petScrubbed();
   } else {
-    // drain while overlays open, so a stale gesture can't fire later
+    // drain while the screen is off, so a stale gesture can't fire later
     M5.petTapped(); M5.petScrubbed(); M5.petHoldStarted(); M5.petSwipedDown();
     M5.petSwipedLeft(); M5.petSwipedRight();
   }
-  // Stop is handled OUTSIDE the overlay gate: if a prompt or menu opens
-  // mid-hold, the release must still end the dictation — a swallowed stop
-  // means the bridge holds Opt+Space until its own watchdog fires.
-  if (M5.petHoldEnded() && voiceHold) {
-    voiceHold = false;
-    diagLog("voice stop");
-    sendCmd("{\"cmd\":\"voice\",\"state\":\"stop\"}");
-    beep(900, 30);
-  }
+  // Drained unconditionally: nothing consumes a hold any more, and an
+  // unread edge would latch in the compat-layer state machine.
+  M5.petHoldStarted(); M5.petHoldEnded();
 
   // BtnA: step through fake scenarios
-  diagPhase(DP_PROMPT);
-  // Prompt arrival: beep, reset response flag
-  if (strcmp(tama.promptId, lastPromptId) != 0) {
-    strncpy(lastPromptId, tama.promptId, sizeof(lastPromptId)-1);
-    lastPromptId[sizeof(lastPromptId)-1] = 0;
-    responseSent = false;
-    if (tama.promptId[0]) {
-      diagLog("prompt %.20s", tama.promptTool);
-      promptArrivedMs = millis();
-      wake();
-      beep(1200, 80);   // alert chirp
-      // Repaint so the card band starts from a clean frame.
-      repaintAll();
-      characterInvalidate();
-      if (buddyMode) buddyInvalidate();
-      cardPhase = CARD_REST;
-      cardX = 0; cardVel = 0; cardArmed = false; cardAlways = false;
-      // Text-first: a fresh request opens straight into the full-screen
-      // detail view (the pet steps aside) so the command is readable
-      // without an extra tap. Tapping toggles back to the compact
-      // pet-and-card view and the swipe gestures work in both.
-      cardExpanded = true;
-      if (!cardSpr.created()) cardSpr.createSprite(CARD_W, CARD_H);
-    } else {
-      // Prompt resolved — free the card sprite and repaint everything so
-      // the card band doesn't leave stale rows under the transcript HUD.
-      if (cardSpr.created()) cardSpr.deleteSprite();
-      cardPhase = CARD_REST;
-      cardX = 0; cardVel = 0;
-      cardExpanded = false;
-      repaintAll();
-      if (buddyMode) buddyInvalidate();
-    }
-  }
-
-  bool inPrompt = tama.promptId[0] && !responseSent;
-
-  // Swipe card: raw-touch drag + release physics. Runs the whole time a
-  // prompt is on screen; decisions commit on release past CARD_COMMIT px
-  // (or a fast flick), then the card flies off while "sent" follows.
-  if (tama.promptId[0]) {
-    bool tdown = M5.touching();
-    if (!responseSent) {
-      // Expanded detail view owns the whole screen, so drags start anywhere;
-      // the compact card only grabs touches inside its band.
-      if ((cardPhase == CARD_REST || cardPhase == CARD_SNAP)
-          && tdown && !cardTouchPrev
-          && (cardExpanded || M5.touchY() >= CARD_BAND_Y)) {
-        cardPhase = CARD_DRAG;
-        cardGrabX = M5.touchX() - (int)cardX;   // grab mid-snap without a jump
-        cardGrabY = M5.touchY();
-        cardGrabMs = millis();
-        cardVel = 0;
-        wake();
-      }
-      if (cardPhase == CARD_DRAG) {
-        if (tdown) {
-          float nx = (float)(M5.touchX() - cardGrabX);
-          cardVel = nx - cardX;
-          cardX = nx;
-          bool past = fabsf(cardRatio()) >= 1.0f;
-          if (past && !cardArmed) { beep(1800, 20); cardArmedAtMs = millis(); }
-          cardArmed = past;
-          // Dwell at the approve edge upgrades the decision to "always" —
-          // approve AND stop prompting for this command shape. Deliberately
-          // impossible to hit from a plain flick: it needs a 700ms hold
-          // past the threshold, and retreating disarms it.
-          bool alwaysNow = cardArmed && cardX > 0
-                           && millis() - cardArmedAtMs >= 700;
-          if (alwaysNow && !cardAlways) beep(2600, 50);
-          cardAlways = alwaysNow;
-          lastInteractMs = millis();
-        } else {                               // release
-          int dyUp = cardGrabY - M5.touchY();
-          uint32_t pressMs = millis() - cardGrabMs;
-          // Tap (short, stationary) toggles the full-command detail view.
-          // Checked first so it can never be mistaken for a micro-drag.
-          if (pressMs < 350 && fabsf(cardX) < 8 && abs(dyUp) < 8) {
-            cardExpanded = !cardExpanded;
-            beep(1700, 20);
-            cardPhase = CARD_SNAP;
-            cardArmed = false;
-            cardAlways = false;
-            repaintAll();          // leaving the full-screen view needs a clean frame
-          } else
-          // Swipe UP = "show me": raise that session's terminal on the Mac.
-          // NOT a decision — the card snaps back and stays pending. Only
-          // counts when the drag was clearly vertical, so a sloppy
-          // approve/deny swipe can't turn into a window switch.
-          // 35px, not 50: the drag must START inside the 116px-tall card
-          // band, so a 50px upward flick left almost no room and the gesture
-          // kept failing in practice. 35px is still well clear of a jittery
-          // tap, and the sideways gate keeps it distinct from approve/deny.
-          if (dyUp > 35 && fabsf(cardX) < CARD_COMMIT * 0.6f) {
-            char fc[80];
-            snprintf(fc, sizeof(fc), "{\"cmd\":\"focus\",\"id\":\"%s\"}", tama.promptId);
-            sendCmd(fc);
-            diagLog("card focus swipe");
-            beep(1500, 25);
-            cardPhase = CARD_SNAP;
-            cardArmed = false;
-            cardAlways = false;
-          } else {
-          // Direction-aware commit: hot prompts need the longer approve
-          // drag and a harder flick; deny is always the cheap 60px/10px.
-          float m = fabsf(cardX) > 2.0f ? cardX : cardVel;
-          bool approve = m > 0;
-          float commitDist = approve ? cardApproveCommit() : CARD_COMMIT;
-          float flickGate  = (approve && tama.promptHot) ? 18.0f : 10.0f;
-          bool commit = fabsf(cardX) > commitDist || fabsf(cardVel) > flickGate;
-          if (commit) {
-            sendDecision(approve ? (cardAlways ? "always" : "once") : "deny");
-            cardPhase = CARD_FLY;
-            cardExpanded = false;
-            repaintAll();
-            float dir = approve ? 1.0f : -1.0f;
-            cardVel = fmaxf(fabsf(cardVel), 16.0f) * dir;
-          } else {
-            cardPhase = CARD_SNAP;
-          }
-          cardArmed = false;
-          cardAlways = false;
-          }
-        }
-      }
-    }
-    if (cardPhase == CARD_SNAP) {              // spring back to center
-      cardX *= 0.65f;
-      if (fabsf(cardX) < 1.5f) { cardX = 0; cardVel = 0; cardPhase = CARD_REST; }
-    } else if (cardPhase == CARD_FLY) {        // accelerate off-screen
-      cardVel *= 1.12f;
-      cardX += cardVel;
-      if (fabsf(cardX) > (float)(W / 2 + CARD_W)) {
-        cardX = 0; cardVel = 0; cardPhase = CARD_REST;
-      }
-    }
-    cardTouchPrev = tdown;
-  } else {
-    cardTouchPrev = false;
-  }
-
   // Button-press wake. BtnB's press is swallowed when it wakes the screen
   // so the same tap doesn't also scroll the transcript. BtnA is wake-only:
   // the screens/menu it used to cycle are gone (owner request — bottom-left
@@ -1162,9 +729,7 @@ void loop() {
   // BtnB (bottom-right): scroll back through the transcript HUD.
   if (M5.BtnB.wasPressed()) {
     if (swallowBtnB) { swallowBtnB = false; }
-    else if (tama.promptId[0]) {
-      // swipe card owns decisions — swallow strip touches during a prompt
-    } else {
+    else {
       beep(2400, 30);
       msgScroll = (msgScroll >= 30) ? 0 : msgScroll + 1;
     }
@@ -1235,13 +800,11 @@ void loop() {
     static_assert(CAP_X + CAP_COLS * 6 * CAP_SIZE <= W - 6, "caption text must leave the more-tick margin");
     static_assert(CAP_LINES <= TamaState::CAP_MAX_LINES && CAP_COLS <= TamaState::CAP_MAX_COLS, "caption storage");
     bool captionUp = tama.captionAtMs && tama.captionNLines
-                     && now - tama.captionAtMs < (uint32_t)tama.captionHoldMs + CAP_GRACE_MS
-                     && tama.promptId[0] == 0;
-    eyesSet(activeState, baseState == P_ATTENTION, listenNow, tama.promptHot, bodyGazeSide(), tama.explore,
+                     && now - tama.captionAtMs < (uint32_t)tama.captionHoldMs + CAP_GRACE_MS;
+    eyesSet(activeState, baseState == P_ATTENTION, listenNow, false, bodyGazeSide(), tama.explore,
             tama.agentState, moodExprForEyes);
-    // A card (y >= 126) or a caption page (y >= 112) owns the lower band: eyes park on the N row
-    // in the same frame (eyesCardUp only picks the row, so one call covers both).
-    eyesCardUp(tama.promptId[0] != 0 || captionUp);
+    // A caption page (y >= 112) owns the lower band: the eyes park on the N row.
+    eyesCardUp(captionUp);
     eyesLookAt((int8_t)bodyYawDeg(), (int8_t)bodyPitchDeg());
     eyesTick(now);
     static uint32_t captionSeenAt = 0;
@@ -1306,7 +869,7 @@ void loop() {
   // bounce brightness between 8 and full every few frames.
   static int8_t faceDownFrames = 0;
   diagPhase(DP_NAP);
-  if (!inPrompt) {
+  {
     bool down = isFaceDown();
     if (down)       { if (faceDownFrames < 20) faceDownFrames++; }
     else            { if (faceDownFrames > -10) faceDownFrames--; }
@@ -1327,7 +890,7 @@ void loop() {
   // millis() not the cached `now`: wake() runs after `now` is captured,
   // so now - lastInteractMs underflows when a button is held → flicker.
   // No auto-off on USB power — clock face wants to stay visible while charging.
-  if (!screenOff && !inPrompt && !_onUsb
+  if (!screenOff && !_onUsb
       && millis() - lastInteractMs > SCREEN_OFF_MS) {
     M5.Axp.SetLDO2(false);
     screenOff = true;

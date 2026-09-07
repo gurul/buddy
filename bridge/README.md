@@ -519,10 +519,8 @@ available.
 Hold the Option key on the Mac and the board turns to face you and shows
 its listening pose. Release it and the board goes back to what it was
 doing. Option is the usual dictation hotkey, so the board listens while
-you dictate. This only *watches* the key. Hold-the-pet push-to-talk, which
-would *press* it, is off by default: buddy never opens your mic unless you
-opt in with `CC_BUDDY_VOICE_HOTKEY=option|opt-space|fn`, in which case the
-board shows the same pose either way.
+you dictate. This only *watches* the key — buddy never presses it.
+(Hold-the-pet push-to-talk, which used to press it, has been removed.)
 
 The daemon watches the key with a listen-only Quartz event tap and sends
 `{"cmd":"listen","on":true}` on key down and `{"cmd":"listen","on":false}`
@@ -648,7 +646,7 @@ keyword model download), knobs and safety:
 
 ```
 cc-buddy-bridge ears-check          # mic + model, then listen for the phrase
-cc-buddy-bridge voice-check         # Accessibility state (push-to-talk and the worker)
+cc-buddy-bridge key-check           # Accessibility state (swipe-to-key and the worker)
 tail -f ~/Library/Logs/cc-buddy-bridge.log | grep -E "ears|voice|agent"
 ```
 
@@ -686,7 +684,7 @@ pitch 35..65, held 2–4 s, then another, every 4–9 s. So an idle buddy keeps
 looking around; only the camera notes are rationed.
 
 Anything that means the human is back stops it at once with `mode explore
-false`: a hook event (a session running or waiting), a permission card, the
+false`: a hook event (a session running or waiting), the
 listen key going down, a touch on the board, or the board disconnecting.
 The idle clock then has to reach `CC_BUDDY_EXPLORE_AFTER_MIN` again.
 
@@ -703,8 +701,8 @@ with a two-word send-off, the conversation ends, and the explore starts. A
 manual explore ignores the idle clock — a running Claude session or a hook
 event does not end it — and keeps panning cycle after cycle (with the usual
 rest in between) until something says the human wants the robot back: a touch
-on the board, a permission card, the listen key, the next wake word, the board
-disconnecting, or `explore stop`. It cannot start while a card is waiting, the
+on the board, the listen key, the next wake word, the board
+disconnecting, or `explore stop`. It cannot start while the
 listen key is down, or the board is disconnected (the command says why). It
 works even with `CC_BUDDY_EXPLORE=0`, which only turns off the idle start.
 

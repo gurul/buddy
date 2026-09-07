@@ -76,8 +76,8 @@ arduino-cli core install esp32:esp32        # tested with 3.3.10
 
 Grant the daemon's Python **Microphone**, **Accessibility** and **Screen Recording** in
 System Settings → Privacy & Security (the daemon logs the exact binary and asks for the
-Screen Recording dialog on first start). Set `CC_BUDDY_MONITOR_ONLY=1` in the service
-environment so Claude Code's permission prompts stay in the terminal.
+Screen Recording dialog on first start). Claude Code's permission prompts always stay in
+the terminal — the board never gates a tool call.
 
 Then:
 

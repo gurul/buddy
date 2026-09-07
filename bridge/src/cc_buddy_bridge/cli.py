@@ -13,7 +13,6 @@ from . import __version__
 from .daemon import Daemon
 from .envfile import load_env_file
 from .ipc import make_transport
-from .voice_trigger import DEFAULT_HOTKEY, HOTKEYS
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -63,16 +62,6 @@ def main(argv: list[str] | None = None) -> int:
              "into the service so the daemon uses serial instead of BLE.",
     )
     p_install.add_argument(
-        "--voice-hotkey",
-        default=os.environ.get("CC_BUDDY_VOICE_HOTKEY") or None,
-        choices=sorted(HOTKEYS),
-        help=f"With --service: bake the push-to-talk hotkey into the service. "
-             f"Default is '{DEFAULT_HOTKEY}' — a bare Option hold, which synthesizes "
-             f"reliably and is what most dictation apps should be rebound to. Without "
-             f"this flag the hotkey must be hand-edited into the unit file, and the "
-             f"next --service install silently reverts it.",
-    )
-    p_install.add_argument(
         "--notes-widget", action="store_true",
         help="macOS: also install a second launchd agent that shows the robot's idle-explorer "
              "notes as a desktop widget at login (com.github.cc-buddy-bridge.notes-widget)",
@@ -118,8 +107,8 @@ def main(argv: list[str] | None = None) -> int:
                           help="Build the window, print what it rendered, and exit (smoke test)")
 
     sub.add_parser(
-        "voice-check",
-        help="Diagnose hold-the-pet push-to-talk (Accessibility grant, signing, pyobjc)",
+        "key-check",
+        help="Diagnose swipe-to-key (Accessibility grant, signing, pyobjc)",
     )
     p_ears = sub.add_parser(
         "ears-check",
@@ -243,7 +232,6 @@ def main(argv: list[str] | None = None) -> int:
             from .service import install_service
             return install_service(
                 serial_port=getattr(args, "serial_port", None),
-                voice_hotkey=getattr(args, "voice_hotkey", None),
             )
         from .installer import install_hooks
         return install_hooks(config_dir=getattr(args, "config_dir", None))
@@ -282,9 +270,9 @@ def main(argv: list[str] | None = None) -> int:
         return _run_species(args.name, args.socket)
     if args.cmd == "diag":
         return _run_diag(args.socket, args.watch)
-    if args.cmd == "voice-check":
-        from .voice_trigger import VoiceHold
-        return VoiceHold().diagnose()
+    if args.cmd == "key-check":
+        from .key_tap import KeyTapper
+        return KeyTapper().diagnose()
     if args.cmd == "ears-check":
         from .ears import diagnose as ears_diagnose
         return ears_diagnose(args.seconds)

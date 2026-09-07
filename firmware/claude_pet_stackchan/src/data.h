@@ -17,16 +17,6 @@ struct TamaState {
   char     lines[8][92];
   uint8_t  nLines;
   uint16_t lineGen;          // bumps when lines change — lets UI reset scroll
-  char     promptId[40];     // pending permission request ID; empty = no prompt
-  char     promptTool[20];
-  char     promptHint[44];
-  char     promptSess[20];   // cwd basename of the asking session
-  uint8_t  promptQueued;     // prompts waiting behind this one (deck depth)
-  uint16_t promptTtl;        // seconds left at last heartbeat before terminal fallback
-  uint32_t promptTtlAtMs;    // millis() when promptTtl arrived (for local countdown)
-  uint16_t promptTtlMax;     // largest ttl seen for this prompt — drain-bar scale
-  bool     promptHot;        // destructive command: hot border, stiffer approve
-  char     promptDetail[724];// long-command tail; empty = hint says it all.
                              // Sized for the text-first card: ~21 rows of 36
                              // chars, matching the bridge's 720-byte cap.
   bool     listening;        // host dictation key held: {"cmd":"listen","on":bool}
@@ -257,30 +247,6 @@ static void _applyJson(const char* line, TamaState* out) {
       out->lineGen++;
     }
     out->nLines = n;
-  }
-  JsonObject pr = doc["prompt"];
-  if (!pr.isNull()) {
-    const char* pid = pr["id"]; const char* pt = pr["tool"]; const char* ph = pr["hint"];
-    bool fresh = strcmp(out->promptId, pid ? pid : "") != 0;
-    strncpy(out->promptId,   pid ? pid : "", sizeof(out->promptId)-1);   out->promptId[sizeof(out->promptId)-1]=0;
-    strncpy(out->promptTool, pt  ? pt  : "", sizeof(out->promptTool)-1); out->promptTool[sizeof(out->promptTool)-1]=0;
-    strncpy(out->promptHint, ph  ? ph  : "", sizeof(out->promptHint)-1); out->promptHint[sizeof(out->promptHint)-1]=0;
-    const char* ps = pr["sess"];
-    strncpy(out->promptSess, ps ? ps : "", sizeof(out->promptSess)-1); out->promptSess[sizeof(out->promptSess)-1]=0;
-    out->promptQueued = pr["queued"] | 0;
-    uint16_t ttl = pr["ttl"] | 0;
-    out->promptTtl = ttl;
-    out->promptTtlAtMs = millis();
-    if (fresh || ttl > out->promptTtlMax) out->promptTtlMax = ttl;
-    const char* risk = pr["risk"];
-    out->promptHot = risk && strcmp(risk, "hot") == 0;
-    const char* pd = pr["detail"];
-    strncpy(out->promptDetail, pd ? pd : "", sizeof(out->promptDetail)-1);
-    out->promptDetail[sizeof(out->promptDetail)-1] = 0;
-  } else {
-    out->promptId[0] = 0; out->promptTool[0] = 0; out->promptHint[0] = 0; out->promptSess[0] = 0;
-    out->promptQueued = 0; out->promptTtl = 0; out->promptTtlMax = 0;
-    out->promptHot = false; out->promptDetail[0] = 0;
   }
   out->lastUpdated = millis();
   _lastLiveMs = millis();

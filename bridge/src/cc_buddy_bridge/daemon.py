@@ -5,13 +5,11 @@ from __future__ import annotations
 import asyncio
 import logging
 import os
-import re
 import time
-from pathlib import Path
 from typing import TYPE_CHECKING, Any, Optional
 
 if TYPE_CHECKING:
-    from .voice_trigger import VoiceHold
+    from .key_tap import KeyTapper
 
 from . import voice_agent
 from .audit import AuditLog
@@ -40,12 +38,11 @@ from .identity import default_path as identity_default_path
 from .ipc import IPCServer
 from .jsonl_tailer import JSONLTailer
 from .listen_key import Stopper, start_listen_key
-from .matchers import MatcherConfig, classify_command, derive_always_pattern
+from .matchers import MatcherConfig, classify_command
 from .matchers import load_config as load_matcher_config
 from .protocol import (
     ENTRY_MAX_BYTES,
     HEARTBEAT_KEEPALIVE,
-    PERMISSION_WAIT_SECS,
     build_heartbeat,
     build_time_sync,
     truncate_utf8_bytes,
@@ -67,15 +64,6 @@ log = logging.getLogger(__name__)
 # PERMISSION_WAIT_SECS moved to protocol.py — the wire `prompt.ttl` field is
 # derived from it, so it lives next to the serializer. Re-exported via the
 # import above for callers/tests that referenced it here.
-
-# Monitor-only mode: the board is a status display with inert buttons, so no
-# permission ever waits on it. Env-gated rather than a CLI flag because it is
-# a property of which firmware is flashed, not of how the daemon was invoked —
-# the two have to be set together or prompts stall for PERMISSION_WAIT_SECS.
-MONITOR_ONLY = os.environ.get("CC_BUDDY_MONITOR_ONLY", "").strip().lower() in (
-    "1", "true", "yes", "on",
-)
-
 
 class Daemon:
     def __init__(
@@ -110,17 +98,15 @@ class Daemon:
         # Per-decision append-only log; see audit.py
         self.audit = AuditLog()
         # tool_use_id → Future resolving to "allow" | "deny"
-        self._permission_futures: dict[str, asyncio.Future[str]] = {}
         # Read scopes (git-repo roots / parent dirs) the user has approved via
         # a card swipe. Daemon-lifetime by design — restart forgets all grants.
         self._read_scopes: set[str] = set()
         # Command shapes granted "always" from the stick (card held at the
         # approve edge). In-memory only — a bad grant dies with the daemon.
-        self._stick_always: list[re.Pattern[str]] = []
         # Hold-the-pet push-to-talk: holds Opt+Space (VoiceFlow) between the
         # stick's voice start/stop events. Lazily constructed on first use so
         # non-mac / Quartz-less hosts pay nothing.
-        self._voice: Optional["VoiceHold"] = None
+        self._keys: Optional["KeyTapper"] = None
         # Listen key (held Option = dictation): a Quartz tap on its own
         # thread, started in run(). None when the tap could not be created.
         self._listen_stop: Optional[Stopper] = None
@@ -193,7 +179,6 @@ class Daemon:
         self._ack_escalation = 0   # consecutive missed-ack episodes
         self._clean_polls = 0      # answered polls since the last escalation
         # tool_use_id -> session cwd, for the card's swipe-up focus action.
-        self._pending_cwds: dict[str, str] = {}
         # transcript_path → hash of the last assistant content we emitted as an
         # entry. Used to distinguish "fresh turn" from "re-read old content"
         # when the transcript file hasn't been flushed yet.
@@ -244,7 +229,6 @@ class Daemon:
             asyncio.create_task(self._on_ble_connected(), name="on-connect"),
             asyncio.create_task(self._status_poller(), name="status-poller"),
             asyncio.create_task(self._update_check_loop(), name="update-check"),
-            asyncio.create_task(self._voice_watchdog(), name="voice-watchdog"),
             asyncio.create_task(self._vision_stats_loop(), name="vision-stats"),
         ]
         # The diary (diary.py): memory-aware thoughts plus an appraisal
@@ -283,8 +267,6 @@ class Daemon:
                 await asyncio.gather(self._conversation, return_exceptions=True)
             if self._ears is not None:
                 self._ears.stop()
-            if self._voice is not None:
-                self._voice.stop()   # idempotent; never exit with keys down
             if self._listen_stop is not None:
                 self._listen_stop()
             await self.ble.stop()
@@ -800,21 +782,6 @@ class Daemon:
         await self.ble.send({"cmd": "listen", "on": False})
         self._listen_sent = False
 
-    async def _voice_watchdog(self) -> None:
-        """Force-release an overdue push-to-talk hold. The stop event can be
-        lost (serial died mid-hold, board reset while recording), and a
-        system-wide stuck Opt+Space is the one failure mode this feature is
-        not allowed to have."""
-        while not self._shutdown.is_set():
-            try:
-                await asyncio.wait_for(self._shutdown.wait(), timeout=5.0)
-                return
-            except asyncio.TimeoutError:
-                pass
-            if self._voice is not None and self._voice.overdue():
-                log.warning("voice: hold overdue — force-releasing Opt+Space")
-                self._voice.stop()
-
     async def _update_check_loop(self) -> None:
         """Poll GitHub releases once at startup, then every 24 hours.
 
@@ -1070,14 +1037,6 @@ class Daemon:
             self.audit.record(**audit_kwargs, decision="allow", source="auto_allow")
             return {"ok": True, "decision": "allow"}
 
-        # A prior card was held at the approve edge ("always") for this
-        # command shape — approve without another round-trip. Checked after
-        # auto_allow but before the stick, so it silences repeat prompts.
-        if decision_class == "ask" and any(rx.search(hint) for rx in self._stick_always):
-            log.info("pretooluse for %s (%s): stick always-allow → allow", tool_name, hint[:60])
-            self.audit.record(**audit_kwargs, decision="allow", source="stick_always")
-            return {"ok": True, "decision": "allow"}
-
         # If BLE isn't connected, skip the round-trip and return no decision so
         # Claude Code's normal flow runs (respects user's auto/allow settings).
         if not self.ble.connected:
@@ -1088,71 +1047,14 @@ class Daemon:
             self.audit.record(**audit_kwargs, decision=None, source="ble_disconnected")
             return {"ok": True}
 
-        # Monitor-only: the panel is a display, not an input device. Take the
-        # same exit as a disconnected stick so Claude Code's own prompt runs
-        # immediately — never _await_stick_decision, which would block the
-        # tool call for PERMISSION_WAIT_SECS waiting on a button that is now
-        # inert. Placed after auto_allow/stick_always so the matcher fast
-        # paths (which never touch the screen) keep working.
-        if MONITOR_ONLY:
-            log.info("pretooluse for %s: monitor-only, deferring to default flow", tool_name)
-            self.audit.record(**audit_kwargs, decision=None, source="monitor_only")
-            return {"ok": True}
-
-        # Unknown commands don't force a button press — defer to Claude Code's
-        # native flow (which may auto-approve under `permissions.defaultMode=auto`).
-        # Only always_ask patterns surface on the stick.
-        if decision_class == "default":
-            log.info("pretooluse for %s (%s): no matcher → defer to default", tool_name, hint[:60])
-            self.audit.record(**audit_kwargs, decision=None, source="defer")
-            return {"ok": True}
-
-        decision, source, elapsed = await self._await_stick_decision(
-            session_id, tool_use_id, tool_name, hint, cwd=req.get("cwd") or "")
-        self.audit.record(
-            **audit_kwargs, decision=decision, source=source, elapsed_s=elapsed,
-        )
-        return {"ok": True, "decision": decision}
-
-    async def _await_stick_decision(
-        self, session_id: str, tool_use_id: str, tool_name: str, hint: str,
-        cwd: str = "",
-    ) -> tuple[str, str, float]:
-        """Surface a prompt card on the stick and block until it is swiped
-        (or times out). Returns (decision, source, elapsed_s); timeout maps
-        to 'ask' so Claude Code's terminal prompt takes over."""
-        log.info(
-            "permission request: tool=%s id=%s hint=%r waiting up to %.0fs",
-            tool_name, tool_use_id, hint[:80], PERMISSION_WAIT_SECS,
-        )
-        pending = self.state.permission_pending(session_id, tool_use_id, tool_name, hint, cwd=cwd)
-        self._pending_cwds[tool_use_id] = pending.cwd
-        fut: asyncio.Future[str] = asyncio.get_running_loop().create_future()
-        self._permission_futures[tool_use_id] = fut
-        source = "stick"
-        try:
-            await self._push_heartbeat(force=True)
-            try:
-                decision = await asyncio.wait_for(fut, timeout=PERMISSION_WAIT_SECS)
-                elapsed = time.monotonic() - pending.issued_at
-                log.info(
-                    "permission resolved: id=%s decision=%s (%.1fs)",
-                    tool_use_id, decision, elapsed,
-                )
-            except asyncio.TimeoutError:
-                elapsed = time.monotonic() - pending.issued_at
-                log.warning(
-                    "permission timeout: id=%s tool=%s after %.1fs → falling back to 'ask'",
-                    tool_use_id, tool_name, elapsed,
-                )
-                decision = "ask"
-                source = "timeout"
-        finally:
-            self._permission_futures.pop(tool_use_id, None)
-            self._pending_cwds.pop(tool_use_id, None)
-            self.state.permission_resolved(tool_use_id)
-            await self._push_heartbeat()
-        return decision, source, elapsed
+        # The board has no decision surface any more — the swipe card is
+        # gone, so nothing can answer a prompt. Always defer to Claude Code's
+        # own permission flow rather than block the tool call waiting on a
+        # button that no longer exists. Placed after auto_allow so the matcher
+        # fast paths keep working.
+        log.info("pretooluse for %s (%s): no card → defer to default", tool_name, hint[:60])
+        self.audit.record(**audit_kwargs, decision=None, source="defer")
+        return {"ok": True}
 
     def _ensure_session(self, req: dict[str, Any]) -> None:
         """Register the session behind a hook event if we've never seen it.
@@ -1200,22 +1102,9 @@ class Daemon:
         if not self.ble.connected:
             self.audit.record(**audit_kwargs, decision=None, source="ble_disconnected")
             return {"ok": True}
-        if MONITOR_ONLY:
-            self.audit.record(**audit_kwargs, decision=None, source="monitor_only")
-            return {"ok": True}
-        # Card it. Show the path home-relative so the two hint lines carry
-        # the tail of the path, which is the part a human recognises.
-        home = str(Path.home())
-        shown = "~" + path[len(home):] if path.startswith(home) else path
-        decision, source, elapsed = await self._await_stick_decision(
-            session_id, tool_use_id, "Read", shown, cwd=cwd)
-        if decision == "allow" and scope is not None:
-            self._read_scopes.add(scope)
-            log.info("read scope granted for this daemon's lifetime: %s", scope)
-        self.audit.record(
-            **audit_kwargs, decision=decision, source=source, elapsed_s=elapsed,
-        )
-        return {"ok": True, "decision": decision}
+        # No card to show it on — defer to Claude Code's own flow.
+        self.audit.record(**audit_kwargs, decision=None, source="defer")
+        return {"ok": True}
 
     # ---- BLE handler ----
 
@@ -1279,94 +1168,33 @@ class Daemon:
             log.info("explore: called back by a double tap")
             await self._dismiss_explore("double tap")
             return
-        if cmd in ("focus", "key", "voice", "permission"):
+        if cmd in ("focus", "key"):
             # A touch on the board: the human is here, stop exploring — at
             # once, and even a manual explore, which ignores the idle clock.
-            # A `voice` message with on=false is the finger coming *off* (or a
-            # stale release after a reboot); only the press means someone is
-            # there, and a release must not end an explore nobody touched
-            # (bench 2026-09-06: a reboot's release stopped a manual explore
-            # seven seconds in).
-            touched = cmd != "voice" or bool(obj.get("on"))
-            if touched:
-                self._note_activity()
-                await self._dismiss_explore(f"touch ({cmd})")
+            self._note_activity()
+            await self._dismiss_explore(f"touch ({cmd})")
             # ... and a touch while buddy is in a conversation is "hush": the
             # conversation (and any task it is running) ends at once.
-            if cmd in ("focus", "voice", "key") and self._conversation is not None and not self._conversation.done():
+            if self._conversation is not None and not self._conversation.done():
                 log.info("ears: hushed by a touch (%s)", cmd)
                 await self._cancel_active_task("hushed by a touch")
                 self._conversation.cancel()
-                if cmd == "voice":
-                    return
         if cmd == "focus":
-            # Two senders, same verb. Swipe UP on the permission card carries
-            # the prompt id: raise the terminal of the session that is asking
-            # (the card stays pending — look-before-you-decide, not a
-            # decision). A tap on the pet in attention state carries no id:
-            # resolve the waiting session ourselves (oldest pending
-            # permission, else newest needs-input session).
+            # A tap on the pet in attention state: raise the terminal of the
+            # session that is waiting on the human (oldest pending permission,
+            # else newest needs-input session).
             from .focus_terminal import focus_session_terminal
-            cwd = self._pending_cwds.get(str(obj.get("id") or ""), "")
-            if not cwd:
-                cwd = self.state.attention_cwd()
+            cwd = self.state.attention_cwd()
             log.info("focus: requested for %r", cwd or "(unknown session)")
             asyncio.create_task(focus_session_terminal(cwd))
             return
         if cmd == "key":
             # Swipe-down on the pet → Enter on the host.
-            if self._voice is None:
-                from .voice_trigger import VoiceHold
-                self._voice = VoiceHold()
-            self._voice.tap(str(obj.get("name") or ""))
+            if self._keys is None:
+                from .key_tap import KeyTapper
+                self._keys = KeyTapper()
+            self._keys.tap(str(obj.get("name") or ""))
             return
-        if cmd == "voice":
-            # Hold-the-pet push-to-talk. start = finger settled on the pet,
-            # stop = release. The VoiceHold object is idempotent, and the
-            # status poller force-releases an overdue hold (lost stop event).
-            if self._voice is None:
-                from .voice_trigger import VoiceHold
-                self._voice = VoiceHold()
-            state = obj.get("state")
-            if state == "start":
-                self._voice.start()
-            elif state == "stop":
-                self._voice.stop()
-            else:
-                log.warning("voice: unknown state %r", state)
-            return
-        if cmd == "permission":
-            tool_use_id = obj.get("id")
-            decision = obj.get("decision")
-            if decision not in ("once", "always", "deny"):
-                log.warning("ignoring permission with unknown decision: %r", obj)
-                return
-            # "always" = approve AND stop carding this command shape for the
-            # daemon's lifetime (the card was held at the approve edge).
-            # Bash only — Read approvals already grant their whole scope.
-            # Registered BEFORE resolving the future, which clears the pending.
-            if decision == "always":
-                p = self.state.find_pending_by_id(str(tool_use_id or ""))
-                if p is not None and p.tool_name == "Bash" and p.hint:
-                    pattern = derive_always_pattern(p.hint)
-                    self._stick_always.append(re.compile(pattern))
-                    log.info("stick always-allow: %s (from %r)", pattern, p.hint[:60])
-            # Map the stick's once/always to Claude Code's "allow".
-            mapped = "deny" if decision == "deny" else "allow"
-            fut = self._permission_futures.get(tool_use_id or "")
-            if fut is not None and not fut.done():
-                log.info(
-                    "permission button press: id=%s → %s (stick sent %r)",
-                    tool_use_id, mapped, decision,
-                )
-                fut.set_result(mapped)
-            else:
-                log.info(
-                    "permission %s received for id=%s but no pending request (timed out or already resolved)",
-                    decision, tool_use_id,
-                )
-            return
-
         # Status acks come back from the device after we poll with {"cmd":"status"}.
         # Shape per REFERENCE.md: {"ack":"status","ok":true,"data":{"name","sec","bat":{...},"sys":{...},"stats":{...}}}.
         ack = obj.get("ack")
