@@ -505,14 +505,8 @@ def _fmt_photo(rec: Record) -> str:
     return f"[{rec.id}] {when:%a %H:%M} yaw={rec.yaw:+d} — {rec.caption or rec.thought}"
 
 
-def build_context(memory: Memory, when: datetime, yaw: int, pitch: int, guess_tags: set[str],
-                  heard: Optional[str] = None) -> str:
-    """The text the vision call gets alongside the photo (~2k tokens).
-
-    ``heard`` is one phrase about what the room sounded like while the head
-    was settling here (hearing.py), or None when buddy has no reading. It is
-    deliberately vague — buddy has a loudness number, not a classifier, and a
-    diary that guessed "a door" from a number would be inventing things."""
+def build_context(memory: Memory, when: datetime, yaw: int, pitch: int, guess_tags: set[str]) -> str:
+    """The text the vision call gets alongside the photo (~2k tokens)."""
     now_ts = when.timestamp()
     last3 = memory.written()[-3:]
     exclude = {r.id for r in last3}
@@ -530,9 +524,7 @@ def build_context(memory: Memory, when: datetime, yaw: int, pitch: int, guess_ta
         "MY ALBUM (pictures I already keep — do not ask for one of these again unless it changed):\n"
         + ("\n".join(_fmt_photo(r) for r in album(memory.records, now_ts)[-ALBUM_IN_CONTEXT:]) or "(no photos yet)"),
         f"NOW: {when:%A %H:%M}, head yaw={yaw:+d} pitch={pitch} (a low pitch looks down at the desk, "
-        f"a high one up at the room)."
-        + (f"\nWHAT YOU HEARD JUST NOW: {heard} (a loudness reading, not a recording — never guess what "
-           f"made the sound, but you may notice that there was one)." if heard else ""),
+        f"a high one up at the room).",
         ASK_FOR_JSON,
     ]
     return "\n\n".join(parts)
@@ -927,7 +919,7 @@ class DiaryTaker:
         # A first cheap guess at relevance for retrieval: the last note's tags.
         last = self.memory.written()[-1:]
         guess = set(last[0].tags) if last else set()
-        context = build_context(self.memory, when, note.yaw, note.pitch, guess, heard=note.heard)
+        context = build_context(self.memory, when, note.yaw, note.pitch, guess)
         loop = asyncio.get_running_loop()
         try:
             raw = await asyncio.wait_for(

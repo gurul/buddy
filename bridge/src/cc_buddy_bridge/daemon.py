@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import asyncio
-from dataclasses import replace
 import logging
 import os
 import re
@@ -52,7 +51,6 @@ from .protocol import (
     truncate_utf8_bytes,
 )
 from .read_policy import is_within, read_scope
-from .hearing import Hearing, parse as parse_sound
 from .thought_screen import ThoughtScreen
 from .state import State
 from .version_check import check as version_check
@@ -177,11 +175,6 @@ class Daemon:
         # What the room sounds like (hearing.py). The board reports a loudness
         # reading while it explores; a frame cannot tell a silent afternoon
         # from one where a door just banged.
-        self._room = Hearing()
-        self._room_logged_at = float("-inf")
-        # When the head arrived at the waypoint it is looking at now, so a
-        # thought is told what buddy heard while it was there, not an hour ago.
-        self._waypoint_since = 0.0
         # Monotonic time of the last thing a human or a session did: any hook
         # event, a board touch, the listen key. Idle time is measured from it.
         self._last_activity_at = time.monotonic()
@@ -664,15 +657,12 @@ class Daemon:
             if self.ble.connected:
                 await self.ble.send(build_mode_cmd(action.explore))
         elif isinstance(action, Look):
-            self._waypoint_since = time.monotonic()
             log.info("explore: look yaw=%+d pitch=%d", action.yaw, action.pitch)
             if self.ble.connected:
                 await self.ble.send(build_look_cmd(action.yaw, action.pitch, action.hold_ms))
         elif isinstance(action, Note):
             if self._notes is not None:
-                # What the room sounded like while the head was settling here.
-                heard = self._room.describe(time.monotonic(), since=self._waypoint_since)
-                asyncio.create_task(self._notes.take(replace(action, heard=heard)))
+                asyncio.create_task(self._notes.take(action))
         elif isinstance(action, Rest):
             # Nothing over the wire: the board stays in explore mode and
             # looks around on its own until the next pan cycle.
@@ -1250,19 +1240,6 @@ class Daemon:
             if self._explorer.active:
                 self._explore_raw_frame = frame
             await self._vision.on_frame(frame)
-            return
-        sound = obj.get("sound")
-        if isinstance(sound, dict):
-            reading = parse_sound(sound, time.monotonic())
-            if reading is not None:
-                self._room.hear(reading)
-                # One line a minute, like the vision stats: enough to see the
-                # ear is alive without a log full of loudness numbers.
-                now = time.monotonic()
-                if now - self._room_logged_at >= 60.0:
-                    self._room_logged_at = now
-                    log.info("ear: rms %d peak %d (this room's quiet is %d)",
-                             reading.rms, reading.peak, reading.quiet)
             return
         diag = obj.get("diag")
         if isinstance(diag, dict):

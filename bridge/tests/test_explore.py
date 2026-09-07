@@ -18,7 +18,6 @@ import pytest
 
 from cc_buddy_bridge import explore
 from cc_buddy_bridge.caption_pager import CaptionPager
-from cc_buddy_bridge.hearing import Hearing
 from cc_buddy_bridge.explore import (
     LOOK_INTERVAL_SECS,
     PAN_PITCHES,
@@ -579,8 +578,6 @@ def _daemon(connected: bool = True, running: int = 0, waiting: int = 0, pending:
         _explore_raw_frame=None,
     )
     d._thought_pager = CaptionPager()
-    d._room = Hearing()
-    d._waypoint_since = 0.0
     d._on_caption = lambda msg: d.ble.sent.append(msg)
     for name in ("_note_activity", "_idle_secs", "_explore_step", "_run_explore_action", "_stop_explore",
                  "_request_explore", "_dismiss_explore", "_clear_thought", "_flush_thought_pager",

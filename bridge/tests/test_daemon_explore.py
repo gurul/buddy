@@ -12,7 +12,6 @@ from types import MethodType, SimpleNamespace
 
 from cc_buddy_bridge import daemon as daemon_mod
 from cc_buddy_bridge.caption_pager import CaptionPager
-from cc_buddy_bridge.hearing import Hearing
 from cc_buddy_bridge.diary import Thought
 from cc_buddy_bridge.thought_screen import ThoughtScreen
 from cc_buddy_bridge.daemon import Daemon
@@ -77,9 +76,6 @@ def _daemon(connected: bool = True, pending: int = 0, listen_sent=None, enabled:
     )
     d._thought_pager = CaptionPager()
     d._screen = ThoughtScreen()
-    d._room = Hearing()
-    d._room_logged_at = float("-inf")
-    d._waypoint_since = 0.0
     for name in ("_note_activity", "_idle_secs", "_explore_step", "_run_explore_action", "_stop_explore",
                  "_request_explore", "_dismiss_explore", "_clear_thought", "_flush_thought_pager",
                  "_show_thought", "_handle_ipc", "_handle_ble", "_on_wake",
@@ -488,18 +484,7 @@ def test_the_screen_is_cleared_when_the_explore_ends() -> None:
     asyncio.run(go())
 
 
-# ---- the ear, and being called back by hand ------------------------------------------------
-
-def test_a_sound_line_is_remembered_and_never_reaches_the_face_tracker() -> None:
-    async def go():
-        d = _snap_daemon()
-        await d._handle_ble({"sound": {"rms": 40, "peak": 62, "quiet": 18}})
-        assert d._room.latest is not None and d._room.latest.peak == 62
-        assert d.stream_frames == []
-        await d._handle_ble({"sound": {"rms": "loud"}})     # malformed: ignored, not fatal
-        assert len(d._room.readings) == 1
-    asyncio.run(go())
-
+# ---- being called back by hand ---------------------------------------------------------------
 
 def test_a_double_tap_on_the_screen_calls_buddy_back() -> None:
     async def go():
