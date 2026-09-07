@@ -763,6 +763,18 @@ image line under the diary line, which is itself unchanged:
   ![](photos/2026-09-06/141207-118.jpg)
 ```
 
+When a photo is kept, buddy looks at it properly: the full-size picture goes
+back at high detail and it works out what is actually in the frame, replacing
+the caption, the tags and (when it says so) the sentence it guessed from the
+thumbnail. The pan itself stays cheap.
+
+buddy also puts its thoughts on its own screen while it explores, but not all
+of them — a screen on a desk is a claim on your attention in a way a memory file
+is not. A thought reaches it only if it is interesting on its own terms, is not
+about the thing buddy just talked about, and enough quiet has passed: at most
+one every four minutes and six an hour. Pat the robot on the head to call it
+back from exploring.
+
 A photo always earns its diary line, even when the write gate would not have.
 Habituation stops repeats: the same picture again is refused, each earlier photo
 of the same subject is worth less than the last, and a spot goes dull for a few

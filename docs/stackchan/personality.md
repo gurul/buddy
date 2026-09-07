@@ -260,6 +260,19 @@ own output is not calibrated. Vector, the closest commercial relative, only ever
 took a photo when told to (Digital Dream Labs KB, *Photos taken by Vector*, 2020);
 this is the same feature with the shutter on the robot's own judgment.
 
+**A second look, once it has the real picture.** The thought buddy forms while
+panning comes from the 160x120 streamed frame at the API's coarsest image
+setting: enough to notice that something changed, not enough to say what it is.
+On the bench a sewing machine across the room came back as "a white object".
+So the pan stays cheap and the thinking happens afterwards: when a photo clears
+the cool factor, buddy sends that full-size picture back at high detail and asks
+what is actually there. It replaces the caption, the tags and, when it says it
+is confident, the diary sentence itself. Being allowed to look and still be
+unsure is part of the deal — the prompt asks it to say what something resembles
+rather than invent a specific object, and an unconfident answer leaves the
+first thought standing. A failed second look costs nothing: the photo is kept
+and the glance's sentence is written.
+
 **Where a photo lives.** `photos/YYYY-MM-DD/HHMMSS-<record id>.jpg` under the notes
 directory, with the path in `memory.jsonl` and an indented Markdown image line
 under the diary line:

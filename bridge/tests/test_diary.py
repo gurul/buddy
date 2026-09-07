@@ -42,11 +42,14 @@ def _reply(thoughts, novelty=6, importance=3, valence=20, arousal=30, label="cur
 
 
 class FakeClient:
-    def __init__(self, replies: list[str], reflection: str | None = None) -> None:
+    def __init__(self, replies: list[str], reflection: str | None = None,
+                 examination: str | None = None) -> None:
         self.replies = list(replies)
         self.reflection = reflection
+        self.examination = examination
         self.contexts: list[str] = []
         self.reflect_prompts: list[str] = []
+        self.examine_contexts: list[str] = []
 
     def think(self, image: bytes, mime: str, context: str) -> str:
         self.contexts.append(context)
@@ -59,6 +62,13 @@ class FakeClient:
         if self.reflection is None:
             raise RuntimeError("no reflection")
         return self.reflection
+
+    def examine(self, image: bytes, mime: str, context: str) -> str:
+        """The second, unhurried look at a photo buddy kept."""
+        self.examine_contexts.append(context)
+        if self.examination is None:
+            raise RuntimeError("no examination")
+        return self.examination
 
 
 class Clock:
@@ -652,14 +662,94 @@ def test_the_context_asks_for_json_in_the_input_itself(tmp_path: Path) -> None:
 
 def test_every_json_call_says_json_in_its_own_input(tmp_path: Path) -> None:
     """The Responses API refuses `json_object` unless the word is in the input
-    messages; the instructions do not count. Both calls build their input
-    separately, so both have to carry it (bench 2026-09-06: the thought path
-    was fixed and the dreams path went on failing for hours)."""
+    messages; the instructions do not count. Each call builds its input in a
+    different place, and all three were caught by this in turn on 2026-09-06 —
+    the thought, then the dreams pass hours later, then the closer look at a
+    photo. This test covers every input the diary builds."""
     clock = Clock(datetime(2026, 9, 6, 21, 30))
-    client = FakeClient([_reply([("A thing happened.", 0.3)])],
-                        reflection=json.dumps({"insights": ["i"], "profile": "", "star_candidates": []}))
-    t = _taker(tmp_path, client, clock)
-    asyncio.run(t.take(Note(_frame(), 0, 40)))
-    assert "json" in client.contexts[0].lower()
+    client = FakeClient([_exciting()],          # must clear the photo gate, or examine never runs
+                        reflection=json.dumps({"insights": ["i"], "profile": "", "star_candidates": []}),
+                        examination=json.dumps({"sees": ["a thing"], "caption": "c", "thought": "t",
+                                                "objects": ["thing"], "confident": True}))
+
+    async def snapshot() -> Frame:
+        return _jpeg_frame()
+
+    t = _photo_taker(tmp_path, client, clock, snapshot=snapshot)
+    asyncio.run(t.take(_note()))
     asyncio.run(t.reflect(clock.now))
-    assert client.reflect_prompts and "json" in client.reflect_prompts[0].lower()
+    inputs = {"think": client.contexts, "reflect": client.reflect_prompts, "examine": client.examine_contexts}
+    for name, sent in inputs.items():
+        assert sent, f"the {name} call was never made, so this proves nothing"
+        assert "json" in sent[0].lower(), name
+
+
+# ---- the second look: what it works out once it has the real picture ---------------------------
+
+def _examination(caption="the sewing machine has moved again", thought="Somebody threaded that sewing machine since Tuesday.",
+                 sees=("a sewing machine on a side table", "a dark couch along the right wall"),
+                 objects=("sewing machine", "couch", "side table"), confident=True) -> str:
+    return json.dumps({"sees": list(sees), "caption": caption, "thought": thought,
+                       "objects": list(objects), "confident": confident})
+
+
+def _looker(tmp: Path, clock: Clock, examination: str | None) -> tuple[DiaryTaker, FakeClient]:
+    client = FakeClient([_exciting()], examination=examination)
+
+    async def snapshot() -> Frame:
+        return _jpeg_frame()
+
+    return _photo_taker(tmp, client, clock, snapshot=snapshot), client
+
+
+def test_a_kept_photo_is_looked_at_properly_and_the_guess_is_replaced(tmp_path: Path) -> None:
+    clock = Clock(datetime(2026, 9, 6, 14, 0))
+    t, client = _looker(tmp_path, clock, _examination())
+    path = asyncio.run(t.take(_note()))
+    rec = t.memory.records[0]
+    assert t.photographed == 1 and t.examined == 1
+    # It now knows what the thing is, and says so.
+    assert rec.caption == "the sewing machine has moved again"
+    assert rec.thought == "Somebody threaded that sewing machine since Tuesday."
+    assert rec.observations[0] == "a sewing machine on a side table"
+    assert rec.tags[:2] == ["sewing machine", "couch"]        # named things lead, for retrieval
+    # ... and the diary line is the corrected sentence, not the glance.
+    assert "sewing machine" in path.read_text()
+    # The look was given what it thought before, so it can improve on it.
+    assert "when you glanced" in client.examine_contexts[0]
+
+
+def test_it_does_not_overwrite_a_thought_it_is_unsure_about(tmp_path: Path) -> None:
+    """Being allowed to look and still not be sure is the point; a guess
+    dressed up as a second opinion would be worse than the first one."""
+    clock = Clock(datetime(2026, 9, 6, 14, 0))
+    t, _ = _looker(tmp_path, clock, _examination(thought="Maybe a lamp, maybe not.", confident=False))
+    asyncio.run(t.take(_note()))
+    rec = t.memory.records[0]
+    assert rec.thought == "Someone brought a plant to my desk."   # the glance stands
+    assert rec.caption == "the sewing machine has moved again"    # ... but the caption still improves
+    assert t.examined == 1
+
+
+def test_a_failed_second_look_never_costs_the_thought_or_the_photo(tmp_path: Path, caplog) -> None:
+    clock = Clock(datetime(2026, 9, 6, 14, 0))
+    t, _ = _looker(tmp_path, clock, None)                        # examine() raises
+    with caplog.at_level(logging.INFO):
+        path = asyncio.run(t.take(_note()))
+    rec = t.memory.records[0]
+    assert path is not None and rec.photo and t.photographed == 1
+    assert t.examined == 0
+    assert rec.thought == "Someone brought a plant to my desk."
+    assert (t.notes_dir / rec.photo).read_bytes() == JPEG
+    assert any("could not look closer" in r.message for r in caplog.records)
+
+
+def test_the_pan_itself_stays_cheap(tmp_path: Path) -> None:
+    """Exploring is unchanged: the thinking call still gets the small streamed
+    frame, and nothing is examined unless a photo was actually kept."""
+    clock = Clock(datetime(2026, 9, 6, 14, 0))
+    client = FakeClient([_reply_photo(want=0.1, novelty=4, importance=2)], examination=_examination())
+    t = _photo_taker(tmp_path, client, clock)
+    asyncio.run(t.take(_note(surprise=0.5)))
+    assert t.photographed == 0 and t.examined == 0
+    assert client.examine_contexts == []
