@@ -63,7 +63,7 @@ saturation 0.4 + 0.5·|v|, brightness 0.3 + 0.6·(a + 1)/2, pulse 0.25 / 0.5 /
 2.5 Hz; look-around amplitude 30 + 15·a degrees, tempo 1 + 0.6·a. One chirp per
 kind change, at most one every 8 s.
 
-**Where it shows.** Only while exploring, and never over a permission card, the
+**Where it shows.** Only while exploring, and never over the
 listening pose, the attention state, or an agent phase. The engine integrates all
 the time, so a startle right before a conversation is still felt afterwards.
 

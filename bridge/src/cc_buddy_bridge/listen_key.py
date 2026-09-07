@@ -15,7 +15,7 @@ Two halves, kept apart so the state machine is testable without a Mac:
 * ``start_listen_key`` — Quartz. A listen-only CGEventTap for flagsChanged
   runs on its own daemon thread and marshals flags to the asyncio loop.
 
-Synthetic Option presses posted by voice_trigger.py (hold-the-pet
+Synthetic Option presses posted by key_tap.py (swipe-to-key
 push-to-talk) hit the same tap. That is intended: the board shows the same
 listening pose whether the hold came from the keyboard or the pet.
 
@@ -34,7 +34,7 @@ import threading
 import time
 from typing import Callable, Optional
 
-from .voice_trigger import FLAG_ALTERNATE, FLAG_SECONDARY_FN
+from .key_tap import FLAG_ALTERNATE, FLAG_SECONDARY_FN
 
 log = logging.getLogger(__name__)
 

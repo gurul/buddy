@@ -26,9 +26,8 @@ daemon ─{"cmd":"agent","state":…}─▶ robot: wake · listening · thinking
 
 1. **Wake.** The daemon keeps one microphone stream open and runs every 100 ms block
    through a streaming keyword spotter. On "hey buddy" the robot's head comes up
-   with a chirp (`wake`) and a conversation opens. A wake is ignored while you are
-   holding the dictation key, while a conversation is already open, or while a
-   permission card is waiting on the board.
+   with a chirp (`wake`) and a conversation opens. A wake is ignored while a
+   conversation is already open.
 2. **Talk.** A Realtime session (`gpt-realtime-2.1-mini`, semantic turn detection)
    hears the same microphone. **buddy does not speak through the Mac**: the model
    answers in text, and each reply is shown as pages of 4 lines x 17 characters in
@@ -80,7 +79,7 @@ daemon ─{"cmd":"agent","state":…}─▶ robot: wake · listening · thinking
    conversation like `end_conversation`; once the robot has dropped the conversation
    pose the daemon starts a manual explore — the same pan-and-diary loop it runs
    when Claude has been idle, but right now and for as long as you leave it (a
-   touch, a card, the listen key, the next wake word or `cc-buddy-bridge explore
+   touch, the listen key, the next wake word or `cc-buddy-bridge explore
    stop` end it). Refused while a task is running: stop the task first. The same
    thing from the shell is `cc-buddy-bridge explore`.
 

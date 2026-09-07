@@ -8,7 +8,7 @@ touch pet and the CrowPanel e-ink builds — keep their design notes in
 
 `firmware/claude_pet_stackchan` — third board, same NDJSON protocol, same
 `data.h`. Unlike the e-ink remake this is the pet build with a new
-`board_compat` layer: the sprite/HUD/card pipeline is unchanged, the ASCII
+`board_compat` layer: the sprite/HUD pipeline is unchanged, the ASCII
 species and GIF renderer still compile but are not drawn, and the face is
 FluxGarage RoboEyes. Full reference: `docs/stackchan/build.md`.
 
@@ -34,7 +34,7 @@ this link).
 | Single WS2812 | `body.cpp` LED table through `ledSet()` (unchanged colours skip the I2C write) |
 | `M5.Beep` stub | `chirp.cpp`: R2D2 phrases synthesized to 8-bit PCM at 16 kHz in PSRAM, `M5.Speaker.playRaw()` |
 | No body | `body.cpp`: keyframe sequences per state, `easeInOutCubic` tween streamed at 25 Hz over the BSP spring (auto-angle-sync off), micro-drift while awake, torque release at rest |
-| Touch strip BtnB | also the back top zone; front zone tap = pet tap; middle zone hold 600 ms = push-to-talk |
+| Touch strip BtnB | also the back top zone; front zone tap = pet tap |
 | `M5.Rtc` | BM8563 through `halRtcGet/Set`, system clock fallback |
 | `derive()` | Claude idle → SLEEP, any session running → BUSY, waiting → ATTENTION; IDLE means "no daemon" |
 
@@ -53,7 +53,7 @@ static init handed the sprite a null parent and boot-looped the first flash.
 - Camera HFOV 66° is an assumption. `kYawSign` +1 verified (head follows the
   hand); `kElevSign` is unverified.
 - Top touch is armed 3 s after boot: the Si12T baseline is stale while the
-  servo rail rises (a phantom middle-zone hold fired push-to-talk at boot).
+  servo rail rises (the middle zone read pressed at boot).
 - Pitch is clamped to 5..85 (M5Stack's advice), yaw to ±60 for the cable loom.
 
 ### Gaze policy (`gaze.cpp`)
@@ -67,7 +67,7 @@ search sweep (pitch 45 then 65, yaw -40..40) every 5 s until a live target is
 younger than 5 s. BUSY/IDLE glance only (8° deadband, every 3 s). An
 `unknown` face gets a glance and never trains memory. SLEEP and one-shots
 never move for the camera. `look` from the host is honoured in
-SLEEP/IDLE/BUSY only, never with a card up or the owner wanted.
+SLEEP/IDLE/BUSY only, never while the owner is wanted.
 
 ### Wire additions
 

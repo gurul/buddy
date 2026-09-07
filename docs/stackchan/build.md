@@ -75,7 +75,7 @@ tick: two 96x96 eyes, radius 22, 36 px apart. The eye colour is a random HSV
 hue per boot (printed as `[eyes] colour #RRGGBB`; `EYE_COLOUR_OVERRIDE` in
 `src/eyes.h` fixes it). One status word sits under the eyes in the same
 colour. No clock. The ASCII species and GIF renderer compile but are not
-drawn. A permission card owns y >= 126, so the eyes park on the top row.
+drawn. A caption page owns y >= 112, so the eyes park on the top row.
 
 ## States
 
@@ -90,7 +90,7 @@ connected → IDLE (awake, looking around).
 | CELEBRATE | session completed | quick yaw shake, 0.6 s | HAPPY, laugh | green | trill |
 | HEART | head pat (front zone) | tilt toward the toucher, pitch +8 | HAPPY, curiosity | pink | trill |
 | DIZZY | (kept from the pet build) | 1.2 s yaw wobble | flicker, confused | off | wobble |
-| Listening | Option held on the Mac, or a push-to-talk hold | toward a toucher seen in the last 30 s, else centre; pitch 60 | wide (110 px) | blue (mic live) | one short up-chirp |
+| Listening | Option held on the Mac | toward a toucher seen in the last 30 s, else centre; pitch 60 | wide (110 px) | blue (mic live) | one short up-chirp |
 | Explore | `{"cmd":"mode","explore":true}` | host `look`s when held; otherwise looks around on its own — amplitude, tempo and a pitch bias follow the affect engine (`mood.cpp`) | openness, smile/droop, curiosity, blink and saccade tempo from the feeling | the feeling's colour and pulse (0.25 / 0.5 / 2.5 Hz) | one chirp per feeling change |
 | Agent phases | `{"cmd":"agent","state":..}` | listening: faces you · thinking: tilted, slow side-to-side · speaking: bobs · working: down at the desk, typing glances · asking: up · done: nod · error: wobble | per phase ([personality.md](personality.md) § 2) | animations over the two back rows: blue wave · cyan scanner · white sparkle · cyan ripple · orange alternating · green sweep · red flash | wake / talk babble / "hm?" / beep-boop / boop |
 
@@ -105,24 +105,23 @@ depend on the servo zero (NVS `servo/zero_pos_2`): bench-tune them.
 Chirps (`src/chirp.cpp`) are synthesized to 8-bit PCM at 16 kHz into two 32 KB
 PSRAM buffers and played through `M5.Speaker.playRaw()`; nothing blocks. Top
 touch is armed 3 s after boot: the Si12T baseline is stale while the servo
-rail comes up (the middle zone read pressed at boot, a phantom push-to-talk).
+rail comes up (the middle zone read pressed at boot, a phantom hold).
 
 ## Controls
 
-| Input | No card up | Card showing |
-|---|---|---|
-| Swipe card right / left | — | approve / deny. Hold at the right edge 700 ms = ALWAYS |
-| Tap the panel (attention only) | raise the blocked session's terminal | — |
-| Hold the panel | push-to-talk: the daemon holds the dictation hotkey | — |
-| Swipe down | Enter on the Mac | — |
-| Swipe left / right | previous / next option in Claude Code's pickers | — |
-| Bottom-right strip | scroll back through the transcript | — |
-| **Front zone** tap (< 450 ms) | attention: focus terminal. Otherwise HEART one-shot | — |
-| **Middle zone** hold (≥ 600 ms) | push-to-talk, same events as the panel hold | — |
-| **Back zone** | same as the bottom-right strip | — |
+| Input | What it does |
+|---|---|
+| Tap the panel (attention only) | raise the blocked session's terminal |
+| Swipe down | Enter on the Mac |
+| Swipe left / right | previous / next option in Claude Code's pickers |
+| Bottom-right strip | scroll back through the transcript |
+| **Front zone** tap (< 450 ms) | attention: focus terminal. Otherwise HEART one-shot |
+| **Back zone** | same as the bottom-right strip |
 
-With `CC_BUDDY_MONITOR_ONLY=1` (the setup on this machine) no card reaches the
-robot, so only the "No card up" column applies.
+The permission swipe card and hold-to-talk are both gone (owner request). The
+board decides nothing: every permission defers to Claude Code's own terminal
+prompt, and a hold on the pet is read and discarded. A touch during a
+conversation still hushes it.
 
 ## Gaze policy
 
@@ -142,14 +141,14 @@ Owner wanted (ATTENTION or listening): live target → remembered spot →
 **search sweep**, two rows (pitch 45 then 65, yaw -40..40, ~4.3 s), repeated
 every 5 s while no live target is younger than 5 s. BUSY/IDLE only glance:
 8° deadband, at most every 3 s, 3 s hold. SLEEP and the one-shots observe but
-never move. `{"cmd":"look"}` is honoured in SLEEP/IDLE/BUSY only, never with a
-card up or while the owner is wanted. `{"cmd":"owner","op":"reset"}` wipes the
+never move. `{"cmd":"look"}` is honoured in SLEEP/IDLE/BUSY only, never while the owner
+is wanted. `{"cmd":"owner","op":"reset"}` wipes the
 memory. Geometry: camera HFOV assumed 66°, VFOV 3/4 of that; `kYawSign` +1
 (bench: the head follows the hand); `kElevSign` is **unverified**.
 
 ## Wire additions
 
-Every other verb is the pet build's (`time`, `status`, `permission`, `focus`, `key`, `voice`).
+Every other verb is the pet build's (`time`, `status`, `focus`, `key`).
 
 | Direction | Line | Purpose |
 |---|---|---|
@@ -176,18 +175,17 @@ cd bridge && .venv/bin/cc-buddy-bridge install                       # hooks
 .venv/bin/cc-buddy-bridge install --notes-widget                     # optional pyobjc panel at login
 ```
 
-Then add `CC_BUDDY_MONITOR_ONLY=1` to `EnvironmentVariables` in
-`~/Library/LaunchAgents/com.github.cc-buddy-bridge.daemon.plist`: Claude Code
-runs with `permissions.defaultMode = bypassPermissions` here, so a card on the
-robot would be a second gate; taps only focus the terminal.
+The board never gates a permission — the swipe card is gone, so every prompt
+defers to Claude Code's own terminal prompt and taps only focus the terminal.
+(`CC_BUDDY_MONITOR_ONLY` used to force this and is no longer read.)
 `~/.config/cc-buddy-bridge/matchers.toml` has `replace_defaults = true` and an
 empty `always_ask`, so no Bash command is routed to the board either.
 
 The launchd daemon does not read `.zshrc`: put `OPENAI_API_KEY=sk-...` in
 `~/.config/cc-buddy-bridge/env` (mode 600); a value already in the environment
 wins. The daemon's python needs **Input Monitoring** (listen key) and
-**Accessibility** (Enter, and push-to-talk if you opt in with
-`CC_BUDDY_VOICE_HOTKEY`; it is off by default); the startup log names the binary.
+**Accessibility** (the Enter/arrow taps a swipe sends); the startup log names
+the binary.
 Reload the plist with `launchctl unload` + `load -w`, not `kickstart`.
 
 Knobs (all in `bridge/README.md`): `CC_BUDDY_LISTEN_KEY` (`option`, `fn`,
@@ -219,7 +217,7 @@ You can also send it off by hand: `cc-buddy-bridge explore` (`status`, `stop`)
 over IPC (`{"evt":"explore","action":"start|stop|status"}`), or say
 *"hey buddy, go explore"* — the voice tool `go_explore` ends the conversation and the daemon
 starts the explore once the board has left the conversation pose. A manual
-explore ignores the idle clock; a touch, a card, the listen key, the next wake
+explore ignores the idle clock; a touch, the listen key, the next wake
 word, a disconnect or `explore stop` ends it. `CC_BUDDY_EXPLORE=0` only turns
 off the idle start.
 

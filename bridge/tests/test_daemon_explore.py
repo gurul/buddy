@@ -154,8 +154,9 @@ def test_ipc_start_works_when_the_idle_start_is_disabled() -> None:
 def test_a_touch_ends_a_manual_explore_at_once() -> None:
     async def go():
         d = _daemon()
+        d._keys = SimpleNamespace(tap=lambda name: None)
         await d._handle_ipc({"evt": "explore", "action": "start"})
-        await d._handle_ble({"cmd": "voice", "on": True})
+        await d._handle_ble({"cmd": "key", "name": "enter"})
         assert d._explorer.state == "off" and not d._explorer.manual
         assert d.ble.sent[-1] == MODE_OFF
         # the idle clock restarted: the next tick does not resume
@@ -169,8 +170,9 @@ def test_a_touch_during_a_conversation_hushes_and_ends_the_explore() -> None:
         d = _daemon()
         conv = _Conversation()
         d._conversation = conv
+        d._keys = SimpleNamespace(tap=lambda name: None)
         await d._handle_ipc({"evt": "explore", "action": "start"})
-        await d._handle_ble({"cmd": "voice", "on": True})
+        await d._handle_ble({"cmd": "key", "name": "enter"})
         assert conv.cancelled and d._explorer.state == "off"
         assert d.ble.sent[-1] == MODE_OFF
     asyncio.run(go())
@@ -349,29 +351,12 @@ def test_stream_frames_still_go_to_the_tracker_and_bad_snaps_are_none() -> None:
     asyncio.run(go())
 
 
-def test_a_voice_release_does_not_end_an_explore_nobody_touched() -> None:
-    """The board sends {"cmd":"voice","on":false} when a finger comes off, and
-    a stale one arrives after a reboot. Only the press means the human is here
-    (bench 2026-09-06: a release stopped a manual explore seven seconds in)."""
-    async def go():
-        d = _daemon()
-        await d._handle_ipc({"evt": "explore", "action": "start"})
-        await d._handle_ble({"cmd": "voice", "on": False})
-        assert d._explorer.active and d._explorer.manual
-        assert MODE_OFF not in d.ble.sent
-        await d._handle_ble({"cmd": "voice", "on": True})       # a real touch
-        assert d._explorer.state == "off"
-        assert d.ble.sent[-1] == MODE_OFF
-    asyncio.run(go())
-
-
 def test_every_other_board_touch_still_ends_it() -> None:
-    """focus / key / permission carry no on-flag: any of them is the human."""
+    """focus / key: either one is the human, so either ends the explore."""
     async def go():
-        for cmd in ({"cmd": "focus"}, {"cmd": "key", "name": "enter"}, {"cmd": "permission", "id": "x"}):
+        for cmd in ({"cmd": "focus"}, {"cmd": "key", "name": "enter"}):
             d = _daemon()
-            d._pending_cwds = {}
-            d._voice = SimpleNamespace(start=lambda: None, stop=lambda: None, tap=lambda name: None)
+            d._keys = SimpleNamespace(tap=lambda name: None)
             await d._handle_ipc({"evt": "explore", "action": "start"})
             try:
                 await d._handle_ble(cmd)
@@ -477,7 +462,8 @@ def test_the_screen_is_cleared_when_the_explore_ends() -> None:
         d._show_thought(_thought("Half-read when the human walks in."))
         await asyncio.sleep(0)
         assert _captions(d)
-        await d._handle_ble({"cmd": "voice", "on": True})       # a touch ends it
+        d._keys = SimpleNamespace(tap=lambda name: None)
+        await d._handle_ble({"cmd": "key", "name": "enter"})     # a touch ends it
         await asyncio.sleep(0)                                  # _on_caption sends on a task
         assert {"cmd": "caption", "clear": True} in _captions(d)
         assert _captions(d)[-1] == {"cmd": "caption", "clear": True}

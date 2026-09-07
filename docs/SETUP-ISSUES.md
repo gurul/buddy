@@ -8,6 +8,13 @@ identified it. The common thread: **every one of these fails silently.** Nothing
 crashed, nothing printed an error at the point of failure — the pet just sat
 there working-but-inert, which is the hardest possible thing to debug.
 
+> **Since recorded:** hold-the-pet push-to-talk and the permission swipe card
+> were both removed (owner request). Issues **3, 5, 6, 7, 8 and 9** are about
+> the push-to-talk hotkey and are now moot — kept as a record of what the
+> machine did, not as open work. `voice_trigger.py` is now `key_tap.py` and
+> `voice-check` is now `key-check`; the Accessibility findings still apply to
+> the swipe-to-key path, which is the only thing that still synthesizes keys.
+
 ---
 
 ## 1. `install --service` silently defaults to BLE
@@ -54,7 +61,7 @@ is what essentially every user wants); or print a loud "hooks NOT installed — 
 
 ---
 
-## 3. `voice-check` reports a trust result that does not apply to the daemon
+## 3. `key-check` (then `voice-check`) reports a trust result that does not apply to the daemon
 
 **Severity: high — this one actively sent debugging in the wrong direction.**
 
@@ -117,7 +124,7 @@ wherever a config change is involved, and correct the `voice-check` FIX text.
 
 ## 5. No way to persist the voice hotkey through `install --service`
 
-**Severity: medium**
+**Severity: medium — MOOT: push-to-talk removed, the hotkey no longer exists.**
 
 `--serial-port` is bakeable into the service; the voice hotkey is not
 (`_service_launchd.py:51-54`). Setting it requires hand-editing the plist, and
@@ -201,7 +208,7 @@ silent failure here.
 
 ## 9. `DEFAULT_HOTKEY` contradicts its own docstring
 
-**Severity: trivial**
+**Severity: trivial — MOOT: the hotkey table was removed with push-to-talk.**
 
 `voice_trigger.py:9-11` states *"`fn` for Willow Voice (default)"*, but
 `DEFAULT_HOTKEY == "option"`. One of the two is wrong. (Empirically on this

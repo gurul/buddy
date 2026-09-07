@@ -1,38 +1,23 @@
-"""Hold-the-pet push-to-talk: synthesize a global dictation-hotkey hold.
+"""Tap one allowlisted key on the host, on request from the board.
 
-The stick sends {"cmd":"voice","state":"start"} when a finger settles on the
-pet for 600ms and "stop" on release. Push-to-talk dictation apps record while
-their global hotkey is held and paste on release — so the bridge simply holds
-that hotkey between the two events: finger down = key down, finger up = key
-up, dictation lands wherever the cursor is.
+A swipe on the pet sends {"cmd":"key","name":"enter"|"next"|"prev"} and the
+bridge synthesizes that single keystroke, so Claude Code's option pickers can
+be answered without reaching for the keyboard.
 
-Which hotkey is configurable (CC_BUDDY_VOICE_HOTKEY), because it is a property
-of the dictation app, not of the pet. The default is `option` — a bare Option
-hold — and it is the one to prefer: Option is an ordinary modifier, so it
-synthesizes reliably through CGEventPost, and every dictation app worth using
-can be rebound to it. Prefer rebinding the app over changing this.
+Hold-the-pet push-to-talk used to live here too — a finger on the pet held a
+dictation app's global hotkey. It is gone (owner request): the board no longer
+sends voice frames, and nothing here holds a modifier down any more. What is
+left is the tap, which is bounded, idempotent and cannot stick a key.
 
-The alternatives exist for apps that cannot be rebound: `opt-space` (VoiceFlow's
-stock chord) and `fn`. Avoid `fn` where you can — it is a secondary-fn modifier
-that many apps read straight from raw HID, so a synthesized fn is simply not
-seen. See HOTKEYS.
+Mechanics: Quartz CGEventPost at the HID tap. Taps use a NULL event source —
+with a real source, Warp's global key handling swallowed Return before the
+focused app saw it. CC_BUDDY_KEY_SOURCE=hid forces the real source if some
+other app ever needs the opposite, and CC_BUDDY_KEY_METHOD=osascript routes
+through System Events instead (Warp ignores CGEventPost synthetics).
 
-Mechanics: Quartz CGEventPost at the HID tap, from a real HIDSystemState
-event source — events built with a NULL source carry no keyboard state and
-apps drop them. Chord keys press in order and release in reverse.
-
-Stuck-key safety, because a system-wide held modifier is genuinely
-disruptive (fn or Option stuck down breaks typing everywhere):
-
-* a watchdog force-releases after MAX_HOLD_SECS if the stop event never
-  arrives (serial died mid-hold, board reset while recording);
-* release() is idempotent and runs unconditionally at daemon shutdown.
-
-Requires macOS Accessibility permission for the daemon's python — the first
-start attempts AXIsProcessTrustedWithOptions with the system prompt enabled,
-and posts nothing until trust is granted (CGEventPost is silently filtered
-for untrusted processes, so without the check the feature would just
-mysteriously do nothing).
+Requires macOS Accessibility permission for the daemon's python — CGEventPost
+is silently filtered for untrusted processes, so without the check the feature
+would just mysteriously do nothing.
 """
 
 from __future__ import annotations
@@ -45,47 +30,13 @@ from typing import Callable, Optional
 
 log = logging.getLogger(__name__)
 
-KEY_SPACE = 49     # kVK_Space
-KEY_OPTION = 58    # kVK_Option
 KEY_RETURN = 36    # kVK_Return
-KEY_FUNCTION = 63  # kVK_Function — the fn key
-MAX_HOLD_SECS = 60.0
 
 # Event flag masks (Quartz constants, hardcoded so the module imports on
-# non-mac hosts for testing).
+# non-mac hosts for testing). Read by listen_key.py, which watches for a real
+# Option press rather than synthesizing one.
 FLAG_ALTERNATE = 0x00080000   # kCGEventFlagMaskAlternate
 FLAG_SECONDARY_FN = 0x00800000  # kCGEventFlagMaskSecondaryFn
-
-# Push-to-talk chords, as ordered (keycode, flags) pairs pressed in sequence
-# and released in reverse. Which dictation app you use decides the chord:
-#
-#   fn         Willow Voice, and macOS's own dictation — a bare fn hold. fn is
-#              a *secondary-fn modifier*, not an ordinary key, so the event
-#              must carry FLAG_SECONDARY_FN or listeners ignore it.
-#   opt-space  VoiceFlow. Option goes down as its own key event first so apps
-#              tracking the physical modifier (flagsChanged) see it, then
-#              Space carries the alternate flag for apps that read flags.
-HOTKEYS: dict[str, list[tuple[int, int]]] = {
-    # Bare Option hold — Willow Voice, once rebound off fn. An ordinary
-    # modifier, so unlike fn it synthesizes reliably.
-    "option": [(KEY_OPTION, FLAG_ALTERNATE)],
-    "fn": [(KEY_FUNCTION, FLAG_SECONDARY_FN)],
-    "opt-space": [(KEY_OPTION, 0), (KEY_SPACE, FLAG_ALTERNATE)],
-    # No chord at all: holding the pet never touches the keyboard, so buddy
-    # never starts your dictation app (and so never opens the mic). This is
-    # the default — push-to-talk is opt-in via CC_BUDDY_VOICE_HOTKEY.
-    "off": [],
-}
-DEFAULT_HOTKEY = "off"
-
-
-def _configured_hotkey() -> str:
-    name = (os.environ.get("CC_BUDDY_VOICE_HOTKEY") or DEFAULT_HOTKEY).strip().lower()
-    if name not in HOTKEYS:
-        log.warning("voice: unknown CC_BUDDY_VOICE_HOTKEY=%r; using %s",
-                    name, DEFAULT_HOTKEY)
-        return DEFAULT_HOTKEY
-    return name
 
 KEY_KEYPAD_ENTER = 76  # kVK_ANSI_KeypadEnter
 KEY_DOWN_ARROW = 125   # kVK_DownArrow
@@ -128,7 +79,7 @@ def _quartz_poster() -> Optional[Poster]:
         import Quartz
     except ImportError:
         log.warning(
-            "voice: pyobjc-framework-Quartz not installed — hold-the-pet "
+            "key: pyobjc-framework-Quartz not installed — swipe-to-key "
             "does nothing (pip install pyobjc-framework-Quartz)")
         return None
 
@@ -192,15 +143,11 @@ def _check_accessibility(prompt: bool = False) -> bool:
         return True
 
 
-class VoiceHold:
-    """One press-and-hold of Option+Space. Idempotent on both edges."""
+class KeyTapper:
+    """Synthesizes single keystrokes the board asks for. Stateless per tap."""
 
     def __init__(self, poster: Optional[Poster] = None,
-                 clock: Callable[[], float] = time.monotonic,
-                 trust_check: Optional[Callable[[], bool]] = None,
-                 hotkey: Optional[str] = None) -> None:
-        self._hotkey = (hotkey or _configured_hotkey())
-        self._chord = HOTKEYS[self._hotkey]
+                 trust_check: Optional[Callable[[], bool]] = None) -> None:
         # Injected poster (tests) skips the Accessibility machinery entirely;
         # the real Quartz poster gets the real trust check unless overridden.
         if poster is None:
@@ -209,67 +156,10 @@ class VoiceHold:
                 trust_check = _check_accessibility
         self._poster = poster
         self._trust_check = trust_check
-        self._clock = clock
-        self._held_since: Optional[float] = None
         self._prompted = False   # the system dialog is shown at most once
 
-    @property
-    def active(self) -> bool:
-        return self._held_since is not None
-
-    @property
-    def enabled(self) -> bool:
-        """False when the hotkey is ``off``: holds are logged and dropped."""
-        return bool(self._chord)
-
-    def start(self) -> bool:
-        if not self.enabled:
-            if not self._prompted:
-                log.info("voice: push-to-talk is off (set CC_BUDDY_VOICE_HOTKEY to "
-                         "option/opt-space/fn to let the pet hold your dictation key)")
-                self._prompted = True
-            return False
-        if self._poster is None:
-            return False
-        if self.active:
-            return True
-        if self._trust_check is not None:
-            # Silent check every attempt; the modal dialog only the first time.
-            try:
-                ok = self._trust_check(prompt=not self._prompted)  # type: ignore[call-arg]
-            except TypeError:
-                ok = self._trust_check()   # injected checks take no kwargs
-            self._prompted = True
-            if not ok:
-                log.warning(
-                    "voice: Accessibility not granted for %s — see "
-                    "`cc-buddy-bridge voice-check` for the exact binary to add "
-                    "in System Settings > Privacy & Security > Accessibility",
-                    sys.executable)
-                return False        # keep the check armed for the next hold
-            self._trust_check = None  # verified once; stop re-checking
-        for keycode, flags in self._chord:
-            self._poster(keycode, True, flags)
-        self._held_since = self._clock()
-        log.info("voice: hold started (%s down)", self._hotkey)
-        return True
-
-    def stop(self) -> None:
-        if not self.active or self._poster is None:
-            self._held_since = None
-            return
-        # Flags describe the modifier state AFTER the event, so a release must
-        # clear them. Sending fn-up while still asserting FLAG_SECONDARY_FN
-        # told macOS fn was *still held* — the key stuck down system-wide and
-        # dictation never stopped. Release always carries flags=0.
-        for keycode, _flags in reversed(self._chord):
-            self._poster(keycode, False, 0)
-        held = self._clock() - (self._held_since or self._clock())
-        self._held_since = None
-        log.info("voice: hold released after %.1fs (%s up)", held, self._hotkey)
-
     def diagnose(self) -> int:
-        """Print why push-to-talk is or isn't working. Returns an exit code.
+        """Print why swipe-to-key is or isn't working. Returns an exit code.
 
         Accessibility is granted per *binary*, and a venv's python is a symlink
         — macOS resolves it, so the path that must appear (and be toggled ON)
@@ -296,14 +186,10 @@ class VoiceHold:
         print(f"code signature:        {sig}")
         if sig.startswith("ad-hoc"):
             print("  note: ad-hoc-signed interpreters (uv/pyenv builds) are the")
-            print("  usual cause of a grant that 'won't stick' — macOS keys the")
+            print("  usual cause of a grant that 'won\'t stick' — macOS keys the")
             print("  grant to the signature. Remove every stale python entry in")
             print("  the Accessibility list, then re-add the resolved path above.")
 
-        print(f"hotkey:                {self._hotkey}")
-        if not self.enabled:
-            print("  push-to-talk is OFF (the default): holding the pet never presses a key.")
-            print("  Opt in with CC_BUDDY_VOICE_HOTKEY=option|opt-space|fn.")
         if self._poster is None:
             print("quartz poster:         UNAVAILABLE (pyobjc not installed?)")
             return 2
@@ -319,10 +205,7 @@ class VoiceHold:
             print("  4. restart the daemon:")
             print("     launchctl kickstart -k gui/$(id -u)/com.github.cc-buddy-bridge.daemon")
             return 1
-        if not self.enabled:
-            print("\nAccessibility is granted; set CC_BUDDY_VOICE_HOTKEY to enable push-to-talk.")
-            return 0
-        print("\nReady — hold the pet to dictate.")
+        print("\nReady — swipe the pet to send Enter.")
         return 0
 
     @staticmethod
@@ -350,19 +233,12 @@ class VoiceHold:
             return False
 
     def tap(self, name: str) -> bool:
-        """Press and release one allowlisted key (swipe-down → Enter).
-
-        Refused while a push-to-talk hold is active: the dictation modifier
-        is still down, so a bare Return would arrive as a different chord.
-        """
+        """Press and release one allowlisted key (swipe-down → Enter)."""
         key = TAPPABLE.get(name)
         if key is None:
             log.warning("key: refusing unknown key %r", name)
             return False
         if self._poster is None:
-            return False
-        if self.active:
-            log.warning("key: ignoring %r while a voice hold is active", name)
             return False
         if self._trust_check is not None:
             try:
@@ -371,7 +247,7 @@ class VoiceHold:
                 ok = self._trust_check()
             self._prompted = True
             if not ok:
-                log.warning("key: Accessibility not granted — see `voice-check`")
+                log.warning("key: Accessibility not granted — see `key-check`")
                 return False
             self._trust_check = None
         method = (os.environ.get("CC_BUDDY_KEY_METHOD") or "auto").strip().lower()
@@ -389,9 +265,3 @@ class VoiceHold:
         self._poster(key, False, 0, False)
         log.info("key: tapped %s", name)
         return True
-
-    def overdue(self) -> bool:
-        """True when a hold has exceeded MAX_HOLD_SECS — the stop event was
-        lost (dead link, board reset) and the keys must be force-released."""
-        return (self._held_since is not None
-                and self._clock() - self._held_since > MAX_HOLD_SECS)

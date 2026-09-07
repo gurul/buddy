@@ -18,7 +18,7 @@ from cc_buddy_bridge.listen_key import (
     configured_listen_key,
     start_listen_key,
 )
-from cc_buddy_bridge.voice_trigger import FLAG_ALTERNATE, FLAG_SECONDARY_FN
+from cc_buddy_bridge.key_tap import FLAG_ALTERNATE, FLAG_SECONDARY_FN
 
 OTHER_FLAGS = 0x00020000   # kCGEventFlagMaskShift — must never count as Option
 
