@@ -19,8 +19,22 @@ cd "$(dirname "$0")/.."
 FQBN="esp32:esp32:m5stack_cores3:PartitionScheme=huge_app,PSRAM=enabled"
 SKETCH=firmware/claude_pet_stackchan
 PLIST="$HOME/Library/LaunchAgents/com.github.cc-buddy-bridge.daemon.plist"
-PORT="${1:-$(ls /dev/cu.usbmodem* 2>/dev/null | head -1)}"
-[ -n "$PORT" ] || { echo "no /dev/cu.usbmodem* device found" >&2; exit 1; }
+PORT="${1:-}"
+if [ -z "$PORT" ]; then
+  # A glob loop, not `ls … | head`: with `set -e` and pipefail, ls exiting 2
+  # on an unmatched glob takes the whole script down at this line, before the
+  # message below can say why. A board that had not finished re-enumerating
+  # after a reset read as a silent exit 1 (bench 2026-09-08).
+  for dev in /dev/cu.usbmodem*; do
+    [ -e "$dev" ] || continue
+    PORT="$dev"
+    break
+  done
+fi
+[ -n "$PORT" ] || {
+  echo "no /dev/cu.usbmodem* device found — plugged in, and finished enumerating?" >&2
+  exit 1
+}
 
 SHA=$(git rev-parse --short HEAD)
 git diff --quiet || SHA="$SHA-dirty"
@@ -36,14 +50,48 @@ cp "$BUILD/claude_pet_stackchan.ino.elf" \
 echo "archived ELF for $SHA"
 
 UPLOAD=(arduino-cli upload -p "$PORT" -b "$FQBN" --input-dir "$BUILD" "$SKETCH")
-if launchctl list 2>/dev/null | grep -q com.github.cc-buddy-bridge.daemon; then
-  launchctl bootout "gui/$(id -u)/com.github.cc-buddy-bridge.daemon" 2>/dev/null || true
-  trap 'launchctl bootstrap "gui/$(id -u)" "$PLIST" && echo "daemon restarted"' EXIT
-  # wait for the reader thread to release the fd; a fixed sleep raced it
-  for _ in $(seq 1 20); do
-    lsof "$PORT" >/dev/null 2>&1 || break
-    sleep 1
-  done
+
+LABEL=com.github.cc-buddy-bridge.daemon
+SVC="gui/$(id -u)/$LABEL"
+daemon_loaded() { launchctl print "$SVC" >/dev/null 2>&1; }
+port_busy()     { lsof "$PORT" >/dev/null 2>&1; }
+
+if daemon_loaded; then
+  # Registered BEFORE the bootout, so a bootout that half-succeeds — or an
+  # upload that dies below — still puts the daemon back. Guarded, so a
+  # bootout that did not take does not get a second copy bootstrapped onto it.
+  trap 'daemon_loaded || { launchctl bootstrap "gui/$(id -u)" "$PLIST" && echo "daemon restarted"; }' EXIT
+
+  echo "stopping $LABEL — it holds $PORT exclusively"
+  # Never discard what launchctl says. A swallowed bootout error is how this
+  # last reached the owner: the daemon stayed up, the wait loop below gave up
+  # without a word, and the first sign of trouble was esptool failing with
+  # "port is busy" forty lines later (bench 2026-09-08).
+  if ! out=$(launchctl bootout "$SVC" 2>&1); then
+    echo "  launchctl bootout: ${out:-no output}"
+  fi
+
+  # And do not believe the exit code either way: bootout returns EINPROGRESS
+  # while a KeepAlive job winds down. The job leaving the domain is the fact.
+  for _ in $(seq 1 20); do daemon_loaded || break; sleep 1; done
+  if daemon_loaded; then
+    echo "$LABEL is still loaded after 20s — refusing to flash into a live daemon." >&2
+    echo "try: launchctl bootout $SVC" >&2
+    exit 1
+  fi
+
+  # The job being gone does not mean the fd is closed; a fixed sleep raced it.
+  for _ in $(seq 1 20); do port_busy || break; sleep 1; done
 fi
+
+# Reached with or without a daemon: an Arduino serial monitor, a stray
+# `cc-buddy-bridge daemon` run by hand, or a screen session holds the port
+# just as exclusively. Say who, here, instead of letting esptool say "busy".
+if port_busy; then
+  echo "$PORT is still held — esptool cannot open it. Holder:" >&2
+  lsof "$PORT" >&2 || true
+  exit 1
+fi
+
 "${UPLOAD[@]}"
 echo "flashed $SHA to $PORT"
