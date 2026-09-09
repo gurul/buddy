@@ -537,15 +537,19 @@ void loop() {
 
   diagPhase(DP_LED);
   // Body: head servos + the 12 LEDs follow activeState (see body.cpp for the
-  // choreography table). Solid blue overrides every LED colour while a
-  // push-to-talk hold is active — it is the "mic is live" indicator.
+  // choreography table). Solid blue overrides every LED colour while the host
+  // is listening — it is the "mic is live" indicator.
   // needsAttention is the BASE state so a one-shot overlay (level-up
   // celebrate) cannot drop the head while a session is still waiting.
-  // Listening pose: the host's dictation key ({"cmd":"listen"}) and the
-  // on-screen push-to-talk hold are the same thing to the body — face the
-  // user, mic-blue LEDs, "listening..." balloon.
+  // Listening pose: the host's dictation key ({"cmd":"listen"}) is the only
+  // source — face the user, mic-blue LEDs, "listening..." balloon.
+  // A touch hold used to raise the pose too. That outlived hold-to-talk: with
+  // nothing left to dictate into, a steady press — or a body-touch zone latched
+  // on by capacitive drift after power-on, which needs no finger at all — sat
+  // the robot in "listening..." while the host knew nothing about it. The pose
+  // now says exactly what the host said, and nothing else.
   static bool wasListening = false;
-  bool listenNow = tama.listening || M5.petHeldNow();
+  bool listenNow = tama.listening;
   if (listenNow != wasListening) {
     wasListening = listenNow;
     diagLog("listen %s", listenNow ? "on" : "off");

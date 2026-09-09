@@ -132,15 +132,18 @@ class M5Compat {
   bool petTapped();     // quick tap on the pet (panel or body front zone)
   bool petTapWasBody() const { return _tapFromBody; }   // valid right after petTapped()
   bool petScrubbed();   // rapid left-right scrubbing → dizzy
-  // Press-and-hold on the pet: push-to-talk. Fires start after 600ms of a
-  // steady press (<20px drift), end on release or on leaving the pet zone.
-  // A hold never also fires tap (tap needs release <450ms) and suppresses
-  // scrub detection while active. Level query for LED feedback.
-  // The body's middle touch zone is a second hold source with the same
-  // timing and the same events.
+  // Press-and-hold on the pet. Fires start after 600ms of a steady press
+  // (<20px drift), end on release or on leaving the pet zone. A hold never
+  // also fires tap (tap needs release <450ms) and suppresses scrub detection
+  // while active. The body's middle touch zone is a second hold source with
+  // the same timing and the same events.
+  // Nothing acts on a hold any more — push-to-talk is gone. The edges exist
+  // only to be drained in main.cpp so they cannot latch, and the latch itself
+  // survives only to suppress tap/scrub during a steady press. There is
+  // deliberately no level query: reading it is how a hold last became a
+  // listening pose the host never asked for.
   bool petHoldStarted();
   bool petHoldEnded();
-  bool petHeldNow() const { return _holdActive || _bodyHoldActive; }
   // Downward swipe on the pet → Enter on the host. Fires mid-drag the moment
   // the threshold is crossed (not on release) so it feels immediate.
   bool petSwipedDown();
