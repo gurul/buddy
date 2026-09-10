@@ -102,9 +102,8 @@ call tools and return one short line for buddy to say.
 - While a task runs: "stop" / "cancel" / "never mind" → stop_task. A correction or addition ("use Safari
   instead", "also save it") → steer_task with the text. "How's it going?" → task_status, summarised in one
   line.
-- A message tagged [task finished] → return the result in one short line; the conversation ends right after.
-- A message tagged [task question] → return that exact question for buddy to ask out loud. The owner's
-  answer comes back next; relay it with answer_question as plain words ("yes", "no", "the second one").
+- A message tagged [task question] is a question buddy has just asked the owner out loud for the running
+  task. When the owner answers, relay it with answer_question as plain words ("yes", "no", "the second one").
 - Goodbye, thanks, "that's all", "stop listening", "go to sleep", "be quiet" or "never mind" with no task
   running → end_conversation.
 - "Go explore", "look around", "go play", "check out the room" → go_explore. If they tell you to stop
@@ -637,6 +636,12 @@ class VoiceSession:
                     self._emit_events(self._pager.reset(self._clock()))
                     self._reply_open = False
                 self._set_after_captions("working" if self.task_running else "listening")
+        elif et == "response.output_text.done":
+            # What the backend handed the voice. Logged because the voice speaks its own
+            # words: without this line a wrong reply cannot be traced to either half.
+            text = str(_attr(ev, "text") or "")
+            if text:
+                log.info("voice: backend said: %s", text[:160])
         elif et == "error":
             log.warning("voice: backend error: %s", _attr(ev, "error") or ev)
 
@@ -764,7 +769,9 @@ class VoiceSession:
         self._last_activity = self._clock()
         if not self._ended.is_set():
             self._end_after_response = True
-            await self._say_from_task(f"[task finished] {final}")
+            log.info("voice: task result to the voice: %s", final[:160])
+            await self._speak(f"The computer task you started has finished. Tell the owner this result in one "
+                              f"short line, then say a two-word goodbye: {final}")
         return final
 
     def _on_agent_event(self, ev: AgentEvent) -> None:
@@ -793,7 +800,11 @@ class VoiceSession:
     async def _ask_user(self, question: str) -> str:
         loop = asyncio.get_running_loop()
         self._pending_answer = loop.create_future()
-        await self._say_from_task(f"[task question] {question}")
+        # The backend gets the question as context (no response): it is the half that
+        # calls answer_question when the owner replies. The voice gets it to ask.
+        await self._backend_note(f"[task question] {question}")
+        await self._speak(f"The computer task needs an answer from the owner. Ask exactly this, then wait for "
+                          f"their answer: {question}")
         try:
             return await asyncio.wait_for(self._pending_answer, timeout=60.0)
         except asyncio.TimeoutError:
@@ -801,12 +812,21 @@ class VoiceSession:
         finally:
             self._pending_answer = None
 
-    async def _say_from_task(self, text: str) -> None:
-        # Into the backend conversation, not the Live model: the backend prompt is
-        # what knows the [task finished] / [task question] tags.
+    async def _speak(self, content: str) -> None:
+        """Hand the voice something to say (`session.commentary.append`).
+
+        The SDK documents commentary as "speakable context … for a result the model
+        should communicate". Routing a result through the backend instead
+        (response.item.create + response.create) left the voice free to say anything:
+        on 2026-09-10 a finished task, "Spotify is playing INTERGALACTIC.", reached the
+        owner as "Okay, waiting."
+        """
+        await self.conn.session.commentary.append(content=content, delegation_id=None)
+
+    async def _backend_note(self, text: str) -> None:
+        """Context for the backend's next delegated turn; asks for no response."""
         await self.conn.response.item.create(item={"type": "message", "role": "user",
                                                    "content": [{"type": "input_text", "text": text}]})
-        await self._request_response()
 
     async def _request_response(self) -> None:
         """response.create now, or as soon as the in-flight backend response completes."""
