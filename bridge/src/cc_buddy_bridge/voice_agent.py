@@ -87,7 +87,8 @@ You just heard your wake word. Answer in one or two short spoken sentences; no l
 offers of things you "can help with" — you are a pet, not an assistant menu.
 
 You can operate your owner's Mac for them. The moment they ask for anything on the computer, delegate it
-— say nothing first, do not guess an app, do not narrate steps you have not seen.
+at once — do not guess an app, do not narrate steps you have not seen. A two-word acknowledgement as you
+delegate is fine; say it once.
 
 Starting a task is not finishing it. Until its result arrives, say only that you are on it.
   NOT: "It's playing now."   INSTEAD: "On it."
@@ -104,8 +105,10 @@ call tools and return one short line for buddy to say.
 
 - A request to do something on the owner's Mac → call start_task at once, with the goal in the owner's own
   words plus any app or site they named. Never guess an app or hedge ("likely in a music app"). When
-  start_task returns ok, return exactly: On it. The task has only started; its result reaches buddy on its
-  own when it finishes, so never describe the outcome here.
+  start_task returns ok, reply with an empty message: buddy has already acknowledged the request, and the
+  result reaches buddy on its own when the task finishes.
+- Never ask the owner a clarifying question. Call start_task with their words as they are; the task can
+  ask them itself if it truly needs an answer.
 - While a task runs: "stop" / "cancel" / "never mind" → stop_task. A correction or addition ("use Safari
   instead", "also save it") → steer_task with the text. "How's it going?" → task_status, summarised in one
   line.
@@ -446,11 +449,12 @@ class VoiceSession:
         ticker = asyncio.create_task(self._tick_loop(), name="voice-ticks")
         cancelled = False
         try:
-            await self._events()
+            await self._until_ended()
         except asyncio.CancelledError:
             cancelled = True                        # hush (a touch on the robot): clear the board at once
             raise
         finally:
+            self._ended.set()                       # every exit path: nothing may speak into a closing session
             pump.cancel()
             watchdog.cancel()
             await asyncio.gather(pump, watchdog, return_exceptions=True)
@@ -579,6 +583,26 @@ class VoiceSession:
                   and not self._pager.busy and now - self._last_activity > self.config.idle_timeout_secs):
                 log.info("voice: nothing said for %.0f s — closing", self.config.idle_timeout_secs)
                 self._ended.set()
+
+    async def _until_ended(self) -> None:
+        """Serve Live events until the session ends — by an event, or by the watchdog.
+
+        The watchdog's idle timeout and session cap only set `_ended`, and `_events`
+        checks it only when the next Live event arrives. When the server went quiet
+        the session never closed: all three idle closes in the log hung (+91 s,
+        +129 s, +93 min), while the keepalive kept the frozen phase alive on the
+        board and the wake word stayed blocked (timer review, 2026-09-10).
+        """
+        events = asyncio.create_task(self._events(), name="voice-events")
+        ended = asyncio.create_task(self._ended.wait(), name="voice-ended")
+        try:
+            await asyncio.wait({events, ended}, return_when=asyncio.FIRST_COMPLETED)
+        finally:
+            for t in (events, ended):
+                t.cancel()
+            await asyncio.gather(events, ended, return_exceptions=True)
+        if events.done() and not events.cancelled() and events.exception() is not None:
+            raise events.exception()  # type: ignore[misc]
 
     async def _events(self) -> None:
         async for event in self.conn:
@@ -710,7 +734,7 @@ class VoiceSession:
             result = {"ok": ok} if ok else {"ok": False, "reason": "no task is running"}
         elif name == "stop_task":
             if self.task_running and self.agent is not None:
-                self.agent.cancel(reason="the conversation closed")
+                self.agent.cancel(reason="you asked me to stop")
                 result = {"ok": True}
             else:
                 result = {"ok": False, "reason": "no task is running"}
@@ -757,7 +781,18 @@ class VoiceSession:
             return {"ok": False, "reason": "a task is already running; steer or stop it first"}
         self.agent = self.agent_factory(self._on_agent_event, self._ask_user)
         self._agent_task = asyncio.create_task(self._run_agent(goal), name="voice-agent")
+        # Started, not done. The voice gets that as silent context, and the face goes to
+        # "working" once the reply on screen has been read — it used to wait on the
+        # backend's own reply and came up 8-11 s late (task review, 2026-09-10).
+        self._bg(self._quiet(f"A computer task has started: {goal}. Nothing is done yet; its result "
+                             "arrives on its own when it finishes."))
+        self._set_after_captions("working")
         return {"ok": True, "goal": goal}
+
+    def _bg(self, coro: Awaitable[None]) -> None:
+        task = asyncio.ensure_future(coro)
+        task.add_done_callback(lambda t: t.cancelled() or t.exception() is None
+                               or log.warning("voice: background send failed: %s", t.exception()))
 
     async def _run_agent(self, goal: str) -> str:
         assert self.agent is not None
@@ -793,8 +828,10 @@ class VoiceSession:
             self._set("asking")
         elif ev.kind == "final":
             self._set("done")
-        elif ev.kind in ("cancelled", "error"):
-            self._set("error" if ev.kind == "error" else "done")
+        elif ev.kind == "error":
+            self._set("error")
+        elif ev.kind == "cancelled":
+            self._set("listening")                  # a stopped task is not a finished one: no done nod
 
     async def _ask_user(self, question: str) -> str:
         loop = asyncio.get_running_loop()
@@ -821,6 +858,11 @@ class VoiceSession:
         owner as "Okay, waiting."
         """
         await self.conn.session.commentary.append(content=content, delegation_id=None)
+
+    async def _quiet(self, content: str) -> None:
+        """Silent context for the voice (`session.thinking.append`): it can shape later
+        speech but asks for none."""
+        await self.conn.session.thinking.append(content=content, delegation_id=None)
 
     async def _backend_note(self, text: str) -> None:
         """Context for the backend's next delegated turn; asks for no response."""
