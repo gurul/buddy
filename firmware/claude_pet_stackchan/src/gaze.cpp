@@ -5,6 +5,7 @@
 //   look.cpp      GC0308 on a core-0 task: motion centroid + skin-blob face
 //   owner_model.h LIVE gaze (fresh target, EMA) + MEMORY (habit histogram)
 //   this file     per-state policy -> bodyLookAt() / bodySearchSweep()
+#include "ticks.h"
 #include "gaze.h"
 #include "body.h"
 #include "look.h"
@@ -164,7 +165,8 @@ void gazeUpdate(PersonaState active, bool needsAttention, bool listening,
 
   // Host face detections (highest priority). Absolute angles use the pose
   // ECHOED in the face cmd (the pose at capture), never the current one.
-  bool hostFresh = host && host->faceAtMs && now - host->faceAtMs <= kHostFreshMs;
+  // elapsedMs: faceAtMs is stamped in dataPoll(), after `now` was read (ticks.h).
+  bool hostFresh = host && host->faceAtMs && ticks::elapsedMs(now, host->faceAtMs) <= kHostFreshMs;
   if (hostFresh != hostLive) {
     hostLive = hostFresh;
     if (!hostLive) Serial.println("[gaze] host silent, on-board fallback");
