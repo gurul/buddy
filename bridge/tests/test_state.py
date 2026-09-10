@@ -1,6 +1,11 @@
 import time
 
-from cc_buddy_bridge.state import State
+from cc_buddy_bridge.state import (
+    NON_WAITING_NOTIFICATION_KINDS,
+    WAITING_NOTIFICATION_KINDS,
+    State,
+    notification_waits,
+)
 
 
 def test_session_lifecycle():
@@ -105,3 +110,68 @@ def test_attention_cwd_empty_when_nothing_waits():
     s.needs_input("a")
     s.input_received("a")
     assert s.attention_cwd() == ""
+
+
+# ---- notification kinds: which ones mean "Claude needs you" ----
+# Waiting kinds light the attention pose; an idle reminder must not take over
+# a live voice conversation (firmware derive(): Claude idle -> the pet sleeps).
+
+
+def test_notification_kind_permission_prompt_waits():
+    assert notification_waits("permission_prompt") is True
+
+
+def test_notification_kind_elicitation_dialog_waits():
+    assert notification_waits("elicitation_dialog") is True
+
+
+def test_notification_kind_idle_prompt_does_not_wait():
+    assert notification_waits("idle_prompt") is False
+
+
+def test_notification_kind_idle_does_not_wait():
+    assert notification_waits("idle") is False
+
+
+def test_notification_kind_auth_success_does_not_wait():
+    assert notification_waits("auth_success") is False
+
+
+def test_notification_kind_elicitation_response_does_not_wait():
+    assert notification_waits("elicitation_response") is False
+
+
+def test_notification_kind_missing_or_empty_waits():
+    # No kind at all: keep the old, conservative behavior.
+    assert notification_waits(None) is True
+    assert notification_waits("") is True
+
+
+def test_notification_kind_unknown_waits():
+    # A kind Claude Code adds later may be blocking: still get attention.
+    assert notification_waits("some_future_kind") is True
+
+
+def test_notification_kind_sets_are_exact_and_disjoint():
+    assert WAITING_NOTIFICATION_KINDS == {"permission_prompt", "elicitation_dialog"}
+    assert NON_WAITING_NOTIFICATION_KINDS == {
+        "idle_prompt", "idle", "auth_success", "elicitation_response",
+    }
+    assert not WAITING_NOTIFICATION_KINDS & NON_WAITING_NOTIFICATION_KINDS
+    assert all(notification_waits(k) for k in WAITING_NOTIFICATION_KINDS)
+    assert not any(notification_waits(k) for k in NON_WAITING_NOTIFICATION_KINDS)
+
+
+def test_notification_kind_drives_waiting_count():
+    s = State()
+    s.session_start("x")
+    for kind in NON_WAITING_NOTIFICATION_KINDS:
+        if notification_waits(kind):
+            s.needs_input("x")
+        assert s.waiting_count == 0, kind
+    for kind in ("permission_prompt", "elicitation_dialog", None, "some_future_kind"):
+        s.input_received("x")
+        assert s.waiting_count == 0
+        if notification_waits(kind):
+            s.needs_input("x")
+        assert s.waiting_count == 1, kind
