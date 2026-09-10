@@ -58,7 +58,12 @@ DEFAULT_EXEC_TIMEOUT_SECS = 60.0
 DEFAULT_MAX_SECS = 180.0        # longest successful logged run 27 s ×6; 25 turns × 5.2 s worst API = 130 s + exec
 DEFAULT_API_TIMEOUT_SECS = 90.0 # measured max 5.2 s; SDK default 600 s is what made "stop" hang
 RETRYABLE_API_ERRORS = frozenset({"APIConnectionError", "APITimeoutError", "RateLimitError", "InternalServerError"})
-REASONING_EFFORTS = ("low", "medium", "high")
+REASONING_EFFORTS = ("none", "minimal", "low", "medium", "high", "xhigh", "max")   # openai 3.13 ReasoningEffort
+# Logged medians over 55 real calls (2026-09-10): low 3.37 s, medium 3.87 s. Medium on every
+# turn costs ~0.5 s a step; OpenAI's guidance for Astra is to start at medium, not low.
+DEFAULT_REASONING_EFFORT = "medium"
+DEFAULT_PLAN_REASONING_EFFORT = "high"
+DEFAULT_VERIFY_REASONING_EFFORT = "low"
 PROGRESS_SKIP_PREFIXES = ("Traceback", "exec_py", "{", "[", "frontmost:", "screen_text:", "found ", "zoom of")
 DEFAULT_RUNS_DIR = "~/.config/cc-buddy-bridge/agent-runs"
 WORKER_LINE_LIMIT = 32 * 1024 * 1024
@@ -87,10 +92,14 @@ Also: pyautogui (hotkey, press, click, scroll), time, log(value), display(image)
 
 Rules:
 1. Every exec_py call that clicks, types or presses keys ends with a fresh screenshot automatically,
-   taken after the screen settles, plus an [after] line with the frontmost app and whether the screen
-   changed. Do not add display() calls unless you need a zoom. Screenshot coordinates are click coordinates.
+   taken after the screen settles, plus an "[after your input]" line: the frontmost app, and whether and
+   where the screen changed ("changed around (x,y,w,h)", in click coordinates, or "unchanged"). A call
+   that only looked ends with "[after]". Do not add display() calls unless you need a zoom. Screenshot
+   coordinates are click coordinates.
 2. Open apps and pages with open_app / open_url — never Spotlight. Prefer keyboard shortcuts (command+l,
-   command+f, command+t, command+w) and click_text over pixel hunting.
+   command+f, command+t, command+w) and click_text over pixel hunting. Keys and clicks go to the
+   frontmost app: before you press keys, the app you mean must be frontmost, and if a line says
+   "clicked on … in <another app>", your click landed there — open_app the right one and try again.
 3. Group predictable actions in one call — open_app, wait_for, click_text, type_text, press enter — and
    split only where the next step depends on something you must see first. Wait with wait_for or
    wait_settled, not time.sleep; a call is killed after 60 seconds.
@@ -106,9 +115,36 @@ Rules:
    then try another way — or say what is blocking you.
 9. The human may steer you mid-task; a message tagged [steer] overrides the original goal. A message
    tagged [note] is advice from the system.
-10. When the goal is done, or you cannot finish, reply with a short plain-language message (one or two
+10. Only finish when the latest screenshot shows the requested end state. If your last
+    "[after your input]" line says the screen is unchanged, your input did nothing visible: look again
+    (observe, zoom) before you claim anything. Then reply with a short plain-language message (one or two
     sentences, spoken by a robot, under 110 characters) saying what state things are in — that ends the
-    task. Report what you verified on screen, not what you attempted. Do not describe tool mechanics."""
+    task. Report what you verified on screen, not what you attempted; if it did not work, say so. Your
+    final message is checked against a fresh screenshot before the human hears it. Do not describe tool
+    mechanics."""
+
+# A second, independent look at the screen before a claim is spoken. The agent model has
+# spent the task believing it is close; this call gets no previous_response_id, so it
+# judges the screenshot, not the story. Idea from the Atlas SDK's "paired" lane
+# (arc-computer/atlas-sdk orchestrator.py:309-316: validate, one guided retry), rebuilt
+# here with the screenshot the Atlas teacher never sees. No Atlas text is copied.
+VERIFY_INSTRUCTIONS = """You check a desktop agent's final message against the Mac's screen. You get the human's goal,
+the agent's final message, the agent's last status line and a fresh screenshot.
+
+Decide from the screenshot whether the final message is true.
+- valid=true when the screenshot shows the state the message claims. A message that says the task could not
+  be done is valid when the screen is consistent with that.
+- valid=false when the screenshot does not show the claimed state, or shows something else in front.
+Music playing cannot be heard: judge it by a pause button in place of a play button, a moving progress bar, or
+a highlighted now-playing row.
+guidance: when invalid, one sentence saying what the screen actually shows; when valid, an empty string."""
+
+VERIFY_SCHEMA: dict[str, Any] = {
+    "type": "object",
+    "additionalProperties": False,
+    "required": ["valid", "guidance"],
+    "properties": {"valid": {"type": "boolean"}, "guidance": {"type": "string"}},
+}
 
 TOOLS: list[dict[str, Any]] = [
     {
@@ -161,8 +197,10 @@ class AgentConfig:
     max_turns: int = DEFAULT_MAX_TURNS
     exec_timeout_secs: float = DEFAULT_EXEC_TIMEOUT_SECS
     runs_dir: Path = Path(DEFAULT_RUNS_DIR).expanduser()
-    reasoning_effort: str = "low"
-    plan_reasoning_effort: str = "medium"          # turn 1 and recovery turns
+    reasoning_effort: str = DEFAULT_REASONING_EFFORT
+    plan_reasoning_effort: str = DEFAULT_PLAN_REASONING_EFFORT   # turn 1 and recovery turns
+    verify: bool = True                            # check a final answer against a fresh screenshot
+    verify_reasoning_effort: str = DEFAULT_VERIFY_REASONING_EFFORT
     max_secs: float = DEFAULT_MAX_SECS
     api_timeout_secs: float = DEFAULT_API_TIMEOUT_SECS
     progress_min_gap_secs: float = 1.5             # the voice session's caption pacing for progress lines
@@ -173,7 +211,7 @@ def _effort(env: Any, key: str, default: str) -> str:
     if not raw:
         return default
     if raw not in REASONING_EFFORTS:
-        log.warning("agent: %s=%r is not low|medium|high; using %s", key, raw, default)
+        log.warning("agent: %s=%r is not one of %s; using %s", key, raw, "|".join(REASONING_EFFORTS), default)
         return default
     return raw
 
@@ -204,8 +242,10 @@ def configured(environ: Any = None) -> AgentConfig:
     runs = Path((env.get("CC_BUDDY_AGENT_RUNS_DIR") or DEFAULT_RUNS_DIR)).expanduser()
     return AgentConfig(
         enabled=enabled, model=model, max_turns=turns, runs_dir=runs,
-        reasoning_effort=_effort(env, "CC_BUDDY_AGENT_REASONING", "low"),
-        plan_reasoning_effort=_effort(env, "CC_BUDDY_AGENT_PLAN_REASONING", "medium"),
+        reasoning_effort=_effort(env, "CC_BUDDY_AGENT_REASONING", DEFAULT_REASONING_EFFORT),
+        plan_reasoning_effort=_effort(env, "CC_BUDDY_AGENT_PLAN_REASONING", DEFAULT_PLAN_REASONING_EFFORT),
+        verify=(env.get("CC_BUDDY_AGENT_VERIFY") or "").strip().lower() not in ("0", "false", "no", "off"),
+        verify_reasoning_effort=_effort(env, "CC_BUDDY_AGENT_VERIFY_REASONING", DEFAULT_VERIFY_REASONING_EFFORT),
         exec_timeout_secs=_seconds(env, "CC_BUDDY_AGENT_EXEC_TIMEOUT", DEFAULT_EXEC_TIMEOUT_SECS, 10.0),
         max_secs=_seconds(env, "CC_BUDDY_AGENT_MAX_SECS", DEFAULT_MAX_SECS, 30.0),
     )
@@ -365,6 +405,7 @@ class Classified:
     kind: str                                   # "calls" | "final" | "commentary"
     calls: list[dict[str, Any]] = field(default_factory=list)
     text: str = ""
+    phases: list[str] = field(default_factory=list)   # the `phase` of each assistant message, "" when absent
 
 
 def classify_response(response: dict[str, Any]) -> Classified:
@@ -377,6 +418,8 @@ def classify_response(response: dict[str, Any]) -> Classified:
         raise RuntimeError("malformed Responses API reply")
     calls: list[dict[str, Any]] = []
     texts: list[str] = []
+    finals: list[str] = []
+    phases: list[str] = []
     for item in response["output"]:
         t = item.get("type")
         if t == "reasoning":
@@ -393,17 +436,30 @@ def classify_response(response: dict[str, Any]) -> Classified:
                 raise RuntimeError("function call arguments must be an object")
             calls.append({"name": name, "call_id": item["call_id"], "args": args})
         elif t == "message":
+            # `phase` (openai 3.13): "commentary" is mid-task narration and never ends
+            # the run; "final_answer" or no phase is the answer (the cua sample app's
+            # rule, responses_loop.py:138-160). Before this, "Spotify is playing, let me
+            # check" with no tool call ended the task as its answer.
+            phase = str(item.get("phase") or "")
+            phases.append(phase)
             for part in item.get("content") or []:
                 if part.get("type") == "output_text" and part.get("text"):
-                    texts.append(part["text"])
+                    piece = part["text"]
                 elif part.get("type") == "refusal":
-                    texts.append(part.get("refusal") or "I can't do that.")
+                    piece = part.get("refusal") or "I can't do that."
+                    phase = "final_answer"
+                else:
+                    continue
+                texts.append(piece)
+                if phase != "commentary":
+                    finals.append(piece)
     text = "\n".join(texts).strip()
     if calls:
-        return Classified("calls", calls, text)
-    if text:
-        return Classified("final", [], text)
-    return Classified("commentary", [], "")
+        return Classified("calls", calls, text, phases)
+    final = "\n".join(finals).strip()
+    if final:
+        return Classified("final", [], final, phases)
+    return Classified("commentary", [], text, phases)
 
 
 # ---- the agent -------------------------------------------------------------------------
@@ -442,6 +498,22 @@ def _user(text: str) -> dict[str, Any]:
     return {"type": "message", "role": "user", "content": [{"type": "input_text", "text": text}]}
 
 
+def _verdict(response: dict[str, Any]) -> dict[str, Any]:
+    """{"valid": bool, "guidance": str} from a structured-output reply; raises when it is not one."""
+    if response.get("status") != "completed":
+        raise RuntimeError(f"verifier did not complete (status {response.get('status')!r})")
+    for item in response.get("output") or []:
+        if item.get("type") != "message":
+            continue
+        for part in item.get("content") or []:
+            if part.get("type") == "output_text" and part.get("text"):
+                data = json.loads(part["text"])
+                if not isinstance(data, dict) or not isinstance(data.get("valid"), bool):
+                    raise RuntimeError("verifier reply is not a verdict")
+                return {"valid": data["valid"], "guidance": str(data.get("guidance") or "").strip()}
+    raise RuntimeError("verifier reply has no text")
+
+
 class ComputerAgent:
     """One task on the desktop. See the module docstring for the contract."""
 
@@ -467,6 +539,10 @@ class ComputerAgent:
         self._cancel_reason = ""
         self._t0 = 0.0
         self._last_code: Optional[str] = None
+        self._acted = False                        # any step this run clicked, typed or pressed keys
+        self._last_after = ""                      # the latest [after …] line
+        self._verify_retried = False
+        self._retry_note = ""
         self.running = False
         self.turn = 0
         self.goal = ""
@@ -501,6 +577,9 @@ class ComputerAgent:
         self._cancel.clear()
         self._cancel_reason = ""
         self._last_code = None
+        self._acted = False
+        self._last_after = ""
+        self._verify_retried = False
         self._open_log(goal)
         self._emit("started", goal)
         factory = self.worker_factory or (lambda: WorkerClient(timeout_secs=self.config.exec_timeout_secs))
@@ -587,7 +666,12 @@ class ComputerAgent:
                 req["previous_response_id"] = previous
             t_req = self._clock()
             response = await self._interruptible(self._create(req, turn))
-            self._log({"turn": turn, "effort": effort, "api_secs": round(self._clock() - t_req, 2)})
+            entry: dict[str, Any] = {"turn": turn, "effort": effort, "api_secs": round(self._clock() - t_req, 2)}
+            usage = response.get("usage")
+            if isinstance(usage, dict):
+                entry["tokens"] = {"in": usage.get("input_tokens"), "out": usage.get("output_tokens"),
+                                   "reasoning": (usage.get("output_tokens_details") or {}).get("reasoning_tokens")}
+            self._log(entry)
             self._check_cancel()
             if (response.get("status") == "incomplete"
                     and (response.get("incomplete_details") or {}).get("reason") == "max_output_tokens"
@@ -603,10 +687,15 @@ class ComputerAgent:
             self._emit("turn", "", turn)
             if c.text:
                 self.last_commentary = c.text
-                self._log({"turn": turn, "commentary": c.text})
+                self._log({"turn": turn, "commentary": c.text, "phase": c.phases})
                 if c.kind == "final":
-                    self._emit("final", c.text, turn)
-                    return c.text
+                    answer = await self._checked_final(goal, c.text, turn, worker)
+                    if answer is None:                     # sent back once to look again
+                        next_input = [_user(self._retry_note)]
+                        effort = cfg.plan_reasoning_effort
+                        continue
+                    self._emit("final", answer, turn)
+                    return answer
                 self._emit("commentary", c.text, turn)
             outputs: list[dict[str, Any]] = []
             notes: list[dict[str, Any]] = []
@@ -622,7 +711,15 @@ class ComputerAgent:
                                "images": sum(1 for o in out if o.get("type") == "input_image")})
                     if any(("Traceback" in t or "exec_py error" in t or "was restarted" in t) for t in texts):
                         escalate = True
-                    if code == self._last_code:
+                    after = next((t for t in reversed(texts) if t.startswith("[after")), "")
+                    if after:
+                        self._last_after = after
+                    no_effect = after.startswith("[after your input]") and "screen: unchanged" in after
+                    if after.startswith("[after your input]"):
+                        self._acted = True
+                    # Only a repeat whose input changed nothing earns the note: the note
+                    # says the screen did not change, so it must have checked (B3).
+                    if code == self._last_code and no_effect:
                         notes.append(_user("[note] That is the same code as the previous step and the screen did "
                                            "not change. Look (zoom / screen_text / observe) and try a different way."))
                         self._log({"turn": turn, "repeat": True})
@@ -652,6 +749,55 @@ class ComputerAgent:
         msg = f"I ran out of steps ({cfg.max_turns}) before finishing."
         self._emit("final", msg, self.turn)
         return msg
+
+    async def _checked_final(self, goal: str, claim: str, turn: int, worker: Any) -> Optional[str]:
+        """The answer to speak, or None to send the agent back once to look again.
+
+        Runs that only looked (no click, key or typing) are not checked: nothing they
+        did could have failed silently. A failed or unreadable check lets the claim
+        through — the check guards the answer, it must never block it.
+        """
+        if not (self.config.verify and self._acted):
+            return claim
+        verdict = await self._verify(goal, claim, turn, worker)
+        if verdict is None or verdict["valid"]:
+            return claim
+        if not self._verify_retried:
+            self._verify_retried = True
+            seen = verdict["guidance"] or "the screen does not show that"
+            self._retry_note = (f"[note] A fresh screenshot does not confirm your answer: {seen} Look again, fix it "
+                                "if you can, and report only what the screen shows.")
+            return None
+        return "I couldn't confirm that on screen. " + claim
+
+    async def _verify(self, goal: str, claim: str, turn: int, worker: Any) -> Optional[dict[str, Any]]:
+        t0 = self._clock()
+        try:
+            items = await self._interruptible(worker.observe())
+            images = [o for o in items if o.get("type") == "input_image"][:1]
+            req: dict[str, Any] = {
+                "model": self.config.model,
+                "instructions": VERIFY_INSTRUCTIONS,
+                "input": [{"type": "message", "role": "user", "content": [
+                    {"type": "input_text", "text": f"Goal: {goal}\nAgent's final message: {claim}\n"
+                                                   f"Agent's last status line: {self._last_after or '(none)'}"},
+                    *images]}],
+                "reasoning": {"effort": self.config.verify_reasoning_effort},
+                "text": {"format": {"type": "json_schema", "name": "verdict", "schema": VERIFY_SCHEMA,
+                                    "strict": True}},
+                "store": False,
+                "timeout": self.config.api_timeout_secs,
+            }
+            response = await self._interruptible(self._create(req, turn))
+            verdict = _verdict(response)
+        except Cancelled:
+            raise
+        except Exception as e:  # noqa: BLE001 — a broken check must not eat the answer
+            log.warning("agent: final-answer check failed (%s); letting the answer through", e)
+            self._log({"turn": turn, "verify": {"error": type(e).__name__}})
+            return None
+        self._log({"turn": turn, "verify": {**verdict, "secs": round(self._clock() - t0, 2)}})
+        return verdict
 
     def _steer_items(self) -> list[dict[str, Any]]:
         items: list[dict[str, Any]] = []

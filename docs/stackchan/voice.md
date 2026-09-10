@@ -58,14 +58,26 @@ daemon ─{"cmd":"agent","state":…}─▶ robot: wake · listening · thinking
    click coordinates), `find_text`, `click_text`, `click_element` (a coordinate click that snaps to the control under the point and refuses if it is not what the model named — handyman's grounding trick, on the Accessibility tree), `wait_for`, `wait_settled`,
    `type_text` (clipboard paste, so accents and emoji survive), `zoom`, `observe` —
    plus raw PyAutoGUI. Every step that clicks, types or presses keys ends with a
-   screenshot taken after the screen settles and an `[after]` line (frontmost app,
-   screen changed or not), so a typical task is 2–4 model turns. Each helper logs
+   screenshot taken after the screen settles and an `[after your input]` line: the
+   frontmost app, where the screen changed (`changed around (x,y,w,h)` in click
+   coordinates) or `unchanged`, and — after a raw click — what it landed on and in
+   which app (`clicked on AXScrollArea in Warp`). A step that only looked ends with
+   `[after]`. The change detector compares 1/4-scale grey thumbnails with a
+   24-pixel noise floor and ignores the menu-bar strip, so a 14x14-point checkbox
+   toggle registers and a text caret does not. A typical task is 2–4 model turns. Each helper logs
    one short sentence ("opened Spotify", "typed 12 characters"); while the robot
    is `working` each of those lines is shown on its screen as a caption page (four
    lines of 17 characters, held at reading pace) when no reply is up, at most one
    every 1.5 s, after the initial "on it…". Turn 1 and recovery turns (an
-   error, a repeated step, a "no", a steer) run at medium reasoning effort, the
-   rest at low. Meanwhile you can keep talking: **"use Safari instead"** →
+   error, a repeated step, a "no", a steer, a failed final-answer check) run at
+   high reasoning effort, the rest at medium. **Before a final answer is spoken**
+   on a task that sent any input, a separate call checks it against a fresh
+   screenshot, with none of the task's history, and returns `{valid, guidance}`.
+   An unconfirmed answer goes back to the agent once, with what the screen
+   actually shows; a second miss is spoken as "I couldn't confirm that on
+   screen." A check that errors lets the answer through. This exists because
+   four logged runs ended "Spotify is playing" right after an input that changed
+   nothing on screen. Meanwhile you can keep talking: **"use Safari instead"** →
    `steer_task` (delivered with the very next step), **"how's it going?"** →
    `task_status`, **"stop"** → `stop_task`: the in-flight model request or step is
    interrupted within ~100 ms, the worker is killed, and every key and mouse
@@ -136,8 +148,10 @@ HEARD IT at 1.4 s — ears are working.
 | `CC_BUDDY_AGENT_MAX_TURNS` | `25` | step cap per task |
 | `CC_BUDDY_AGENT_MAX_SECS` | `180` | wall-clock cap per task (floor 30) |
 | `CC_BUDDY_AGENT_EXEC_TIMEOUT` | `60` | seconds one `exec_py` step may run before the worker session is restarted (floor 10) |
-| `CC_BUDDY_AGENT_REASONING` | `low` | reasoning effort for ordinary steps (`low`, `medium`, `high`) |
-| `CC_BUDDY_AGENT_PLAN_REASONING` | `medium` | reasoning effort for turn 1 and recovery turns (after an error, a repeated step, a "no" or a steer) |
+| `CC_BUDDY_AGENT_REASONING` | `medium` | reasoning effort for ordinary steps (`none`, `minimal`, `low`, `medium`, `high`, `xhigh`, `max`); `medium` costs ~0.5 s a step over `low` (logged medians 3.87 s vs 3.37 s) |
+| `CC_BUDDY_AGENT_PLAN_REASONING` | `high` | reasoning effort for turn 1 and recovery turns (after an error, a repeated step, a "no", a steer, or a failed final-answer check) |
+| `CC_BUDDY_AGENT_VERIFY` | on | check a final answer against a fresh screenshot before it is spoken, on any task that clicked, typed or pressed keys; `0` turns it off |
+| `CC_BUDDY_AGENT_VERIFY_REASONING` | `low` | reasoning effort for that check |
 | `CC_BUDDY_AGENT_RUNS_DIR` | `~/.config/cc-buddy-bridge/agent-runs` | one JSONL action log per task: goal, every code block, text results, questions, answers, final line — never the screenshots |
 
 ## Safety
