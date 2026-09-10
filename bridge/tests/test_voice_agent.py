@@ -788,5 +788,79 @@ def test_prompts_do_not_let_a_started_task_read_as_done() -> None:
     "It's playing now." 12 s before the task finished."""
     from cc_buddy_bridge.voice_agent import BACKEND_INSTRUCTIONS, INSTRUCTIONS
     assert "Starting a task is not finishing it" in INSTRUCTIONS and 'INSTEAD: "On it."' in INSTRUCTIONS
-    assert "When\n  start_task returns ok, return exactly: On it." in BACKEND_INSTRUCTIONS
+    # the backend stays silent after start_task (its "On it." doubled the voice's own), and
+    # never asks a clarifying question (the "what city?" round trip cost 10.4 s)
+    assert "reply with an empty message" in BACKEND_INSTRUCTIONS
+    assert "return exactly: On it" not in BACKEND_INSTRUCTIONS
+    assert "Never ask the owner a clarifying question" in BACKEND_INSTRUCTIONS
+
+
+def test_idle_timeout_closes_when_the_server_goes_quiet() -> None:
+    """3/3 logged idle closes hung until the next Live event (+91 s, +129 s, +93 min)."""
+    clock = {"now": 0.0}
+    conn = FakeConnection()                        # nothing arrives after session.started
+    s, states, _ = _session(conn, [FakeAgent(None, None)], clock=clock)
+
+    async def go():
+        task = asyncio.create_task(s.run())
+        await asyncio.sleep(0.05)
+        clock["now"] = 30.0                        # past the 20 s idle timeout
+        await asyncio.wait_for(task, timeout=2.0)  # ends with NO further event — no feed(None)
+    asyncio.run(go())
+    assert s._ended.is_set() and states[-1] == "idle"
+
+
+def test_started_task_goes_working_at_once_and_tells_the_voice_quietly() -> None:
+    agent = FakeAgent(None, None)
+    # "listening" first: task events never set "working" from there, so only start_task can
+    conn = FakeConnection([_heard("open my mail"), _tool_call("start_task", goal="open mail")])
+    s, states, _ = _session(conn, [agent])
+
+    async def go():
+        task = asyncio.create_task(s.run())
+        await asyncio.sleep(0.02)
+        assert states[-1] == "working"
+        quiet = [kw["content"] for k, kw in conn.sent if k == "session.thinking.append"]
+        assert len(quiet) == 1 and "open mail" in quiet[0] and "Nothing is done yet" in quiet[0]
+        agent.release.set()
+        await asyncio.sleep(0.02)
+        conn.feed(_tool_call("end_conversation", "c9"), None)
+        await task
+    asyncio.run(go())
+
+
+def test_stopped_task_is_not_done_and_gives_the_owners_reason() -> None:
+    agent = FakeAgent(None, None)
+    conn = FakeConnection([_tool_call("start_task", "c1", goal="open mail")])
+    s, states, _ = _session(conn, [agent])
+
+    async def go():
+        task = asyncio.create_task(s.run())
+        await asyncio.sleep(0.02)
+        conn.feed(_tool_call("stop_task", "c2"))
+        await asyncio.sleep(0.02)
+        assert agent.cancelled and agent.reason == "you asked me to stop"
+        s._on_agent_event(AgentEvent("cancelled", "Stopped."))
+        assert states[-1] == "listening"            # no done nod for a stopped task
+        conn.feed(_tool_call("end_conversation", "c9"), None)
+        await task
+    asyncio.run(go())
+
+
+def test_closing_session_speaks_no_result() -> None:
+    """A hush used Task.cancel() but the result path checked only `_ended`, so a hushed
+    conversation still tried to speak its result (15:50:04.623)."""
+    agent = FakeAgent(None, None, final="Mail is open.")
+    conn = FakeConnection([_tool_call("start_task", "c1", goal="open mail")])
+    s, _, _ = _session(conn, [agent])
+
+    async def go():
+        task = asyncio.create_task(s.run())
+        await asyncio.sleep(0.02)
+        task.cancel()                               # the hush path
+        with pytest.raises(asyncio.CancelledError):
+            await task
+    asyncio.run(go())
+    # the greeting is the only thing the voice was handed: no result of any kind after the hush
+    assert len(conn.commentary()) == 1 and "Greet" in conn.commentary()[0]
 
