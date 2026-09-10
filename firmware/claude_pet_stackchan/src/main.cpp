@@ -28,6 +28,7 @@ static void startBt() {
 #include "character.h"
 #include "stats.h"
 #include "persona.h"
+#include "face.h"
 #include "body.h"
 #include "eyes.h"
 #include "chirp.h"
@@ -805,7 +806,12 @@ void loop() {
     static_assert(CAP_LINES <= TamaState::CAP_MAX_LINES && CAP_COLS <= TamaState::CAP_MAX_COLS, "caption storage");
     bool captionUp = tama.captionAtMs && tama.captionNLines
                      && now - tama.captionAtMs < (uint32_t)tama.captionHoldMs + CAP_GRACE_MS;
-    eyesSet(activeState, baseState == P_ATTENTION, listenNow, false, bodyGazeSide(), tama.explore,
+    // A pet showing words is awake (face.h): the face never sleeps under a caption
+    // or in the gap between pages. The body keeps activeState, so no sleepy chirp.
+    static uint32_t lastTextMs = 0;
+    if (captionUp) lastTextMs = now ? now : 1;
+    PersonaState faceNow = face::faceState(activeState, captionUp, now, lastTextMs);
+    eyesSet(faceNow, baseState == P_ATTENTION, listenNow, false, bodyGazeSide(), tama.explore,
             tama.agentState, moodExprForEyes);
     // A caption page (y >= 112) owns the lower band: the eyes park on the N row.
     eyesCardUp(captionUp);
@@ -833,7 +839,7 @@ void loop() {
     // Status word: cleared and redrawn each frame (the card band overwrites
     // it during a prompt, which is intended — the card is the status then).
     if (!captionUp) spr.fillRect(0, EYES_STATUS_Y, W, 18, p.bg);
-    const char* st = captionUp ? "" : eyesStatusText(activeState, listenNow, tama.explore, tama.agentState, moodExprForEyes);
+    const char* st = captionUp ? "" : eyesStatusText(faceNow, listenNow, tama.explore, tama.agentState, moodExprForEyes);
     if (st[0]) {
       spr.setTextDatum(MC_DATUM);
       spr.setTextSize(2);

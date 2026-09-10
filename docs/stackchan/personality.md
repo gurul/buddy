@@ -89,8 +89,17 @@ constant in one file and the other.
 | error | side-to-side wobble | TIRED + flicker + confused | red double flash | `oops` | descending boop |
 | idle | back to the persona state | — | — | — | — |
 
-A phase older than 15 minutes with no follow-up (the daemon died mid-conversation)
+The daemon re-sends the current phase every 10 s while a conversation is open; a
+phase that goes 30 s without one (the daemon died or the link dropped mid-conversation)
 falls back to the persona.
+
+**A pet showing words is awake** (`src/face.h`). The persona sleeps whenever Claude
+Code is idle, and a conversation or a thought caption is not Claude Code activity, so
+buddy used to close its eyes under its own reply — and the `zzz` status word, whose
+row (y 186) sits on the caption band's 4th line (y 181), flashed into the text
+whenever a page ran out before the next arrived. Now, while a caption is up and for
+4 s after the last one, the face (eyes and status word) presents sleep as idle. The
+body keeps its sleep pose, so there is no sleepy chirp and head-drop between pages.
 
 ## 3. The diary (`bridge/src/cc_buddy_bridge/diary.py`)
 
