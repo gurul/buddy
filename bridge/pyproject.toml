@@ -47,7 +47,7 @@ dependencies = [
     # (computer_agent.py) and the realtime voice session (voice_agent.py,
     # needs the [realtime] extra's websockets). 3.8.0 current per PyPI,
     # 2026-09-06. Imported lazily, only when OPENAI_API_KEY is set.
-    "openai[realtime]>=3.8",
+    "openai[realtime]>=3.13",
     # "hey buddy" (ears.py): sherpa-onnx keyword spotting (1.13.7, 2026-09-01)
     # with sentencepiece to tokenise the phrase; sounddevice (0.5.6,
     # 2026-08-17, bundles PortAudio) for the mic and the speaker; numpy for

@@ -60,7 +60,7 @@ never receives session state. Run both.
 | `CC_BUDDY_KEY_METHOD` | `osascript` routes Enter through System Events, for apps that swallow synthetic key events (Warp) |
 | `CC_BUDDY_FOCUS_APPS` | comma-separated app names, in priority order, that tap-to-focus raises (e.g. `Warp,cmux,Composer`) — default: Ghostty, Warp, cmux, Composer, Cursor, VS Code |
 | `CC_BUDDY_VOICE` / `CC_BUDDY_WAKE_WORD` / `CC_BUDDY_WAKE_THRESHOLD` / `CC_BUDDY_MIC` | the wake word (default on, `hey buddy`, 0.25, default input) — [voice.md](voice.md) |
-| `CC_BUDDY_REALTIME_MODEL` / `CC_BUDDY_VOICE_NAME` / `CC_BUDDY_VOICE_IDLE_SECS` | the voice conversation (`gpt-realtime-2.1-mini`, `marin`, 20 s) |
+| `CC_BUDDY_LIVE_MODEL` / `CC_BUDDY_LIVE_BACKEND_MODEL` / `CC_BUDDY_VOICE_NAME` / `CC_BUDDY_VOICE_IDLE_SECS` | the voice conversation (`gpt-live-1`, `gpt-6-astra`, `marin`, 20 s) |
 | `CC_BUDDY_COMPUTER_CONTROL` / `CC_BUDDY_AGENT_MODEL` / `CC_BUDDY_AGENT_MAX_TURNS` | computer use (on, `gpt-6-astra`, 25 steps); action logs in `~/.config/cc-buddy-bridge/agent-runs/` |
 
 Installing into the wrong config home **fails silently** — hooks written, board animating,

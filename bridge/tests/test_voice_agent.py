@@ -1,13 +1,16 @@
-"""voice_agent.py with a scripted realtime connection, a fake speaker and a
-fake computer agent: session setup, tool dispatch, board-state mirroring,
-barge-in, ask_user relay, idle timeout and the session cap."""
+"""voice_agent.py with a scripted Live connection, a fake speaker and a fake
+computer agent: session setup, delegated tool dispatch, board-state mirroring,
+barge-in, ask_user relay, idle timeout and the session cap.
+
+The Live protocol has no transcript-done event, so a spoken turn closes on a
+silence gap. `_say()` builds a turn and the tests advance the fake clock past
+TURN_GAP_SECS to close it."""
 
 from __future__ import annotations
 
 import asyncio
 import base64
 import json
-from types import SimpleNamespace
 
 import pytest
 
@@ -23,17 +26,31 @@ from cc_buddy_bridge.voice_agent import (
 # ---- fakes ---------------------------------------------------------------------------
 
 class _Recorder:
+    """Records every client command under its dotted Live event name."""
+
     def __init__(self, conn: "FakeConnection", kind: str) -> None:
         self.conn, self.kind = conn, kind
+
+    async def start(self, **kw):    # session.start
+        self.conn.sent.append((f"{self.kind}.start", kw))
 
     async def update(self, **kw):   # session.update
         self.conn.sent.append((f"{self.kind}.update", kw))
 
-    async def create(self, **kw):   # response.create / conversation.item.create
+    async def create(self, **kw):   # response.create / response.item.create
         self.conn.sent.append((f"{self.kind}.create", kw))
 
-    async def append(self, **kw):   # input_audio_buffer.append
+    async def append(self, **kw):   # session.input_audio.append / session.commentary.append
         self.conn.sent.append((f"{self.kind}.append", kw))
+
+    async def mute(self, **kw):
+        self.conn.sent.append((f"{self.kind}.mute", kw))
+
+    async def unmute(self, **kw):
+        self.conn.sent.append((f"{self.kind}.unmute", kw))
+
+    async def close(self, **kw):
+        self.conn.sent.append((f"{self.kind}.close", kw))
 
 
 class FakeConnection:
@@ -42,12 +59,15 @@ class FakeConnection:
     def __init__(self, events: list[dict] | None = None) -> None:
         self.sent: list[tuple[str, dict]] = []
         self.queue: asyncio.Queue[dict | None] = asyncio.Queue()
+        self.queue.put_nowait({"type": "session.started"})   # run() waits for this
         for e in events or []:
             self.queue.put_nowait(e)
         self.session = _Recorder(self, "session")
+        self.session.input_audio = _Recorder(self, "session.input_audio")
+        self.session.commentary = _Recorder(self, "session.commentary")
+        self.session.thinking = _Recorder(self, "session.thinking")
         self.response = _Recorder(self, "response")
-        self.input_audio_buffer = _Recorder(self, "input_audio_buffer")
-        self.conversation = SimpleNamespace(item=_Recorder(self, "conversation.item"))
+        self.response.item = _Recorder(self, "response.item")
 
     def feed(self, *events: dict | None) -> None:
         for e in events:
@@ -67,11 +87,15 @@ class FakeConnection:
 
     def tool_outputs(self) -> list[dict]:
         return [json.loads(kw["item"]["output"]) for k, kw in self.sent
-                if k == "conversation.item.create" and kw["item"]["type"] == "function_call_output"]
+                if k == "response.item.create" and kw["item"]["type"] == "function_call_output"]
 
     def user_messages(self) -> list[str]:
         return [kw["item"]["content"][0]["text"] for k, kw in self.sent
-                if k == "conversation.item.create" and kw["item"]["type"] == "message"]
+                if k == "response.item.create" and kw["item"]["type"] == "message"]
+
+    def commentary(self) -> list[str]:
+        """What the voice was handed to say (session.commentary.append), greeting first."""
+        return [kw["content"] for k, kw in self.sent if k == "session.commentary.append"]
 
 
 class FakeSpeaker:
@@ -137,8 +161,32 @@ class FakeAgent:
 
 
 def _tool_call(name: str, call_id: str = "c1", **args) -> dict:
-    return {"type": "response.function_call_arguments.done", "name": name, "call_id": call_id,
-            "arguments": json.dumps(args)}
+    """A backend function call, nested in a Live response.event."""
+    return {"type": "response.event", "event": {
+        "type": "response.output_item.done",
+        "item": {"type": "function_call", "name": name, "call_id": call_id,
+                 "arguments": json.dumps(args)}}}
+
+
+def _delegated(did: str = "d1") -> dict:
+    return {"type": "session.delegation.created",
+            "delegation": {"id": did, "target": "responses", "type": "delegation"}}
+
+
+def _backend(kind: str) -> dict:
+    return {"type": "response.event", "event": {"type": kind}}
+
+
+def _done() -> dict:
+    return _backend("response.completed")
+
+
+def _heard(text: str) -> dict:
+    return {"type": "session.input_transcript.delta", "delta": text}
+
+
+def _spoke(text: str) -> dict:
+    return {"type": "session.output_transcript.delta", "delta": text}
 
 
 def _session(conn: FakeConnection, agents: list[FakeAgent], clock: dict | None = None, **kw):
@@ -162,22 +210,32 @@ def _session(conn: FakeConnection, agents: list[FakeAgent], clock: dict | None =
 
 def test_configured_defaults_and_env() -> None:
     c = configured({})
-    assert c.model == "gpt-realtime-2.1-mini" and c.voice == "marin" and c.idle_timeout_secs == 20.0
-    c = configured({"CC_BUDDY_REALTIME_MODEL": "gpt-realtime-2.1", "CC_BUDDY_VOICE_NAME": "cedar",
+    assert c.model == "gpt-live-1" and c.voice == "marin" and c.idle_timeout_secs == 20.0
+    assert c.backend_model == "gpt-6-astra" and c.backend_effort == "low"
+    c = configured({"CC_BUDDY_LIVE_MODEL": "gpt-live-1-preview", "CC_BUDDY_VOICE_NAME": "cedar",
+                    "CC_BUDDY_LIVE_BACKEND_MODEL": "gpt-5-mini", "CC_BUDDY_LIVE_BACKEND_EFFORT": "minimal",
                     "CC_BUDDY_VOICE_IDLE_SECS": "45"})
-    assert c.model == "gpt-realtime-2.1" and c.voice == "cedar" and c.idle_timeout_secs == 45.0
+    assert c.model == "gpt-live-1-preview" and c.voice == "cedar" and c.idle_timeout_secs == 45.0
+    assert c.backend_model == "gpt-5-mini" and c.backend_effort == "minimal"
+    # the Realtime-era name is ignored, not silently honoured
+    assert configured({"CC_BUDDY_REALTIME_MODEL": "gpt-realtime-2.1"}).model == "gpt-live-1"
+    assert configured({"CC_BUDDY_LIVE_BACKEND_EFFORT": "turbo"}).backend_effort == "low"
     assert configured({"CC_BUDDY_VOICE_IDLE_SECS": "1"}).idle_timeout_secs == 5.0     # floor
 
 
 def test_session_config_shape() -> None:
     s = session_config(VoiceConfig(output="audio"))
-    assert s["type"] == "realtime" and s["model"] == "gpt-realtime-2.1-mini"
-    assert s["audio"]["input"]["format"] == {"type": "audio/pcm", "rate": 24000}
-    assert s["audio"]["input"]["turn_detection"]["type"] == "semantic_vad"
-    assert s["audio"]["input"]["turn_detection"]["interrupt_response"] is True
+    assert s["model"] == "gpt-live-1"
+    # gpt-live-1 is full duplex and always speaks: no modality list, no turn detection
+    assert "output_modalities" not in s and "tools" not in s and "type" not in s
+    assert s["audio"]["format"] == {"type": "audio/pcm", "rate": 24000}
     assert s["audio"]["output"]["voice"] == "marin"
-    assert [t["name"] for t in s["tools"]] == ["start_task", "steer_task", "stop_task", "task_status",
-                                                "answer_question", "go_explore", "end_conversation"]
+    d = s["delegation"]
+    assert d["type"] == "responses" and d["responses"]["model"] == "gpt-6-astra"
+    assert d["responses"]["reasoning"] == {"effort": "low"}
+    assert [t["name"] for t in d["responses"]["tools"]] == ["start_task", "steer_task", "stop_task",
+                                                            "task_status", "answer_question",
+                                                            "go_explore", "end_conversation"]
     assert all(t["type"] == "function" for t in TOOLS)
 
 
@@ -194,25 +252,25 @@ def test_setup_greeting_mic_pump_and_goodbye() -> None:
         conn.feed(_tool_call("end_conversation"), None)
         await task
     asyncio.run(go())
-    assert conn.kinds()[:2] == ["session.update", "response.create"]
-    assert conn.sent[0][1]["session"]["model"] == "gpt-realtime-2.1-mini"
-    assert "greeting" in conn.sent[1][1]["response"]["instructions"]
-    appended = [kw["audio"] for k, kw in conn.sent if k == "input_audio_buffer.append"]
+    assert conn.kinds()[:2] == ["session.start", "session.commentary.append"]
+    assert conn.sent[0][1]["session"]["model"] == "gpt-live-1"
+    assert "Greet" in conn.sent[1][1]["content"]
+    appended = [kw["audio"] for k, kw in conn.sent if k == "session.input_audio.append"]
     assert appended and base64.b64decode(appended[0]) == b"\x01\x02" * 100
     assert conn.tool_outputs() == [{"ok": True}]
     # end_conversation does not ask for another response
-    assert conn.kinds()[-1] == "conversation.item.create"
+    assert conn.kinds()[-1] == "response.item.create"
     assert states[0] == "wake" and states[-1] == "idle"
 
 
 def test_audio_events_drive_speaker_and_states() -> None:
     pcm = base64.b64encode(b"\x00\x10" * 50).decode()
     conn = FakeConnection([
-        {"type": "response.created"},
-        {"type": "response.output_audio.delta", "delta": pcm},
-        {"type": "response.output_audio_transcript.done", "transcript": "Yeah?"},
-        {"type": "response.done"},
-        {"type": "input_audio_buffer.speech_started"},
+        _delegated(),
+        {"type": "session.output_audio.delta", "delta": pcm},
+        _spoke("Yeah?"),
+        _done(),
+        _heard("wait"),
         _tool_call("end_conversation"), None,
     ])
     s, states, _ = _session(conn, [FakeAgent(None, None)])
@@ -225,23 +283,31 @@ def test_audio_events_drive_speaker_and_states() -> None:
 
 def test_start_task_runs_agent_and_reports_result() -> None:
     agent = FakeAgent(None, None, final="Your mail is open.")
+    clock = {"now": 0.0}
     conn = FakeConnection([_tool_call("start_task", goal="open mail")])
-    s, states, _ = _session(conn, [agent])
+    s, states, _ = _session(conn, [agent], clock=clock)
 
     async def go():
         task = asyncio.create_task(s.run())
         await asyncio.sleep(0.01)
         assert s.task_running and "working" in states
-        conn.feed({"type": "response.done"})            # after "On it."
+        conn.feed(_done())            # after "On it."
         await asyncio.sleep(0.01)
         assert states[-1] == "working"
         agent.release.set()
         await asyncio.sleep(0.01)
-        assert conn.user_messages() == ["[task finished] Your mail is open."]
-        assert not s._ended.is_set()                    # still speaking the result
-        conn.feed({"type": "response.created"}, {"type": "response.done"})   # the result, spoken
-        await asyncio.sleep(0.01)
-        assert s._ended.is_set()                        # ... and the conversation closes by itself
+        # the result goes to the VOICE to say, not into the backend (2026-09-10: "Okay, waiting.")
+        assert conn.user_messages() == []
+        assert "Your mail is open." in conn.commentary()[-1]
+        conn.feed(_delegated(), _spoke("Your mail is open."), _done())
+        await asyncio.sleep(0.05)
+        clock["now"] += 2.0                             # the result has been said and gone quiet
+        await asyncio.sleep(0.2)
+        assert not s._ended.is_set()                    # ... and buddy keeps listening (2026-09-10)
+        assert states[-1] == "listening"
+        conn.feed(_tool_call("end_conversation", "c9"))   # "bye buddy" is what ends it
+        await asyncio.sleep(0.05)
+        assert s._ended.is_set()
         conn.feed(None)
         await task
     asyncio.run(go())
@@ -271,7 +337,7 @@ def test_steer_stop_and_status_tools() -> None:
     assert outs[3]["running"] is True and outs[3]["last"] == "looking"
     assert outs[4] == {"ok": True} and agent.cancelled
     assert outs[5] == {"ok": False, "reason": "no task is running"}
-    assert conn.user_messages() == ["[task finished] Stopped."]
+    assert conn.user_messages() == [] and "Stopped." in conn.commentary()[-1]
 
 
 def test_second_start_while_running_is_refused_and_agent_can_be_disabled() -> None:
@@ -312,7 +378,10 @@ def test_ask_user_is_spoken_and_answered_through_the_tool() -> None:
         await task
     asyncio.run(go())
     assert conn.tool_outputs()[1] == {"ok": True}
-    assert conn.user_messages()[-1] == "[task finished] Sent. (answer=yes)"
+    # the backend got the question as context, the voice asked it and later said the result
+    assert conn.user_messages() == ["[task question] Send the email to Sam?"]
+    assert any("Send the email to Sam?" in c for c in conn.commentary())
+    assert "Sent. (answer=yes)" in conn.commentary()[-1]
 
 
 def test_answer_without_a_pending_question_is_refused() -> None:
@@ -324,7 +393,7 @@ def test_answer_without_a_pending_question_is_refused() -> None:
 
 def test_idle_timeout_closes_the_session() -> None:
     clock = {"now": 0.0}
-    conn = FakeConnection([{"type": "response.done"}])
+    conn = FakeConnection([_done()])
     s, states, _ = _session(conn, [FakeAgent(None, None)], clock=clock)
 
     async def go():
@@ -369,20 +438,20 @@ def test_unknown_tool_and_error_events_are_harmless() -> None:
 
 
 def test_tool_result_defers_response_create_until_response_done() -> None:
-    """function_call_arguments.done arrives before response.done; the API rejects a
-    second response.create while one is active (bench 2026-09-06 09:01)."""
-    conn = FakeConnection([{"type": "response.created"}, _tool_call("task_status", "c1")])
+    """A backend function call is reported before its response completes, and the
+    API rejects a second response.create while one is active (bench 2026-09-06 09:01)."""
+    conn = FakeConnection([_delegated(), _tool_call("task_status", "c1")])
     s, _, _ = _session(conn, [FakeAgent(None, None)])
 
     async def go():
         task = asyncio.create_task(s.run())
         await asyncio.sleep(0.01)
         creates_before = sum(1 for k, _ in conn.sent if k == "response.create")
-        assert creates_before == 1                       # the greeting only; the tool result waited
-        conn.feed({"type": "response.done"})
+        assert creates_before == 0                       # the tool result waited; the greeting is commentary
+        conn.feed(_done())
         await asyncio.sleep(0.01)
         creates_after = sum(1 for k, _ in conn.sent if k == "response.create")
-        assert creates_after == 2                        # created once the response finished
+        assert creates_after == 1                        # created once the response completed
         conn.feed(_tool_call("end_conversation", "c2"), None)
         await task
     asyncio.run(go())
@@ -408,35 +477,42 @@ def test_mic_is_muted_while_buddy_speaks_and_for_a_tail() -> None:
         conn.feed(_tool_call("end_conversation"), None)
         await task
     asyncio.run(go())
-    appended = [base64.b64decode(kw["audio"]) for k, kw in conn.sent if k == "input_audio_buffer.append"]
+    appended = [base64.b64decode(kw["audio"]) for k, kw in conn.sent if k == "session.input_audio.append"]
     assert appended == [b"\x03" * 100]
 
 
-def test_conversation_does_not_keep_listening_after_a_task() -> None:
-    """Owner request: after the result is spoken the session ends — no 20 s of listening."""
+def test_conversation_stays_open_after_a_task_until_goodbye_or_idle() -> None:
+    """Owner request 2026-09-10: a finished task does not end the conversation. A goodbye
+    does (previous test), and so does the idle timeout when nothing more is said."""
     agent = FakeAgent(None, None, final="Done.")
+    clock = {"now": 0.0}
     conn = FakeConnection([_tool_call("start_task", "c1", goal="g")])
-    s, states, _ = _session(conn, [agent])
+    s, states, _ = _session(conn, [agent], clock=clock)
 
     async def go():
         task = asyncio.create_task(s.run())
         await asyncio.sleep(0.01)
         agent.release.set()
         await asyncio.sleep(0.01)
-        # the "On it" reply was still queued behind the greeting: it plays first ...
-        conn.feed({"type": "response.created"}, {"type": "response.done"})
-        await asyncio.sleep(0.01)
-        assert not s._ended.is_set()
-        # ... then the result is spoken, and that ends the conversation
-        conn.feed({"type": "response.created"}, {"type": "response.done"})
-        await asyncio.sleep(0.01)
+        conn.feed(_delegated(), _spoke("On it."), _done())
+        await asyncio.sleep(0.05)
+        clock["now"] = 2.0
+        await asyncio.sleep(0.2)
+        conn.feed(_spoke("Done."))                     # the result, spoken
+        await asyncio.sleep(0.05)
+        clock["now"] = 4.0
+        await asyncio.sleep(0.2)
+        assert not s._ended.is_set()                   # still listening after the result
+        clock["now"] = 30.0                            # past the 20 s idle timeout
+        await asyncio.sleep(0.7)                       # the watchdog checks every 0.5 s
         assert s._ended.is_set()
         conn.feed(None)
         await task
     asyncio.run(go())
     assert states[-1] == "idle"
+    assert s.transcript == ["On it.", "Done."]
     creates = [k for k, _ in conn.sent if k == "response.create"]
-    assert len(creates) == 2          # greeting, then ONE reply covering "On it" + the result (both queued) — nothing after
+    assert len(creates) == 1          # "On it" only: the result is commentary, and nothing follows it
 
 
 CAPTIONS = VoiceConfig(idle_timeout_secs=20.0, max_session_secs=600.0, output="captions")
@@ -444,17 +520,22 @@ CAPTIONS = VoiceConfig(idle_timeout_secs=20.0, max_session_secs=600.0, output="c
 
 def _reply(*deltas: str) -> list[dict]:
     text = "".join(deltas)
-    return [{"type": "response.created"},
-            *({"type": "response.output_text.delta", "delta": d} for d in deltas),
-            {"type": "response.output_text.done", "text": text},
-            {"type": "response.done"}]
+    del text
+    return [_delegated(), *(_spoke(d) for d in deltas), _done()]
 
 
 def _captions_session(conn: FakeConnection, clock: dict, **kw):
     captions: list[dict] = []
     s, states, mic = _session(conn, [FakeAgent(None, None)], clock=clock, on_caption=captions.append,
-                              caption_tick_secs=0.001, config=kw.pop("config", CAPTIONS), **kw)
+                              caption_tick_secs=0.001, turn_gap_secs=0.2,
+                              config=kw.pop("config", CAPTIONS), **kw)
     return s, states, captions
+
+
+async def _quiet(clock: dict, at: float = 0.3) -> None:
+    """Live sends no transcript-done event: a reply is final once it goes quiet."""
+    clock["now"] = at
+    await asyncio.sleep(0.02)
 
 
 def test_captions_mode_streams_text_to_the_robot_and_plays_nothing() -> None:
@@ -465,15 +546,17 @@ def test_captions_mode_streams_text_to_the_robot_and_plays_nothing() -> None:
     async def go():
         task = asyncio.create_task(s.run())
         await asyncio.sleep(0.02)
+        await _quiet(clock)
         # page 0 goes up at the first whole word (hold 2 s while it fills), then the final
-        # text refills it as the last page: 15 chars -> clamp(15/12 + 0.8 + 3, 6, 10) = 6 s
+        # text refills it as the last page: 15 chars -> clamp(15/12 + 0.8 + 3, 6, 10) = 6 s,
+        # less the 0.3 s the turn took to go quiet
         assert captions == [
             {"cmd": "caption", "page": 0, "of": 0, "lines": ["Ten past"], "hold_ms": 2000, "chirp": True, "final": False},
-            {"cmd": "caption", "page": 0, "of": 1, "lines": ["Ten past three."], "hold_ms": 6000, "chirp": False,
+            {"cmd": "caption", "page": 0, "of": 1, "lines": ["Ten past three."], "hold_ms": 5700, "chirp": False,
              "final": True},
         ]
         assert states[-1] == "speaking"                 # the phase holds while the page is read
-        clock["now"] = 6.1
+        clock["now"] = 6.4
         await asyncio.sleep(0.01)
         assert captions[-1] == {"cmd": "caption", "clear": True}
         assert states[-1] == "listening"
@@ -492,11 +575,12 @@ def test_state_stays_speaking_until_the_last_page_is_held() -> None:
     async def go():
         task = asyncio.create_task(s.run())
         await asyncio.sleep(0.02)
+        await _quiet(clock)
         assert states[-1] == "speaking" and captions[-1]["final"] is True
         clock["now"] = 3.0
         await asyncio.sleep(0.01)
         assert states[-1] == "speaking"                 # 3 s in: still on the page
-        conn.feed({"type": "input_audio_buffer.speech_started"})   # barge-in
+        conn.feed(_heard("wait"))   # barge-in
         await asyncio.sleep(0.01)
         assert states[-1] == "listening" and captions[-1] == {"cmd": "caption", "clear": True}
         conn.feed(_tool_call("end_conversation"), None)
@@ -513,7 +597,8 @@ def test_idle_watchdog_waits_for_captions() -> None:
     async def go():
         task = asyncio.create_task(s.run())
         await asyncio.sleep(0.02)
-        assert captions[-1]["hold_ms"] == 6000
+        await _quiet(clock)
+        assert captions[-1]["hold_ms"] == 5700
         clock["now"] = 5.5                              # > idle 5 s, but the page is still held
         await asyncio.sleep(0.6)
         assert not s._ended.is_set()
@@ -551,6 +636,7 @@ def test_hush_clears_the_caption_at_once() -> None:
     async def go():
         task = asyncio.create_task(s.run())
         await asyncio.sleep(0.02)
+        await _quiet(clock)
         assert captions[-1]["final"] is True
         task.cancel()                                   # the daemon's touch hush
         with pytest.raises(asyncio.CancelledError):
@@ -567,6 +653,7 @@ def test_new_response_chains_pages() -> None:
     async def go():
         task = asyncio.create_task(s.run())
         await asyncio.sleep(0.02)
+        await _quiet(clock)
         n = len(captions)
         clock["now"] = 0.5
         conn.feed(*_reply("Sure, ", "on it."))          # a second reply while the page is held
@@ -594,11 +681,13 @@ def test_configured_caption_cps() -> None:
 
 
 def test_session_config_captions_vs_audio() -> None:
+    # gpt-live-1 always speaks, so the two modes differ only in the instructions and
+    # in whether the daemon plays the audio it receives
     cap = session_config(VoiceConfig(output="captions"))
-    assert cap["output_modalities"] == ["text"] and "output" not in cap["audio"]
+    assert cap["audio"]["output"]["voice"] == "marin"
     assert "17 characters" in cap["instructions"] and "one page at a time" in cap["instructions"]
     aud = session_config(VoiceConfig(output="audio"))
-    assert aud["output_modalities"] == ["audio"] and aud["audio"]["output"]["voice"] == "marin"
+    assert aud["audio"]["output"]["voice"] == "marin"
     assert "17 characters" not in aud["instructions"]
     assert configured({}).output == "captions"
     assert configured({"CC_BUDDY_VOICE_OUTPUT": "audio"}).output == "audio"
@@ -608,7 +697,7 @@ def test_session_config_captions_vs_audio() -> None:
     conn = FakeConnection(_reply("Yeah?") + [_tool_call("end_conversation"), None])
     s, _, _ = _session(conn, [FakeAgent(None, None)], on_caption=captions.append)
     asyncio.run(s.run())
-    assert captions == [] and s.transcript == ["Yeah?"]
+    assert captions == [] and s.transcript == ["Yeah?"]   # the turn is flushed as the session closes
 
 
 def test_progress_events_become_caption_pages_while_working() -> None:
@@ -655,7 +744,7 @@ def test_go_explore_ends_the_conversation_and_fires_the_callback() -> None:
     asyncio.run(s.run())
     assert conn.tool_outputs() == [{"ok": True}]
     assert fired == [True] and s.explore_requested
-    assert conn.kinds()[-1] == "conversation.item.create"     # no further response is requested
+    assert conn.kinds()[-1] == "response.item.create"     # no further response is requested
     assert states[-1] == "idle"
 
 
@@ -688,5 +777,16 @@ def test_go_explore_without_a_callback_still_ends() -> None:
 
 
 def test_instructions_mention_go_explore() -> None:
-    from cc_buddy_bridge.voice_agent import INSTRUCTIONS
-    assert "go explore" in INSTRUCTIONS and "go_explore" in INSTRUCTIONS
+    # the voice half only has to know to delegate; the tool workflow is the backend's
+    from cc_buddy_bridge.voice_agent import BACKEND_INSTRUCTIONS, INSTRUCTIONS
+    assert "explore" in INSTRUCTIONS
+    assert "Go explore" in BACKEND_INSTRUCTIONS and "go_explore" in BACKEND_INSTRUCTIONS
+
+
+def test_prompts_do_not_let_a_started_task_read_as_done() -> None:
+    """2026-09-10: the backend said "Spotify playback requested." and the voice turned it into
+    "It's playing now." 12 s before the task finished."""
+    from cc_buddy_bridge.voice_agent import BACKEND_INSTRUCTIONS, INSTRUCTIONS
+    assert "Starting a task is not finishing it" in INSTRUCTIONS and 'INSTEAD: "On it."' in INSTRUCTIONS
+    assert "When\n  start_task returns ok, return exactly: On it." in BACKEND_INSTRUCTIONS
+
