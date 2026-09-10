@@ -94,7 +94,7 @@ exploring; the widget fills up. Or send it off yourself: *"hey buddy, go explore
 ## Under the hood
 
 ```
-you ─"hey buddy"─▶ Mac mic ─▶ daemon ─▶ gpt-realtime (understands you) ─▶ gpt-6-astra + PyAutoGUI (hands)
+you ─"hey buddy"─▶ Mac mic ─▶ daemon ─▶ gpt-live-1 (understands you) ─▶ gpt-6-astra + PyAutoGUI (hands)
                                │ NDJSON over USB serial
                                ▼
                              buddy ── persona · affect engine · conversation phases · captions · eyes · LEDs · chirps
