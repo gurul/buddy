@@ -22,8 +22,8 @@ from .ears import Ears
 from .ears import configured as ears_configured
 from .explore import (
     Action,
-    ExploreRefused,
     Explorer,
+    ExploreRefused,
     Look,
     Mode,
     Note,
@@ -48,11 +48,19 @@ from .protocol import (
     truncate_utf8_bytes,
 )
 from .read_policy import is_within, read_scope
+from .state import State, notification_waits
 from .thought_screen import ThoughtScreen
-from .state import State
 from .version_check import check as version_check
 from .vision import STATS_INTERVAL_SECS as VISION_STATS_SECS
-from .vision import FaceTracker, Frame, build_cam_cmd, build_snap_cmd, configured_save_dir, decode_frame, make_detector
+from .vision import (
+    FaceTracker,
+    Frame,
+    build_cam_cmd,
+    build_snap_cmd,
+    configured_save_dir,
+    decode_frame,
+    make_detector,
+)
 
 # Entry text is prefixed with a 2-byte marker ("> ", "@ ", "+ ") before being
 # stored. Budget the user-supplied portion so the full entry stays within the
@@ -994,16 +1002,21 @@ class Daemon:
             return {"ok": True}
 
         if evt == "notification":
-            # Claude is blocked on the user (permission prompt / waiting for
-            # input). Mark the session so heartbeats carry waiting>0 — the
-            # firmware's attention animation + LED pulse.
-            self.state.needs_input(req.get("session_id", ""))
+            # Only a session blocked on the user (a permission prompt, a question
+            # dialog) marks the session, so heartbeats carry waiting>0 — the
+            # firmware's attention animation + LED pulse. An idle reminder is
+            # news, not a request: it must not take over a live conversation.
+            kind = req.get("notification_type")
+            kind = kind if isinstance(kind, str) else None
+            waits = notification_waits(kind)
+            if waits:
+                self.state.needs_input(req.get("session_id", ""))
             msg = req.get("message")
             if isinstance(msg, str) and msg.strip():
                 self.state.add_entry(f"! {msg.strip()}")
-            log.info("notification: session=%s type=%s → attention",
+            log.info("notification: session=%s type=%s → %s",
                      (req.get("session_id") or "?")[:8],
-                     req.get("notification_type") or "?")
+                     kind or "?", "attention" if waits else "not waiting")
             await self._push_heartbeat()
             return {"ok": True}
 
@@ -1173,12 +1186,14 @@ class Daemon:
             # once, and even a manual explore, which ignores the idle clock.
             self._note_activity()
             await self._dismiss_explore(f"touch ({cmd})")
-            # ... and a touch while buddy is in a conversation is "hush": the
-            # conversation (and any task it is running) ends at once.
+            # ... but a touch during a conversation does nothing more. On
+            # 2026-09-10 a phantom body-pad blip in the attention pose sent
+            # focus and killed a live task; a terminal raise would also take
+            # the frontmost app from a running computer-use task. The
+            # conversation ends by voice (goodbye), not by a touch.
             if self._conversation is not None and not self._conversation.done():
-                log.info("ears: hushed by a touch (%s)", cmd)
-                await self._cancel_active_task("hushed by a touch")
-                self._conversation.cancel()
+                log.info("board touch (%s) during a conversation — ignored", cmd)
+                return
         if cmd == "focus":
             # A tap on the pet in attention state: raise the terminal of the
             # session that is waiting on the human (oldest pending permission,

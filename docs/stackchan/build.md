@@ -121,7 +121,9 @@ rail comes up (the middle zone read pressed at boot, a phantom hold).
 The permission swipe card and hold-to-talk are both gone (owner request). The
 board decides nothing: every permission defers to Claude Code's own terminal
 prompt, and a hold on the pet is read and discarded. A touch during a
-conversation still hushes it.
+conversation does nothing: it neither hushes it nor raises a terminal, because a
+phantom pad blip killed a live task on 2026-09-10 and a terminal raise would steal
+the front app from a running computer task. End a conversation by voice.
 
 ## Gaze policy
 

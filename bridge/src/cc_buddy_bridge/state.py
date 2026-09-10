@@ -7,6 +7,29 @@ from dataclasses import dataclass
 from datetime import datetime, timezone
 from typing import Optional
 
+# Claude Code Notification kinds (the hook's ``notification_type``) that mean a
+# session is blocked on the human. Daemon log counts: idle_prompt 566,
+# permission_prompt 155, auth_success 19, idle 2, elicitation_response 1. The
+# owner's rule (firmware main.cpp derive()): Claude idle -> the pet sleeps; a
+# session blocked on a permission -> attention. So an idle reminder must not
+# light the attention pose over a live voice conversation.
+WAITING_NOTIFICATION_KINDS = frozenset({"permission_prompt", "elicitation_dialog"})
+# Kinds that are news, not a request: they do not mark the session waiting.
+NON_WAITING_NOTIFICATION_KINDS = frozenset({
+    "idle_prompt", "idle", "auth_success", "elicitation_response",
+})
+
+
+def notification_waits(kind: Optional[str]) -> bool:
+    """True when a Notification of this kind means Claude waits on the human.
+
+    A missing or unknown kind counts as waiting — the old behavior, kept so a
+    new blocking kind from Claude Code still gets the human's attention.
+    """
+    if not kind:
+        return True
+    return kind not in NON_WAITING_NOTIFICATION_KINDS
+
 
 @dataclass
 class PendingPermission:
