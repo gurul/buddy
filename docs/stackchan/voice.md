@@ -9,9 +9,12 @@ pressing the keys; the bridge daemon on the Mac is. The robot acts the part.
 Mac microphone ─24 kHz─▶ ears.py ─── sherpa-onnx keyword spotter ("hey buddy")
                             │                       │ wake
                             │ subscribe()           ▼
-                            └──────▶ voice_agent.py ── gpt-realtime-2.1-mini (speech ↔ speech, WebSocket)
-                                          │ tools: start_task / steer_task / stop_task / task_status /
-                                          │        answer_question / go_explore / end_conversation
+                            └──────▶ voice_agent.py ── gpt-live-1 (full duplex, Live API WebSocket)
+                                          │ delegates every decision needing a tool to
+                                          ▼
+                                    Responses backend (gpt-6-astra) ── tools: start_task / steer_task /
+                                          │   stop_task / task_status / answer_question / go_explore /
+                                          │   end_conversation
                                           ▼
                                     computer_agent.py ── gpt-6-astra (Responses API, exec_py tool)
                                           │ code
@@ -28,9 +31,13 @@ daemon ─{"cmd":"agent","state":…}─▶ robot: wake · listening · thinking
    through a streaming keyword spotter. On "hey buddy" the robot's head comes up
    with a chirp (`wake`) and a conversation opens. A wake is ignored while a
    conversation is already open.
-2. **Talk.** A Realtime session (`gpt-realtime-2.1-mini`, semantic turn detection)
-   hears the same microphone. **buddy does not speak through the Mac**: the model
-   answers in text, and each reply is shown as pages of 4 lines x 17 characters in
+2. **Talk.** A Live session (`gpt-live-1`) hears the same microphone. The model is
+   full duplex — it listens while it speaks and does its own turn-taking, so there is
+   no VAD to configure. It answers chit-chat itself and delegates anything needing a
+   tool to a Responses backend (`gpt-6-astra`) that owns the seven tools.
+   **buddy does not speak through the Mac**: gpt-live-1 has no text-only mode, so the
+   daemon reads `session.output_transcript.delta` and never plays the audio it is
+   sent. Each reply is shown as pages of 4 lines x 17 characters in
    large type under its eyes (the eyes move up to make room); page 0 fills word by
    word as the model writes, every page stays up for its character count at
    12 characters/second (2 s minimum), the last page 6-10 s, and the robot
@@ -51,14 +58,26 @@ daemon ─{"cmd":"agent","state":…}─▶ robot: wake · listening · thinking
    click coordinates), `find_text`, `click_text`, `click_element` (a coordinate click that snaps to the control under the point and refuses if it is not what the model named — handyman's grounding trick, on the Accessibility tree), `wait_for`, `wait_settled`,
    `type_text` (clipboard paste, so accents and emoji survive), `zoom`, `observe` —
    plus raw PyAutoGUI. Every step that clicks, types or presses keys ends with a
-   screenshot taken after the screen settles and an `[after]` line (frontmost app,
-   screen changed or not), so a typical task is 2–4 model turns. Each helper logs
+   screenshot taken after the screen settles and an `[after your input]` line: the
+   frontmost app, where the screen changed (`changed around (x,y,w,h)` in click
+   coordinates) or `unchanged`, and — after a raw click — what it landed on and in
+   which app (`clicked on AXScrollArea in Warp`). A step that only looked ends with
+   `[after]`. The change detector compares 1/4-scale grey thumbnails with a
+   24-pixel noise floor and ignores the menu-bar strip, so a 14x14-point checkbox
+   toggle registers and a text caret does not. A typical task is 2–4 model turns. Each helper logs
    one short sentence ("opened Spotify", "typed 12 characters"); while the robot
    is `working` each of those lines is shown on its screen as a caption page (four
    lines of 17 characters, held at reading pace) when no reply is up, at most one
    every 1.5 s, after the initial "on it…". Turn 1 and recovery turns (an
-   error, a repeated step, a "no", a steer) run at medium reasoning effort, the
-   rest at low. Meanwhile you can keep talking: **"use Safari instead"** →
+   error, a repeated step, a "no", a steer, a failed final-answer check) run at
+   high reasoning effort, the rest at medium. **Before a final answer is spoken**
+   on a task that sent any input, a separate call checks it against a fresh
+   screenshot, with none of the task's history, and returns `{valid, guidance}`.
+   An unconfirmed answer goes back to the agent once, with what the screen
+   actually shows; a second miss is spoken as "I couldn't confirm that on
+   screen." A check that errors lets the answer through. This exists because
+   four logged runs ended "Spotify is playing" right after an input that changed
+   nothing on screen. Meanwhile you can keep talking: **"use Safari instead"** →
    `steer_task` (delivered with the very next step), **"how's it going?"** →
    `task_status`, **"stop"** → `stop_task`: the in-flight model request or step is
    interrupted within ~100 ms, the worker is killed, and every key and mouse
@@ -117,9 +136,11 @@ HEARD IT at 1.4 s — ears are working.
 | `CC_BUDDY_WAKE_THRESHOLD` | `0.25` | spotter threshold; lower = more sensitive (bench: 0.25 fired on a synthesized clip, stayed quiet on a control sentence) |
 | `CC_BUDDY_MIC` | default input | substring of the input device name to use |
 | `CC_BUDDY_KWS_MODEL_DIR` | see above | where the sherpa-onnx model lives |
-| `CC_BUDDY_REALTIME_MODEL` | `gpt-realtime-2.1-mini` | the voice model (`gpt-realtime-2.1` for the larger one) |
+| `CC_BUDDY_LIVE_MODEL` | `gpt-live-1` | the voice model (Live API) |
+| `CC_BUDDY_LIVE_BACKEND_MODEL` | `gpt-6-astra` | the Responses backend that owns the tools (`gpt-5-mini` answers faster, calls tools less reliably) |
+| `CC_BUDDY_LIVE_BACKEND_EFFORT` | `low` | reasoning effort for that backend |
 | `CC_BUDDY_VOICE_OUTPUT` | `captions` | `captions`: text to the robot's screen + beeps, silent Mac; `audio`: spoken through the Mac speaker |
-| `CC_BUDDY_VOICE_NAME` | `marin` | the Realtime voice (audio mode only) |
+| `CC_BUDDY_VOICE_NAME` | `marin` | the Live voice (heard only in audio mode) |
 | `CC_BUDDY_CAPTION_CPS` | `12` | reading rate the caption page hold times are derived from (5-30); lower = pages stay longer |
 | `CC_BUDDY_VOICE_IDLE_SECS` | `20` | close the conversation after this much silence with no task running (floor 5) |
 | `CC_BUDDY_COMPUTER_CONTROL` | on | `0` keeps the conversation but refuses `start_task` |
@@ -127,8 +148,10 @@ HEARD IT at 1.4 s — ears are working.
 | `CC_BUDDY_AGENT_MAX_TURNS` | `25` | step cap per task |
 | `CC_BUDDY_AGENT_MAX_SECS` | `180` | wall-clock cap per task (floor 30) |
 | `CC_BUDDY_AGENT_EXEC_TIMEOUT` | `60` | seconds one `exec_py` step may run before the worker session is restarted (floor 10) |
-| `CC_BUDDY_AGENT_REASONING` | `low` | reasoning effort for ordinary steps (`low`, `medium`, `high`) |
-| `CC_BUDDY_AGENT_PLAN_REASONING` | `medium` | reasoning effort for turn 1 and recovery turns (after an error, a repeated step, a "no" or a steer) |
+| `CC_BUDDY_AGENT_REASONING` | `medium` | reasoning effort for ordinary steps (`none`, `minimal`, `low`, `medium`, `high`, `xhigh`, `max`); `medium` costs ~0.5 s a step over `low` (logged medians 3.87 s vs 3.37 s) |
+| `CC_BUDDY_AGENT_PLAN_REASONING` | `high` | reasoning effort for turn 1 and recovery turns (after an error, a repeated step, a "no", a steer, or a failed final-answer check) |
+| `CC_BUDDY_AGENT_VERIFY` | on | check a final answer against a fresh screenshot before it is spoken, on any task that clicked, typed or pressed keys; `0` turns it off |
+| `CC_BUDDY_AGENT_VERIFY_REASONING` | `low` | reasoning effort for that check |
 | `CC_BUDDY_AGENT_RUNS_DIR` | `~/.config/cc-buddy-bridge/agent-runs` | one JSONL action log per task: goal, every code block, text results, questions, answers, final line — never the screenshots |
 
 ## Safety
@@ -151,10 +174,11 @@ The task runs on your real desktop, so the guard rails are real too:
 
 ## Cost, roughly
 
-Wake-word spotting is local (about 1 % of a core). A conversation costs Realtime
-audio tokens (`gpt-realtime-2.1-mini`: $10 in / $20 out per million audio tokens,
-about a cent a minute of talk). A task costs `gpt-6-astra` tokens: one screenshot
-is a few thousand input tokens, a typical 6-step task well under a dollar.
+Wake-word spotting is local (about 1 % of a core). A conversation costs $0.05 per
+minute of session, billed per second — about five times the Realtime-era rate it
+replaced, and captions mode pays it for speech it never plays. The
+Responses backend is billed separately, as are `gpt-6-astra` task tokens: one
+screenshot is a few thousand input tokens, a typical 6-step task well under a dollar.
 
 ## Why these parts (research, 2026-09-06)
 
@@ -164,17 +188,21 @@ is a few thousand input tokens, a typical 6-step task well under a dollar.
   stale; Picovoice Porcupine dropped its free tier on 2026-06-30;
   **livekit-wakeword** (Apache-2.0) is the upgrade path when a GPU training run per
   phrase is acceptable — it reports ~100x fewer false accepts than openWakeWord.
-- **gpt-6-astra** is on `v1/responses` only (not Realtime), and OpenAI's own guide
+- **gpt-6-astra** is on `v1/responses` only (not Live), and OpenAI's own guide
   recommends the code-execution recipe (a plain `exec_py` function tool running
   PyAutoGUI locally) for it; the loop here follows `openai/openai-cua-sample-app`.
   The `beta.threads.tasks` / `computer_control_v1` API shapes seen in some snippets
-  do not exist in the SDK (openai 3.8.0).
+  do not exist in the SDK (openai 3.13.0).
 - **Mid-task steering**: Astra supports `response.steer` over the Responses
   WebSocket; this build queues steers and delivers them with the next step's tool
   results instead, which lands within seconds because every step is a turn boundary
   and keeps the plain HTTP loop.
-- **Realtime voice**: `gpt-realtime-2.1(-mini)` over WebSocket, 24 kHz PCM16,
-  function calling, `semantic_vad` with `interrupt_response` for barge-in.
+- **Live voice** (2026-09-10): `gpt-live-1` on `POST /live/sessions`, a different
+  endpoint from Realtime — `client.live.connect()`, `session.start`,
+  `session.input_audio.append`, 24 kHz PCM16. It is full duplex, so there is no
+  turn-detection block and no `output_modalities`. Tools belong to the delegated
+  Responses backend, not to the voice model. Transcript deltas carry no done event,
+  so `voice_agent._Turns` closes a turn on a speaker change or 1.2 s of quiet.
 - **On-device perception** (measured 2026-09-06 on a 3024x1964 display): Apple
   Vision `VNRecognizeTextRequest` reads the full 2x capture in 0.31 s (accurate)
   or 0.04 s (fast, used for polling), and `CGDisplayCreateImage` captures it in

@@ -165,7 +165,7 @@ def test_a_touch_ends_a_manual_explore_at_once() -> None:
     asyncio.run(go())
 
 
-def test_a_touch_during_a_conversation_hushes_and_ends_the_explore() -> None:
+def test_a_touch_during_a_conversation_ends_the_explore_but_not_the_conversation() -> None:
     async def go():
         d = _daemon()
         conv = _Conversation()
@@ -173,7 +173,7 @@ def test_a_touch_during_a_conversation_hushes_and_ends_the_explore() -> None:
         d._keys = SimpleNamespace(tap=lambda name: None)
         await d._handle_ipc({"evt": "explore", "action": "start"})
         await d._handle_ble({"cmd": "key", "name": "enter"})
-        assert conv.cancelled and d._explorer.state == "off"
+        assert not conv.cancelled and d._explorer.state == "off"
         assert d.ble.sent[-1] == MODE_OFF
     asyncio.run(go())
 

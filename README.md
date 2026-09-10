@@ -25,7 +25,7 @@ the desk, its eyes go quick, the LEDs ripple, the screen says *on it…*, and a
 `gpt-6-astra` loop drives the real mouse and keyboard: screenshot, a few lines of
 PyAutoGUI, look again, up to 25 steps. It asks before anything consequential, takes
 "actually, use Safari" mid-task, and stops on "stop". Then it nods, tells you, and
-goes quiet.
+keeps listening until you say goodbye.
 
 **It has moods.** While it explores, an affect engine on the board — valence, arousal,
 a social drive, a stimulation drive — decides how it feels, and every channel shows
@@ -51,7 +51,8 @@ time, its profile of you, its dreams.
 
 **It knows when you are busy.** It mirrors Claude Code: asleep while you are idle, busy
 while Claude works, head up and searching for you when a session is blocked on you.
-Tap it and it raises that terminal.
+Tap it and it raises that terminal. It is never asleep while it is showing you words:
+under a caption, and for a few seconds after one, its eyes stay open and there is no "zzz".
 
 ## Get one running
 
@@ -94,7 +95,7 @@ exploring; the widget fills up. Or send it off yourself: *"hey buddy, go explore
 ## Under the hood
 
 ```
-you ─"hey buddy"─▶ Mac mic ─▶ daemon ─▶ gpt-realtime (understands you) ─▶ gpt-6-astra + PyAutoGUI (hands)
+you ─"hey buddy"─▶ Mac mic ─▶ daemon ─▶ gpt-live-1 (understands you) ─▶ gpt-6-astra + PyAutoGUI (hands)
                                │ NDJSON over USB serial
                                ▼
                              buddy ── persona · affect engine · conversation phases · captions · eyes · LEDs · chirps

@@ -6,7 +6,11 @@ refocused on the robot; the current knobs are in [../../bridge/README.md](../../
 ## What a Claude Code session does to the pet
 
 - **Mirrors Claude's state.** Sleeping, busy, waiting, celebrating — driven by Claude Code
-  hooks plus a tailer over the session transcripts for tokens and message counts.
+  hooks plus a tailer over the session transcripts for tokens and message counts. Only a
+  session blocked on you (a Notification of kind `permission_prompt` or `elicitation_dialog`,
+  or one with no kind or an unknown kind) puts the pet in the waiting/attention state. An
+  idle reminder (`idle_prompt`, `idle`), `auth_success` and `elicitation_response` are
+  logged and listed, but they do not make the pet demand attention.
 - **Never decides a permission.** The swipe-to-decide card is gone (owner request). Every
   tool call the matcher does not auto-allow defers to Claude Code's own prompt in the
   terminal, immediately — the daemon never blocks a tool call waiting on the board. The
@@ -15,7 +19,9 @@ refocused on the robot; the current knobs are in [../../bridge/README.md](../../
   the terminal of the session that's blocked on you. Window-level matching by the session's repo name works everywhere —
   AppleScript for iTerm2/Terminal.app, Accessibility (AXRaise) for Ghostty, Warp, cmux and
   friends — falling back to raising the app; the app order is configurable via
-  `CC_BUDDY_FOCUS_APPS`.
+  `CC_BUDDY_FOCUS_APPS`. While a voice conversation is open, a board touch (tap or swipe) is
+  logged and ignored: it does not end the conversation, cancel its task, raise a terminal or
+  tap a key. The conversation ends by voice.
 - **Hands-on-pet option picking.** Swipe left/right to walk Claude Code's option pickers
   (Up/Down arrows), swipe down for Enter. Hold-to-talk is gone (owner request): a finger on
   the pet no longer holds a dictation hotkey, and the board sends no voice frames at all.
@@ -60,7 +66,7 @@ never receives session state. Run both.
 | `CC_BUDDY_KEY_METHOD` | `osascript` routes Enter through System Events, for apps that swallow synthetic key events (Warp) |
 | `CC_BUDDY_FOCUS_APPS` | comma-separated app names, in priority order, that tap-to-focus raises (e.g. `Warp,cmux,Composer`) — default: Ghostty, Warp, cmux, Composer, Cursor, VS Code |
 | `CC_BUDDY_VOICE` / `CC_BUDDY_WAKE_WORD` / `CC_BUDDY_WAKE_THRESHOLD` / `CC_BUDDY_MIC` | the wake word (default on, `hey buddy`, 0.25, default input) — [voice.md](voice.md) |
-| `CC_BUDDY_REALTIME_MODEL` / `CC_BUDDY_VOICE_NAME` / `CC_BUDDY_VOICE_IDLE_SECS` | the voice conversation (`gpt-realtime-2.1-mini`, `marin`, 20 s) |
+| `CC_BUDDY_LIVE_MODEL` / `CC_BUDDY_LIVE_BACKEND_MODEL` / `CC_BUDDY_VOICE_NAME` / `CC_BUDDY_VOICE_IDLE_SECS` | the voice conversation (`gpt-live-1`, `gpt-6-astra`, `marin`, 20 s) |
 | `CC_BUDDY_COMPUTER_CONTROL` / `CC_BUDDY_AGENT_MODEL` / `CC_BUDDY_AGENT_MAX_TURNS` | computer use (on, `gpt-6-astra`, 25 steps); action logs in `~/.config/cc-buddy-bridge/agent-runs/` |
 
 Installing into the wrong config home **fails silently** — hooks written, board animating,
