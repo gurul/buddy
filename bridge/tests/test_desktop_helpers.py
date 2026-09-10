@@ -442,3 +442,18 @@ def test_raw_click_names_the_app_it_landed_in() -> None:
     assert b.h.after_line().endswith("; clicked on AXScrollArea in Warp")
     assert b.h.click_element(30, 20, "Play button").startswith(
         "did not click: under (30,20) is AXLink 'Weather' in Safari, not 'Play button'")
+
+
+def test_focused_pid_prefers_ax_then_window_list_then_workspace(monkeypatch) -> None:
+    """NSWorkspace goes stale in the worker (no run loop): it must never win over a live source."""
+    monkeypatch.setattr(dh, "_ax_focused_pid", lambda: 11)
+    monkeypatch.setattr(dh, "_window_list_pid", lambda: 22)
+    monkeypatch.setattr(dh, "_workspace_pid", lambda: 33)
+    assert dh._focused_pid() == 11
+    monkeypatch.setattr(dh, "_ax_focused_pid", lambda: 0)          # AX refused (-25204)
+    assert dh._focused_pid() == 22
+    monkeypatch.setattr(dh, "_window_list_pid", lambda: 0)
+    assert dh._focused_pid() == 33
+    monkeypatch.setattr(dh, "_workspace_pid", lambda: 0)
+    assert dh._focused_pid() == 0 and dh.ax_frontmost() == dh.EMPTY_FRONT
+

@@ -182,15 +182,82 @@ def vision_ocr(frame: Frame, level: str = "accurate") -> list[dict[str, Any]]:
     return out
 
 
+def _ax_focused_pid() -> int:
+    """The app that has keyboard focus, from AX — where a key press actually goes. 0 on error
+    (kAXErrorCannotComplete, -25204, was seen once while a terminal held focus)."""
+    try:
+        from ApplicationServices import (
+            AXUIElementCopyAttributeValue,
+            AXUIElementCreateSystemWide,
+            AXUIElementGetPid,
+        )
+
+        err, app = AXUIElementCopyAttributeValue(AXUIElementCreateSystemWide(), "AXFocusedApplication", None)
+        if err != 0 or app is None:
+            return 0
+        err, pid = AXUIElementGetPid(app, None)
+        return int(pid) if err == 0 and pid else 0
+    except Exception:  # noqa: BLE001
+        return 0
+
+
+def _window_list_pid() -> int:
+    """The owner of the frontmost normal (layer 0) on-screen window. 0 when there is none."""
+    try:
+        import Quartz
+
+        opts = Quartz.kCGWindowListOptionOnScreenOnly | Quartz.kCGWindowListExcludeDesktopElements
+        for w in Quartz.CGWindowListCopyWindowInfo(opts, Quartz.kCGNullWindowID) or []:
+            if w.get("kCGWindowLayer") == 0 and w.get("kCGWindowOwnerPID"):
+                return int(w["kCGWindowOwnerPID"])
+    except Exception:  # noqa: BLE001
+        pass
+    return 0
+
+
+def _workspace_pid() -> int:
+    """NSWorkspace's idea of the frontmost app — last resort only, see `_focused_pid`."""
+    try:
+        from AppKit import NSWorkspace
+
+        app = NSWorkspace.sharedWorkspace().frontmostApplication()
+        return int(app.processIdentifier()) if app is not None else 0
+    except Exception:  # noqa: BLE001
+        return 0
+
+
+def _focused_pid() -> int:
+    """The frontmost app's pid, from sources that stay current in a long-lived process.
+
+    NSWorkspace.frontmostApplication() is updated by notifications that only arrive
+    while a run loop spins, and the desktop worker has none. Measured 2026-09-10 in a
+    plain python process: after `open -a Finder` it still said Warp, while AX and the
+    window list both said Finder. In a real run it said "Finder" for every step after
+    Spotify came up, so open_app waited out its full 8 s twice and the model went
+    hunting in the Dock.
+    """
+    for probe in (_ax_focused_pid, _window_list_pid, _workspace_pid):
+        pid = probe()
+        if pid:
+            return pid
+    return 0
+
+
 def ax_frontmost() -> dict[str, Any]:
     """{"app","bundle","title","pid"} of the frontmost app; title "" on any AX error."""
-    from AppKit import NSWorkspace
-
-    app = NSWorkspace.sharedWorkspace().frontmostApplication()
-    if app is None:
+    pid = _focused_pid()
+    if not pid:
         return dict(EMPTY_FRONT)
-    info: dict[str, Any] = {"app": str(app.localizedName() or ""), "bundle": str(app.bundleIdentifier() or ""),
-                            "title": "", "pid": int(app.processIdentifier())}
+    name, bundle = "", ""
+    try:
+        from AppKit import NSRunningApplication
+
+        app = NSRunningApplication.runningApplicationWithProcessIdentifier_(pid)
+        if app is not None:
+            name, bundle = str(app.localizedName() or ""), str(app.bundleIdentifier() or "")
+    except Exception:  # noqa: BLE001
+        pass
+    info: dict[str, Any] = {"app": name or app_name_for_pid(pid), "bundle": bundle, "title": "", "pid": pid}
     try:
         from ApplicationServices import (
             AXUIElementCopyAttributeValue,
