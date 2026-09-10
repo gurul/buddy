@@ -121,13 +121,17 @@ def test_configured_defaults_and_env() -> None:
 
 def test_configured_reads_new_knobs_and_wires_exec_timeout(monkeypatch, caplog, tmp_path: Path) -> None:
     c = configured({})
-    assert (c.reasoning_effort, c.plan_reasoning_effort) == ("low", "medium")
+    assert (c.reasoning_effort, c.plan_reasoning_effort) == ("medium", "high")
+    assert c.verify is True and c.verify_reasoning_effort == "low"
+    assert configured({"CC_BUDDY_AGENT_VERIFY": "off"}).verify is False
+    assert configured({"CC_BUDDY_AGENT_PLAN_REASONING": "xhigh"}).plan_reasoning_effort == "xhigh"
+    assert configured({"CC_BUDDY_AGENT_PLAN_REASONING": "max"}).plan_reasoning_effort == "max"
     assert (c.exec_timeout_secs, c.max_secs, c.api_timeout_secs) == (60.0, 180.0, 90.0)
     c = configured({"CC_BUDDY_AGENT_REASONING": "medium", "CC_BUDDY_AGENT_PLAN_REASONING": "high",
                     "CC_BUDDY_AGENT_EXEC_TIMEOUT": "30", "CC_BUDDY_AGENT_MAX_SECS": "60"})
     assert (c.reasoning_effort, c.plan_reasoning_effort, c.exec_timeout_secs, c.max_secs) == ("medium", "high", 30.0, 60.0)
     with caplog.at_level("WARNING"):
-        assert configured({"CC_BUDDY_AGENT_REASONING": "turbo"}).reasoning_effort == "low"
+        assert configured({"CC_BUDDY_AGENT_REASONING": "turbo"}).reasoning_effort == "medium"
     assert "turbo" in caplog.text
     assert configured({"CC_BUDDY_AGENT_EXEC_TIMEOUT": "3"}).exec_timeout_secs == 10.0
     assert configured({"CC_BUDDY_AGENT_MAX_SECS": "5"}).max_secs == 30.0
@@ -222,8 +226,8 @@ def test_first_turn_carries_context_and_plan_effort(tmp_path: Path) -> None:
     client = FakeClient([_response("r1", _call("exec_py", "c1", code="a")), _response("r2", _message("ok"))])
     a, _ = _agent(client, FakeWorker(), tmp_path)
     asyncio.run(a.run("x"))
-    assert client.requests[0]["reasoning"] == {"effort": "medium"}
-    assert client.requests[1]["reasoning"] == {"effort": "low"}
+    assert client.requests[0]["reasoning"] == {"effort": "high"}
+    assert client.requests[1]["reasoning"] == {"effort": "medium"}
     assert all(r["timeout"] == 90.0 for r in client.requests)
 
 
@@ -273,9 +277,9 @@ def test_steer_is_delivered_with_the_next_turn(tmp_path: Path) -> None:
     assert inp[0]["type"] == "function_call_output"
     assert inp[1] == {"type": "message", "role": "user",
                       "content": [{"type": "input_text", "text": "[steer] actually use safari"}]}
-    assert client.requests[1]["reasoning"] == {"effort": "medium"}        # a steer is a planning moment
+    assert client.requests[1]["reasoning"] == {"effort": "high"}          # a steer is a planning moment
     assert all(i["type"] != "message" for i in client.requests[2]["input"])   # delivered once
-    assert client.requests[2]["reasoning"] == {"effort": "low"}
+    assert client.requests[2]["reasoning"] == {"effort": "medium"}
 
 
 def test_cancel_stops_between_turns_and_kills_the_worker(tmp_path: Path) -> None:
@@ -355,7 +359,7 @@ def test_ask_user_without_a_listener_answers_no(tmp_path: Path) -> None:
     a, _ = _agent(client, FakeWorker(), tmp_path)
     asyncio.run(a.run("x"))
     assert client.requests[1]["input"][0]["output"][0]["text"].startswith("no (")
-    assert client.requests[1]["reasoning"] == {"effort": "medium"}        # a "no" means re-plan
+    assert client.requests[1]["reasoning"] == {"effort": "high"}          # a "no" means re-plan
 
 
 def test_failsafe_ends_the_run(tmp_path: Path) -> None:
@@ -375,21 +379,47 @@ def test_client_error_is_reported_not_raised(tmp_path: Path) -> None:
 
 # ---- pacing: effort, repeats, retries, continuation ---------------------------------
 
-def test_repeat_exec_gets_a_note_and_medium_effort(tmp_path: Path) -> None:
+NO_EFFECT = [{"type": "input_text", "text": "[after your input] frontmost: Spotify — 'Spotify'; screen: unchanged"}]
+ACTED = [{"type": "input_text",
+          "text": "[after your input] frontmost: Spotify — 'Spotify'; screen: changed around (10,10,20,20)"}]
+LOOKED = [{"type": "input_text", "text": "[after] frontmost: Spotify — 'Spotify'; screen: unchanged"}]
+
+
+def _verdict(rid: str, valid: bool, guidance: str = "") -> dict:
+    return _response(rid, _message(json.dumps({"valid": valid, "guidance": guidance})))
+
+
+def test_repeat_exec_gets_a_note_when_the_input_changed_nothing(tmp_path: Path) -> None:
     client = FakeClient([
         _response("r1", _call("exec_py", "c1", code="pyautogui.click(1, 2)")),
         _response("r2", _call("exec_py", "c2", code="pyautogui.click(1, 2)")),
         _response("r3", _message("stuck")),
+        _verdict("v1", True),
     ])
-    a, _ = _agent(client, FakeWorker(), tmp_path)
+    a, _ = _agent(client, FakeWorker({"pyautogui.click(1, 2)": NO_EFFECT}), tmp_path)
     asyncio.run(a.run("x"))
-    assert client.requests[1]["reasoning"] == {"effort": "low"}
+    assert client.requests[1]["reasoning"] == {"effort": "medium"}
     inp = client.requests[2]["input"]
     notes = [i for i in inp if i["type"] == "message"]
     assert len(notes) == 1 and notes[0]["content"][0]["text"].startswith("[note] That is the same code")
-    assert client.requests[2]["reasoning"] == {"effort": "medium"}
+    assert client.requests[2]["reasoning"] == {"effort": "high"}
     lines = [json.loads(ln) for ln in a.run_log.read_text().splitlines()]
     assert any(ln.get("repeat") is True for ln in lines)
+
+
+def test_repeat_exec_that_changed_the_screen_gets_no_repeat_note(tmp_path: Path) -> None:
+    """Scrolling twice is a repeat that works; the note used to accuse it of changing nothing."""
+    client = FakeClient([
+        _response("r1", _call("exec_py", "c1", code="pyautogui.scroll(-10)")),
+        _response("r2", _call("exec_py", "c2", code="pyautogui.scroll(-10)")),
+        _response("r3", _message("scrolled")),
+        _verdict("v1", True),
+    ])
+    a, _ = _agent(client, FakeWorker({"pyautogui.scroll(-10)": ACTED}), tmp_path)
+    asyncio.run(a.run("x"))
+    assert not [i for i in client.requests[2]["input"] if i["type"] == "message"]
+    assert client.requests[2]["reasoning"] == {"effort": "medium"}
+    assert not any(json.loads(ln).get("repeat") for ln in a.run_log.read_text().splitlines())
 
 
 def test_error_result_escalates_effort_once(tmp_path: Path) -> None:
@@ -403,7 +433,7 @@ def test_error_result_escalates_effort_once(tmp_path: Path) -> None:
     a, _ = _agent(client, worker, tmp_path)
     asyncio.run(a.run("x"))
     efforts = [r["reasoning"]["effort"] for r in client.requests]
-    assert efforts == ["medium", "medium", "low", "low"]
+    assert efforts == ["high", "high", "medium", "medium"]
 
 
 def test_transient_api_error_retries_once(tmp_path: Path) -> None:
@@ -477,8 +507,121 @@ def test_action_log_records_goal_exec_results_and_final(tmp_path: Path) -> None:
     lines = [json.loads(ln) for ln in a.run_log.read_text().splitlines()]
     assert lines[0]["goal"] == "look" and lines[0]["model"] == "gpt-6-astra"
     assert lines[1] == {"t": 1.0, "turn": 0, "context": "frontmost: Warp — 'zsh'; screen 100x50; 14:02"}
-    assert lines[2] == {"t": 1.0, "turn": 1, "effort": "medium", "api_secs": 0.0}
+    assert lines[2] == {"t": 1.0, "turn": 1, "effort": "high", "api_secs": 0.0}
     assert lines[3]["exec"] == "display(pyautogui.screenshot())"
     assert lines[4] == {"t": 1.0, "turn": 1, "result": ["hi"], "images": 1}     # no image bytes in the log
     assert lines[-1]["final"] == "all done"
     assert "data:x" not in a.run_log.read_text() and "AAAA" not in a.run_log.read_text()
+
+
+
+# ---- phase, usage, and the final-answer check ------------------------------------------
+
+def _phased(text: str, phase: str) -> dict:
+    return {**_message(text), "phase": phase}
+
+
+def test_classify_reads_phase() -> None:
+    c = classify_response(_response("r1", _phased("Spotify is playing, let me check", "commentary")))
+    assert c.kind == "commentary" and c.text == "Spotify is playing, let me check" and c.phases == ["commentary"]
+    c = classify_response(_response("r2", _phased("looking", "commentary"), _phased("It is playing.", "final_answer")))
+    assert c.kind == "final" and c.text == "It is playing."
+    assert classify_response(_response("r3", _message("no phase is an answer"))).kind == "final"
+
+
+def test_phase_commentary_does_not_end_the_run(tmp_path: Path) -> None:
+    client = FakeClient([_response("r1", _phased("Spotify is playing, let me check", "commentary")),
+                         _response("r2", _phased("Spotify is playing.", "final_answer"))])
+    a, events = _agent(client, FakeWorker(), tmp_path)
+    assert asyncio.run(a.run("play")) == "Spotify is playing."
+    assert client.requests[1]["input"] == []
+    assert [e.kind for e in events].count("commentary") == 1
+    logged = [json.loads(ln) for ln in a.run_log.read_text().splitlines()]
+    assert [ln["phase"] for ln in logged if "phase" in ln] == [["commentary"], ["final_answer"]]
+
+
+def test_usage_tokens_are_logged_per_turn(tmp_path: Path) -> None:
+    usage = {"input_tokens": 1200, "output_tokens": 90, "output_tokens_details": {"reasoning_tokens": 64}}
+    client = FakeClient([_response("r1", _message("ok"), usage=usage)])
+    a, _ = _agent(client, FakeWorker(), tmp_path)
+    asyncio.run(a.run("x"))
+    [line] = [json.loads(ln) for ln in a.run_log.read_text().splitlines() if "api_secs" in ln]
+    assert line["tokens"] == {"in": 1200, "out": 90, "reasoning": 64}
+
+
+def test_verifier_passes_a_confirmed_claim(tmp_path: Path) -> None:
+    client = FakeClient([_response("r1", _call("exec_py", "c1", code="pyautogui.press('space')")),
+                         _response("r2", _message("Spotify is playing.")),
+                         _verdict("v1", True)])
+    a, _ = _agent(client, FakeWorker({"pyautogui.press('space')": ACTED}), tmp_path)
+    assert asyncio.run(a.run("play spotify")) == "Spotify is playing."
+    assert len(client.requests) == 3
+    logged = [json.loads(ln) for ln in a.run_log.read_text().splitlines()]
+    assert [ln["verify"]["valid"] for ln in logged if "verify" in ln] == [True]
+
+
+def test_verifier_sends_back_an_unconfirmed_claim_once(tmp_path: Path) -> None:
+    client = FakeClient([_response("r1", _call("exec_py", "c1", code="pyautogui.press('space')")),
+                         _response("r2", _message("Spotify is playing.")),
+                         _verdict("v1", False, "Finder is in front and Spotify shows a play button."),
+                         _response("r3", _call("exec_py", "c3", code="open_app('Spotify')")),
+                         _response("r4", _message("Now Spotify is playing.")),
+                         _verdict("v2", True)])
+    worker = FakeWorker({"pyautogui.press('space')": ACTED, "open_app('Spotify')": ACTED})
+    a, _ = _agent(client, worker, tmp_path)
+    assert asyncio.run(a.run("play spotify")) == "Now Spotify is playing."
+    retry = client.requests[3]
+    assert retry["previous_response_id"] == "r2" and retry["reasoning"] == {"effort": "high"}
+    [note] = retry["input"]
+    text = note["content"][0]["text"]
+    assert text.startswith("[note] A fresh screenshot does not confirm your answer:")
+    assert "Finder is in front" in text
+
+
+def test_verifier_second_failure_says_it_could_not_confirm(tmp_path: Path) -> None:
+    client = FakeClient([_response("r1", _call("exec_py", "c1", code="pyautogui.press('space')")),
+                         _response("r2", _message("Spotify is playing.")),
+                         _verdict("v1", False, "A play button is showing."),
+                         _response("r3", _message("It is playing now.")),
+                         _verdict("v2", False, "A play button is still showing.")])
+    a, events = _agent(client, FakeWorker({"pyautogui.press('space')": ACTED}), tmp_path)
+    final = asyncio.run(a.run("play spotify"))
+    assert final == "I couldn't confirm that on screen. It is playing now."
+    assert events[-1] == AgentEvent("final", final, 3)             # turn 3: the retried answer
+
+
+def test_verifier_skipped_for_read_only_runs(tmp_path: Path) -> None:
+    client = FakeClient([_response("r1", _call("exec_py", "c1", code="log(screen_text())")),
+                         _response("r2", _message("Google shows 60°F."))])
+    a, _ = _agent(client, FakeWorker({"log(screen_text())": LOOKED}), tmp_path)
+    assert asyncio.run(a.run("weather")) == "Google shows 60°F."
+    assert len(client.requests) == 2                  # no check: a run that only looked cannot have misfired
+
+
+def test_verifier_failure_lets_the_answer_through(tmp_path: Path) -> None:
+    client = FakeClient([_response("r1", _call("exec_py", "c1", code="pyautogui.press('space')")),
+                         _response("r2", _message("Spotify is playing.")),
+                         _response("v1", status="failed")])
+    a, _ = _agent(client, FakeWorker({"pyautogui.press('space')": ACTED}), tmp_path)
+    assert asyncio.run(a.run("play spotify")) == "Spotify is playing."
+    logged = [json.loads(ln) for ln in a.run_log.read_text().splitlines()]
+    assert [ln["verify"] for ln in logged if "verify" in ln] == [{"error": "RuntimeError"}]
+
+
+def test_verifier_request_shape(tmp_path: Path) -> None:
+    client = FakeClient([_response("r1", _call("exec_py", "c1", code="pyautogui.press('space')")),
+                         _response("r2", _message("Spotify is playing.")),
+                         _verdict("v1", True)])
+    a, _ = _agent(client, FakeWorker({"pyautogui.press('space')": ACTED}), tmp_path)
+    asyncio.run(a.run("play spotify"))
+    req = client.requests[2]
+    assert "previous_response_id" not in req and "tools" not in req     # judges the screen, not the story
+    assert req["instructions"] == ca.VERIFY_INSTRUCTIONS and req["store"] is False
+    assert req["text"]["format"] == {"type": "json_schema", "name": "verdict", "schema": ca.VERIFY_SCHEMA,
+                                     "strict": True}
+    assert req["reasoning"] == {"effort": "low"}
+    [msg] = req["input"]
+    text, image = msg["content"]
+    assert "Goal: play spotify" in text["text"] and "Spotify is playing." in text["text"]
+    assert "[after your input] frontmost: Spotify" in text["text"]
+    assert image == IMAGE                                                  # a FRESH observe screenshot
