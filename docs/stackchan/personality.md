@@ -101,6 +101,13 @@ whenever a page ran out before the next arrived. Now, while a caption is up and 
 4 s after the last one, the face (eyes and status word) presents sleep as idle. The
 body keeps its sleep pose, so there is no sleepy chirp and head-drop between pages.
 
+The root cause was on the board, not in the rule: `loop()` reads `now` once, and
+`dataPoll()` then stamps each host command with a fresh `millis()`. When the clock
+ticked between the two, `now - agentAtMs` wrapped to about four billion and a phase
+went stale the instant it arrived — three times in one conversation (board event
+ring, 2026-09-10). Every age check against a `dataPoll()` stamp now goes through
+`ticks::elapsedMs()` (`src/ticks.h`), which reads a stamp newer than `now` as age 0.
+
 ## 3. The diary (`bridge/src/cc_buddy_bridge/diary.py`)
 
 The old note was a caption: "a desk with a monitor and a keyboard", once per
