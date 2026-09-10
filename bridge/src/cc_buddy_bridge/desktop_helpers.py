@@ -46,7 +46,15 @@ ACTION_NAMES = ("click", "doubleClick", "rightClick", "middleClick", "mouseDown"
 BROWSER_BUNDLES = frozenset({"com.apple.Safari", "com.google.Chrome", "org.mozilla.firefox",
                              "company.thebrowser.Browser", "com.brave.Browser", "com.microsoft.edgemac"})
 MAX_WAIT_SECS = 30.0          # every wait is clamped here: 30 s + 0.31 s OCR stays under the 60 s exec deadline
-CHANGE_THRESHOLD = 0.003      # fraction of 1/8-scale pixels differing by > 24/255; caret/clock blink ≈ 2-4 px of 92k
+# Change detection on a 1/4-scale grey thumbnail (one thumb pixel = 2x2 points on Retina).
+# Measured 2026-09-10 on a 3024x1964 frame: a 14x14-point checkbox toggle is ~63 changed
+# thumb pixels here, and was 0.00022 of the old 1/8-scale image — under the 0.003 fraction
+# the detector used to need, so it reported "unchanged". A pixel-count floor replaces the
+# fraction: a text caret stays under it, a checkbox clears it.
+THUMB_DIVISOR = 4
+CHANGE_PIXEL_DELTA = 24       # a thumb pixel counts as changed above this grey-level difference
+CHANGE_MIN_PIXELS = 24        # noise floor in thumb pixels: a caret is ~8-16, a checkbox ~50-60
+MENU_BAR_POINTS = 40          # the menu-bar clock ticks every minute; that strip never counts
 SCREEN_TEXT_MAX_LINES = 120
 SCREEN_TEXT_MAX_BYTES = 6 * 1024
 ZOOM_MAX_POINTS = (800, 600)
@@ -80,21 +88,59 @@ class Frame:
         return self._pil
 
     def thumb(self) -> Any:
-        """1/8-scale grayscale, for change detection (0.003 s)."""
+        """1/4-scale grayscale, for change detection (~5 ms on a 3024x1964 frame)."""
         if self._thumb is None:
-            w, h = max(1, self.width // 8), max(1, self.height // 8)
+            w, h = max(1, self.width // THUMB_DIVISOR), max(1, self.height // THUMB_DIVISOR)
             self._thumb = self.pil().convert("L").resize((w, h))
         return self._thumb
 
 
-def changed_fraction(a_thumb: Any, b_thumb: Any) -> float:
-    """Fraction of thumbnail pixels that differ by more than 24/255 (1.0 when the sizes differ)."""
+def change_box(a_thumb: Any, b_thumb: Any, skip_top: int = 0,
+               min_pixels: int = CHANGE_MIN_PIXELS) -> Optional[tuple[int, int, int, int]]:
+    """Where two thumbnails differ: the bounding box (x, y, w, h) in thumb pixels, or None
+    when fewer than `min_pixels` changed. Rows above `skip_top` never count. Thumbnails of
+    different sizes differ everywhere."""
     from PIL import ImageChops
 
     if a_thumb.size != b_thumb.size:
-        return 1.0
-    diff = ImageChops.difference(a_thumb, b_thumb).point(lambda v: 255 if v > 24 else 0)
-    return diff.histogram()[255] / float(a_thumb.width * a_thumb.height)
+        return (0, 0, int(b_thumb.width), int(b_thumb.height))
+    diff = ImageChops.difference(a_thumb, b_thumb).point(lambda v: 255 if v > CHANGE_PIXEL_DELTA else 0)
+    if skip_top > 0:
+        diff.paste(0, (0, 0, diff.width, min(int(skip_top), diff.height)))
+    if diff.histogram()[255] < min_pixels:
+        return None
+    x0, y0, x1, y1 = diff.getbbox()
+    return (x0, y0, x1 - x0, y1 - y0)
+
+
+def app_name_for_pid(pid: int) -> str:
+    """The app that owns a process, "" when unknown. AppKit first (0.3 ms), then libproc (0.02 ms)."""
+    try:
+        from AppKit import NSRunningApplication
+
+        app = NSRunningApplication.runningApplicationWithProcessIdentifier_(int(pid))
+        if app is not None and app.localizedName():
+            return str(app.localizedName())
+    except Exception:  # noqa: BLE001
+        pass
+    try:
+        import ctypes
+        import ctypes.util
+
+        lib = ctypes.CDLL(ctypes.util.find_library("proc"))
+        buf = ctypes.create_string_buffer(256)
+        if lib.proc_name(int(pid), buf, 256) > 0:
+            return buf.value.decode("utf-8", errors="replace")
+    except Exception:  # noqa: BLE001
+        pass
+    return ""
+
+
+def _what(el: dict[str, Any]) -> str:
+    """"AXButton 'Play' in Spotify" — the role, the title when there is one, and the owning app."""
+    role, title, app = el.get("role") or "element", el.get("title") or "", el.get("app") or ""
+    text = f"{role} {title!r}" if title else role
+    return f"{text} in {app}" if app else text
 
 
 # ---- real backends (macOS only) ------------------------------------------------------
@@ -174,6 +220,7 @@ def ax_element_at(x: int, y: int) -> Optional[dict[str, Any]]:
             AXUIElementCopyAttributeValue,
             AXUIElementCopyElementAtPosition,
             AXUIElementCreateSystemWide,
+            AXUIElementGetPid,
             AXValueGetValue,
             kAXValueCGPointType,
             kAXValueCGSizeType,
@@ -207,16 +254,30 @@ def ax_element_at(x: int, y: int) -> Optional[dict[str, Any]]:
     err, el = AXUIElementCopyElementAtPosition(AXUIElementCreateSystemWide(), float(x), float(y), None)
     if err != 0 or el is None:
         return None
+    # Which app the point belongs to. A click aimed at Spotify that lands on Warp's
+    # scroll area reads "AXScrollArea in Warp" — the wrong-app input the logs showed.
+    app = ""
+    try:
+        perr, pid = AXUIElementGetPid(el, None)
+        if perr == 0 and pid:
+            app = app_name_for_pid(pid)
+    except Exception:  # noqa: BLE001
+        pass
     cur, first = el, None
+    found = None
     for _ in range(AX_MAX_HOPS):
         d = describe(cur)
         first = first or d
         if d["pressable"] and (d["title"] or d["role"] != "AXGroup"):
-            return d
+            found = d
+            break
         cur = attr(cur, "AXParent")
         if cur is None:
             break
-    return first
+    result = found or first
+    if result is not None:
+        result["app"] = app
+    return result
 
 
 def _matches(expect: str, role: str, title: str) -> bool:
@@ -252,8 +313,10 @@ class Helpers:
         clock: Callable[[], float] = time.monotonic,
         sleep: Callable[[float], None] = time.sleep,
         now: Callable[[], datetime] = datetime.now,
+        menu_bar_points: int = MENU_BAR_POINTS,
     ) -> None:
         self.gui = pyautogui
+        self._menu_bar_points = menu_bar_points
         self._capture_fn = capture
         self._ocr = ocr
         self._frontmost_fn = frontmost_fn
@@ -311,7 +374,7 @@ class Helpers:
             return None
         if not el:
             return None
-        return f"{el.get('role') or 'element'} {el.get('title')!r}" if el.get("title") else str(el.get("role") or "")
+        return _what(el)
 
     def click_element(self, x: int, y: int, expect: str = "", clicks: int = 1) -> str:
         """Click the control under (x, y) — snapped to its centre — after checking it is the
@@ -329,7 +392,7 @@ class Helpers:
             self.log(line)
             return line
         role, title = el.get("role") or "element", el.get("title") or ""
-        what = f"{role} {title!r}" if title else role
+        what = _what(el)
         if expect and not _matches(expect, role, title):
             line = f"did not click: under ({x},{y}) is {what}, not {expect!r}. Look again (screen_text / zoom)."
             self.log(line)
@@ -522,7 +585,9 @@ class Helpers:
     def _settle(self, timeout: float, interval: float = 0.25) -> bool:
         timeout = min(float(timeout), MAX_WAIT_SECS)
         t0 = self._clock()
-        a = self._capture().thumb()
+        frame = self._capture()
+        a = frame.thumb()
+        skip = self._skip_rows(frame)
         if timeout <= 0:
             self._elapsed = 0.0
             return True
@@ -530,7 +595,7 @@ class Helpers:
             self._sleep(interval)
             b = self._capture().thumb()
             self._elapsed = self._clock() - t0
-            if changed_fraction(a, b) < CHANGE_THRESHOLD:
+            if change_box(a, b, skip) is None:
                 return True
             a = b
             if self._clock() - t0 >= timeout:
@@ -607,16 +672,46 @@ class Helpers:
                 f"screen {w_pts}x{h_pts}; {self._now():%H:%M}")
 
     def after_line(self) -> str:
-        """What changed since the previous exec ended (compares 1/8-scale thumbnails)."""
-        thumb = self._capture().thumb()
-        changed = self._last_thumb is not None and changed_fraction(self._last_thumb, thumb) >= CHANGE_THRESHOLD
+        """What changed since the previous exec ended, and where, in click coordinates.
+
+        "[after your input]" when this step clicked, typed or pressed keys, "[after]" when it
+        only looked — so "[after your input] … screen: unchanged" means the input did nothing
+        visible, which the agent uses to gate its repeat note and its final-answer check.
+        """
+        frame = self._capture()
+        thumb = frame.thumb()
+        box = None
+        if self._last_thumb is not None:
+            box = change_box(self._last_thumb, thumb, self._skip_rows(frame))
         self._last_thumb = thumb
+        if box is None:
+            screen = "unchanged"
+        else:
+            scale = self._thumb_scale(frame)
+            x, y, w, h = (round(v * scale) for v in box)
+            w_pts, h_pts = self._size()
+            if w_pts and h_pts and w * h >= 0.6 * w_pts * h_pts:
+                screen = "changed (most of the screen)"
+            else:
+                screen = f"changed around ({x},{y},{w},{h})"
         front = self._frontmost_fn()
+        head = "[after your input]" if self.acted else "[after]"
         tail = f"; clicked on {self._last_click}" if self._last_click else ""
-        return (f"[after] frontmost: {front.get('app', '')} — {front.get('title', '')!r}; "
-                f"screen: {'changed' if changed else 'unchanged'}{tail}")
+        return (f"{head} frontmost: {front.get('app', '')} — {front.get('title', '')!r}; "
+                f"screen: {screen}{tail}")
 
     # -- internals --
+    def _thumb_scale(self, frame: Frame) -> float:
+        """Points per thumb pixel (2.0 on a 2x Retina frame)."""
+        w_pts, _ = self._size()
+        return w_pts * THUMB_DIVISOR / float(frame.width) if frame.width else 1.0
+
+    def _skip_rows(self, frame: Frame) -> int:
+        """Thumb rows covered by the menu bar, which never count as a change."""
+        if self._menu_bar_points <= 0:
+            return 0
+        return int(self._menu_bar_points / self._thumb_scale(frame)) + 1
+
     def _capture(self) -> Frame:
         self._frame = self._capture_fn()
         return self._frame
