@@ -42,7 +42,8 @@ of `TURN_GAP_SECS` with nothing more said. The SDK ships `AsyncTranscriptGrouper
 for this, but it runs its own daemon timers; `_Turns` uses the session's
 injectable clock instead, so every caption test stays deterministic.
 
-The session ends on end_conversation, after IDLE_TIMEOUT with nothing said
+A finished task does not end the session (owner request 2026-09-10): buddy
+says the result and keeps listening. The session ends on end_conversation, after IDLE_TIMEOUT with nothing said
 and no task running, or at MAX_SESSION. Every seam (connection, speaker,
 mic queue, agent factory, clock) is injectable, so the whole state machine
 is unit-tested with fakes; the real wiring lives in `open_session()`.
@@ -412,11 +413,6 @@ class VoiceSession:
         self._turns = _Turns(turn_gap_secs)
         self._reply_open = False
         self._speaking_until = 0.0
-        # After a task finishes, buddy says the result and the conversation
-        # closes — it must not sit there listening (owner request 2026-09-06).
-        # Set when the [task finished] message goes in; acted on when the
-        # response that speaks it is done.
-        self._end_after_response = False
         self._last_progress_at = float("-inf")
 
     # -- state --
@@ -696,12 +692,6 @@ class VoiceSession:
             self._pager.end_reply(now)
             self._reply_open = False
             self._flush_pager()
-        if self._end_after_response and not self._response_wanted and not self._response_active:
-            # the result has been spoken, and nothing else is queued behind it:
-            # the conversation closes (owner request 2026-09-06)
-            self._end_after_response = False
-            self._ended.set()
-            return
         self._set_after_captions("working" if self.task_running else "listening")
 
     # -- tools --
@@ -774,10 +764,13 @@ class VoiceSession:
         final = await self.agent.run(goal)
         self._last_activity = self._clock()
         if not self._ended.is_set():
-            self._end_after_response = True
+            # The conversation stays open after the result: the owner ends it with a
+            # goodbye, or the idle timeout does (owner request 2026-09-10, reversing
+            # the 2026-09-06 close-after-task).
             log.info("voice: task result to the voice: %s", final[:160])
             await self._speak(f"The computer task you started has finished. Tell the owner this result in one "
-                              f"short line, then say a two-word goodbye: {final}")
+                              f"short line. Do not say goodbye: keep listening until they end the conversation. "
+                              f"The result: {final}")
         return final
 
     def _on_agent_event(self, ev: AgentEvent) -> None:

@@ -299,13 +299,15 @@ def test_start_task_runs_agent_and_reports_result() -> None:
         # the result goes to the VOICE to say, not into the backend (2026-09-10: "Okay, waiting.")
         assert conn.user_messages() == []
         assert "Your mail is open." in conn.commentary()[-1]
-        assert not s._ended.is_set()                    # still speaking the result
         conn.feed(_delegated(), _spoke("Your mail is open."), _done())
-        await asyncio.sleep(0.01)
-        assert not s._ended.is_set()                    # the turn is still open
-        clock["now"] += 2.0                             # ... it goes quiet
-        await asyncio.sleep(0.2)          # a tick or two of the 0.05 s ticker                       # ... the ticker closes it
-        assert s._ended.is_set()                        # ... and the conversation closes by itself
+        await asyncio.sleep(0.05)
+        clock["now"] += 2.0                             # the result has been said and gone quiet
+        await asyncio.sleep(0.2)
+        assert not s._ended.is_set()                    # ... and buddy keeps listening (2026-09-10)
+        assert states[-1] == "listening"
+        conn.feed(_tool_call("end_conversation", "c9"))   # "bye buddy" is what ends it
+        await asyncio.sleep(0.05)
+        assert s._ended.is_set()
         conn.feed(None)
         await task
     asyncio.run(go())
@@ -479,8 +481,9 @@ def test_mic_is_muted_while_buddy_speaks_and_for_a_tail() -> None:
     assert appended == [b"\x03" * 100]
 
 
-def test_conversation_does_not_keep_listening_after_a_task() -> None:
-    """Owner request: after the result is spoken the session ends — no 20 s of listening."""
+def test_conversation_stays_open_after_a_task_until_goodbye_or_idle() -> None:
+    """Owner request 2026-09-10: a finished task does not end the conversation. A goodbye
+    does (previous test), and so does the idle timeout when nothing more is said."""
     agent = FakeAgent(None, None, final="Done.")
     clock = {"now": 0.0}
     conn = FakeConnection([_tool_call("start_task", "c1", goal="g")])
@@ -491,17 +494,17 @@ def test_conversation_does_not_keep_listening_after_a_task() -> None:
         await asyncio.sleep(0.01)
         agent.release.set()
         await asyncio.sleep(0.01)
-        # "On it." is spoken first, with the result already queued behind it ...
-        conn.feed(_delegated(), _spoke("On it."), _done(), _delegated())
-        await asyncio.sleep(0.05)                  # let the events land before the clock moves
+        conn.feed(_delegated(), _spoke("On it."), _done())
+        await asyncio.sleep(0.05)
         clock["now"] = 2.0
-        await asyncio.sleep(0.2)                   # a tick or two of the 0.05 s ticker
-        assert not s._ended.is_set()               # a reply is still queued: not the last word
-        # ... then the result is spoken, and that ends the conversation
-        conn.feed(_spoke("Done."), _done())
+        await asyncio.sleep(0.2)
+        conn.feed(_spoke("Done."))                     # the result, spoken
         await asyncio.sleep(0.05)
         clock["now"] = 4.0
         await asyncio.sleep(0.2)
+        assert not s._ended.is_set()                   # still listening after the result
+        clock["now"] = 30.0                            # past the 20 s idle timeout
+        await asyncio.sleep(0.7)                       # the watchdog checks every 0.5 s
         assert s._ended.is_set()
         conn.feed(None)
         await task

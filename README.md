@@ -25,7 +25,7 @@ the desk, its eyes go quick, the LEDs ripple, the screen says *on it…*, and a
 `gpt-6-astra` loop drives the real mouse and keyboard: screenshot, a few lines of
 PyAutoGUI, look again, up to 25 steps. It asks before anything consequential, takes
 "actually, use Safari" mid-task, and stops on "stop". Then it nods, tells you, and
-goes quiet.
+keeps listening until you say goodbye.
 
 **It has moods.** While it explores, an affect engine on the board — valence, arousal,
 a social drive, a stimulation drive — decides how it feels, and every channel shows
