@@ -6,7 +6,11 @@ refocused on the robot; the current knobs are in [../../bridge/README.md](../../
 ## What a Claude Code session does to the pet
 
 - **Mirrors Claude's state.** Sleeping, busy, waiting, celebrating — driven by Claude Code
-  hooks plus a tailer over the session transcripts for tokens and message counts.
+  hooks plus a tailer over the session transcripts for tokens and message counts. Only a
+  session blocked on you (a Notification of kind `permission_prompt` or `elicitation_dialog`,
+  or one with no kind or an unknown kind) puts the pet in the waiting/attention state. An
+  idle reminder (`idle_prompt`, `idle`), `auth_success` and `elicitation_response` are
+  logged and listed, but they do not make the pet demand attention.
 - **Never decides a permission.** The swipe-to-decide card is gone (owner request). Every
   tool call the matcher does not auto-allow defers to Claude Code's own prompt in the
   terminal, immediately — the daemon never blocks a tool call waiting on the board. The
@@ -15,7 +19,9 @@ refocused on the robot; the current knobs are in [../../bridge/README.md](../../
   the terminal of the session that's blocked on you. Window-level matching by the session's repo name works everywhere —
   AppleScript for iTerm2/Terminal.app, Accessibility (AXRaise) for Ghostty, Warp, cmux and
   friends — falling back to raising the app; the app order is configurable via
-  `CC_BUDDY_FOCUS_APPS`.
+  `CC_BUDDY_FOCUS_APPS`. While a voice conversation is open, a board touch (tap or swipe) is
+  logged and ignored: it does not end the conversation, cancel its task, raise a terminal or
+  tap a key. The conversation ends by voice.
 - **Hands-on-pet option picking.** Swipe left/right to walk Claude Code's option pickers
   (Up/Down arrows), swipe down for Enter. Hold-to-talk is gone (owner request): a finger on
   the pet no longer holds a dictation hotkey, and the board sends no voice frames at all.
