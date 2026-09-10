@@ -167,7 +167,9 @@ def test_auto_screenshot_after_actions_errors_and_empty_calls() -> None:
     gui = FakeAutoGUI()
     h, ns, settled = _helpers(gui)
     r = dw.execute("pyautogui.click(1,2)", ns, h)
-    assert _kinds(r) == ["input_image", "input_text"] and r["output"][1]["text"].startswith("[after] frontmost: Warp")
+    # the call clicked, so the closing line is "[after your input]" (a call that only looked says "[after]")
+    assert _kinds(r) == ["input_image", "input_text"] and r["output"][1]["text"].startswith(
+        "[after your input] frontmost: Warp")
     assert settled == [1.5] and gui.clicks == [(1, 2)]
     r = dw.execute("x = screen_text()", ns, h)                       # text only: no image
     assert _kinds(r) == ["input_text", "input_text"] and r["output"][0]["text"] == "screen_text: 1 lines"

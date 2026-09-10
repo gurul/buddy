@@ -11,7 +11,7 @@ import pytest
 from PIL import Image
 
 from cc_buddy_bridge import desktop_helpers as dh
-from cc_buddy_bridge.desktop_helpers import CHANGE_THRESHOLD, HELPER_NAMES, Frame, Helpers, changed_fraction
+from cc_buddy_bridge.desktop_helpers import CHANGE_MIN_PIXELS, HELPER_NAMES, Frame, Helpers, change_box
 
 # ---- fakes -------------------------------------------------------------------------
 
@@ -125,9 +125,10 @@ class Bench:
         self.fronts = fronts or scripted([front("Warp", "zsh")])
         self.logs: list[str] = []
         self.images: list = []
+        # menu_bar_points=0: these frames are 100x50 points, so a 40-point menu bar would be most of them
         self.h = Helpers(self.gui, capture=self.capture, ocr=self.ocr, frontmost_fn=self.fronts, run=self.run,
                          clipboard=self.clipboard, clock=self.clock.now, sleep=self.clock.sleep,
-                         now=lambda: datetime(2026, 9, 6, 14, 2))
+                         now=lambda: datetime(2026, 9, 6, 14, 2), menu_bar_points=0)
         self.h.bind(self.logs.append, self.images.append)
 
 
@@ -246,7 +247,7 @@ def test_wait_for_polls_fast_then_confirms_accurate_and_supports_gone() -> None:
     assert late.logs == ["'Inbox' not seen in 6.0 s"]
 
 
-def test_wait_settled_and_changed_fraction() -> None:
+def test_wait_settled_and_change_box() -> None:
     a = img()
     b_ = with_block(a, 0.5)
     c = with_block(a, 0.55)
@@ -259,12 +260,48 @@ def test_wait_settled_and_changed_fraction() -> None:
     never.h._capture_fn = never.capture
     assert never.h.wait_settled(timeout=2.0) is False
     assert never.logs == ["screen still changing after 2.0 s"]
-    # positive / negative control on the threshold itself
+    # positive / negative control on the noise floor itself
     thumb = Frame.from_pil(a).thumb()
     one_px = a.copy()
     one_px.putpixel((0, 0), (255, 255, 255))
-    assert changed_fraction(thumb, Frame.from_pil(one_px).thumb()) < CHANGE_THRESHOLD
-    assert changed_fraction(thumb, Frame.from_pil(with_block(a, 0.01)).thumb()) > CHANGE_THRESHOLD
+    assert change_box(thumb, Frame.from_pil(one_px).thumb()) is None
+    assert change_box(thumb, Frame.from_pil(with_block(a, 0.05)).thumb()) is not None
+    assert change_box(thumb, thumb.resize((10, 10))) == (0, 0, 10, 10)     # a size change is a change
+
+
+def _retina(draw=None):
+    """A 1512x982-point screen at 2x, optionally with one white rectangle (physical pixels)."""
+    from PIL import ImageDraw
+
+    im = Image.new("RGB", (3024, 1964), (40, 40, 40))
+    if draw is not None:
+        ImageDraw.Draw(im).rectangle(draw, fill=(255, 255, 255))
+    return im
+
+
+def test_change_box_sees_a_checkbox_but_not_a_caret() -> None:
+    """The case the old 1/8-scale fraction missed (0.00022 < 0.003, measured 2026-09-10)."""
+    base = Frame.from_pil(_retina()).thumb()
+    checkbox = Frame.from_pil(_retina((1000, 800, 1028, 828))).thumb()      # 14x14 points
+    caret = Frame.from_pil(_retina((1000, 800, 1003, 832))).thumb()         # 2x16 points
+    assert change_box(base, checkbox) is not None
+    assert change_box(base, caret) is None
+    assert CHANGE_MIN_PIXELS > 8                                             # a caret is ~9 thumb pixels
+
+
+def test_menu_bar_changes_do_not_count_and_regions_are_in_points() -> None:
+    gui = FakeAutoGUI(points=(1512, 982))
+    frames = [_retina(), _retina((2800, 10, 2900, 50)),            # the clock ticks in the menu bar
+              _retina((2800, 10, 2900, 50)), _retina((600, 1000, 700, 1100))]
+    h = Helpers(gui, capture=captures(frames), frontmost_fn=scripted([front("Safari", "Google")]),
+                clock=Clock().now, sleep=Clock().sleep)
+    assert h.after_line().endswith("screen: unchanged")            # baseline
+    assert h.after_line().endswith("screen: unchanged")            # menu bar only
+    assert h.after_line().endswith("screen: unchanged")
+    line = h.after_line()                                          # a 50x50-point block at (300,500)
+    assert "screen: changed around (" in line
+    x, y, w, ht = (int(v) for v in line.split("changed around (")[1].split(")")[0].split(","))
+    assert 296 <= x <= 300 and 496 <= y <= 500 and 50 <= w <= 56 and 50 <= ht <= 56
 
 
 # ---- type_text / zoom / observe ------------------------------------------------------
@@ -297,7 +334,9 @@ def test_observe_context_and_after_line() -> None:
     assert b.h.observe() == b.h.context_line()
     assert len(b.images) == 1 and b.images[0].size == (100, 50) and b.logs == [b.h.context_line()]
     assert b.h.after_line() == "[after] frontmost: Safari — 'Google'; screen: unchanged"
-    assert b.h.after_line().endswith("screen: changed")
+    assert b.h.after_line().startswith("[after] frontmost: Safari — 'Google'; screen: changed around (0,0,")
+    b.h.acted = True                                    # the step clicked, typed or pressed keys
+    assert b.h.after_line() == "[after your input] frontmost: Safari — 'Google'; screen: unchanged"
 
 
 # ---- caps and wiring -------------------------------------------------------------------
@@ -386,3 +425,20 @@ def test_raw_clicks_report_their_target_in_the_after_line() -> None:
     assert b.h.after_line().endswith("; clicked on AXLink 'Weather'")
     b.h.begin()
     assert "clicked on" not in b.h.after_line()
+
+
+def test_raw_click_names_the_app_it_landed_in() -> None:
+    """Logged 2026-09-08: a click aimed at Spotify's Play landed on Warp's scroll area."""
+    a = img()
+    b = Bench(frames=[a, a, a], fronts=scripted([front("Warp", "zsh")]))
+    b.h._element_at = _elements({(128, 129): {"role": "AXScrollArea", "title": "", "frame": None,
+                                              "pressable": False, "app": "Warp"},
+                                 (30, 20): {"role": "AXLink", "title": "Weather", "frame": None,
+                                            "pressable": True, "app": "Safari"}})
+    ns: dict = {}
+    b.h.install(ns)
+    b.h.begin()
+    b.gui.click(128, 129)
+    assert b.h.after_line().endswith("; clicked on AXScrollArea in Warp")
+    assert b.h.click_element(30, 20, "Play button").startswith(
+        "did not click: under (30,20) is AXLink 'Weather' in Safari, not 'Play button'")
