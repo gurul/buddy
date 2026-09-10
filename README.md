@@ -51,7 +51,8 @@ time, its profile of you, its dreams.
 
 **It knows when you are busy.** It mirrors Claude Code: asleep while you are idle, busy
 while Claude works, head up and searching for you when a session is blocked on you.
-Tap it and it raises that terminal.
+Tap it and it raises that terminal. It is never asleep while it is showing you words:
+under a caption, and for a few seconds after one, its eyes stay open and there is no "zzz".
 
 ## Get one running
 
