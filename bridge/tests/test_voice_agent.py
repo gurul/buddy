@@ -778,3 +778,12 @@ def test_instructions_mention_go_explore() -> None:
     from cc_buddy_bridge.voice_agent import BACKEND_INSTRUCTIONS, INSTRUCTIONS
     assert "explore" in INSTRUCTIONS
     assert "Go explore" in BACKEND_INSTRUCTIONS and "go_explore" in BACKEND_INSTRUCTIONS
+
+
+def test_prompts_do_not_let_a_started_task_read_as_done() -> None:
+    """2026-09-10: the backend said "Spotify playback requested." and the voice turned it into
+    "It's playing now." 12 s before the task finished."""
+    from cc_buddy_bridge.voice_agent import BACKEND_INSTRUCTIONS, INSTRUCTIONS
+    assert "Starting a task is not finishing it" in INSTRUCTIONS and 'INSTEAD: "On it."' in INSTRUCTIONS
+    assert "When\n  start_task returns ok, return exactly: On it." in BACKEND_INSTRUCTIONS
+
