@@ -93,6 +93,10 @@ class FakeConnection:
         return [kw["item"]["content"][0]["text"] for k, kw in self.sent
                 if k == "response.item.create" and kw["item"]["type"] == "message"]
 
+    def commentary(self) -> list[str]:
+        """What the voice was handed to say (session.commentary.append), greeting first."""
+        return [kw["content"] for k, kw in self.sent if k == "session.commentary.append"]
+
 
 class FakeSpeaker:
     def __init__(self) -> None:
@@ -292,7 +296,9 @@ def test_start_task_runs_agent_and_reports_result() -> None:
         assert states[-1] == "working"
         agent.release.set()
         await asyncio.sleep(0.01)
-        assert conn.user_messages() == ["[task finished] Your mail is open."]
+        # the result goes to the VOICE to say, not into the backend (2026-09-10: "Okay, waiting.")
+        assert conn.user_messages() == []
+        assert "Your mail is open." in conn.commentary()[-1]
         assert not s._ended.is_set()                    # still speaking the result
         conn.feed(_delegated(), _spoke("Your mail is open."), _done())
         await asyncio.sleep(0.01)
@@ -329,7 +335,7 @@ def test_steer_stop_and_status_tools() -> None:
     assert outs[3]["running"] is True and outs[3]["last"] == "looking"
     assert outs[4] == {"ok": True} and agent.cancelled
     assert outs[5] == {"ok": False, "reason": "no task is running"}
-    assert conn.user_messages() == ["[task finished] Stopped."]
+    assert conn.user_messages() == [] and "Stopped." in conn.commentary()[-1]
 
 
 def test_second_start_while_running_is_refused_and_agent_can_be_disabled() -> None:
@@ -370,7 +376,10 @@ def test_ask_user_is_spoken_and_answered_through_the_tool() -> None:
         await task
     asyncio.run(go())
     assert conn.tool_outputs()[1] == {"ok": True}
-    assert conn.user_messages()[-1] == "[task finished] Sent. (answer=yes)"
+    # the backend got the question as context, the voice asked it and later said the result
+    assert conn.user_messages() == ["[task question] Send the email to Sam?"]
+    assert any("Send the email to Sam?" in c for c in conn.commentary())
+    assert "Sent. (answer=yes)" in conn.commentary()[-1]
 
 
 def test_answer_without_a_pending_question_is_refused() -> None:
@@ -500,7 +509,7 @@ def test_conversation_does_not_keep_listening_after_a_task() -> None:
     assert states[-1] == "idle"
     assert s.transcript == ["On it.", "Done."]
     creates = [k for k, _ in conn.sent if k == "response.create"]
-    assert len(creates) == 2          # "On it", then the result — and nothing after it
+    assert len(creates) == 1          # "On it" only: the result is commentary, and nothing follows it
 
 
 CAPTIONS = VoiceConfig(idle_timeout_secs=20.0, max_session_secs=600.0, output="captions")
