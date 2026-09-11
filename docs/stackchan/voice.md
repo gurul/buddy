@@ -37,8 +37,9 @@ daemon ─{"cmd":"agent","state":…}─▶ robot: wake · listening · thinking
    tool to a Responses backend (`gpt-6-astra`) that owns the tools: the seven for tasks,
    exploring and ending, plus `look`, `move_head`, `look_around`, `find` and `set_sound`
    ([vision.md](vision.md)). gpt-live-1 takes no images, so a small image model
-   (`gpt-5.4-nano`) describes the camera and each timestamped `[vision HH:MM:SS]` line
-   reaches the voice as silent context. Every finished turn of yours is also checked for
+   (`gpt-5.4-nano`) describes the camera and keeps the newest view; nothing is pushed to
+   the voice, which reads a view only through `look` when you ask what it sees. Every
+   finished turn of yours is also checked for
    "go away" and "mute" in any words (`intent.py`): a goodbye closes the conversation once
    buddy's own goodbye has been said, and mute silences every sound while the head and
    lights keep moving.

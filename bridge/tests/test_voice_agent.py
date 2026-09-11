@@ -879,7 +879,6 @@ def _thinking(conn: FakeConnection) -> list[str]:
 
 class FakeScene:
     def __init__(self, view: dict | None = None) -> None:
-        self.on_note = None
         self.started = self.stopped = 0
         self.view = view or {"ok": True, "view": "A person holding a green mug.", "seen_at": "16:43:05",
                              "age_secs": 1.0, "stale": False}
@@ -923,22 +922,25 @@ class FakeHead:
         return await self.move(0, 45, hold_secs=3.0)
 
 
-def test_scene_notes_reach_the_voice_as_silent_context_and_stop_with_the_session() -> None:
+def test_scene_watches_with_the_session_and_nothing_it_sees_is_pushed_to_the_voice() -> None:
+    # Owner report 2026-09-10: pushed [vision] lines made buddy narrate the room.
+    # The watcher runs for the conversation, but a view reaches the voice only
+    # through the look tool.
     conn = FakeConnection()
     scene = FakeScene()
     s, _, _ = _session(conn, [FakeAgent(None, None)], scene=scene)
 
     async def go():
         task = asyncio.create_task(s.run())
-        await asyncio.sleep(0.01)
-        assert scene.started == 1 and scene.on_note is not None
-        scene.on_note("[vision 16:43:05] A person holding a green mug.")
-        await asyncio.sleep(0.01)
-        assert "[vision 16:43:05] A person holding a green mug." in _thinking(conn)
+        await asyncio.sleep(0.05)
+        assert scene.started == 1
+        assert not hasattr(scene, "on_note")
+        assert not any("[vision" in t for t in _thinking(conn))
         conn.feed(_tool_call("end_conversation"), None)
         await task
     asyncio.run(go())
-    assert scene.stopped == 1 and scene.on_note is None
+    assert scene.stopped == 1
+    assert not any("[vision" in t for t in _thinking(conn))
 
 
 def test_look_tool_answers_from_a_background_task() -> None:
