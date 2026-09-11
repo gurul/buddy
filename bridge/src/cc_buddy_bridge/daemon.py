@@ -54,6 +54,8 @@ from .scene import SceneWatcher, make_scene_client
 from .scene import configured as scene_configured
 from .sound import SoundSetting, build_sound_cmd, quiet_caption
 from .state import State, notification_waits
+from .think import configured as think_configured
+from .think import make_thinker
 from .thought_screen import ThoughtScreen
 from .version_check import check as version_check
 from .vision import STATS_INTERVAL_SECS as VISION_STATS_SECS
@@ -154,6 +156,7 @@ class Daemon:
         self._sound.load()
         # "Go away" / "mute" in any words (intent.py); resolved in run().
         self._intent: Optional[Any] = None
+        self._thinker: Optional[Any] = None
         # Idle explorer (explore.py): after a quiet stretch the board pans
         # the room and, per waypoint, may spend a note on what it sees. The
         # pure Explorer is ticked from _explore_loop; the note client is
@@ -249,6 +252,9 @@ class Daemon:
         self._vision.identity = self._identity
         self._scene.client = make_scene_client(self._scene.config)
         self._intent = make_intent_classifier()
+        # The slow brain behind the voice (think.py): high-effort reasoning with
+        # web search, for the backend's think_hard tool.
+        self._thinker = make_thinker(think_configured(backend_model=self._voice_cfg.backend_model))
         if self._sound.muted:
             log.info("sound: muted (owner's choice, %s) — the head and lights still move", self._sound.path)
         tasks = [
@@ -579,7 +585,8 @@ class Daemon:
                                            config=self._voice_cfg, agent_enabled=self._agent_cfg.enabled,
                                            on_caption=self._on_caption, on_explore=self._on_voice_explore,
                                            scene=self._scene, head=self._head, intent=self._intent,
-                                           on_sound=self._set_sound, muted=lambda: self._sound.muted)
+                                           on_sound=self._set_sound, muted=lambda: self._sound.muted,
+                                           thinker=self._thinker)
         except asyncio.CancelledError:
             self._explore_after_conversation = None      # hushed: stay put
             raise

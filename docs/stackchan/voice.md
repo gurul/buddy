@@ -36,7 +36,12 @@ daemon ─{"cmd":"agent","state":…}─▶ robot: wake · listening · thinking
    no VAD to configure. It answers chit-chat itself and delegates anything needing a
    tool to a Responses backend (`gpt-6-astra`) that owns the tools: the seven for tasks,
    exploring and ending, plus `look`, `move_head`, `look_around`, `find` and `set_sound`
-   ([vision.md](vision.md)). gpt-live-1 takes no images, so a small image model
+   ([vision.md](vision.md)), the built-in `web_search`, and `think_hard`. The voice is
+   the receptionist: a question that needs today's facts (weather, a score, a price) is
+   delegated and the backend searches the web itself, server-side; a genuinely hard
+   question (maths, code, logic, a plan) goes through `think_hard` to `think.py` — one
+   Responses call at `high` effort with web search, up to 90 s — while the voice says
+   "let me check" and keeps listening. gpt-live-1 takes no images, so a small image model
    (`gpt-5.4-nano`) describes the camera and keeps the newest view; nothing is pushed to
    the voice, which reads a view only through `look` when you ask what it sees. Every
    finished turn of yours is also checked for
@@ -147,6 +152,11 @@ HEARD IT at 1.4 s — ears are working.
 | `CC_BUDDY_LIVE_MODEL` | `gpt-live-1` | the voice model (Live API) |
 | `CC_BUDDY_LIVE_BACKEND_MODEL` | `gpt-6-astra` | the Responses backend that owns the tools (`gpt-5-mini` answers faster, calls tools less reliably) |
 | `CC_BUDDY_LIVE_BACKEND_EFFORT` | `low` | reasoning effort for that backend |
+| `CC_BUDDY_LIVE_WEB_SEARCH` | on | `0`: the backend gets no `web_search` tool, so live facts are answered from training only |
+| `CC_BUDDY_THINK` | on | `0`: no `think_hard`; hard questions get the low-effort backend only |
+| `CC_BUDDY_THINK_MODEL` | the backend model | the slow brain behind `think_hard` |
+| `CC_BUDDY_THINK_EFFORT` | `high` | its reasoning effort (`none` … `xhigh`) |
+| `CC_BUDDY_THINK_TIMEOUT_SECS` | `90` | how long one `think_hard` may take (10-300); past it the backend answers as best it can |
 | `CC_BUDDY_VOICE_OUTPUT` | `captions` | `captions`: text to the robot's screen + beeps, silent Mac; `audio`: spoken through the Mac speaker |
 | `CC_BUDDY_VOICE_NAME` | `marin` | the Live voice (heard only in audio mode) |
 | `CC_BUDDY_CAPTION_CPS` | `12` | reading rate the caption page hold times are derived from (5-30); lower = pages stay longer |
@@ -194,6 +204,8 @@ minute of session, billed per second — about five times the Realtime-era rate 
 replaced, and captions mode pays it for speech it never plays. The
 Responses backend is billed separately, as are `gpt-6-astra` task tokens: one
 screenshot is a few thousand input tokens, a typical 6-step task well under a dollar.
+A web search is billed per call on top of the backend's tokens, and a `think_hard` is
+one high-effort `gpt-6-astra` call (cents, not dollars) — every call sets `store=False`.
 
 ## Why these parts (research, 2026-09-06)
 

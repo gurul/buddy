@@ -237,12 +237,15 @@ def test_session_config_shape() -> None:
     d = s["delegation"]
     assert d["type"] == "responses" and d["responses"]["model"] == "gpt-6-astra"
     assert d["responses"]["reasoning"] == {"effort": "low"}
-    assert [t["name"] for t in d["responses"]["tools"]] == ["start_task", "steer_task", "stop_task",
-                                                            "task_status", "answer_question",
-                                                            "go_explore", "end_conversation",
-                                                            "look", "move_head", "look_around", "find",
-                                                            "set_sound"]
+    assert [t.get("name", t["type"]) for t in d["responses"]["tools"]] == [
+        "start_task", "steer_task", "stop_task", "task_status", "answer_question",
+        "go_explore", "end_conversation", "look", "move_head", "look_around", "find",
+        "set_sound", "think_hard", "web_search"]
     assert all(t["type"] == "function" for t in TOOLS)
+    # web search is a built-in Responses tool, on by default and switchable off
+    assert d["responses"]["tools"][-1] == {"type": "web_search"}
+    off = session_config(VoiceConfig(output="audio", web_search=False))
+    assert all(t["type"] == "function" for t in off["delegation"]["responses"]["tools"])
 
 
 # ---- the conversation ------------------------------------------------------------------------
@@ -954,6 +957,53 @@ def test_look_tool_answers_from_a_background_task() -> None:
         await task
     asyncio.run(go())
     assert conn.tool_outputs()[0]["view"] == "A person holding a green mug."
+
+
+def test_think_hard_answers_from_a_background_task_and_keeps_the_voice_company() -> None:
+    asked: list[str] = []
+
+    async def thinker(question: str) -> dict:
+        asked.append(question)
+        await asyncio.sleep(0.02)                    # the slow brain takes its time
+        return {"ok": True, "answer": "Forty-two, because the question was the easy part."}
+
+    conn = FakeConnection([_tool_call("think_hard", "c1", question="what is six times seven, and why?")])
+    s, _, _ = _session(conn, [FakeAgent(None, None)], thinker=thinker)
+
+    async def go():
+        task = asyncio.create_task(s.run())
+        await asyncio.sleep(0.01)
+        # while the brain works: the voice was told to keep the owner company, nothing answered yet
+        assert any("worked on in the background" in t for t in _thinking(conn))
+        assert conn.tool_outputs() == []
+        await asyncio.sleep(0.05)
+        conn.feed(_tool_call("end_conversation", "c9"), None)
+        await task
+    asyncio.run(go())
+    assert asked == ["what is six times seven, and why?"]
+    assert conn.tool_outputs()[0] == {"ok": True, "answer": "Forty-two, because the question was the easy part."}
+
+
+def test_think_hard_without_a_thinker_or_when_it_fails_tells_the_backend_to_answer_itself() -> None:
+    conn = FakeConnection([_tool_call("think_hard", "c1", question="why?")])
+    s, _, _ = _session(conn, [FakeAgent(None, None)])
+
+    async def go():
+        task = asyncio.create_task(s.run())
+        await asyncio.sleep(0.05)
+        conn.feed(_tool_call("end_conversation", "c9"), None)
+        await task
+    asyncio.run(go())
+    assert conn.tool_outputs()[0]["ok"] is False and "answer as best you can" in conn.tool_outputs()[0]["reason"]
+
+    async def broken(_q: str) -> dict:
+        raise TimeoutError("90 s")
+
+    conn = FakeConnection([_tool_call("think_hard", "c1", question="why?")])
+    s, _, _ = _session(conn, [FakeAgent(None, None)], thinker=broken)
+    asyncio.run(go())
+    out = conn.tool_outputs()[0]
+    assert out["ok"] is False and "did not answer in time" in out["reason"]
 
 
 def test_look_without_vision_says_why() -> None:

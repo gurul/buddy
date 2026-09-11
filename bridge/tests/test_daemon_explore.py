@@ -79,6 +79,7 @@ def _daemon(connected: bool = True, pending: int = 0, listen_sent=None, enabled:
         _head=SimpleNamespace(observe=lambda yaw, pitch: None),
         _sound=SimpleNamespace(on=True, muted=False),
         _intent=None,
+        _thinker=None,
         _set_sound=lambda on: None,
     )
     d._thought_pager = CaptionPager()
