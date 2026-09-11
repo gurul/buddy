@@ -45,3 +45,6 @@ debrief/
 .era/runtime/
 .era/tmp/
 # Era - End
+
+# Local-only plans (owner choice, 2026-09-10)
+docs/plans/
