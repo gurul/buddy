@@ -41,7 +41,12 @@ daemon ─{"cmd":"agent","state":…}─▶ robot: wake · listening · thinking
    delegated and the backend searches the web itself, server-side; a genuinely hard
    question (maths, code, logic, a plan) goes through `think_hard` to `think.py` — one
    Responses call at `high` effort with web search, up to 90 s — while the voice says
-   "let me check" and keeps listening. gpt-live-1 takes no images, so a small image model
+   "let me check" and keeps listening. The backend picks the cheapest thing that answers,
+   in order: itself, web search, `think_hard`, and only then `start_task` — computer use
+   is the last resort, for a request the Mac itself must carry out or show, never for a
+   question (owner request 2026-09-10; a six-phrase routing probe against the real backend
+   put every question on the cheap path and every Mac request on `start_task`).
+   gpt-live-1 takes no images, so a small image model
    (`gpt-5.4-nano`) describes the camera and keeps the newest view; nothing is pushed to
    the voice, which reads a view only through `look` when you ask what it sees. Every
    finished turn of yours is also checked for
