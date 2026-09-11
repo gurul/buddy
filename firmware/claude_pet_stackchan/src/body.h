@@ -47,6 +47,10 @@ void bodyNoteToucher(int8_t side);
 void bodyLookAt(int8_t yawDeg, uint16_t holdMs);
 // Same with an explicit pitch (camera gaze). Pitch is clamped 5..85.
 void bodyLookAt(int8_t yawDeg, int8_t pitchDeg, uint16_t holdMs);
+// The owner's own request ({"cmd":"look"} via gaze.cpp, hostlook.h rules). It
+// outranks automatic gaze and the conversation's phase poses until holdMs runs
+// out; holdMs 0 hands the head back at once.
+void bodyHostLook(int8_t yawDeg, int8_t pitchDeg, uint16_t holdMs);
 
 // gaze.cpp: run one "where are you?" sweep now (far left, near left, near
 // right, far right, centre; ~3 s). Pitch stays at the listening value while

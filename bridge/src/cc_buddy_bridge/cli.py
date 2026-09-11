@@ -8,6 +8,7 @@ import logging
 import os
 import signal
 import sys
+from typing import Optional
 
 from . import __version__
 from .daemon import Daemon
@@ -141,6 +142,27 @@ def main(argv: list[str] | None = None) -> int:
         help="Run the host face detector on an image file and print the face cmd it would send",
     )
     p_vision.add_argument("image", help="Path to a JPEG/PNG (anything macOS ImageIO decodes)")
+
+    p_scene = sub.add_parser(
+        "scene-test",
+        help="Describe one image with the model buddy's voice sees through (one real API call)",
+    )
+    p_scene.add_argument("image", help="Path to a JPEG or PNG")
+    p_scene.add_argument("--find", default=None, help="Also look for this thing in the image")
+
+    p_intent = sub.add_parser(
+        "intent-test",
+        help="Check the goodbye / mute classifier on phrases (one real API call each)",
+    )
+    p_intent.add_argument("--expect", nargs=2, action="append", required=True, metavar=("LABEL", "TEXT"),
+                          help="leave | mute | unmute | look | stay, then a phrase; repeat for more")
+
+    p_sound = sub.add_parser(
+        "sound",
+        help="Mute or unmute buddy (the head and lights keep moving), or show which it is",
+    )
+    p_sound.add_argument("action", choices=("on", "off", "status"), nargs="?", default="status")
+    p_sound.add_argument("--socket", default=None, help="IPC path or host:port override")
 
     p_identity = sub.add_parser(
         "identity",
@@ -284,6 +306,19 @@ def main(argv: list[str] | None = None) -> int:
     if args.cmd == "vision-test":
         from .vision import run_vision_test
         return run_vision_test(args.image)
+    if args.cmd == "scene-test":
+        from .scene import run_scene_test
+        return run_scene_test(args.image, find=args.find)
+    if args.cmd == "intent-test":
+        pairs = [(label, text) for label, text in args.expect]
+        bad = [label for label, _ in pairs if label not in ("leave", "mute", "unmute", "look", "stay")]
+        if bad:
+            print(f"intent-test: unknown label(s) {bad}; use leave, mute, unmute, look or stay", file=sys.stderr)
+            return 2
+        from .intent import run_intent_test
+        return run_intent_test(pairs)
+    if args.cmd == "sound":
+        return _run_sound(args.action, args.socket)
     if args.cmd == "identity":
         from .identity import run_identity
         return run_identity(args.action, args.socket)
@@ -468,6 +503,20 @@ def _run_photos(action: str, last: int) -> int:
             size = 0
         print(f"{path.parent.name} {path.stem.split('-')[0]}  {size / 1024:6.0f} KB  {path}")
     print(f"({format_usage(notes_dir)})")
+    return 0
+
+
+def _run_sound(action: str, socket_path: Optional[str]) -> int:
+    """``cc-buddy-bridge sound [on|off|status]``: the daemon owns the port and the choice."""
+    from .hooks._client import post
+
+    resp = post({"evt": "sound", "action": action}, socket_path=socket_path, timeout=3.0)
+    if resp is None:
+        print("cc-buddy-bridge: daemon not reachable", file=sys.stderr)
+        return 2
+    sound = resp.get("sound", "?")
+    note = "" if resp.get("connected") else " (board not connected: it gets the setting when it connects)"
+    print(("buddy is muted — it still moves and lights up" if sound == "off" else "buddy's sound is on") + note)
     return 0
 
 

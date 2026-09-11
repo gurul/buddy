@@ -34,7 +34,14 @@ daemon ─{"cmd":"agent","state":…}─▶ robot: wake · listening · thinking
 2. **Talk.** A Live session (`gpt-live-1`) hears the same microphone. The model is
    full duplex — it listens while it speaks and does its own turn-taking, so there is
    no VAD to configure. It answers chit-chat itself and delegates anything needing a
-   tool to a Responses backend (`gpt-6-astra`) that owns the seven tools.
+   tool to a Responses backend (`gpt-6-astra`) that owns the tools: the seven for tasks,
+   exploring and ending, plus `look`, `move_head`, `look_around`, `find` and `set_sound`
+   ([vision.md](vision.md)). gpt-live-1 takes no images, so a small image model
+   (`gpt-5.4-nano`) describes the camera and each timestamped `[vision HH:MM:SS]` line
+   reaches the voice as silent context. Every finished turn of yours is also checked for
+   "go away" and "mute" in any words (`intent.py`): a goodbye closes the conversation once
+   buddy's own goodbye has been said, and mute silences every sound while the head and
+   lights keep moving.
    **buddy does not speak through the Mac**: gpt-live-1 has no text-only mode, so the
    daemon reads `session.output_transcript.delta` and never plays the audio it is
    sent. Each reply is shown as pages of 4 lines x 17 characters in
@@ -143,6 +150,13 @@ HEARD IT at 1.4 s — ears are working.
 | `CC_BUDDY_VOICE_NAME` | `marin` | the Live voice (heard only in audio mode) |
 | `CC_BUDDY_CAPTION_CPS` | `12` | reading rate the caption page hold times are derived from (5-30); lower = pages stay longer |
 | `CC_BUDDY_VOICE_IDLE_SECS` | `20` | close the conversation after this much silence with no task running (floor 5) |
+| `CC_BUDDY_SCENE` | on | `0`: buddy gets no camera descriptions during a conversation ([vision.md](vision.md)) |
+| `CC_BUDDY_SCENE_MODEL` | `gpt-5.4-nano` | the image model that describes and locates for the voice |
+| `CC_BUDDY_SCENE_INTERVAL_SECS` | `3` | minimum gap between two camera descriptions (1-60) |
+| `CC_BUDDY_SCENE_STALE_SECS` | `15` | a view older than this is reported as out of date (3-300) |
+| `CC_BUDDY_INTENT` | on | `0`: goodbye / mute by the phrase table only, no classifier call |
+| `CC_BUDDY_INTENT_MODEL` | `gpt-5.4-nano` | the goodbye / mute classifier |
+| `CC_BUDDY_SOUND_FILE` | `~/.config/cc-buddy-bridge/sound.json` | where the owner's mute choice is kept |
 | `CC_BUDDY_COMPUTER_CONTROL` | on | `0` keeps the conversation but refuses `start_task` |
 | `CC_BUDDY_AGENT_MODEL` | `gpt-6-astra` | the computer-use model |
 | `CC_BUDDY_AGENT_MAX_TURNS` | `25` | step cap per task |

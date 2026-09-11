@@ -32,6 +32,7 @@ struct GazeHostInput {
   uint16_t hostLookHold;
   bool     explore;          // {"cmd":"mode","explore":true}
   bool     cardUp;           // a permission card is on screen
+  bool     agentActive;      // a voice conversation is open ({"cmd":"agent"} not idle): host looks always land
 };
 
 // Once per loop after bodyUpdate(). `ownerReset` is data.h's

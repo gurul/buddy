@@ -12,6 +12,7 @@ from types import MethodType, SimpleNamespace
 
 from cc_buddy_bridge import daemon as daemon_mod
 from cc_buddy_bridge.caption_pager import CaptionPager
+from cc_buddy_bridge.scene import SceneWatcher
 from cc_buddy_bridge.diary import Thought
 from cc_buddy_bridge.thought_screen import ThoughtScreen
 from cc_buddy_bridge.daemon import Daemon
@@ -73,6 +74,12 @@ def _daemon(connected: bool = True, pending: int = 0, listen_sent=None, enabled:
         _voice_cfg=None,
         _agent_cfg=SimpleNamespace(enabled=False),
         _last_diag=None,
+        # The voice's eyes, head and mute (scene.py / head.py / sound.py): inert here.
+        _scene=SceneWatcher(None),
+        _head=SimpleNamespace(observe=lambda yaw, pitch: None),
+        _sound=SimpleNamespace(on=True, muted=False),
+        _intent=None,
+        _set_sound=lambda on: None,
     )
     d._thought_pager = CaptionPager()
     d._screen = ThoughtScreen()

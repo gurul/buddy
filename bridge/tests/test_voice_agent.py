@@ -16,7 +16,11 @@ import pytest
 
 from cc_buddy_bridge.computer_agent import AgentEvent
 from cc_buddy_bridge.voice_agent import (
+    FAREWELL_MAX_SECS,
+    FAREWELL_QUIET_SECS,
+    LOOK_ROUTE_DELAY_SECS,
     TOOLS,
+    TURN_GAP_SECS,
     VoiceConfig,
     VoiceSession,
     configured,
@@ -235,7 +239,9 @@ def test_session_config_shape() -> None:
     assert d["responses"]["reasoning"] == {"effort": "low"}
     assert [t["name"] for t in d["responses"]["tools"]] == ["start_task", "steer_task", "stop_task",
                                                             "task_status", "answer_question",
-                                                            "go_explore", "end_conversation"]
+                                                            "go_explore", "end_conversation",
+                                                            "look", "move_head", "look_around", "find",
+                                                            "set_sound"]
     assert all(t["type"] == "function" for t in TOOLS)
 
 
@@ -863,4 +869,397 @@ def test_closing_session_speaks_no_result() -> None:
     asyncio.run(go())
     # the greeting is the only thing the voice was handed: no result of any kind after the hush
     assert len(conn.commentary()) == 1 and "Greet" in conn.commentary()[0]
+
+
+# ---- eyes, head, standing orders (2026-09-10) -------------------------------------------------
+
+def _thinking(conn: FakeConnection) -> list[str]:
+    return [kw["content"] for k, kw in conn.sent if k == "session.thinking.append"]
+
+
+class FakeScene:
+    def __init__(self, view: dict | None = None) -> None:
+        self.on_note = None
+        self.started = self.stopped = 0
+        self.view = view or {"ok": True, "view": "A person holding a green mug.", "seen_at": "16:43:05",
+                             "age_secs": 1.0, "stale": False}
+        self.located: list[str] = []
+
+    def start(self) -> None:
+        self.started += 1
+
+    async def stop(self) -> None:
+        self.stopped += 1
+
+    async def look(self, fresh_secs: float = 4.0, newer_than=None) -> dict:
+        await asyncio.sleep(0)
+        return self.view
+
+    async def locate(self, target: str, newer_than=None) -> dict:
+        self.located.append(target)
+        return {"ok": True, "visible": True, "x": 0.0, "y": 0.0, "what": target, "yaw": 0, "pitch": 45}
+
+
+class FakeHead:
+    def __init__(self) -> None:
+        self.moves: list[tuple] = []
+        self.yaw, self.pitch = 0.0, 45.0
+
+    def clock(self) -> float:
+        return 0.0
+
+    async def sleep(self, secs: float) -> None:
+        await asyncio.sleep(0)
+
+    async def move(self, yaw=None, pitch=None, relative=False, hold_secs=15.0) -> dict:
+        self.moves.append((yaw, pitch, relative, hold_secs))
+        if yaw is not None:
+            self.yaw = self.yaw + yaw if relative else yaw
+        if pitch is not None:
+            self.pitch = self.pitch + pitch if relative else pitch
+        return {"ok": True, "yaw": int(self.yaw), "pitch": int(self.pitch), "facing": "x", "hold_secs": hold_secs}
+
+    async def face_owner(self) -> dict:
+        return await self.move(0, 45, hold_secs=3.0)
+
+
+def test_scene_notes_reach_the_voice_as_silent_context_and_stop_with_the_session() -> None:
+    conn = FakeConnection()
+    scene = FakeScene()
+    s, _, _ = _session(conn, [FakeAgent(None, None)], scene=scene)
+
+    async def go():
+        task = asyncio.create_task(s.run())
+        await asyncio.sleep(0.01)
+        assert scene.started == 1 and scene.on_note is not None
+        scene.on_note("[vision 16:43:05] A person holding a green mug.")
+        await asyncio.sleep(0.01)
+        assert "[vision 16:43:05] A person holding a green mug." in _thinking(conn)
+        conn.feed(_tool_call("end_conversation"), None)
+        await task
+    asyncio.run(go())
+    assert scene.stopped == 1 and scene.on_note is None
+
+
+def test_look_tool_answers_from_a_background_task() -> None:
+    conn = FakeConnection([_tool_call("look", "c1")])
+    s, _, _ = _session(conn, [FakeAgent(None, None)], scene=FakeScene())
+
+    async def go():
+        task = asyncio.create_task(s.run())
+        await asyncio.sleep(0.05)
+        conn.feed(_tool_call("end_conversation", "c9"), None)
+        await task
+    asyncio.run(go())
+    assert conn.tool_outputs()[0]["view"] == "A person holding a green mug."
+
+
+def test_look_without_vision_says_why() -> None:
+    conn = FakeConnection([_tool_call("look", "c1")])
+    s, _, _ = _session(conn, [FakeAgent(None, None)])
+
+    async def go():
+        task = asyncio.create_task(s.run())
+        await asyncio.sleep(0.05)
+        conn.feed(_tool_call("end_conversation", "c9"), None)
+        await task
+    asyncio.run(go())
+    assert conn.tool_outputs()[0] == {"ok": False, "reason": "vision is not set up on this computer"}
+
+
+def test_move_head_passes_the_backend_numbers_through() -> None:
+    head = FakeHead()
+    conn = FakeConnection([_tool_call("move_head", "c1", yaw=-15, relative=True),
+                           _tool_call("move_head", "c2", yaw=120, pitch=45, relative=False, hold_secs=30),
+                           _tool_call("move_head", "c3", yaw="left", relative=True),
+                           _tool_call("end_conversation", "c9"), None])
+    s, _, _ = _session(conn, [FakeAgent(None, None)], head=head)
+    asyncio.run(s.run())
+    assert head.moves[0] == (-15.0, None, True, 15.0)
+    assert head.moves[1] == (120.0, 45.0, False, 30.0)
+    assert head.moves[2] == (None, None, True, 15.0)          # a non-number is dropped, not guessed
+    assert conn.tool_outputs()[1]["yaw"] == 120
+
+
+def test_look_around_and_find_run_through_head_and_scene() -> None:
+    head, scene = FakeHead(), FakeScene()
+    conn = FakeConnection([_tool_call("look_around", "c1")])
+    s, _, _ = _session(conn, [FakeAgent(None, None)], head=head, scene=scene)
+
+    async def go():
+        task = asyncio.create_task(s.run())
+        await asyncio.sleep(0.1)
+        conn.feed(_tool_call("find", "c2", target="the door"))
+        await asyncio.sleep(0.1)
+        conn.feed(_tool_call("end_conversation", "c9"), None)
+        await task
+    asyncio.run(go())
+    outs = conn.tool_outputs()
+    around = next(o for o in outs if "views" in o)
+    assert around["ok"] is True and len(around["views"]) == 5
+    found = next(o for o in outs if "found" in o)
+    assert found["found"] is True and scene.located == ["the door"]
+
+
+@pytest.mark.parametrize("words", ["Okay, bye buddy.", "I want you to leave now.", "Stop listening."])
+def test_goodbye_in_the_owners_words_ends_the_session(words: str) -> None:
+    clock = {"now": 0.0}
+    conn = FakeConnection()
+    s, states, mic = _session(conn, [FakeAgent(None, None)], clock=clock)
+
+    async def go():
+        task = asyncio.create_task(s.run())
+        await asyncio.sleep(0.01)
+        conn.feed(_heard(words))
+        await asyncio.sleep(0.01)
+        conn.feed(_spoke("Bye!"))                       # buddy's goodbye closes the user turn
+        await asyncio.sleep(0.01)
+        assert s._farewell and not s._ended.is_set()    # not before the goodbye has been said
+        clock["now"] += TURN_GAP_SECS + 0.1             # the goodbye goes quiet...
+        await asyncio.sleep(0.1)
+        clock["now"] += 1.0
+        await asyncio.sleep(0.7)                        # ...and the watchdog closes the session
+        assert s._ended.is_set()
+        conn.feed(None)
+        await task
+    asyncio.run(go())
+    assert states[-1] == "idle"
+    assert any("[leaving]" in t for t in _thinking(conn))
+    assert s.tool_calls == []                           # it never depended on the model calling a tool
+
+
+def test_goodbye_closes_even_if_buddy_says_nothing_back() -> None:
+    clock = {"now": 0.0}
+    conn = FakeConnection()
+    s, _, _ = _session(conn, [FakeAgent(None, None)], clock=clock)
+
+    async def go():
+        task = asyncio.create_task(s.run())
+        await asyncio.sleep(0.01)
+        conn.feed(_heard("goodbye"))
+        await asyncio.sleep(0.01)
+        clock["now"] += TURN_GAP_SECS + 0.1             # the user turn closes on the gap
+        await asyncio.sleep(0.1)
+        assert s._farewell and not s._ended.is_set()
+        clock["now"] += FAREWELL_MAX_SECS
+        await asyncio.sleep(0.7)
+        assert s._ended.is_set()
+        conn.feed(None)
+        await task
+    asyncio.run(go())
+
+
+def test_the_classifier_catches_a_goodbye_the_phrase_table_does_not_know() -> None:
+    clock = {"now": 0.0}
+    seen: list[str] = []
+
+    async def intent(text: str):
+        seen.append(text)
+        return "leave" if "heading out" in text else None
+
+    conn = FakeConnection()
+    s, _, _ = _session(conn, [FakeAgent(None, None)], clock=clock, intent=intent)
+
+    async def go():
+        task = asyncio.create_task(s.run())
+        await asyncio.sleep(0.01)
+        conn.feed(_heard("alright little guy, I'm heading out"), _spoke("See ya."))
+        await asyncio.sleep(0.05)
+        assert s._farewell
+        clock["now"] += TURN_GAP_SECS + FAREWELL_QUIET_SECS + 0.5
+        await asyncio.sleep(0.7)
+        assert s._ended.is_set()
+        conn.feed(None)
+        await task
+    asyncio.run(go())
+    assert seen == ["alright little guy, I'm heading out"]
+
+
+def test_leave_the_tab_open_does_not_end_anything() -> None:
+    clock = {"now": 0.0}
+
+    async def intent(text: str):
+        return None                                       # the model says: not about buddy
+
+    conn = FakeConnection()
+    s, _, _ = _session(conn, [FakeAgent(None, None)], clock=clock, intent=intent)
+
+    async def go():
+        task = asyncio.create_task(s.run())
+        await asyncio.sleep(0.01)
+        conn.feed(_heard("leave the tab open"), _spoke("On it."))
+        await asyncio.sleep(0.05)
+        clock["now"] += 8.0
+        await asyncio.sleep(0.7)
+        assert not s._farewell and not s._ended.is_set()
+        conn.feed(_tool_call("end_conversation", "c9"), None)
+        await task
+    asyncio.run(go())
+
+
+def test_goodbye_during_a_task_stops_the_mic_and_waits_for_the_result() -> None:
+    agent = FakeAgent(None, None, final="Spotify is playing.")
+    clock = {"now": 0.0}
+    conn = FakeConnection([_tool_call("start_task", "c1", goal="play music")])
+    s, _, mic = _session(conn, [agent], clock=clock)
+
+    async def go():
+        task = asyncio.create_task(s.run())
+        await asyncio.sleep(0.02)
+        conn.feed(_done(), _heard("thanks, bye"), _spoke("Bye!"))
+        await asyncio.sleep(0.02)
+        assert s._farewell and s.task_running and not agent.cancelled   # the task is not killed
+        before = len([k for k in conn.kinds() if k == "session.input_audio.append"])
+        mic.put_nowait(b"\x00\x01" * 50)
+        await asyncio.sleep(0.02)
+        after = len([k for k in conn.kinds() if k == "session.input_audio.append"])
+        assert after == before                                          # buddy stopped listening
+        clock["now"] += FAREWELL_MAX_SECS + 1.0
+        await asyncio.sleep(0.7)
+        assert not s._ended.is_set()                                    # still waiting on the task
+        agent.release.set()
+        await asyncio.sleep(0.02)
+        assert "Spotify is playing." in conn.commentary()[-1]           # the result is said first
+        conn.feed(_spoke("Spotify is playing."))
+        await asyncio.sleep(0.01)
+        clock["now"] += TURN_GAP_SECS + FAREWELL_QUIET_SECS + 0.2
+        await asyncio.sleep(0.7)
+        assert s._ended.is_set()
+        conn.feed(None)
+        await task
+    asyncio.run(go())
+    assert not agent.cancelled
+
+
+def test_mute_and_unmute_by_voice_keep_the_conversation_going() -> None:
+    clock = {"now": 0.0}
+    sound = {"on": True}
+    calls: list[bool] = []
+
+    def on_sound(on: bool) -> None:
+        calls.append(on)
+        sound["on"] = on
+
+    pcm = base64.b64encode(b"\x00\x10" * 50).decode()
+    conn = FakeConnection()
+    s, _, _ = _session(conn, [FakeAgent(None, None)], clock=clock, on_sound=on_sound,
+                       muted=lambda: not sound["on"])
+
+    async def go():
+        task = asyncio.create_task(s.run())
+        await asyncio.sleep(0.01)
+        conn.feed(_heard("mute"), _spoke("Okay."))
+        await asyncio.sleep(0.02)
+        assert calls == [False] and not s._ended.is_set() and not s._farewell
+        conn.feed({"type": "session.output_audio.delta", "delta": pcm})
+        await asyncio.sleep(0.01)
+        assert s.speaker.played == b""                                  # muted: the Mac plays nothing
+        clock["now"] += TURN_GAP_SECS + 0.1
+        conn.feed(_heard("unmute yourself"), _spoke("Back."))
+        await asyncio.sleep(0.02)
+        assert calls == [False, True]
+        conn.feed({"type": "session.output_audio.delta", "delta": pcm})
+        await asyncio.sleep(0.01)
+        assert s.speaker.played == b"\x00\x10" * 50
+        conn.feed(_tool_call("set_sound", "c1", on=False), _tool_call("set_sound", "c2", on="loud"))
+        await asyncio.sleep(0.02)
+        conn.feed(_tool_call("end_conversation", "c9"), None)
+        await task
+    asyncio.run(go())
+    notes = _thinking(conn)
+    assert any(n.startswith("[sound] You are muted") for n in notes)
+    assert any(n == "[sound] Your sound is back on." for n in notes)
+    assert calls == [False, True, False]
+    assert conn.tool_outputs()[0] == {"ok": True, "sound": "off"}
+    assert conn.tool_outputs()[1] == {"ok": False, "reason": "on must be true or false"}
+
+
+def test_a_slow_look_holds_off_the_idle_close_and_never_logs_the_view(caplog) -> None:
+    clock = {"now": 0.0}
+    gate = asyncio.Event()
+
+    class SlowScene(FakeScene):
+        async def look(self, fresh_secs: float = 4.0, newer_than=None) -> dict:
+            await gate.wait()
+            return self.view
+
+    conn = FakeConnection([_tool_call("look", "c1")])
+    s, _, _ = _session(conn, [FakeAgent(None, None)], clock=clock, scene=SlowScene())
+
+    async def go():
+        with caplog.at_level("INFO"):
+            task = asyncio.create_task(s.run())
+            await asyncio.sleep(0.02)
+            clock["now"] += 60.0                       # far past the 20 s idle timeout
+            await asyncio.sleep(0.7)
+            assert not s._ended.is_set()               # a look in flight is not idleness
+            gate.set()
+            await asyncio.sleep(0.05)
+            assert conn.tool_outputs()[0]["ok"] is True
+            conn.feed(_tool_call("end_conversation", "c9"), None)
+            await task
+    asyncio.run(go())
+    assert not any("green mug" in r.getMessage() for r in caplog.records)
+
+
+def test_a_head_request_the_voice_did_not_delegate_is_routed_to_the_backend() -> None:
+    """17:43 on the bench: "look a bit up and to your left" got "Okay, looking." and no tool call."""
+    conn = FakeConnection()
+    s, _, _ = _session(conn, [FakeAgent(None, None)])
+
+    async def go():
+        task = asyncio.create_task(s.run())
+        await asyncio.sleep(0.01)
+        conn.feed(_heard("Look a bit up and to your left."), _spoke("Okay, looking."))
+        await asyncio.sleep(LOOK_ROUTE_DELAY_SECS + 0.2)
+        assert conn.user_messages() == ["[look request] Look a bit up and to your left."]
+        assert conn.kinds()[-1] == "response.create"          # the backend is asked to act on it
+        conn.feed(_tool_call("end_conversation", "c9"), None)
+        await task
+    asyncio.run(go())
+
+
+def test_a_head_request_the_voice_delegated_is_not_routed_twice() -> None:
+    clock = {"now": 0.0}
+    conn = FakeConnection()
+    s, _, _ = _session(conn, [FakeAgent(None, None)], clock=clock)
+
+    async def go():
+        task = asyncio.create_task(s.run())
+        await asyncio.sleep(0.01)
+        clock["now"] = 5.0
+        conn.feed(_heard("look a bit more left"))
+        await asyncio.sleep(0.01)
+        clock["now"] = 5.3
+        conn.feed(_delegated(), _spoke("Turning."))          # the voice delegated it itself
+        await asyncio.sleep(LOOK_ROUTE_DELAY_SECS + 0.2)
+        assert conn.user_messages() == []
+        conn.feed(_tool_call("end_conversation", "c9"), None)
+        await task
+    asyncio.run(go())
+
+
+def test_the_classifier_routes_a_head_request_the_table_does_not_know() -> None:
+    async def intent(text: str):
+        return "look" if "keys" in text else None
+
+    conn = FakeConnection()
+    s, _, _ = _session(conn, [FakeAgent(None, None)], intent=intent)
+
+    async def go():
+        task = asyncio.create_task(s.run())
+        await asyncio.sleep(0.01)
+        conn.feed(_heard("where did I leave my keys"), _spoke("Let me see."))
+        await asyncio.sleep(LOOK_ROUTE_DELAY_SECS + 0.2)
+        assert conn.user_messages() == ["[look request] where did I leave my keys"]
+        conn.feed(_tool_call("end_conversation", "c9"), None)
+        await task
+    asyncio.run(go())
+
+
+def test_a_muted_session_starts_by_telling_the_voice() -> None:
+    conn = FakeConnection([_tool_call("end_conversation"), None])
+    s, _, _ = _session(conn, [FakeAgent(None, None)], muted=lambda: True)
+    asyncio.run(s.run())
+    assert _thinking(conn)[0].startswith("[sound] You are muted")
 

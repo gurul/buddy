@@ -105,6 +105,7 @@ camera frames ◀──────────────▶ macOS Vision (fac
 | | Where | Read |
 |---|---|---|
 | Ears, voice, computer control | `bridge/src/cc_buddy_bridge/ears.py`, `voice_agent.py`, `computer_agent.py`, `desktop_worker.py` | [voice.md](docs/stackchan/voice.md) |
+| Seeing, turning its head, goodbye, mute | `bridge/src/cc_buddy_bridge/scene.py`, `head.py`, `intent.py`, `sound.py`; `firmware/claude_pet_stackchan/src/hostlook.h` | [vision.md](docs/stackchan/vision.md) |
 | Feelings, phases, the diary | `firmware/claude_pet_stackchan/src/mood.cpp`, `body.cpp`, `eyes.cpp`; `bridge/src/cc_buddy_bridge/diary.py` | [personality.md](docs/stackchan/personality.md) |
 | Widget and diary window | `widget/` | [widget.md](docs/stackchan/widget.md) |
 | The robot itself: build, wire protocol, gaze, bench notes | `firmware/claude_pet_stackchan` | [build.md](docs/stackchan/build.md), [DESIGN.md](DESIGN.md) |

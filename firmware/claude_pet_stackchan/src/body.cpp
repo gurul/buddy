@@ -4,6 +4,7 @@
 #include "body.h"
 #include "chirp.h"
 #include "gaze.h"
+#include "hostlook.h"
 #include <M5StackChan.h>
 
 // ---- servo limits (degrees) ----
@@ -216,6 +217,10 @@ static uint32_t touchArmAt  = 0;
 static bool     touchArmed  = false;
 
 static bool gazeHeld(uint32_t now) { return (int32_t)(now - gazeUntil) < 0; }
+// The current hold came from the owner's own request (bodyHostLook). It then
+// outranks automatic gaze and the conversation's phase poses (hostlook.h).
+static bool gazeFromHost = false;
+static bool hostHeld(uint32_t now) { return hostlook::holdsHead(gazeFromHost, now, gazeUntil); }
 
 int    bodyYawDeg()   { return curYaw; }
 int    bodyPitchDeg() { return curPitch; }
@@ -254,20 +259,24 @@ void bodySetAgent(AgentState s) {
   agentState = s;
   agentSince = now;
   seq = nullptr;
-  gazeUntil = 0; gazePending = false;
+  // A look the owner asked for keeps the head through phase changes: buddy goes
+  // on looking where it was told while it answers (hostlook.h). The phase still
+  // chirps; only its pose and its beat stand aside until the hold runs out.
+  const bool keep = hostHeld(now);
+  if (!keep) { gazeUntil = 0; gazePending = false; }
   nextAgentBeat = now + 600;
   switch (s) {
-    case AG_WAKE:      headTo(0, PITCH_LEVEL + 12, 700); chirpPlay(CHIRP_WAKE, true); break;
-    case AG_LISTENING: headTo((now - toucherAt < 30000) ? toucherSide * YAW_FOUND_YOU : 0, PITCH_LEVEL + 15, 500); break;
-    case AG_THINKING:  headTo(random(2) ? 14 : -14, PITCH_LEVEL + 6, 300); nextAgentBeat = now + 2500; break;
-    case AG_SPEAKING:  headTo(0, PITCH_LEVEL + 10, 400); break;
-    case AG_WORKING:   headTo(0, 30, 400); nextAgentBeat = now + 700; break;   // eyes down at the desk
-    case AG_ASKING:    headTo(0, PITCH_ATTENTION, 600); chirpPlay(CHIRP_LISTEN, true); break;
-    case AG_DONE:      play(SEQ_AGENT_DONE, NKEYS(SEQ_AGENT_DONE), now); chirpPlay(CHIRP_OK, true); break;
-    case AG_ERROR:     play(SEQ_AGENT_ERROR, NKEYS(SEQ_AGENT_ERROR), now); chirpPlay(CHIRP_NO, true); break;
+    case AG_WAKE:      if (!keep) headTo(0, PITCH_LEVEL + 12, 700); chirpPlay(CHIRP_WAKE, true); break;
+    case AG_LISTENING: if (!keep) headTo((now - toucherAt < 30000) ? toucherSide * YAW_FOUND_YOU : 0, PITCH_LEVEL + 15, 500); break;
+    case AG_THINKING:  if (!keep) headTo(random(2) ? 14 : -14, PITCH_LEVEL + 6, 300); nextAgentBeat = now + 2500; break;
+    case AG_SPEAKING:  if (!keep) headTo(0, PITCH_LEVEL + 10, 400); break;
+    case AG_WORKING:   if (!keep) headTo(0, 30, 400); nextAgentBeat = now + 700; break;   // eyes down at the desk
+    case AG_ASKING:    if (!keep) headTo(0, PITCH_ATTENTION, 600); chirpPlay(CHIRP_LISTEN, true); break;
+    case AG_DONE:      if (!keep) play(SEQ_AGENT_DONE, NKEYS(SEQ_AGENT_DONE), now); chirpPlay(CHIRP_OK, true); break;
+    case AG_ERROR:     if (!keep) play(SEQ_AGENT_ERROR, NKEYS(SEQ_AGENT_ERROR), now); chirpPlay(CHIRP_NO, true); break;
     case AG_IDLE:
     default:
-      if (lastState != 0xFF && !listening) onEnterSilent((PersonaState)lastState, now);
+      if (!keep && lastState != 0xFF && !listening) onEnterSilent((PersonaState)lastState, now);
       break;
   }
 }
@@ -275,6 +284,7 @@ void bodySetAgent(AgentState s) {
 // Micro-motions that keep an agent phase alive: typing glances while
 // working, a bob while speaking, a slow side-to-side while thinking.
 static void agentBeat(uint32_t now) {
+  if (hostHeld(now)) return;                 // the owner's look holds: no glances, bobs or sways
   if (seq || (int32_t)(now - nextAgentBeat) < 0) return;
   switch (agentState) {
     case AG_WORKING:
@@ -320,7 +330,7 @@ void bodySetMood(const MoodExpr* e) {
   }
 }
 
-void bodyLookAt(int8_t yawDeg, uint16_t holdMs) {
+static void setGaze(int8_t yawDeg, uint16_t holdMs) {
   if (holdMs == 0) { gazeUntil = 0; gazePending = false; gazeSide = 0; return; }
   gazeYaw     = clampYaw(yawDeg);
   gazePitch   = -1;
@@ -328,9 +338,23 @@ void bodyLookAt(int8_t yawDeg, uint16_t holdMs) {
   gazePending = true;
   gazeSide    = 0;
 }
+// Automatic gaze (owner tracking, the toucher, explore waypoints) waits while
+// the owner's own look holds: they asked for it, so it is not overridden.
+void bodyLookAt(int8_t yawDeg, uint16_t holdMs) {
+  if (hostHeld(millis())) return;
+  gazeFromHost = false;
+  setGaze(yawDeg, holdMs);
+}
 void bodyLookAt(int8_t yawDeg, int8_t pitchDeg, uint16_t holdMs) {
-  bodyLookAt(yawDeg, holdMs);
+  if (hostHeld(millis())) return;
+  gazeFromHost = false;
+  setGaze(yawDeg, holdMs);
   if (holdMs) gazePitch = clampPitch(pitchDeg);
+}
+void bodyHostLook(int8_t yawDeg, int8_t pitchDeg, uint16_t holdMs) {
+  setGaze(yawDeg, holdMs);
+  if (holdMs) gazePitch = clampPitch(pitchDeg);
+  gazeFromHost = holdMs > 0;
 }
 
 void bodyNoteToucher(int8_t side) {
@@ -624,7 +648,8 @@ static void updateInner(PersonaState active, bool needsAttention, uint32_t now) 
   // Gaze hold (toucher / camera) overrides the periodic behaviours below.
   // Sleep ignores it: a sleeping pet does not track. While listening the
   // pitch stays at the listening value; only the yaw follows the owner.
-  bool held = gazeHeld(now) && active != P_SLEEP;
+  // The owner's own look lands in SLEEP too: they asked, so the pet looks.
+  bool held = gazeHeld(now) && (active != P_SLEEP || gazeFromHost);
   if (held && gazePending) {
     seq = nullptr;
     int pitch = listening ? PITCH_LISTEN
