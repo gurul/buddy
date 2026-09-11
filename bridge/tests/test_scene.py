@@ -134,8 +134,6 @@ def test_only_the_newest_frame_is_described_and_note_uses_seen_time() -> None:
         clock = Clock()
         client = FakeClient([("A person at a desk.", "")], clock=clock, takes=2.0)
         w = watcher(client, clock)
-        notes: list[str] = []
-        w.on_note = notes.append
         w.start(run_loop=False)
         for seq in (1, 2, 3):
             w.offer(jpeg_frame(seq))
@@ -143,7 +141,7 @@ def test_only_the_newest_frame_is_described_and_note_uses_seen_time() -> None:
         await w.tick()
         assert client.images == [b"\xff\xd8frame3"]          # latest-only: 1 and 2 never left
         assert w._frame is None                               # released once handed off
-        assert notes == ["[vision 16:43:00] A person at a desk."]   # seen time, not answer time (+2.5 s)
+        assert w.notes == ["[vision 16:43:00] A person at a desk."]   # seen time, not answer time (+2.5 s)
         assert w.latest is not None and w.latest.latency_secs == pytest.approx(2.0)
         await w.stop()
     asyncio.run(go())

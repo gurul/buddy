@@ -51,9 +51,10 @@ is unit-tested with fakes; the real wiring lives in `open_session()`.
 Eyes, head and standing orders (owner requests 2026-09-10):
 
 * gpt-live-1 takes no images (its model page lists image as unsupported), so
-  scene.py describes the camera with a cheap image model. Each timestamped
-  `[vision HH:MM:SS]` line reaches the voice as silent context, and the
-  backend's `look` tool asks for a fresh view.
+  scene.py describes the camera with a cheap image model and keeps the newest
+  view. Nothing is pushed to the voice: a view reaches it only through the
+  backend's `look` tool, when the owner asks. (Pushed lines made the voice
+  narrate the room unprompted — owner report 2026-09-10.)
 * head.py turns the head. The backend picks the pose from the owner's own
   words (`move_head`), pans the room (`look_around`) or searches (`find`).
 * intent.py reads every finished user turn. "Go away" in any words closes
@@ -119,10 +120,9 @@ When the result arrives, tell them it in one short line.
 Delegate anything that changes what a running task is doing, ends the conversation, or sends you off to
 explore. Chit-chat you answer yourself.
 
-You have a camera. A line tagged [vision HH:MM:SS] is what it saw at that time. Asked what you see, answer
-from the newest [vision] line in one short sentence, with only what that line says. If the newest line says
-the camera is lost or you cannot make out the view, say you can't see right now. For a closer look ("what am
-I holding?"), delegate.
+You have a camera, but you only look through it when asked. When the owner asks what you see, what they are
+holding, or to look at something, delegate; the result tells you what is in view, and you say only that in
+one short sentence. Never mention what is around you unless they asked.
 
 You can turn your head. Delegate every request to look somewhere, look around, or find something; say only
 a two-word acknowledgement until the result arrives.
@@ -131,8 +131,7 @@ When the owner says goodbye or wants you gone, say a two- or three-word goodbye 
 listening after it. A [sound] line tells you whether you are muted; muted, nobody hears you, but your words
 still show on your screen, so keep them short.
 
-Never claim to have done something you did not do, or to see something no [vision] line or tool result
-showed you."""
+Never claim to have done something you did not do, or to see something no tool result showed you."""
 
 BACKEND_INSTRUCTIONS = """You are the reasoning half of buddy, a small desk robot. You never speak; you
 call tools and return one short line for buddy to say.
@@ -456,7 +455,7 @@ class VoiceSession:
         caption_tick_secs: float = 0.05,
         on_explore: Optional[Callable[[], None]] = None,
         turn_gap_secs: float = TURN_GAP_SECS,
-        scene: Any = None,                                  # scene.SceneWatcher-like: start/stop/look/locate/on_note
+        scene: Any = None,                                  # scene.SceneWatcher-like: start/stop/look/locate
         head: Any = None,                                   # head.Head-like: move/yaw/pitch/clock/sleep
         intent: Optional[Callable[[str], Awaitable[Optional[str]]]] = None,   # intent.make_classifier(...)
         on_sound: Optional[Callable[[bool], None]] = None,  # the owner muted (False) / unmuted (True)
@@ -549,8 +548,7 @@ class VoiceSession:
         if self.muted():
             await self._quiet(MUTED_NOTE)
         if self.scene is not None:
-            self.scene.on_note = self._on_scene_note
-            self.scene.start()
+            self.scene.start()                      # watches quietly; the look tool reads it on request
         pump = asyncio.create_task(self._pump_mic(), name="voice-mic")
         watchdog = asyncio.create_task(self._watchdog(), name="voice-watchdog")
         ticker = asyncio.create_task(self._tick_loop(), name="voice-ticks")
@@ -987,14 +985,8 @@ class VoiceSession:
         return await self.head.move(num("yaw"), num("pitch"), relative=args.get("relative") is True,
                                     hold_secs=head_mod.DEFAULT_HOLD_SECS if hold is None else hold)
 
-    def _on_scene_note(self, note: str) -> None:
-        """scene.py saw something (or lost the camera): silent context for the voice."""
-        if not self._ended.is_set():
-            self._bg(self._quiet(note))
-
     async def _stop_scene(self) -> None:
         if self.scene is not None:
-            self.scene.on_note = None
             await self.scene.stop()
 
     # -- standing orders: go away, mute --

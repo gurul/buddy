@@ -8,10 +8,13 @@ open, the newest camera frame goes to ``gpt-5.4-nano`` at most once every
 
     [vision 16:43:05] A person at a desk holding a green mug. Change: they picked up the mug.
 
-The voice session (voice_agent.py) hands each line to the Live model as silent
-context. Its ``look`` tool asks for a fresh view on demand, and head.py's
-``look_around`` / ``find`` use ``look(newer_than=...)`` and ``locate`` so a
-view is always from a frame taken after the head stopped turning.
+Nothing here is pushed to the voice. Each line goes into the watcher's own
+journal (``notes``) and the newest view waits in ``latest``; the voice reads
+it only when the owner asks, through the backend's ``look`` tool. (Pushing
+every line as silent context made the voice narrate the room unprompted,
+owner report 2026-09-10.) head.py's ``look_around`` / ``find`` use
+``look(newer_than=...)`` and ``locate`` so a view is always from a frame taken
+after the head stopped turning.
 
 Privacy, by construction:
 
@@ -24,10 +27,10 @@ Privacy, by construction:
 
 Honesty about time: every line carries the wall-clock time the frame was
 *seen*, not the time the answer came back. When no frame arrives for
-``camera_lost_secs`` (board gone, camera off), the voice is told once that it
-cannot see and that its last view is out of date. When the view is
-unchanged, a "no change since" line — stamped with the newest view that
-confirmed it — is repeated every ``refresh_secs``.
+``camera_lost_secs`` (board gone, camera off), the journal records once that
+the camera is lost and ``look`` answers that nothing can be seen. When the
+view is unchanged, a "no change since" line — stamped with the newest view
+that confirmed it — is journaled every ``refresh_secs``.
 
 Two halves, as in vision.py: a pure core (``SceneWatcher`` with an injected
 client and clock, ``parse_scene``, ``format_note``) that runs in tests, and
@@ -248,8 +251,8 @@ class SceneWatcher:
 
     ``client`` may be set after construction (the daemon resolves it in
     run()). ``camera_ok`` says whether a camera could be streaming at all —
-    the board is connected and the host asked it to stream. ``on_note`` is
-    set by the voice session for the life of one conversation.
+    the board is connected and the host asked it to stream. The watcher
+    never calls out: ``look`` and ``locate`` are the only way a view leaves it.
     """
 
     def __init__(
@@ -267,7 +270,6 @@ class SceneWatcher:
         self.wall = wall
         self.camera_ok = camera_ok
         self.tick_secs = tick_secs
-        self.on_note: Optional[Callable[[str], None]] = None
         self.active = False
         self.latest: Optional[Observation] = None
         self.notes: list[str] = []      # this conversation's notes, for tests and the log; cleared on stop
@@ -354,17 +356,13 @@ class SceneWatcher:
         return self.wall() - timedelta(seconds=max(0.0, self.clock() - t))
 
     def _emit(self, note: str) -> None:
+        """Journal one line. It goes nowhere else: the voice pulls views with ``look``."""
         self.notes.append(note)
         self._last_note_at = self.clock()
         # The log gets the tag and the kind of line, never what the camera saw.
         kind = ("camera lost" if "Camera lost" in note else "cannot see" if "cannot make out" in note
                 else "no change" if "No change since" in note else "view")
-        log.info("scene: %s %s → voice", note.split("]", 1)[0] + "]", kind)
-        if self.on_note is not None:
-            try:
-                self.on_note(note)
-            except Exception:  # noqa: BLE001
-                log.exception("scene: on_note failed")
+        log.info("scene: %s %s", note.split("]", 1)[0] + "]", kind)
 
     def _usable_frame(self) -> bool:
         return self._frame is not None and self._frame_at > self._min_frame_at
