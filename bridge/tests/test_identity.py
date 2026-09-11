@@ -28,6 +28,7 @@ from cc_buddy_bridge.identity import (
     crop_rect,
     euclidean,
 )
+from cc_buddy_bridge.scene import SceneWatcher
 from cc_buddy_bridge.vision import FaceTracker, Frame, Rect
 
 W, H = 160, 120
@@ -372,8 +373,11 @@ def _daemon(identity_obj, connected: bool = True) -> SimpleNamespace:
     ble = _StubBle(connected)
     # _note_activity / _explorer: the listen key and every frame are also seen
     # by the idle explorer (explore.py); the stub keeps it inactive.
+    # _head/_scene: every frame also carries the head pose (head.py) and is offered to
+    # the voice's eyes (scene.py, inert outside a conversation).
     d = SimpleNamespace(ble=ble, _listen_sent=None, _listen_down=False, _identity=identity_obj,
-                        _note_activity=lambda: None, _explorer=SimpleNamespace(active=False))
+                        _note_activity=lambda: None, _explorer=SimpleNamespace(active=False),
+                        _head=SimpleNamespace(observe=lambda yaw, pitch: None), _scene=SceneWatcher(None))
     d._vision = FaceTracker(detect=lambda f: [Rect(60, 40, 40, 40, conf=1.0)], send=ble.send,
                             identity=identity_obj)
     for name in ("_on_listen_key", "_handle_identity", "_handle_ble"):

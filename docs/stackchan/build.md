@@ -143,8 +143,13 @@ Owner wanted (ATTENTION or listening): live target → remembered spot →
 **search sweep**, two rows (pitch 45 then 65, yaw -40..40, ~4.3 s), repeated
 every 5 s while no live target is younger than 5 s. BUSY/IDLE only glance:
 8° deadband, at most every 3 s, 3 s hold. SLEEP and the one-shots observe but
-never move. `{"cmd":"look"}` is honoured in SLEEP/IDLE/BUSY only, never while the owner
-is wanted. `{"cmd":"owner","op":"reset"}` wipes the
+never move. `{"cmd":"look"}` (rules in `src/hostlook.h`) is honoured in any state
+during a voice conversation — the owner asked for it out loud — and in SLEEP/IDLE/BUSY
+otherwise, never while the owner is wanted, never with a card up or while dictating. It
+may turn the full neck range (±120°). While its hold lasts it owns the head: automatic
+gaze waits, and the conversation's phase poses and beats stand aside, so buddy keeps
+looking where it was told while it answers (host test: `host/hostlook_test.cpp`).
+`{"cmd":"owner","op":"reset"}` wipes the
 memory. Geometry: camera HFOV assumed 66°, VFOV 3/4 of that; `kYawSign` +1
 (bench: the head follows the hand); `kElevSign` is **unverified**.
 
@@ -158,7 +163,8 @@ Every other verb is the pet build's (`time`, `status`, `focus`, `key`).
 | host → board | `{"cmd":"cam","on":true,"fps":5,"w":160,"h":120}` / `{"cmd":"cam","on":false}` | start/stop the frame stream |
 | board → host | `{"frame":{"seq":n,"w":160,"h":120,"fmt":"jpeg","b64":"...","yaw":Y,"pitch":P}}` | one line per frame, written from the camera task |
 | host → board | `{"cmd":"face","seq":n,"bx":..,"by":..,"size":..,"conf":..,"yaw":Y,"pitch":P,"who":"owner"\|"unknown"}` | largest face; `conf:0` = no face |
-| host → board | `{"cmd":"look","yaw":-60..60,"pitch":5..85,"hold":ms}` | absolute pose request (explorer) |
+| host → board | `{"cmd":"look","yaw":-120..120,"pitch":5..85,"hold":ms}` | absolute pose request (explorer, and the voice's `move_head` / `look_around` / `find`); `+yaw` = the robot's right; `hold:0` hands the head back |
+| host → board | `{"cmd":"sound","on":true\|false}` | the owner muted / unmuted buddy; persisted (NVS `s_snd`) and applied to every chirp and beep; motion and LEDs unaffected. The status ack reports it as `"snd"` |
 | host → board | `{"cmd":"mode","explore":true\|false}` | enter/leave explore mode |
 | host → board | `{"cmd":"snap"}` | one full-size photo: the look task answers with a single frame line at 320x240, quality 85, carrying `"snap":true` |
 | host → board | `{"cmd":"owner","op":"reset"}` | forget the owner memory |

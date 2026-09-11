@@ -361,14 +361,18 @@ def _daemon(detect, connected: bool = True) -> SimpleNamespace:
     from types import MethodType
 
     from cc_buddy_bridge.daemon import Daemon
+    from cc_buddy_bridge.scene import SceneWatcher
 
     ble = _StubBle(connected)
     # _explorer/_note_activity: the idle explorer's hooks in _handle_ble (explore.py).
+    # _head/_scene/_sound: the frame's head pose, the voice's eyes (inert outside a
+    # conversation) and the owner's mute choice, re-sent on every resync.
     d = SimpleNamespace(ble=ble, _listen_sent=None, _shutdown=asyncio.Event(),
                         _explorer=SimpleNamespace(active=False), _note_activity=lambda: None,
-                        _agent_state="idle")
+                        _agent_state="idle", _head=SimpleNamespace(observe=lambda yaw, pitch: None),
+                        _scene=SceneWatcher(None), _sound=SimpleNamespace(on=True, muted=False))
     d._vision = FaceTracker(detect=detect, send=ble.send)
-    for name in ("_reset_listen", "_resync_agent", "_send_cam"):
+    for name in ("_reset_listen", "_resync_agent", "_send_cam", "_send_sound"):
         setattr(d, name, MethodType(getattr(Daemon, name), d))
     return d
 
@@ -384,8 +388,10 @@ def test_daemon_resync_sends_cam_on_after_time_sync() -> None:
 
     sent = asyncio.run(go())
     assert "time" in sent[0]
-    assert sent[-1] == {"cmd": "cam", "on": True, "fps": 5, "w": 160, "h": 120}
-    assert sent.index({"cmd": "listen", "on": False}) < len(sent) - 1
+    cam = sent.index({"cmd": "cam", "on": True, "fps": 5, "w": 160, "h": 120})
+    assert sent.index({"cmd": "listen", "on": False}) < cam
+    # ... and the owner's mute choice goes out last, so a rebooted board comes back with it
+    assert sent[-1] == {"cmd": "sound", "on": True} and cam == len(sent) - 2
 
 
 def test_daemon_no_cam_on_without_detector() -> None:

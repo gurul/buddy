@@ -33,8 +33,10 @@ from .explore import (
     build_mode_cmd,
 )
 from .explore import configured as explore_configured
+from .head import Head
 from .identity import FaceIdentity, OwnerIdentity, configured_threshold, make_describer
 from .identity import default_path as identity_default_path
+from .intent import make_intent_classifier
 from .ipc import IPCServer
 from .jsonl_tailer import JSONLTailer
 from .listen_key import Stopper, start_listen_key
@@ -48,6 +50,9 @@ from .protocol import (
     truncate_utf8_bytes,
 )
 from .read_policy import is_within, read_scope
+from .scene import SceneWatcher, make_scene_client
+from .scene import configured as scene_configured
+from .sound import SoundSetting, build_sound_cmd, quiet_caption
 from .state import State, notification_waits
 from .thought_screen import ThoughtScreen
 from .version_check import check as version_check
@@ -136,6 +141,19 @@ class Daemon:
         # Owner identity: the prints live in memory; the file is loaded and
         # the Vision describer resolved in run(), like the detector.
         self._identity: Optional[FaceIdentity] = None
+        # Eyes for the voice (scene.py): camera frames become timestamped
+        # descriptions, only while a conversation is open. The client (an
+        # image model) is resolved in run(), like the detector.
+        self._scene = SceneWatcher(None, scene_configured(),
+                                   camera_ok=lambda: self.ble.connected and self._vision.enabled)
+        # Head control for the voice (head.py). The board echoes its real
+        # pose on every camera frame; relative moves start from that.
+        self._head = Head(self.ble.send, connected=lambda: self.ble.connected)
+        # The owner's mute choice (sound.py): persisted, re-sent on every connect.
+        self._sound = SoundSetting()
+        self._sound.load()
+        # "Go away" / "mute" in any words (intent.py); resolved in run().
+        self._intent: Optional[Any] = None
         # Idle explorer (explore.py): after a quiet stretch the board pans
         # the room and, per waypoint, may spend a note on what it sees. The
         # pure Explorer is ticked from _explore_loop; the note client is
@@ -229,6 +247,10 @@ class Daemon:
         self._vision.detect = make_detector()
         self._identity = self._make_identity()
         self._vision.identity = self._identity
+        self._scene.client = make_scene_client(self._scene.config)
+        self._intent = make_intent_classifier()
+        if self._sound.muted:
+            log.info("sound: muted (owner's choice, %s) — the head and lights still move", self._sound.path)
         tasks = [
             asyncio.create_task(self.ipc.serve_forever(), name="ipc"),
             asyncio.create_task(self.ble.run(), name="ble"),
@@ -339,6 +361,7 @@ class Daemon:
         await self._reset_listen()
         await self._resync_agent()
         await self._send_cam(True)
+        await self._send_sound()
 
     async def _on_ble_connected(self) -> None:
         """On every (re)connect, emit time sync + force a heartbeat + kick
@@ -358,6 +381,7 @@ class Daemon:
             await self._reset_listen()
             await self._resync_agent()
             await self._send_cam(True)
+            await self._send_sound()
             # Wait for the connection to drop before waiting again.
             while self.ble.connected and not self._shutdown.is_set():
                 await asyncio.sleep(1.0)
@@ -434,6 +458,21 @@ class Daemon:
             await asyncio.wait_for(self.ble.send(build_cam_cmd(on)), timeout=2.0)
         except asyncio.TimeoutError:
             log.warning("vision: cam %s command timed out", "on" if on else "off")
+
+    # ---- sound (mute) ----
+
+    async def _send_sound(self) -> None:
+        """Tell the board the owner's choice. Its firmware gates every chirp on it."""
+        if self.ble.connected:
+            await self.ble.send(build_sound_cmd(self._sound.on))
+
+    def _set_sound(self, on: bool) -> None:
+        """The owner muted or unmuted buddy (by voice or `cc-buddy-bridge sound`).
+        Persisted, and the board is told at once. Motion and LEDs are untouched."""
+        if self._sound.set(on):
+            log.info("sound: %s (the head and lights keep moving)", "on" if on else "muted")
+        if self.ble.connected:
+            asyncio.create_task(self._send_sound())
 
     async def _vision_stats_loop(self) -> None:
         """One summary line per window, and only when frames arrived. Never per-frame."""
@@ -538,7 +577,9 @@ class Daemon:
         try:
             await voice_agent.open_session(mic, self._on_agent_state, self._make_agent,
                                            config=self._voice_cfg, agent_enabled=self._agent_cfg.enabled,
-                                           on_caption=self._on_caption, on_explore=self._on_voice_explore)
+                                           on_caption=self._on_caption, on_explore=self._on_voice_explore,
+                                           scene=self._scene, head=self._head, intent=self._intent,
+                                           on_sound=self._set_sound, muted=lambda: self._sound.muted)
         except asyncio.CancelledError:
             self._explore_after_conversation = None      # hushed: stay put
             raise
@@ -577,9 +618,10 @@ class Daemon:
                                  "hold_ms": 4000, "final": True, "chirp": False})
 
     def _on_caption(self, msg: dict) -> None:
-        """One page of buddy's reply (or a clear) onto the robot's screen; the pager owns the timing."""
+        """One page of buddy's reply (or a clear) onto the robot's screen; the pager owns the timing.
+        Muted, the page goes without its talk chirp (older firmware has no sound command)."""
         if self.ble.connected:
-            asyncio.create_task(self.ble.send(msg))
+            asyncio.create_task(self.ble.send(quiet_caption(msg, self._sound.muted)))
 
     def _on_agent_state(self, state: str) -> None:
         """Mirror the conversation/task phase on the board."""
@@ -965,6 +1007,13 @@ class Daemon:
                      "ok" if ok else "fail")
             return {"ok": bool(ok)}
 
+        if evt == "sound":
+            # `cc-buddy-bridge sound [on|off|status]`
+            action = req.get("action")
+            if action in ("on", "off"):
+                self._set_sound(action == "on")
+            return {"ok": True, "sound": "on" if self._sound.on else "off", "connected": self.ble.connected}
+
         if evt == "get_state":
             # Queried by the `cc-buddy-bridge hud` subcommand (or anyone else
             # who wants a one-shot snapshot). Kept small on purpose.
@@ -1141,6 +1190,10 @@ class Daemon:
             # sample (the explore loop decodes it, once, when it is due).
             if self._explorer.active:
                 self._explore_raw_frame = frame
+            # The head pose rides on every frame; the scene watcher keeps only the
+            # newest frame, and only while a conversation is open.
+            self._head.observe(frame.get("yaw"), frame.get("pitch"))
+            self._scene.offer(frame)
             await self._vision.on_frame(frame)
             return
         diag = obj.get("diag")
@@ -1238,6 +1291,11 @@ class Daemon:
                     self._last_stick_sec,
                 )
                 self._last_stick_sec = bool(sec)
+            snd = data.get("snd")               # firmware with {"cmd":"sound"}; older boards omit it
+            if isinstance(snd, bool) and snd != self._sound.on:
+                log.info("sound: board has sound %s but the owner chose %s — re-sending",
+                         "on" if snd else "off", "on" if self._sound.on else "off")
+                asyncio.create_task(self._send_sound())
             bat = data.get("bat") or {}
             if isinstance(bat, dict) and bat:
                 pct = bat.get("pct")

@@ -8,6 +8,7 @@
 #include "ticks.h"
 #include "gaze.h"
 #include "body.h"
+#include "hostlook.h"
 #include "look.h"
 #include "owner_model.h"
 #include <M5StackChan.h>
@@ -210,16 +211,18 @@ void gazeUpdate(PersonaState active, bool needsAttention, bool listening,
   }
   model.decay(now);
 
-  // Host-driven gaze ({"cmd":"look"}): SLEEP/IDLE/BUSY only, never with a
-  // card up, never while the owner is wanted. Same tween, clamped.
+  // Host-driven gaze ({"cmd":"look"}): the rules live in hostlook.h — any state
+  // during a voice conversation, calm states otherwise, never with a card up or
+  // while dictating. The full neck range (±120), not the owner-tracking ±60.
   if (host && host->hostLookReq) {
     host->hostLookReq = false;
-    bool ok = !host->cardUp && !listening && active != P_ATTENTION && !needsAttention
-              && (active == P_SLEEP || active == P_IDLE || active == P_BUSY);
+    bool ok = hostlook::accepted(host->cardUp, listening, host->agentActive,
+                                 active == P_ATTENTION || needsAttention,
+                                 active == P_SLEEP || active == P_IDLE || active == P_BUSY);
     if (ok) {
-      float y = clampf(host->hostLookYaw, -kYawLimitDeg, kYawLimitDeg);
-      float p = clampf(host->hostLookPitch, kPitchMinDeg, kPitchMaxDeg);
-      bodyLookAt((int8_t)y, (int8_t)p, host->hostLookHold);
+      int y = hostlook::clampYaw(host->hostLookYaw);
+      int p = hostlook::clampPitch(host->hostLookPitch);
+      bodyHostLook((int8_t)y, (int8_t)p, host->hostLookHold);
       look::setMoving(true); model.noteMoving(true); moving = true;
       Serial.printf("[gaze] host look yaw=%.0f pitch=%.0f hold=%u\n", y, p, (unsigned)host->hostLookHold);
     }

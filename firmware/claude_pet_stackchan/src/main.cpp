@@ -630,6 +630,7 @@ void loop() {
     hin.hostLookReq = tama.hostLookReq; hin.hostLookYaw = tama.hostLookYaw;
     hin.hostLookPitch = tama.hostLookPitch; hin.hostLookHold = tama.hostLookHold;
     hin.explore = tama.explore; hin.cardUp = false;
+    hin.agentActive = tama.agentState != AG_IDLE;
     gazeUpdate(activeState, baseState == P_ATTENTION, listenNow, now, &tama.ownerReset, &hin);
     tama.hostLookReq = hin.hostLookReq;      // consumed by gaze
   }

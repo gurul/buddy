@@ -115,6 +115,16 @@ inline bool xferCommand(JsonDocument& doc) {
     return true;
   }
 
+  // {"cmd":"sound","on":bool}: the owner muted or unmuted buddy by voice.
+  // Persisted (NVS "s_snd"), and main.cpp hands it to the chirp synth every
+  // loop, so every chirp and beep follows it. Motion and LEDs do not.
+  if (strcmp(cmd, "sound") == 0) {
+    settings().sound = doc["on"] | true;
+    settingsSave();
+    _xAck("sound", true);
+    return true;
+  }
+
   if (strcmp(cmd, "status") == 0) {
     // Dump everything the info screens show. Manual printf rather than
     // ArduinoJson serialize — less heap churn, and the shape is fixed.
@@ -123,15 +133,15 @@ inline bool xferCommand(JsonDocument& doc) {
     int vBus = (int)(M5.Axp.GetVBusVoltage() * 1000);
     int pct = (vBat - 3200) / 10;
     if (pct < 0) pct = 0; if (pct > 100) pct = 100;
-    char b[320];
+    char b[384];   // 320 left no room for a full-length name + owner once "snd" was added
     int len = snprintf(b, sizeof(b),
       "{\"ack\":\"status\",\"ok\":true,\"n\":0,\"data\":{"
-      "\"name\":\"%s\",\"owner\":\"%s\",\"sec\":%s,"
+      "\"name\":\"%s\",\"owner\":\"%s\",\"sec\":%s,\"snd\":%s,"
       "\"bat\":{\"pct\":%d,\"mV\":%d,\"mA\":%d,\"usb\":%s},"
       "\"sys\":{\"up\":%lu,\"heap\":%u,\"fsFree\":%lu,\"fsTotal\":%lu},"
       "\"stats\":{\"appr\":%u,\"deny\":%u,\"vel\":%u,\"nap\":%lu,\"lvl\":%u}"
       "}}\n",
-      petName(), ownerName(), bleSecure() ? "true" : "false",
+      petName(), ownerName(), bleSecure() ? "true" : "false", settings().sound ? "true" : "false",
       pct, vBat, iBat, (vBus > 4000) ? "true" : "false",
       millis() / 1000, ESP.getFreeHeap(),
       (unsigned long)(LittleFS.totalBytes() - LittleFS.usedBytes()),
