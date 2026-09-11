@@ -15,39 +15,46 @@ API's `input_image` type as the positive control. The Live session's Responses b
 every frame.
 
 So `scene.py` sends camera frames to `gpt-5.4-nano` (image input, $0.20 per 1M input
-tokens, reasoning effort none by default), and hands what it says to the voice as text.
+tokens, reasoning effort none by default) and keeps the newest answer as text. **It is
+pulled, never pushed**: the voice sees a view only when the backend calls `look`, which
+happens when you ask. An earlier build pushed every view into the voice as silent context,
+and buddy narrated the room unprompted (owner report, 2026-09-10).
 
 ```
  board camera ─frame 5/s─▶ daemon ─newest frame, ≤1 per 3 s─▶ gpt-5.4-nano (describe)
       ▲                      │                                     │ {"scene","change"}
       │ {"cmd":"look"}       │                                     ▼
-      │                      │                 [vision 16:43:05] A person holds a green mug.
-   head.py ◀─move_head/find/look_around── gpt-6-astra backend       │ session.thinking.append
-                                              ▲                     ▼
+      │                      │          scene.latest: [vision 16:43:05] A person holds a green mug.
+   head.py ◀─move_head/find/look_around── gpt-6-astra backend ◀─look()─┘  (on request only)
+                                              ▲
                                               └──── delegates ── gpt-live-1 (the voice)
 ```
 
 Measured on this machine (`cc-buddy-bridge scene-test docs/assets/hero.png --find "the robot"`,
 2026-09-10): a describe took 2.96 s, a locate 1.83 s.
 
-## What the voice is told, and when
+## What the watcher keeps, and what the voice can pull
 
-Only while a conversation is open, and only these lines:
+Only while a conversation is open, the watcher journals these lines for itself (`notes`;
+the log records the tag and the kind, never the text):
 
 | Line | When |
 |---|---|
 | `[vision 16:43:05] A person at a desk holding a green mug.` | the first view of a conversation |
 | `[vision 16:43:14] … Change: they picked up the mug` | the describer says the view changed |
 | `[vision 16:43:32] No change since 16:43:05: …` | at most every 20 s, and only when a newer view confirmed it |
-| `[vision 16:44:00] Camera lost: you cannot see anything right now. Your last view, from 16:43:32, may be out of date.` | no frame for 3 s, or the board is gone (said once) |
-| `[vision …] You cannot make out the view right now.` | describes keep failing and the last view is over 15 s old (said once) |
+| `[vision 16:44:00] Camera lost: you cannot see anything right now. Your last view, from 16:43:32, may be out of date.` | no frame for 3 s, or the board is gone (once) |
+| `[vision …] You cannot make out the view right now.` | describes keep failing and the last view is over 15 s old (once) |
 
 Every time is when the frame was **seen**, never when the answer came back, and a
-"no change" line is stamped with the view that confirmed it, never with "now". The voice
-answers simple questions from the newest line; for "what am I holding?" the backend calls
-`look`, which reuses a view younger than 4 s or asks for a fresh one and waits at most one
-describe timeout (8 s). A slow answer is dropped, never queued: at most one describe runs,
-and only the newest frame waits.
+"no change" line is stamped with the view that confirmed it, never with "now".
+
+None of this reaches the voice on its own. "What do you see?" / "what am I holding?" goes to
+the backend, which calls `look`: it returns the newest view with its `seen_at`, `age_secs`
+and `stale` flag, reusing a view younger than 4 s or asking for a fresh one and waiting at
+most one describe timeout (8 s). With the camera lost it answers that nothing can be seen.
+A slow answer is dropped, never queued: at most one describe runs, and only the newest
+frame waits.
 
 ## Turning the head
 
@@ -105,9 +112,10 @@ does the same from a shell.
   and closing the conversation drops the frame slot and every description.
 - At most one frame is held, in memory: the next frame replaces it, a describe releases it,
   and closing the conversation drops it. Nothing in this path writes an image to disk.
-- Every request sets `store=False`. The descriptions reach the voice as context and nowhere
-  else: the daemon log records that a view was described and when (`scene: [vision 16:43:05]
-  view → voice`), and whether a `look` / `find` worked — never what the camera saw.
+- Every request sets `store=False`. A description reaches the voice only as a `look` /
+  `look_around` / `find` result and nowhere else: the daemon log records that a view was
+  described and when (`scene: [vision 16:43:05] view`), and whether a `look` / `find`
+  worked — never what the camera saw.
 - Separate features with their own switches do send frames outside conversations: the idle
   explorer's notes and the diary (`CC_BUDDY_EXPLORE`, [personality.md](personality.md)).
   `CC_BUDDY_SCENE=0` turns this feature off entirely.

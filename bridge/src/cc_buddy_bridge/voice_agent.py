@@ -51,9 +51,10 @@ is unit-tested with fakes; the real wiring lives in `open_session()`.
 Eyes, head and standing orders (owner requests 2026-09-10):
 
 * gpt-live-1 takes no images (its model page lists image as unsupported), so
-  scene.py describes the camera with a cheap image model. Each timestamped
-  `[vision HH:MM:SS]` line reaches the voice as silent context, and the
-  backend's `look` tool asks for a fresh view.
+  scene.py describes the camera with a cheap image model and keeps the newest
+  view. Nothing is pushed to the voice: a view reaches it only through the
+  backend's `look` tool, when the owner asks. (Pushed lines made the voice
+  narrate the room unprompted — owner report 2026-09-10.)
 * head.py turns the head. The backend picks the pose from the owner's own
   words (`move_head`), pans the room (`look_around`) or searches (`find`).
 * intent.py reads every finished user turn. "Go away" in any words closes
@@ -107,9 +108,10 @@ INSTRUCTIONS = """You are buddy, a small desk robot with a cheerful, curious per
 You just heard your wake word. Answer in one or two short spoken sentences; no lists, no markdown, no
 offers of things you "can help with" — you are a pet, not an assistant menu.
 
-You can operate your owner's Mac for them. The moment they ask for anything on the computer, delegate it
-at once — do not guess an app, do not narrate steps you have not seen. A two-word acknowledgement as you
-delegate is fine; say it once.
+You can operate your owner's Mac for them, but only when they ask for something the Mac must do or show:
+open, play, send, find a file, read the screen. The moment they ask for that, delegate it at once — do not
+guess an app, do not narrate steps you have not seen. A two-word acknowledgement as you delegate is fine;
+say it once. A plain question is not a computer job.
 
 Starting a task is not finishing it. Until its result arrives, say only that you are on it.
   NOT: "It's playing now."   INSTEAD: "On it."
@@ -119,10 +121,15 @@ When the result arrives, tell them it in one short line.
 Delegate anything that changes what a running task is doing, ends the conversation, or sends you off to
 explore. Chit-chat you answer yourself.
 
-You have a camera. A line tagged [vision HH:MM:SS] is what it saw at that time. Asked what you see, answer
-from the newest [vision] line in one short sentence, with only what that line says. If the newest line says
-the camera is lost or you cannot make out the view, say you can't see right now. For a closer look ("what am
-I holding?"), delegate.
+You are the receptionist; a slower brain works behind you. Anything that needs today's facts — weather,
+scores, news, prices, opening hours, "what's happening with…" — delegate; it searches the web. Anything
+hard — maths, code, logic, a plan, a comparison — delegate; it thinks it through, which can take a while.
+While you wait, say a few words like "Let me check" or "Give me a moment" and keep listening; do not
+guess the answer. When the result arrives, say it.
+
+You have a camera, but you only look through it when asked. When the owner asks what you see, what they are
+holding, or to look at something, delegate; the result tells you what is in view, and you say only that in
+one short sentence. Never mention what is around you unless they asked.
 
 You can turn your head. Delegate every request to look somewhere, look around, or find something; say only
 a two-word acknowledgement until the result arrives.
@@ -131,11 +138,17 @@ When the owner says goodbye or wants you gone, say a two- or three-word goodbye 
 listening after it. A [sound] line tells you whether you are muted; muted, nobody hears you, but your words
 still show on your screen, so keep them short.
 
-Never claim to have done something you did not do, or to see something no [vision] line or tool result
-showed you."""
+Never claim to have done something you did not do, or to see something no tool result showed you."""
 
 BACKEND_INSTRUCTIONS = """You are the reasoning half of buddy, a small desk robot. You never speak; you
 call tools and return one short line for buddy to say.
+
+Pick the cheapest thing that answers, in this order: answer it yourself; search the web; think_hard; and
+only then start_task. start_task is the last resort — it takes over the owner's Mac, clicks and types for
+tens of seconds, and can change things. Use it only when the request needs the Mac itself: an app opened or
+controlled, something on the screen read, a file, an email, a message, a setting, a download. A question is
+never a task: "what's the weather", "who won", "what's 17 times 23", "how do I…" are answered or searched,
+never started as a task, even if an app could show the answer.
 
 - A request to do something on the owner's Mac → call start_task at once, with the goal in the owner's own
   words plus any app or site they named. Never guess an app or hedge ("likely in a music app"). When
@@ -168,12 +181,21 @@ call tools and return one short line for buddy to say.
   the thing in the owner's words; say where it is ("on my left") or that you could not see it.
 - "Mute", "no sound", "be quiet", "stop beeping" → set_sound with on false. "Unmute", "sound back on" →
   set_sound with on true. Sound never ends the conversation.
+- A question whose answer depends on current facts — weather, a score, news, a price, opening hours,
+  anything after your training — → search the web, then answer in one short spoken line: the fact and,
+  if it matters, when it is from. No URLs, no source names.
+- A genuinely hard question — maths beyond arithmetic, code, logic, a plan, a comparison with trade-offs
+  → think_hard with the question in the owner's words. Return its answer as it is. Simple questions you
+  answer yourself; never send chit-chat or a lookup to think_hard.
 
-Return at most one short sentence. Never invent a result you did not get from a tool."""
+Return at most one short sentence, except a think_hard answer, which may be three. Never invent a result
+you did not get from a tool."""
 
 TOOLS: list[dict[str, Any]] = [
     {"type": "function", "name": "start_task",
-     "description": "Start a computer-use task on the owner's Mac. Returns immediately; the task runs in the background.",
+     "description": "Start a computer-use task on the owner's Mac: it clicks and types for them. Last resort — "
+                    "only for a request the Mac itself must carry out or show, never for a question. Returns "
+                    "immediately; the task runs in the background.",
      "parameters": {"type": "object", "properties": {"goal": {"type": "string",
                     "description": "What to accomplish, in the owner's own words, naming any app or site they "
                                    "named. Do not add guesses."}},
@@ -228,7 +250,14 @@ TOOLS: list[dict[str, Any]] = [
      "parameters": {"type": "object", "properties": {"on": {"type": "boolean",
                     "description": "false mutes you, true turns sound back on."}},
                     "required": ["on"], "additionalProperties": False}},
+    {"type": "function", "name": "think_hard",
+     "description": "Hand a genuinely hard question to a slower, stronger model that reasons at high effort "
+                    "and can search the web. Takes up to a minute or more. Returns its spoken answer.",
+     "parameters": {"type": "object", "properties": {"question": {"type": "string",
+                    "description": "The question in the owner's own words, with any detail they gave."}},
+                    "required": ["question"], "additionalProperties": False}},
 ]
+WEB_SEARCH_TOOL: dict[str, Any] = {"type": "web_search"}   # server-side; nothing to answer on our end
 
 DEFAULT_CAPTION_CPS = PagerConfig().read_cps
 
@@ -243,10 +272,12 @@ class VoiceConfig:
     max_session_secs: float = DEFAULT_MAX_SESSION_SECS
     output: str = "captions"      # "captions" (text → robot screen + beeps) or "audio" (Mac speaker)
     caption_cps: float = DEFAULT_CAPTION_CPS   # reading rate the caption page holds derive from (5..30)
+    web_search: bool = True       # the backend may search the web (a built-in Responses tool)
 
 
 def configured(environ: Any = None) -> VoiceConfig:
     env = os.environ if environ is None else environ
+    web = (env.get("CC_BUDDY_LIVE_WEB_SEARCH") or "1").strip().lower() not in ("0", "false", "no", "off")
     if env.get("CC_BUDDY_REALTIME_MODEL"):
         log.warning("voice: CC_BUDDY_REALTIME_MODEL is a Realtime-era name and is ignored; "
                     "set CC_BUDDY_LIVE_MODEL instead")
@@ -277,7 +308,7 @@ def configured(environ: Any = None) -> VoiceConfig:
         except ValueError:
             log.warning("voice: CC_BUDDY_CAPTION_CPS=%r is not a number; using %s", raw, cps)
     return VoiceConfig(model=model, backend_model=backend, backend_effort=effort, voice=voice,
-                       idle_timeout_secs=idle, output=out, caption_cps=cps)
+                       idle_timeout_secs=idle, output=out, caption_cps=cps, web_search=web)
 
 
 def session_config(config: VoiceConfig) -> dict[str, Any]:
@@ -301,7 +332,7 @@ def session_config(config: VoiceConfig) -> dict[str, Any]:
             "responses": {
                 "model": config.backend_model,
                 "instructions": BACKEND_INSTRUCTIONS,
-                "tools": TOOLS,
+                "tools": TOOLS + ([WEB_SEARCH_TOOL] if config.web_search else []),
                 "tool_choice": "auto",
                 "reasoning": {"effort": config.backend_effort},
                 "parallel_tool_calls": False,
@@ -456,16 +487,18 @@ class VoiceSession:
         caption_tick_secs: float = 0.05,
         on_explore: Optional[Callable[[], None]] = None,
         turn_gap_secs: float = TURN_GAP_SECS,
-        scene: Any = None,                                  # scene.SceneWatcher-like: start/stop/look/locate/on_note
+        scene: Any = None,                                  # scene.SceneWatcher-like: start/stop/look/locate
         head: Any = None,                                   # head.Head-like: move/yaw/pitch/clock/sleep
         intent: Optional[Callable[[str], Awaitable[Optional[str]]]] = None,   # intent.make_classifier(...)
         on_sound: Optional[Callable[[bool], None]] = None,  # the owner muted (False) / unmuted (True)
         muted: Callable[[], bool] = lambda: False,
+        thinker: Optional[Callable[[str], Awaitable[dict[str, Any]]]] = None,   # think.make_thinker(...)
     ) -> None:
         self.conn = connection
         self.scene = scene
         self.head = head
         self.intent = intent
+        self.thinker = thinker
         self.on_sound = on_sound
         self.muted = muted
         # "Go away" was heard: the mic stops, and the session closes once buddy's
@@ -549,8 +582,7 @@ class VoiceSession:
         if self.muted():
             await self._quiet(MUTED_NOTE)
         if self.scene is not None:
-            self.scene.on_note = self._on_scene_note
-            self.scene.start()
+            self.scene.start()                      # watches quietly; the look tool reads it on request
         pump = asyncio.create_task(self._pump_mic(), name="voice-mic")
         watchdog = asyncio.create_task(self._watchdog(), name="voice-watchdog")
         ticker = asyncio.create_task(self._tick_loop(), name="voice-ticks")
@@ -901,9 +933,10 @@ class VoiceSession:
                 result = {"ok": True, "sound": "on" if on else "off"}
             else:
                 result = {"ok": False, "reason": "on must be true or false"}
-        elif name in ("look", "look_around", "find"):
-            # Seconds of camera and head work: answered from a background task, so
-            # Live events (the owner talking, captions) keep flowing meanwhile.
+        elif name in ("look", "look_around", "find", "think_hard"):
+            # Seconds (or a minute, for think_hard) of camera, head or model work:
+            # answered from a background task, so Live events (the owner talking,
+            # captions) keep flowing meanwhile.
             self._slow_tool(name, call_id, args)
             return
         else:
@@ -938,6 +971,8 @@ class VoiceSession:
                     result = await self._look()
                 elif name == "look_around":
                     result = await self._look_around()
+                elif name == "think_hard":
+                    result = await self._think_hard(str(args.get("question", "")))
                 else:
                     result = await self._find(str(args.get("target", "")))
             except asyncio.CancelledError:
@@ -948,7 +983,7 @@ class VoiceSession:
             if self._ended.is_set():
                 return
             self._last_activity = self._clock()
-            # What the camera saw is never logged: only whether the call worked.
+            # What the camera saw, or what was asked, is never logged: only whether the call worked.
             log.info("voice: %s → ok=%s%s", name, result.get("ok"),
                      f" found={result['found']}" if "found" in result else "")
             await self.conn.response.item.create(item={"type": "function_call_output", "call_id": call_id,
@@ -975,6 +1010,23 @@ class VoiceSession:
             return {"ok": False, "reason": "head control or vision is not set up on this computer"}
         return await head_mod.find(self.head, self.scene, target)
 
+    # -- the slow brain --
+    async def _think_hard(self, question: str) -> dict[str, Any]:
+        question = question.strip()
+        if not question:
+            return {"ok": False, "reason": "empty question"}
+        if self.thinker is None:
+            return {"ok": False, "reason": "deep reasoning is off on this computer; answer as best you can"}
+        # The voice was told to keep the owner company; a fresh reply from the
+        # backend is not needed until the answer is in.
+        await self._quiet("A hard question is being worked on in the background. Say a few words that "
+                          "you are on it if you have not already; do not guess the answer.")
+        try:
+            return await self.thinker(question)
+        except Exception as e:  # noqa: BLE001
+            log.warning("voice: think_hard failed: %s: %s", type(e).__name__, e)
+            return {"ok": False, "reason": "the slow brain did not answer in time; answer as best you can"}
+
     async def _move_head(self, args: dict[str, Any]) -> dict[str, Any]:
         if self.head is None:
             return {"ok": False, "reason": "head control is not set up on this computer"}
@@ -987,14 +1039,8 @@ class VoiceSession:
         return await self.head.move(num("yaw"), num("pitch"), relative=args.get("relative") is True,
                                     hold_secs=head_mod.DEFAULT_HOLD_SECS if hold is None else hold)
 
-    def _on_scene_note(self, note: str) -> None:
-        """scene.py saw something (or lost the camera): silent context for the voice."""
-        if not self._ended.is_set():
-            self._bg(self._quiet(note))
-
     async def _stop_scene(self) -> None:
         if self.scene is not None:
-            self.scene.on_note = None
             await self.scene.stop()
 
     # -- standing orders: go away, mute --
@@ -1192,6 +1238,7 @@ async def open_session(
     intent: Optional[Callable[[str], Awaitable[Optional[str]]]] = None,
     on_sound: Optional[Callable[[bool], None]] = None,
     muted: Callable[[], bool] = lambda: False,
+    thinker: Optional[Callable[[str], Awaitable[dict[str, Any]]]] = None,
 ) -> None:
     """Run one full conversation on the real Live API — captions to the robot,
     or the real speaker in audio mode."""
@@ -1206,7 +1253,7 @@ async def open_session(
             session = VoiceSession(conn, mic, speaker, agent_factory, on_state, config=cfg,
                                    agent_enabled=agent_enabled, on_caption=on_caption,
                                    on_explore=on_explore, scene=scene, head=head, intent=intent,
-                                   on_sound=on_sound, muted=muted)
+                                   on_sound=on_sound, muted=muted, thinker=thinker)
             await session.run()
     finally:
         speaker.close()
