@@ -45,6 +45,15 @@ anything that made it feel something — get a photo, taken at full resolution o
 its own judgment. It will not photograph the same thing twice, it loses interest
 in a corner it just shot, and what you star teaches it what to look for.
 
+**It remembers talking to you.** Every conversation is distilled into a few lines it
+writes to itself — never the words, only what mattered — and the next one opens with
+the gap and one thing it still owes you. Say *"remember that"* and it keeps the claim
+for good. It curates its own days.
+
+**It takes notes for you.** Say *"start taking notes"* and it transcribes the room until
+you tell it to stop, then writes up the decisions, the actions and what was left open,
+and keeps the transcript underneath.
+
 **It shows you.** A macOS desktop widget carries the latest thoughts and the current
 feeling; click it for the whole diary — what it saw, what changed, how it felt over
 time, its profile of you, its dreams.
@@ -107,6 +116,9 @@ camera frames ◀──────────────▶ macOS Vision (fac
 | Ears, voice, web search, deep reasoning, computer control | `bridge/src/cc_buddy_bridge/ears.py`, `voice_agent.py`, `think.py`, `computer_agent.py`, `desktop_worker.py` | [voice.md](docs/stackchan/voice.md) |
 | Seeing, turning its head, goodbye, mute | `bridge/src/cc_buddy_bridge/scene.py`, `head.py`, `intent.py`, `sound.py`; `firmware/claude_pet_stackchan/src/hostlook.h` | [vision.md](docs/stackchan/vision.md) |
 | Feelings, phases, the diary | `firmware/claude_pet_stackchan/src/mood.cpp`, `body.cpp`, `eyes.cpp`; `bridge/src/cc_buddy_bridge/diary.py` | [personality.md](docs/stackchan/personality.md) |
+| Taking notes on the room | `bridge/src/cc_buddy_bridge/notes.py` | [voice.md](docs/stackchan/voice.md#taking-notes-on-the-room) |
+| Motion: named rhythms the board runs | `bridge/src/cc_buddy_bridge/motion.py`, `firmware/claude_pet_stackchan/src/motion.h` | [build.md](docs/stackchan/build.md#named-motion) |
+| Memory of conversations, and starring by voice | `bridge/src/cc_buddy_bridge/recall.py`, `chat_memory.py` | [voice.md](docs/stackchan/voice.md#what-buddy-remembers-of-talking-with-you) |
 | Widget and diary window | `widget/` | [widget.md](docs/stackchan/widget.md) |
 | The robot itself: build, wire protocol, gaze, bench notes | `firmware/claude_pet_stackchan` | [build.md](docs/stackchan/build.md), [DESIGN.md](DESIGN.md) |
 | Daemon commands and every knob | `bridge/` | [bridge/README.md](bridge/README.md) |

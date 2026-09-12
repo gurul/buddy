@@ -144,6 +144,39 @@ struct Reflection: Codable, Hashable, Identifiable, Sendable {
     var id: String { date }
 }
 
+/// One conversation buddy had with its owner, as buddy wrote it down afterwards.
+///
+/// The spoken half of buddy's memory lives in its own claude-debrief store
+/// (`~/.config/cc-buddy-bridge/debrief`), written by the daemon's chat_memory.py.
+/// It is kept apart from `Note`, which is what buddy SAW: what the owner said is
+/// quotable, what a camera suggested is not.
+struct Conversation: Codable, Hashable, Identifiable, Sendable {
+    let date: String          // yyyy-MM-dd
+    let time: String          // HH:mm
+    let title: String
+    /// Debts of buddy's own, verbatim: "buddy owes an answer about the servo".
+    var owes: [String] = []
+
+    var id: String { "\(date) \(time) \(title)" }
+}
+
+/// A recording buddy made of the room, on request (notes.py).
+///
+/// Unlike a `Conversation`, which is buddy's memory of talking WITH its owner,
+/// this is a transcript of a meeting, a lecture or a call. The file on disk holds
+/// the write-up and the full transcript; this carries enough to list it and open
+/// or export the file.
+struct RoomNote: Codable, Hashable, Identifiable, Sendable {
+    let date: String          // yyyy-MM-dd
+    let time: String          // HH:mm
+    let title: String
+    var gist: String = ""
+    var words: Int = 0
+    var path: String = ""     // the file, for Reveal in Finder and for export
+
+    var id: String { path.isEmpty ? "\(date) \(time) \(title)" : path }
+}
+
 struct NotesSnapshot: Codable, Sendable {
     var updatedAt: Date
     var notesDir: String
@@ -155,15 +188,27 @@ struct NotesSnapshot: Codable, Sendable {
     var profile: String = ""
     /// Newest day first.
     var reflections: [Reflection] = []
-    /// `highlights.md`: what the human starred, in file order (oldest first).
+    /// `highlights.md`: what the human starred from the diary, in file order (oldest first).
     var highlights: [String] = []
+    /// Conversations, newest first. What buddy heard.
+    var conversations: [Conversation] = []
+    /// Claims the owner promoted out loud with "remember that", oldest first.
+    var spokenStars: [String] = []
+    /// Recordings of the room, newest first.
+    var roomNotes: [RoomNote] = []
 
-    enum CodingKeys: String, CodingKey { case updatedAt, notesDir, notes, thoughts, profile, reflections, highlights }
+    enum CodingKeys: String, CodingKey {
+        case updatedAt, notesDir, notes, thoughts, profile, reflections, highlights, conversations,
+             spokenStars, roomNotes
+    }
 
     init(updatedAt: Date, notesDir: String, notes: [Note], thoughts: [Thought] = [], profile: String = "",
-         reflections: [Reflection] = [], highlights: [String] = []) {
+         reflections: [Reflection] = [], highlights: [String] = [], conversations: [Conversation] = [],
+         spokenStars: [String] = [], roomNotes: [RoomNote] = []) {
         self.updatedAt = updatedAt; self.notesDir = notesDir; self.notes = notes
         self.thoughts = thoughts; self.profile = profile; self.reflections = reflections; self.highlights = highlights
+        self.conversations = conversations; self.spokenStars = spokenStars
+        self.roomNotes = roomNotes
     }
 
     /// Older mirrors wrote only `notes`; keep reading them.
@@ -176,6 +221,17 @@ struct NotesSnapshot: Codable, Sendable {
         profile = (try? c.decode(String.self, forKey: .profile)) ?? ""
         reflections = (try? c.decode([Reflection].self, forKey: .reflections)) ?? []
         highlights = (try? c.decode([String].self, forKey: .highlights)) ?? []
+        conversations = (try? c.decode([Conversation].self, forKey: .conversations)) ?? []
+        spokenStars = (try? c.decode([String].self, forKey: .spokenStars)) ?? []
+        roomNotes = (try? c.decode([RoomNote].self, forKey: .roomNotes)) ?? []
+    }
+
+    /// The one line most worth showing on a small card: a debt of buddy's own.
+    var newestDebt: String? {
+        for conversation in conversations {
+            if let owed = conversation.owes.first { return owed }
+        }
+        return nil
     }
 
     /// The newest feeling, from the newest memory record.
@@ -419,6 +475,20 @@ enum NoteStore {
     }
 
     /// Atomically writes the snapshot into the group container.
+    /// Everything in the snapshot except `updatedAt`, as bytes, so "did anything
+    /// change?" covers every field without listing them.
+    ///
+    /// The mirror used to compare four fields by hand. Three fields were added
+    /// for conversations, spoken stars and room notes, and none of them reached
+    /// the guard: a recording was read, held in memory for the diary window, and
+    /// never written to the App Group, so the widget's Notes tab stayed empty
+    /// while the file sat on disk (2026-09-11).
+    static func contentKey(_ snapshot: NotesSnapshot) -> Data? {
+        var copy = snapshot
+        copy.updatedAt = Date(timeIntervalSince1970: 0)
+        return try? encoder.encode(copy)
+    }
+
     static func save(_ snapshot: NotesSnapshot) throws {
         guard let url = AppGroup.notesFileURL else {
             throw CocoaError(.fileNoSuchFile, userInfo: [NSLocalizedDescriptionKey: "App Group container \(AppGroup.id) unavailable"])
@@ -454,10 +524,142 @@ enum NoteStore {
         try body.write(to: url, atomically: true, encoding: .utf8)
     }
 
+    // MARK: - The spoken half: buddy's own debrief store
+
+    /// Where buddy keeps what was SAID. Its own claude-debrief store, written by
+    /// the daemon's chat_memory.py, separate from the notes directory.
+    static func defaultDebriefDir() -> URL {
+        if let override = ProcessInfo.processInfo.environment["CC_BUDDY_DEBRIEF_DIR"], !override.isEmpty {
+            return URL(fileURLWithPath: (override as NSString).expandingTildeInPath, isDirectory: true)
+        }
+        return FileManager.default.homeDirectoryForCurrentUser
+            .appendingPathComponent(".config/cc-buddy-bridge/debrief", isDirectory: true)
+    }
+
+    /// One conversation note: its title and any debt of buddy's own.
+    static func parseConversation(_ body: String, date: String, time: String) -> Conversation? {
+        var title = ""
+        var owes: [String] = []
+        for raw in body.split(separator: "\n", omittingEmptySubsequences: true) {
+            let line = raw.trimmingCharacters(in: .whitespaces)
+            if title.isEmpty, line.hasPrefix("# ") {
+                title = String(line.dropFirst(2)).trimmingCharacters(in: .whitespaces)
+            } else if line.hasPrefix("- ") {
+                let item = String(line.dropFirst(2)).trimmingCharacters(in: .whitespaces)
+                if item.lowercased().hasPrefix("buddy owes") { owes.append(item) }
+            }
+        }
+        guard !title.isEmpty || !owes.isEmpty else { return nil }
+        return Conversation(date: date, time: time, title: title.isEmpty ? "A conversation" : title, owes: owes)
+    }
+
+    /// Conversations, newest first, across every day in the store.
+    static func readConversations(store: URL, limit: Int = 60) -> [Conversation] {
+        let fm = FileManager.default
+        let sessions = store.appendingPathComponent("sessions", isDirectory: true)
+        let days = ((try? fm.contentsOfDirectory(at: sessions, includingPropertiesForKeys: nil)) ?? [])
+            .filter { $0.hasDirectoryPath }
+            .sorted { $0.lastPathComponent > $1.lastPathComponent }
+        var out: [Conversation] = []
+        for day in days {
+            let date = day.lastPathComponent
+            let files = ((try? fm.contentsOfDirectory(at: day, includingPropertiesForKeys: nil)) ?? [])
+                .filter { $0.pathExtension == "md" }
+                .sorted { $0.lastPathComponent > $1.lastPathComponent }
+            for file in files {
+                guard let body = try? String(contentsOf: file, encoding: .utf8) else { continue }
+                let stem = file.deletingPathExtension().lastPathComponent
+                let digits = stem.prefix(4)
+                let time = digits.count == 4 && digits.allSatisfy(\.isNumber)
+                    ? "\(digits.prefix(2)):\(digits.suffix(2))" : "--:--"
+                if let c = parseConversation(body, date: date, time: String(time)) {
+                    out.append(c)
+                    if out.count >= limit { return out }
+                }
+            }
+        }
+        return out
+    }
+
+    /// Recordings of the room, newest first, read from `<store>/notes/<day>/`.
+    ///
+    /// Only the head of each file is parsed: these carry a whole transcript, and
+    /// the widget lists them rather than showing them. The file itself is what
+    /// the owner opens or exports.
+    static func readRoomNotes(store: URL, limit: Int = 40) -> [RoomNote] {
+        let fm = FileManager.default
+        let root = store.appendingPathComponent("notes", isDirectory: true)
+        let days = ((try? fm.contentsOfDirectory(at: root, includingPropertiesForKeys: nil)) ?? [])
+            .filter { $0.hasDirectoryPath }
+            .sorted { $0.lastPathComponent > $1.lastPathComponent }
+        var out: [RoomNote] = []
+        for day in days {
+            let files = ((try? fm.contentsOfDirectory(at: day, includingPropertiesForKeys: nil)) ?? [])
+                .filter { $0.pathExtension == "md" }
+                .sorted { $0.lastPathComponent > $1.lastPathComponent }
+            for file in files {
+                guard let body = try? String(contentsOf: file, encoding: .utf8) else { continue }
+                var title = "", gist = "", words = 0
+                var afterTitle = false
+                for raw in body.split(separator: "\n", omittingEmptySubsequences: false).prefix(40) {
+                    let line = raw.trimmingCharacters(in: .whitespaces)
+                    if line.hasPrefix("words:") {
+                        words = Int(line.dropFirst(6).trimmingCharacters(in: .whitespaces)) ?? 0
+                    } else if title.isEmpty, line.hasPrefix("# ") {
+                        title = String(line.dropFirst(2)).trimmingCharacters(in: .whitespaces)
+                        afterTitle = true
+                    } else if afterTitle, gist.isEmpty, !line.isEmpty, !line.hasPrefix("#"),
+                              !line.hasPrefix("<!--"), !line.hasPrefix(">") {
+                        gist = line
+                    }
+                }
+                let stem = file.deletingPathExtension().lastPathComponent
+                let digits = stem.prefix(4)
+                let time = digits.count == 4 && digits.allSatisfy(\.isNumber)
+                    ? "\(digits.prefix(2)):\(digits.suffix(2))" : "--:--"
+                out.append(RoomNote(date: day.lastPathComponent, time: String(time),
+                                    title: title.isEmpty ? "Notes" : title, gist: gist,
+                                    words: words, path: file.path))
+                if out.count >= limit { return out }
+            }
+        }
+        return out
+    }
+
+    /// Claims the owner promoted by voice, read ONLY from the section buddy writes.
+    ///
+    /// A fresh `era-debrief install` seeds HIGHLIGHTS.md with a worked example
+    /// carrying ★ lines of its own, about somebody else's outage. Scanning the
+    /// whole file put one of those on the desktop as buddy's memory of its owner
+    /// (2026-09-11). Reading only buddy's own section makes that impossible.
+    static func readSpokenStars(store: URL) -> [String] {
+        guard let body = try? String(contentsOf: store.appendingPathComponent("HIGHLIGHTS.md",
+                                                                              isDirectory: false),
+                                     encoding: .utf8) else { return [] }
+        var out: [String] = []
+        var inside = false
+        for raw in body.split(separator: "\n", omittingEmptySubsequences: false) {
+            let line = raw.trimmingCharacters(in: .whitespaces)
+            if line.hasPrefix("#") {
+                let heading = line.drop(while: { $0 == "#" }).trimmingCharacters(in: .whitespaces).lowercased()
+                inside = heading.hasPrefix("from talking")
+                continue
+            }
+            guard inside else { continue }
+            var claim = line
+            if claim.hasPrefix("-") { claim.removeFirst(); claim = claim.trimmingCharacters(in: .whitespaces) }
+            guard claim.hasPrefix("★") else { continue }
+            claim.removeFirst()
+            claim = claim.trimmingCharacters(in: .whitespaces)
+            if !claim.isEmpty, !claim.contains("*(example)*") { out.append(claim) }
+        }
+        return out
+    }
+
     /// Reads the daemon's notes directory: diary lines (newest first), memory records
     /// (newest first), the profile and the reflections. Returns the snapshot plus the
     /// newest day file (the one worth watching for appends).
-    static func read(notesDir: URL) -> (snapshot: NotesSnapshot, newestFile: URL?) {
+    static func read(notesDir: URL, store: URL? = nil) -> (snapshot: NotesSnapshot, newestFile: URL?) {
         let fm = FileManager.default
         let files = ((try? fm.contentsOfDirectory(at: notesDir, includingPropertiesForKeys: nil)) ?? [])
             .filter { $0.pathExtension == "md" && $0.lastPathComponent != "profile.md" }
@@ -496,8 +698,12 @@ enum NoteStore {
         let profile = (try? String(contentsOf: profileURL, encoding: .utf8)) ?? ""
         let highlights = readHighlights(notesDir: notesDir)
 
+        let debrief = store ?? defaultDebriefDir()
         let snap = NotesSnapshot(updatedAt: .now, notesDir: notesDir.path, notes: notes, thoughts: thoughts,
-                                 profile: profile, reflections: reflections, highlights: highlights)
+                                 profile: profile, reflections: reflections, highlights: highlights,
+                                 conversations: readConversations(store: debrief),
+                                 spokenStars: readSpokenStars(store: debrief),
+                                 roomNotes: readRoomNotes(store: debrief))
         return (snap, files.first)
     }
 }

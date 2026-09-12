@@ -13,6 +13,8 @@ for the feeling it was written in; the large size adds what changed. **Tap it**
 
 | Tab | What |
 |---|---|
+| **Talking** | what buddy heard: the claims you promoted by saying *"remember that"* pinned at the top, then every conversation newest first with what it was about and any **debt of buddy's own** (`buddy owes …`) |
+| **Notes** | recordings buddy made of the room on request ([voice.md](voice.md#taking-notes-on-the-room)), each with *Open*, *Save a copy…* and *Show in Finder* |
 | Thoughts | every thought by day; click one for the observations, what changed, tags, novelty and importance, and valence/arousal gauges; a toggle shows the unwritten candidates buddy kept in memory only; **★ stars** a thought into `highlights.md` |
 | Feelings | valence and arousal per thought over time (Swift Charts), a tally of feelings |
 | Profile | ★ never forget (the starred layer), then buddy's ROOM / HUMAN / SELF / RULES blocks |
@@ -36,6 +38,30 @@ Development" signing certificate).
 Sizes: small shows 2 thoughts, medium 4, large 9 with a "changed:" line. Empty
 state: *Nothing noticed yet — buddy explores when Claude is idle.*
 
+## The two provenances
+
+buddy remembers two different kinds of thing, and the widget never merges them:
+
+| | What buddy **saw** | What buddy **heard** |
+|---|---|---|
+| Written by | `diary.py` | `chat_memory.py` |
+| Lives in | `~/.config/cc-buddy-bridge/notes/` | `~/.config/cc-buddy-bridge/debrief/` (its own claude-debrief store) |
+| Shown in | Thoughts, Photos, Feelings, Profile, Dreams | **Talking**, and one line on the card |
+| Quotable as fact | no — a camera suggested it | yes — the owner said it |
+| Starred by | ★ in the diary window (`notes/highlights.md`) | saying *"remember that"* out loud (`debrief/HIGHLIGHTS.md`, under `## From talking`) |
+
+The card shows the newest `buddy owes …` line above everything buddy saw, because
+it is the one line about the owner rather than about the room, and it is the thing
+buddy has not done yet.
+
+**Only buddy's own section of `debrief/HIGHLIGHTS.md` is ever read.** A fresh
+`era-debrief install` seeds that file with a worked example carrying ★ lines of
+its own, about somebody else's outage. Scanning the whole file put one of those on
+the desktop as buddy's memory of its owner (2026-09-11); reading only the
+`## From talking` section makes that impossible rather than unlikely.
+`CC_BUDDY_DEBRIEF_DIR` overrides the store path, as `CC_BUDDY_NOTES_DIR` does the
+notes one.
+
 ## How notes flow
 
 ```
@@ -47,6 +73,10 @@ cc-buddy-bridge daemon (diary.py)
        profile.md      ROOM / HUMAN / SELF / RULES
        highlights.md   "- ★ <claim> — starred <date>"  (written by the diary window, read by buddy)
            │  (DispatchSource on the dir + on the newest day file, plus a 30 s timer)
+           │  it rewrites whenever ANY part of the snapshot changed, compared as
+           │  one content key. Comparing a hand-listed set of fields is how room
+           │  notes stayed invisible for an afternoon: they were read, held for
+           │  the diary window, and never written out (2026-09-11)
            ▼
 StackChanNotes.app  (helper, unsandboxed; hosts the diary window; claims stackchan://)
   └─ ~/Library/Group Containers/SJ8BKXTNUS.com.github.cc-buddy-bridge/notes.json
@@ -66,6 +96,7 @@ section, tolerant `Thought` decoding for `memory.jsonl` (missing fields default)
 Environment knobs on the helper:
 
 - `CC_BUDDY_NOTES_DIR` — override the notes directory (default `~/.config/cc-buddy-bridge/notes`).
+- `CC_BUDDY_DEBRIEF_DIR` — override buddy's spoken-memory store (default `~/.config/cc-buddy-bridge/debrief`).
 - `CC_BUDDY_NO_LOGIN_ITEM=1` — skip the one-time login-item registration (smoke tests from a build dir).
 
 ## Build and install

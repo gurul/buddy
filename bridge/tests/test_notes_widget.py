@@ -99,7 +99,82 @@ def test_collect_notes_missing_dir_is_empty(tmp_path):
 
 def test_render_text_empty_state():
     assert nw.render_text([], TODAY) == nw.EMPTY_TEXT
-    assert "idle for 10 min" in nw.EMPTY_TEXT
+    assert nw.render_text([], TODAY, []) == nw.EMPTY_TEXT
+    # the empty state teaches the two things you can say, because the widget is
+    # the interface and the voice is the way in
+    assert "hey buddy" in nw.EMPTY_TEXT and "remember that" in nw.EMPTY_TEXT
+
+
+def test_the_two_provenances_are_never_mixed_into_one_list():
+    """What buddy heard and what buddy saw are different kinds of claim, so a day
+    holding both gets a labelled group for each."""
+    said = nw.Note(day=TODAY, time="22:14", text="The right servo", kind=nw.SAID)
+    owes = nw.Note(day=TODAY, time="22:14", text="buddy owes an answer", kind=nw.SAID)
+    seen = nw.Note(day=TODAY, time="21:03", text="the chair is pushed in", kind=nw.SEEN)
+
+    labels = [label for label, _ in nw.render_sections([said, owes, seen], TODAY)]
+    assert any("Talking" in label for label in labels)
+    assert any("Looking" in label for label in labels)
+
+    # a day with only one kind needs no sub-heading
+    only_seen = [label for label, _ in nw.render_sections([seen], TODAY)]
+    assert only_seen == [nw.day_label(TODAY, TODAY)]
+
+
+def test_starred_claims_are_pinned_above_the_days():
+    seen = nw.Note(day=TODAY, time="21:03", text="the chair is pushed in", kind=nw.SEEN)
+    text = nw.render_text([seen], TODAY, ["The owner keeps the guitar behind the desk"])
+    assert text.index(nw.STARS_LABEL) < text.index("the chair is pushed in")
+    assert "guitar behind the desk" in text
+
+
+def test_a_conversation_note_shows_its_title_and_what_buddy_owes(tmp_path):
+    note = """---
+source: buddy-voice
+---
+
+# The right servo and the flash script
+
+## What was said
+
+- the owner thinks the right servo sticks
+
+## Open threads
+
+- buddy owes an answer about why the right servo sticks
+- the owner wants to try a different horn
+"""
+    assert nw.parse_conversation(note) == [
+        "The right servo and the flash script",
+        "buddy owes an answer about why the right servo sticks",
+    ], "the title and buddy's own debt; the owner's threads are not the widget's job"
+
+    day = TODAY.isoformat()
+    d = tmp_path / "sessions" / day
+    d.mkdir(parents=True)
+    (d / "2214-abc.md").write_text(note, encoding="utf-8")
+    got = nw.collect_conversations(tmp_path, TODAY)
+    assert [n.time for n in got] == ["22:14", "22:14"]
+    assert all(n.kind == nw.SAID for n in got)
+
+
+def test_everything_is_gathered_newest_first_and_absence_is_normal(tmp_path):
+    notes_dir = tmp_path / "notes"
+    store = tmp_path / "debrief"
+    notes_dir.mkdir()
+    (notes_dir / f"{TODAY.isoformat()}.md").write_text("- 21:03 the chair is pushed in\n", encoding="utf-8")
+    d = store / "sessions" / TODAY.isoformat()
+    d.mkdir(parents=True)
+    (d / "2214-abc.md").write_text("---\nsource: buddy-voice\n---\n# A chat\n", encoding="utf-8")
+
+    notes, starred = nw.collect_everything(notes_dir, store, TODAY)
+    assert [n.text for n in notes] == ["A chat", "the chair is pushed in"]
+    assert starred == []
+
+    # either half missing is a normal state, not an error
+    assert nw.collect_everything(notes_dir, tmp_path / "nope", TODAY)[0]
+    assert nw.collect_everything(tmp_path / "nope", store, TODAY)[0]
+    assert nw.collect_everything(tmp_path / "a", tmp_path / "b", TODAY) == ([], [])
 
 
 def test_render_text_sections_per_day_with_headers():

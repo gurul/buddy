@@ -8,7 +8,7 @@ import logging
 import os
 import signal
 import sys
-from typing import Optional
+from typing import Any, Optional
 
 from . import __version__
 from .daemon import Daemon
@@ -156,6 +156,35 @@ def main(argv: list[str] | None = None) -> int:
     )
     p_intent.add_argument("--expect", nargs=2, action="append", required=True, metavar=("LABEL", "TEXT"),
                           help="leave | mute | unmute | look | stay, then a phrase; repeat for more")
+
+    # "notes" is already the diary's own listing (what buddy SAW). This records
+    # the room, so it takes the name the owner says out loud.
+    p_notes = sub.add_parser(
+        "take-notes",
+        help="Take notes on the room: buddy transcribes what is said until you stop it",
+    )
+    p_notes.add_argument("action", choices=("start", "stop", "status", "list"), nargs="?",
+                         default="status")
+    p_notes.add_argument("--socket", default=None, help="IPC path or host:port override")
+
+    p_move = sub.add_parser(
+        "move",
+        help="Move the head: a named rhythm or gesture the board runs by itself",
+    )
+    p_move.add_argument("preset", nargs="?", default="dance",
+                        help="sway, dance, nod, shake, bounce, wiggle, fig8, doubletake, "
+                             "shrug, tilt, perk, droop, lean_peek, home")
+    p_move.add_argument("--speed", type=float, default=1.0,
+                        help="0.5-2.0; above 1 is a quicker beat, and the board narrows the swing to match")
+    p_move.add_argument("--stop", action="store_true", help="stop whatever is running, where it is")
+    p_move.add_argument("--keys", default=None,
+                        help="a raw keyframe list instead of a preset, e.g. "
+                             "'[[0,127,35,400],[900,127,45,400]]' (127 leaves an axis alone)")
+    p_move.add_argument("--yaw-amp", type=int, default=None)
+    p_move.add_argument("--pitch-amp", type=int, default=None)
+    p_move.add_argument("--period-ms", type=int, default=None)
+    p_move.add_argument("--cycles", type=int, default=None)
+    p_move.add_argument("--socket", default=None, help="IPC path or host:port override")
 
     p_sound = sub.add_parser(
         "sound",
@@ -317,6 +346,10 @@ def main(argv: list[str] | None = None) -> int:
             return 2
         from .intent import run_intent_test
         return run_intent_test(pairs)
+    if args.cmd == "take-notes":
+        return _run_notes(args)
+    if args.cmd == "move":
+        return _run_move(args)
     if args.cmd == "sound":
         return _run_sound(args.action, args.socket)
     if args.cmd == "identity":
@@ -503,6 +536,111 @@ def _run_photos(action: str, last: int) -> int:
             size = 0
         print(f"{path.parent.name} {path.stem.split('-')[0]}  {size / 1024:6.0f} KB  {path}")
     print(f"({format_usage(notes_dir)})")
+    return 0
+
+
+def _run_notes(args: Any) -> int:
+    """``cc-buddy-bridge notes start|stop|status|list``.
+
+    `stop` here is the one with no latency: every other way of stopping has to
+    wait for a segment to come back from the transcriber.
+    """
+    from .hooks._client import post
+    from .notes import recent
+    from .recall import configured as recall_configured
+
+    if args.action == "list":
+        files = recent(recall_configured())
+        if not files:
+            print("no notes yet — say \u201cstart taking notes\u201d, or run `notes start`")
+            return 0
+        for f in files:
+            first = ""
+            try:
+                for line in f.read_text(encoding="utf-8").splitlines():
+                    if line.startswith("# "):
+                        first = line[2:].strip()
+                        break
+            except OSError:
+                pass
+            print(f"{f.parent.name} {f.stem[:4]}  {first or f.stem}")
+            print(f"    {f}")
+        return 0
+
+    resp = post({"evt": "notes", "action": args.action}, socket_path=args.socket, timeout=180.0)
+    if resp is None:
+        print("cc-buddy-bridge: daemon not reachable", file=sys.stderr)
+        return 2
+    if not resp.get("ok"):
+        print(f"cc-buddy-bridge: {resp.get('error') or 'that did not work'}", file=sys.stderr)
+        return 1
+    if args.action == "start":
+        if resp.get("already"):
+            print(f"already taking notes, {resp.get('minutes', 0)} min in")
+        else:
+            print("taking notes — say \u201cstop taking notes\u201d, tap the robot, or run `notes stop`")
+            print("buddy cannot hear its own name while it does this")
+        return 0
+    if args.action == "stop":
+        path = resp.get("path")
+        print(f"stopped after {resp.get('minutes', 0)} min, {resp.get('words', 0)} words")
+        print(path if path else "nothing was said, so nothing was written")
+        return 0
+    if resp.get("active"):
+        print(f"taking notes: {resp.get('minutes', 0)} min, {resp.get('segments', 0)} segments, "
+              f"{resp.get('words', 0)} words")
+        last = (resp.get("last") or "").strip()
+        if last:
+            print(f"  last heard: …{last[-100:]}")
+    else:
+        print("not taking notes")
+    return 0
+
+
+def _run_move(args: Any) -> int:
+    """``cc-buddy-bridge move [preset]``: the bench path, needing no conversation.
+
+    There was no way to move the head without talking to the robot, which made
+    every motion change cost a wake word and a model round trip to look at.
+    """
+    import json as _json
+
+    from . import motion as motion_mod
+    from .hooks._client import post
+
+    req: dict[str, Any] = {"evt": "move"}
+    if args.stop:
+        req["kind"] = "stop"
+    elif args.keys:
+        try:
+            req["kind"], req["keys"] = "keys", _json.loads(args.keys)
+        except ValueError as e:
+            print(f"cc-buddy-bridge: --keys is not JSON ({e})", file=sys.stderr)
+            return 2
+    elif args.preset in motion_mod.KEYS:
+        req["kind"], req["preset"] = "keys", args.preset
+    else:
+        req["kind"], req["preset"], req["speed"] = "osc", args.preset, args.speed
+        for flag in ("yaw_amp", "pitch_amp", "period_ms", "cycles"):
+            value = getattr(args, flag, None)
+            if value is not None:
+                req[flag] = value
+
+    resp = post(req, socket_path=args.socket, timeout=10.0)
+    if resp is None:
+        print("cc-buddy-bridge: daemon not reachable", file=sys.stderr)
+        return 2
+    if not resp.get("ok"):
+        print(f"cc-buddy-bridge: {resp.get('error') or 'the board refused it'}", file=sys.stderr)
+        return 1
+    if req["kind"] == "stop":
+        print("stopped")
+        return 0
+    asked = resp.get("asked") or {}
+    print(f"asked for {motion_mod.describe(resp.get('sent') or {})}")
+    print("the board admits it against its own limits, so the delivered swing may be smaller")
+    if asked.get("ms"):
+        print(f"about {asked['ms'] / 1000:.1f}s of motion")
     return 0
 
 

@@ -11,10 +11,13 @@ from typing import TYPE_CHECKING, Any, Optional
 if TYPE_CHECKING:
     from .key_tap import KeyTapper
 
+from . import recall as recall_mod
 from . import voice_agent
 from .audit import AuditLog
 from .ble import BuddyBLE
 from .caption_pager import CaptionPager, PagerConfig
+from .chat_memory import ChatMemory, make_chat_client
+from .chat_memory import star as star_memory
 from .computer_agent import ComputerAgent, log_desktop_grants, make_response_creator
 from .computer_agent import configured as agent_configured
 from .diary import DiaryTaker, Emote, Thought, build_emote_cmd, make_diary_client
@@ -42,6 +45,8 @@ from .jsonl_tailer import JSONLTailer
 from .listen_key import Stopper, start_listen_key
 from .matchers import MatcherConfig, classify_command
 from .matchers import load_config as load_matcher_config
+from .notes import RoomNotes, make_notes_client
+from .notes import configured as notes_configured
 from .protocol import (
     ENTRY_MAX_BYTES,
     HEARTBEAT_KEEPALIVE,
@@ -170,6 +175,21 @@ class Daemon:
         # its phases through {"cmd":"agent","state":...}.
         self._ears_cfg = ears_configured()
         self._voice_cfg = voice_agent.configured()
+        self._recall_cfg = recall_mod.configured()
+        # buddy's memory of what was SAID: one note per conversation, and its own
+        # day pass. Separate from the diary, which remembers what it SAW.
+        self._chat_memory = ChatMemory(self._recall_cfg, make_chat_client())
+        # Fire-and-forget work that must outlive the call that started it, held so
+        # it is not garbage-collected mid-flight.
+        self._background: set[asyncio.Task[Any]] = set()
+        # The last few seconds of reported head poses, for measuring a motion.
+        self._motion_trace: list[tuple[float, float, float]] = []
+        # Recording the room on request (notes.py), built lazily so a daemon that
+        # is never asked never touches the microphone for it. NOT self._notes:
+        # that is the diary's vision note taker, and clobbering it would cost
+        # buddy its eyes.
+        self._room_notes: Optional[RoomNotes] = None
+        self._notes_after_conversation = False
         self._agent_cfg = agent_configured()
         self._ears: Optional[Ears] = None
         self._conversation: Optional[asyncio.Task[None]] = None
@@ -278,6 +298,10 @@ class Daemon:
                                      snapshot=self._take_snapshot, on_thought=self._show_thought)
         tasks.append(asyncio.create_task(self._explore_loop(), name="explore"))
         tasks.append(asyncio.create_task(self._thought_caption_loop(), name="thought-captions"))
+        # buddy's own day pass: aggregate yesterday's conversations into a day
+        # record without waiting for a human to run anything.
+        tasks.append(asyncio.create_task(self._chat_memory.curate_loop(self._shutdown),
+                                         name="chat-memory-curate"))
         if not self._explore_cfg.enabled:
             log.info("explore: idle start disabled (CC_BUDDY_EXPLORE=0); "
                      "`cc-buddy-bridge explore` and \"go explore\" still work")
@@ -580,13 +604,22 @@ class Daemon:
             return
         mic = self._ears.subscribe()
         keepalive = asyncio.create_task(self._agent_keepalive(), name="agent-keepalive")
+        # What buddy remembers of talking with the owner (recall.py). Read here
+        # rather than inside the session because it is a few file reads —
+        # measured at well under a millisecond — and the prompt is built once, at
+        # session.start, before the owner has finished their first sentence.
+        memory = recall_mod.opening_brief(self._recall_cfg)
+        if memory:
+            log.info("recall: %s", memory)
         try:
             await voice_agent.open_session(mic, self._on_agent_state, self._make_agent,
                                            config=self._voice_cfg, agent_enabled=self._agent_cfg.enabled,
                                            on_caption=self._on_caption, on_explore=self._on_voice_explore,
                                            scene=self._scene, head=self._head, intent=self._intent,
                                            on_sound=self._set_sound, muted=lambda: self._sound.muted,
-                                           thinker=self._thinker)
+                                           thinker=self._thinker, memory=memory,
+                                           on_closed=self._remember_conversation,
+                                           on_star=self._star_by_voice)
         except asyncio.CancelledError:
             self._explore_after_conversation = None      # hushed: stay put
             raise
@@ -598,9 +631,50 @@ class Daemon:
             await asyncio.gather(keepalive, return_exceptions=True)
             self._ears.unsubscribe(mic)
             self._on_agent_state("idle")
+            # Last, and on every exit path including a hush: the conversation
+            # happened, so the next one can say how long ago it was.
+            recall_mod.note_conversation_time(self._recall_cfg)
             reason, self._explore_after_conversation = self._explore_after_conversation, None
             if reason is not None:
                 await self._request_explore(reason)
+
+    def _room_notes_taker(self) -> RoomNotes:
+        if self._room_notes is None:
+            self._room_notes = RoomNotes(self._recall_cfg, notes_configured(), make_notes_client(),
+                                         self._ears, on_state=self._on_agent_state)
+        return self._room_notes
+
+    def _notes_by_voice(self) -> None:
+        """The owner asked for notes out loud, inside a conversation.
+
+        The conversation has to end first: the wake word and the note taker both
+        want the microphone, and ears.py bypasses the spotter while anything is
+        subscribed. So buddy says it will, the session closes, and recording
+        starts on the way out.
+        """
+        self._notes_after_conversation = True
+
+    def _star_by_voice(self, claim: str) -> Optional[str]:
+        """The owner said "remember that" out loud. That is a human promoting.
+
+        Synchronous because it is one small append and buddy has to say whether it
+        worked in the same breath.
+        """
+        return star_memory(self._recall_cfg, claim)
+
+    def _remember_conversation(self, turns: list[tuple[str, str]]) -> None:
+        """The conversation is over: write down what was said, in the background.
+
+        Fire and forget on purpose. Distilling costs one model call, and nothing
+        about the next wake word, the board, or the idle explorer may wait on it.
+        """
+        if not turns:
+            return
+        session_id = f"{time.time():.0f}"
+        task = asyncio.create_task(self._chat_memory.remember(turns, session_id),
+                                   name="chat-memory-remember")
+        self._background.add(task)
+        task.add_done_callback(self._background.discard)
 
     def _on_voice_explore(self) -> None:
         """The voice tool go_explore: remember the wish; it is granted in
@@ -896,6 +970,62 @@ class Daemon:
             elif action != "status":
                 return {"ok": False, "error": f"unknown explore action: {action!r}"}
             return {"ok": True, "connected": self.ble.connected, "explore": self._explorer.status()}
+
+        if evt == "notes":
+            # `cc-buddy-bridge notes start|stop|status`, and the voice path.
+            action = str(req.get("action") or "status")
+            taker = self._room_notes_taker()
+            if action == "start":
+                return taker.start()
+            if action == "stop":
+                return await taker.stop(str(req.get("reason") or "asked"))
+            return {"ok": True, **taker.status()}
+
+        if evt == "trace":
+            # The pose series the board reported during the last motion.
+            return {"ok": True, "trace": [[round(t, 3), y, p] for t, y, p in self._motion_trace]}
+
+        if evt == "pose":
+            # Where the head actually is, as the BOARD reports it on every camera
+            # frame (~4.3/s, head.observe). Sampling this during a motion is how a
+            # delivered swing is measured without a camera pointed at the room —
+            # the plan's own check, and the only one that reads the servos rather
+            # than the request.
+            head = self._head
+            return {"ok": True, "yaw": getattr(head, "yaw", None),
+                    "pitch": getattr(head, "pitch", None),
+                    "at": getattr(head, "pose_at", None),
+                    "connected": self.ble.connected}
+
+        if evt == "move":
+            # `cc-buddy-bridge move …`: a named motion the BOARD runs. The host
+            # only names it; motion.h admits every number before a servo sees it,
+            # so this path cannot ask for something unsafe however it is called.
+            from . import motion as motion_mod
+            kind = str(req.get("kind") or "osc")
+            try:
+                if kind == "stop":
+                    cmd = motion_mod.stop_command()
+                elif kind == "keys":
+                    cmd = motion_mod.keys_command(req.get("preset"), req.get("keys"))
+                else:
+                    cmd = motion_mod.osc_command(
+                        req.get("preset"), speed=float(req.get("speed") or 1.0),
+                        **{k: req[k] for k in ("yaw_amp", "pitch_amp", "period_ms",
+                                               "pitch_period_ms", "phase_deg", "cycles",
+                                               "dwell_pct", "jitter_pct", "center_yaw",
+                                               "center_pitch") if req.get(k) is not None})
+            except ValueError as e:
+                return {"ok": False, "error": str(e)}
+            if not self.ble.connected:
+                return {"ok": False, "error": "the board is not connected"}
+            ok = await self.ble.send(cmd)
+            if kind != "stop":
+                log.info("move: %s — %s", req.get("preset") or kind, motion_mod.describe(cmd))
+            else:
+                log.info("move: stop")
+            return {"ok": bool(ok), "sent": cmd, "asked": motion_mod.predict(cmd),
+                    "connected": self.ble.connected}
 
         if evt == "celebrate":
             # Host-triggered celebration. Reuses the same `completed: true`
@@ -1270,6 +1400,19 @@ class Daemon:
                 self._keys = KeyTapper()
             self._keys.tap(str(obj.get("name") or ""))
             return
+        # {"pose":{"y":tenths,"p":tenths}}: where the head actually is, ten times a
+        # second, but only while a motion runs. It exists because the camera
+        # frames that normally carry the pose are quarantined for the whole of a
+        # movement, so this is the only way to measure a delivered swing.
+        pose = obj.get("pose")
+        if isinstance(pose, dict):
+            yaw, pitch = pose.get("y"), pose.get("p")
+            if isinstance(yaw, (int, float)) and isinstance(pitch, (int, float)):
+                self._head.observe(yaw / 10.0, pitch / 10.0)
+                self._motion_trace.append((time.monotonic(), yaw / 10.0, pitch / 10.0))
+                del self._motion_trace[:-400]
+            return
+
         # Status acks come back from the device after we poll with {"cmd":"status"}.
         # Shape per REFERENCE.md: {"ack":"status","ok":true,"data":{"name","sec","bat":{...},"sys":{...},"stats":{...}}}.
         ack = obj.get("ack")

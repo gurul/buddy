@@ -12,8 +12,8 @@ struct DiaryView: View {
     @State private var tab: Tab = .thoughts
 
     enum Tab: String, CaseIterable, Identifiable {
-        case thoughts = "Thoughts", photos = "Photos", feelings = "Feelings", profile = "Profile",
-             reflections = "Dreams"
+        case talking = "Talking", recordings = "Notes", thoughts = "Thoughts", photos = "Photos",
+             feelings = "Feelings", profile = "Profile", reflections = "Dreams"
         var id: String { rawValue }
     }
 
@@ -23,6 +23,9 @@ struct DiaryView: View {
             Divider()
             Group {
                 switch tab {
+                case .talking: TalkingList(conversations: mirror.snapshot.conversations,
+                                           stars: mirror.snapshot.spokenStars)
+                case .recordings: RoomNotesList(notes: mirror.snapshot.roomNotes)
                 case .thoughts: ThoughtsList(thoughts: mirror.snapshot.thoughts, notes: mirror.snapshot.notes)
                 case .photos: PhotosGrid(thoughts: mirror.snapshot.thoughts, notesDir: mirror.notesDir)
                 case .feelings: FeelingsView(thoughts: mirror.snapshot.thoughts)
@@ -71,6 +74,175 @@ extension Color {
         guard let t else { return .secondary }
         let (r, g, b) = MoodColor.rgb(valence: t.valence, arousal: t.arousal, label: t.label)
         return Color(red: r, green: g, blue: b)
+    }
+}
+
+// MARK: - Notes buddy took of the room
+//
+// A recording is a file, not a card: it holds a whole transcript. So this lists
+// them and gets out of the way, with the two things you actually want — open it,
+// or save a copy somewhere of your own.
+
+private struct RoomNotesList: View {
+    let notes: [RoomNote]
+    @State private var saving: String?
+
+    private var days: [(String, [RoomNote])] {
+        var out: [(String, [RoomNote])] = []
+        for n in notes {
+            if let last = out.last, last.0 == n.date { out[out.count - 1].1.append(n) } else { out.append((n.date, [n])) }
+        }
+        return out
+    }
+
+    var body: some View {
+        if notes.isEmpty {
+            ContentUnavailableView {
+                Label("No recordings yet", systemImage: "text.append")
+            } description: {
+                Text("Say “start taking notes” and buddy writes down what is said in the room until you tell it to stop, tap it, or run `cc-buddy-bridge take-notes stop`.")
+            }
+        } else {
+            ScrollView {
+                VStack(alignment: .leading, spacing: 18) {
+                    ForEach(days, id: \.0) { day, items in
+                        VStack(alignment: .leading, spacing: 12) {
+                            Text(day).font(.caption.weight(.semibold)).foregroundStyle(.secondary)
+                            ForEach(items) { note in
+                                VStack(alignment: .leading, spacing: 5) {
+                                    HStack(alignment: .firstTextBaseline, spacing: 8) {
+                                        Text(note.time).font(.caption.monospacedDigit())
+                                            .foregroundStyle(.secondary)
+                                        Text(note.title).font(.callout.weight(.medium))
+                                        Spacer(minLength: 8)
+                                        if note.words > 0 {
+                                            Text("\(note.words) words").font(.caption)
+                                                .foregroundStyle(.secondary)
+                                        }
+                                    }
+                                    if !note.gist.isEmpty {
+                                        Text(note.gist).font(.callout).foregroundStyle(.secondary)
+                                            .fixedSize(horizontal: false, vertical: true)
+                                    }
+                                    HStack(spacing: 10) {
+                                        Button("Open") { open(note) }
+                                        Button("Save a copy…") { save(note) }
+                                        Button("Show in Finder") { reveal(note) }
+                                    }
+                                    .buttonStyle(.link)
+                                    .font(.caption)
+                                }
+                                .padding(.bottom, 2)
+                            }
+                        }
+                    }
+                }
+                .padding(16)
+                .frame(maxWidth: .infinity, alignment: .leading)
+            }
+        }
+    }
+
+    private func open(_ note: RoomNote) {
+        NSWorkspace.shared.open(URL(fileURLWithPath: note.path))
+    }
+
+    private func reveal(_ note: RoomNote) {
+        NSWorkspace.shared.activateFileViewerSelecting([URL(fileURLWithPath: note.path)])
+    }
+
+    /// Save a copy wherever the owner wants it. The original stays where buddy
+    /// put it — this is a download, not a move, so nothing that has been indexed
+    /// or linked goes missing.
+    private func save(_ note: RoomNote) {
+        let src = URL(fileURLWithPath: note.path)
+        let panel = NSSavePanel()
+        panel.nameFieldStringValue = src.lastPathComponent
+        panel.allowedContentTypes = [.init(filenameExtension: "md") ?? .plainText]
+        panel.canCreateDirectories = true
+        panel.title = "Save these notes"
+        panel.begin { response in
+            guard response == .OK, let dst = panel.url else { return }
+            do {
+                if FileManager.default.fileExists(atPath: dst.path) {
+                    try FileManager.default.removeItem(at: dst)
+                }
+                try FileManager.default.copyItem(at: src, to: dst)
+            } catch {
+                NSSound.beep()
+            }
+        }
+    }
+}
+
+// MARK: - Talking
+//
+// What buddy heard, kept apart from what buddy saw. The starred claims sit at the
+// top because they are permanent and the owner put them there by voice; the
+// conversations follow, newest first, each showing what it was about and any debt
+// of buddy's own. A debt is the line the owner most wants to see: it is the thing
+// buddy has not done yet.
+
+private struct TalkingList: View {
+    let conversations: [Conversation]
+    let stars: [String]
+
+    private var days: [(String, [Conversation])] {
+        var out: [(String, [Conversation])] = []
+        for c in conversations {
+            if let last = out.last, last.0 == c.date { out[out.count - 1].1.append(c) } else { out.append((c.date, [c])) }
+        }
+        return out
+    }
+
+    var body: some View {
+        if conversations.isEmpty && stars.isEmpty {
+            ContentUnavailableView {
+                Label("Nothing said yet", systemImage: "waveform")
+            } description: {
+                Text("Say “hey buddy” to talk to it. Say “remember that” and it keeps what you just said, for good.")
+            }
+        } else {
+            ScrollView {
+                VStack(alignment: .leading, spacing: 18) {
+                    if !stars.isEmpty {
+                        VStack(alignment: .leading, spacing: 6) {
+                            Text("Remembered for good")
+                                .font(.caption.weight(.semibold)).foregroundStyle(.secondary)
+                            ForEach(Array(stars.reversed().enumerated()), id: \.offset) { _, claim in
+                                HStack(alignment: .firstTextBaseline, spacing: 8) {
+                                    Text("★").foregroundStyle(.yellow)
+                                    Text(claim).font(.callout)
+                                }
+                            }
+                        }
+                    }
+                    ForEach(days, id: \.0) { day, items in
+                        VStack(alignment: .leading, spacing: 10) {
+                            Text(day).font(.caption.weight(.semibold)).foregroundStyle(.secondary)
+                            ForEach(items) { c in
+                                VStack(alignment: .leading, spacing: 4) {
+                                    HStack(alignment: .firstTextBaseline, spacing: 8) {
+                                        Text(c.time).font(.caption.monospacedDigit()).foregroundStyle(.secondary)
+                                        Text(c.title).font(.callout.weight(.medium))
+                                    }
+                                    ForEach(Array(c.owes.enumerated()), id: \.offset) { _, owed in
+                                        HStack(alignment: .firstTextBaseline, spacing: 8) {
+                                            Image(systemName: "arrow.uturn.backward")
+                                                .font(.caption2).foregroundStyle(.orange)
+                                            Text(owed).font(.callout).foregroundStyle(.primary)
+                                        }
+                                        .padding(.leading, 2)
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+                .padding(16)
+                .frame(maxWidth: .infinity, alignment: .leading)
+            }
+        }
     }
 }
 

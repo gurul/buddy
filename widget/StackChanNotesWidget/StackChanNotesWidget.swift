@@ -109,11 +109,26 @@ struct NotesView: View {
                     .multilineTextAlignment(.leading)
                 Spacer(minLength: 0)
             } else {
+                // A debt of buddy's own goes above everything it saw: it is the one
+                // line that is about the owner rather than about the room, and it is
+                // the thing buddy has not done yet.
+                if let debt = entry.snapshot.newestDebt {
+                    HStack(alignment: .firstTextBaseline, spacing: 5) {
+                        Image(systemName: "arrow.uturn.backward")
+                            .font(.system(size: family == .systemSmall ? 8 : 9, weight: .semibold))
+                            .foregroundStyle(.orange.opacity(0.9))
+                        Text(debt)
+                            .font(.system(size: family == .systemSmall ? 10 : 11, weight: .medium))
+                            .foregroundStyle(.white.opacity(0.92))
+                            .lineLimit(family == .systemSmall ? 2 : 1)
+                    }
+                }
                 if let lead {
                     PhotoStrip(url: lead.url, height: family == .systemLarge ? 96 : 64)
                 }
                 VStack(alignment: .leading, spacing: family == .systemSmall ? 5 : 7) {
-                    ForEach(rows.prefix(lead == nil ? lineBudget : max(1, lineBudget - 2))) { row in
+                    ForEach(rows.prefix(max(1, (lead == nil ? lineBudget : lineBudget - 2)
+                                             - (entry.snapshot.newestDebt == nil ? 0 : 1)))) { row in
                         ThoughtRow(row: row, family: family)
                     }
                 }

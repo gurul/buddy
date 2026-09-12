@@ -4,6 +4,7 @@
 #include "ble_bridge.h"
 #include "xfer.h"
 #include "persona.h"
+#include "motion.h"
 
 struct TamaState {
   uint8_t  sessionsTotal;
@@ -37,6 +38,13 @@ struct TamaState {
   int16_t  hostLookYaw, hostLookPitch;
   uint16_t hostLookHold;     // ms
   bool     explore;          // {"cmd":"mode","explore":true}
+  // {"cmd":"move",...}: a named motion the BOARD runs, not a pose. One of
+  // three shapes, all one line: "osc" (a rhythm), "keys" (a path), "stop".
+  uint8_t  moveReq;          // 0 none, 1 osc, 2 keys, 3 stop; consumer clears it
+  motion::Osc moveOsc;       // shape 1, straight off the wire (admitted on the board)
+  bool     moveCentreHere;   // shape 1: centre on the current pose (no centre given)
+  motion::Key moveKeys[motion::kKeysMax];   // shape 2
+  uint8_t  moveNKeys;
   // Voice / computer-control conversation on the host: {"cmd":"agent","state":".."}
   uint8_t  agentState;       // AgentState (persona.h); AG_IDLE = none
   uint32_t agentAtMs;        // millis() of the last agent cmd
@@ -150,6 +158,49 @@ static void _applyJson(const char* line, TamaState* out) {
     out->hostLookHold  = doc["hold"]  | (uint16_t)3000;
     out->hostLookReq   = true;
     _lastLiveMs = millis();
+    return;
+  }
+  // {"cmd":"move","kind":"osc","yaw_amp":d,"pitch_amp":d,"period_ms":ms,
+  //   "pitch_period_ms":ms,"phase_deg":d,"cycles":n,"dwell_pct":n,"jitter_pct":n,
+  //   ["center_yaw":d,"center_pitch":d]}   — a rhythm the board runs by itself
+  // {"cmd":"move","kind":"keys","keys":[[at_ms,yaw,pitch,speed],..<=8]}  — a path
+  // {"cmd":"move","kind":"stop"}                                         — stop now
+  // Every number is admitted on the board (motion.h) before a servo sees it, so
+  // a host or a model asking for something silly is reduced, never obeyed.
+  if (cmd && strcmp(cmd, "move") == 0) {
+    _lastLiveMs = millis();
+    const char* kind = doc["kind"] | "osc";
+    if (strcmp(kind, "stop") == 0) { out->moveReq = 3; return; }
+    if (strcmp(kind, "keys") == 0) {
+      JsonArrayConst ks = doc["keys"].as<JsonArrayConst>();
+      uint8_t n = 0;
+      for (JsonArrayConst k : ks) {
+        if (n >= motion::kKeysMax) break;
+        out->moveKeys[n].atMs  = k[0] | (uint16_t)0;
+        out->moveKeys[n].yaw   = k[1] | (int8_t)motion::KEEP;
+        out->moveKeys[n].pitch = k[2] | (int8_t)motion::KEEP;
+        out->moveKeys[n].speed = k[3] | (uint16_t)500;
+        n++;
+      }
+      out->moveNKeys = n;
+      out->moveReq = n ? 2 : 0;
+      return;
+    }
+    motion::Osc o{};
+    o.ampYaw        = (uint8_t)(doc["yaw_amp"]   | 0);
+    o.ampPitch      = (uint8_t)(doc["pitch_amp"] | 0);
+    o.periodMs      = doc["period_ms"]       | (uint16_t)900;
+    o.pitchPeriodMs = doc["pitch_period_ms"] | (uint16_t)0;
+    o.phaseDeg      = doc["phase_deg"]       | (int16_t)0;
+    o.cycles        = (uint8_t)(doc["cycles"] | 4);
+    o.dwellPct      = (uint8_t)(doc["dwell_pct"]  | 8);
+    o.jitterPct     = (uint8_t)(doc["jitter_pct"] | 8);
+    const bool haveCentre = doc["center_yaw"].is<int>() || doc["center_pitch"].is<int>();
+    o.centerYaw   = doc["center_yaw"]   | (int16_t)0;
+    o.centerPitch = doc["center_pitch"] | (int16_t)45;
+    out->moveOsc = o;
+    out->moveCentreHere = !haveCentre;
+    out->moveReq = 1;
     return;
   }
   // {"cmd":"snap"}: the host wants one full-resolution photo (a diary picture).
