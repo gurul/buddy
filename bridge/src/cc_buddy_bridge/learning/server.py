@@ -6,6 +6,7 @@ import base64
 import errno
 import json
 import logging
+import re
 import secrets
 import sys
 import threading
@@ -22,6 +23,10 @@ log = logging.getLogger(__name__)
 DEFAULT_PORT = 48766
 MAX_BODY = 12 * 1024 * 1024
 ASSETS = Path(__file__).parent / "web"
+# Fonts are bundled (SIL OFL, see web/fonts/OFL.txt) because the page CSP is same-origin only.
+FONTS = ASSETS / "fonts"
+FONT_FILE = re.compile(r"[a-z0-9-]+\.woff2")
+CSP = "default-src 'self'; img-src 'self' data:; style-src 'self'; script-src 'self'; font-src 'self'; frame-ancestors 'none'"
 
 
 def validate_work(data):
@@ -198,7 +203,7 @@ class Handler(BaseHTTPRequestHandler):
         self.send_header("Content-Length", str(len(encoded)))
         self.send_header("Cache-Control", "no-store")
         self.send_header("X-Content-Type-Options", "nosniff")
-        self.send_header("Content-Security-Policy", "default-src 'self'; img-src 'self' data:; style-src 'self'; script-src 'self'; frame-ancestors 'none'")
+        self.send_header("Content-Security-Policy", CSP)
         self.end_headers()
         self.wfile.write(encoded)
 
@@ -221,7 +226,20 @@ class Handler(BaseHTTPRequestHandler):
                 parts = path.split("/")
                 key = parts[3]
                 return self.reply(200, app.store.history(key) if len(parts) > 4 and parts[4] == "history" else app.store.get(key))
-            files = {"/": ("index.html", "text/html; charset=utf-8"), "/app.js": ("app.js", "text/javascript; charset=utf-8"),
+            if path.startswith("/fonts/"):
+                # urlsplit does not percent-decode, so "..", "%2f" and friends fail the name checks.
+                name = path[len("/fonts/"):]
+                if name == "OFL.txt":
+                    mime = "text/plain; charset=utf-8"
+                elif FONT_FILE.fullmatch(name):
+                    mime = "font/woff2"
+                else:
+                    return self.reply(404, {"error": "Not found"})
+                target = FONTS / name
+                if target.resolve().parent != FONTS.resolve() or not target.is_file():
+                    return self.reply(404, {"error": "Not found"})
+                return self.reply(200, target.read_bytes(), mime)
+            files = {"/":("index.html", "text/html; charset=utf-8"), "/app.js": ("app.js", "text/javascript; charset=utf-8"),
                      "/style.css": ("style.css", "text/css; charset=utf-8")}
             if path in files:
                 name, mime = files[path]

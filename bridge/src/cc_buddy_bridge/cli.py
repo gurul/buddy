@@ -14,6 +14,7 @@ from . import __version__
 from .daemon import Daemon
 from .envfile import load_env_file
 from .ipc import make_transport
+from .learning import LESSON_ACTIONS
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -268,6 +269,26 @@ def main(argv: list[str] | None = None) -> int:
     p_learning.add_argument("--port", type=int, default=48766)
     p_learning.add_argument("--data-dir")
     p_learning.add_argument("--no-open", action="store_true")
+    p_learning.add_argument("--env-file", default=None,
+                            help="Explicit environment file (default ~/.config/cc-buddy-bridge/env)")
+
+    p_lesson = sub.add_parser(
+        "lesson",
+        help="Drive buddy's math lesson from the terminal (same path as the voice tool)",
+        description="Drive buddy's math lesson on the running daemon. "
+                    "Actions: open, start, ideas, hint, check, step, status, recap, end.",
+    )
+    p_lesson.add_argument("action", choices=LESSON_ACTIONS, metavar="action",
+                          help="open: show the whiteboard; start: new lesson (--mode, --topic, --level); "
+                               "ideas: save your thinking (--text; empty means stuck); hint: a nudge; "
+                               "check: review your work; step: exactly one next step; status: latest "
+                               "feedback; recap: summary and a question; end: save and finish")
+    p_lesson.add_argument("--mode", choices=("learn", "help"), default=None,
+                          help="start: learn a topic (default) or get help with your own problem")
+    p_lesson.add_argument("--topic", default=None, help="start: the topic, for example Fractions")
+    p_lesson.add_argument("--level", default=None, help="start: the level, for example \"Grade 4\"")
+    p_lesson.add_argument("--text", default=None, help="ideas: what you are thinking")
+    p_lesson.add_argument("--socket", default=None, help="IPC path or host:port override")
 
     args = parser.parse_args(argv)
     if args.cmd is None:
@@ -283,7 +304,11 @@ def main(argv: list[str] | None = None) -> int:
             options.append("--no-open")
         if args.data_dir:
             options.extend(["--data-dir", args.data_dir])
+        if args.env_file:
+            options.extend(["--env-file", args.env_file])
         return learning_main(options)
+    if args.cmd == "lesson":
+        return _run_lesson(args)
     if args.cmd == "daemon":
         return _run_daemon(args)
     if args.cmd == "install":
@@ -700,6 +725,49 @@ def _run_explore(action: str, socket_path: Optional[str]) -> int:
             where = f" at yaw={wp[0]:+d} pitch={wp[1]}" if wp else ""
             print(f"buddy is {state} ({how}: {st.get('reason')}){where}; "
                   f"{st.get('cycles', 0)} cycle(s), {st.get('notes', 0)} note(s) this run")
+    return 0
+
+
+def _run_lesson(args: Any) -> int:
+    """``cc-buddy-bridge lesson <action>``: the voice tool's lesson path, from a terminal."""
+    from .hooks._client import post
+    from .learning import TUTOR_ACTIONS
+
+    if args.action == "ideas" and args.text is None:
+        # The lesson saves ideas as given: a bare `lesson ideas` would overwrite the learner's
+        # saved thinking with nothing and mark them stuck. Make "stuck" an explicit choice.
+        print('lesson: ideas needs --text "..." (use --text "" to say you are stuck)', file=sys.stderr)
+        return 2
+
+    req: dict[str, Any] = {"evt": "lesson", "action": args.action}
+    for key in ("mode", "topic", "level", "text"):
+        value = getattr(args, key, None)
+        if value is not None:
+            req[key] = value
+    # A tutor reply can take the model's 90 s plus a 15 s search; post() cannot tell a slow
+    # reply from a daemon that is not running, so give it room and say so on failure.
+    slow = args.action in TUTOR_ACTIONS
+    resp = post(req, socket_path=args.socket, timeout=150.0 if slow else 15.0, connect_timeout=3.0)
+    if resp is None:
+        print("cc-buddy-bridge: daemon not reachable. Start it with `cc-buddy-bridge daemon` (or the "
+              "launchd service). `cc-buddy-bridge learning` opens the whiteboard without the robot."
+              + (" If the daemon is running, the tutor may still be answering; try `lesson status`."
+                 if slow else ""),
+              file=sys.stderr)
+        return 2
+    if not resp.get("ok"):
+        print(f"lesson: {resp.get('error') or resp.get('reason') or 'that did not work'}", file=sys.stderr)
+        return 1
+    if args.action == "status":
+        lesson = resp.get("lesson")
+        if lesson:
+            print(f"{lesson.get('topic')} ({lesson.get('mode')}, {lesson.get('stage')})"
+                  + (f": {lesson['problem']}" if lesson.get("problem") else ""))
+        else:
+            print("no lesson is open")
+    answer = str(resp.get("answer") or "").strip()
+    if answer:
+        print(answer)
     return 0
 
 

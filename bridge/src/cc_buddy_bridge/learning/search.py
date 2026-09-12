@@ -9,7 +9,8 @@ from urllib.parse import urlsplit
 def search_problems(topic, level):
     key = os.environ.get("EXA_API_KEY", "").strip()
     if not key:
-        return [], "Exa search is off. Add EXA_API_KEY to enable practice references."
+        return [], ("Exa search is off. Add EXA_API_KEY to ~/.config/cc-buddy-bridge/env and restart "
+                    "to enable practice references.")
     body = {"query": f"Math practice problems and exercises: {str(topic)[:200]}. Level: {str(level)[:100]}",
             "type": "auto", "numResults": 3, "moderation": True,
             "includeDomains": ["khanacademy.org", "openstax.org", "mathsisfun.com",

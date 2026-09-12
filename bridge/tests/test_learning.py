@@ -2,6 +2,7 @@
 import base64
 import json
 import urllib.error
+import urllib.parse
 import urllib.request
 from unittest.mock import patch
 
@@ -171,6 +172,34 @@ def test_http_origin_token_and_persistence(tmp_path):
         server.server_close()
 
 
+def test_bundled_fonts_are_served_same_origin_and_traversal_is_rejected(tmp_path):
+    server = start(tmp_path, demo=True, port=0)
+    url = server.app.url
+    try:
+        with urllib.request.urlopen(url) as r:
+            csp = r.headers.get("Content-Security-Policy", "")
+        assert "font-src 'self'" in csp
+        with urllib.request.urlopen(url + "style.css") as r:
+            css = r.read().decode()
+        fonts = sorted(set(part.split(")")[0].strip("'\"") for part in css.split("url(")[1:] if ".woff2" in part))
+        assert fonts, "style.css references no bundled woff2 fonts"
+        assert not any("googleapis" in f or "gstatic" in f for f in fonts)
+        for ref in fonts:
+            with urllib.request.urlopen(urllib.parse.urljoin(url + "style.css", ref)) as r:
+                assert r.status == 200
+                assert r.headers.get_content_type() == "font/woff2"
+                assert len(r.read()) > 1000
+        with urllib.request.urlopen(url + "fonts/OFL.txt") as r:
+            assert r.headers.get_content_type() == "text/plain"
+        for bad in ("fonts/../server.py", "fonts/%2e%2e%2fserver.py", "fonts/..%2fserver.py", "fonts/nope.woff2"):
+            with pytest.raises(urllib.error.HTTPError) as exc:
+                urllib.request.urlopen(url + bad)
+            assert exc.value.code == 404, bad
+    finally:
+        server.shutdown()
+        server.server_close()
+
+
 def test_voice_uses_same_lesson_state(tmp_path):
     app = LearningApp(tmp_path, demo=True)
     with patch("webbrowser.open"):
@@ -183,8 +212,9 @@ def test_voice_uses_same_lesson_state(tmp_path):
 
 @pytest.mark.parametrize("env, provider, model, ready", [
     ({}, "openai", "gpt-6-astra", False),
-    ({"OPENROUTER_API_KEY": "router"}, "openrouter", "openai/gpt-6-astra", True),
-    ({"OPENAI_API_KEY": "direct", "OPENROUTER_API_KEY": "router"}, "openrouter", "openai/gpt-6-astra", True),
+    ({"OPENROUTER_API_KEY": "router"}, "openai", "gpt-6-astra", False),
+    ({"OPENAI_API_KEY": "direct", "OPENROUTER_API_KEY": "router"}, "openai", "gpt-6-astra", True),
+    ({"CC_BUDDY_LEARNING_PROVIDER": "openrouter", "OPENROUTER_API_KEY": "router"}, "openrouter", "openai/gpt-6-astra", True),
     ({"CC_BUDDY_LEARNING_PROVIDER": "openrouter", "OPENAI_API_KEY": "direct"}, "openrouter", "openai/gpt-6-astra", False),
     ({"CC_BUDDY_LEARNING_PROVIDER": "openai", "OPENAI_API_KEY": "direct", "OPENROUTER_API_KEY": "router"}, "openai", "gpt-6-astra", True),
 ])
@@ -192,6 +222,38 @@ def test_provider_selection_and_astra_default(env, provider, model, ready):
     cfg = live_settings(env)
     assert (cfg["provider"], cfg["model"], cfg["ready"]) == (provider, model, ready)
     assert "router" not in cfg.values() and "direct" not in cfg.values()
+
+
+def test_openrouter_key_alone_does_not_switch_provider(monkeypatch, tmp_path):
+    monkeypatch.setenv("OPENAI_API_KEY", "direct-test")
+    monkeypatch.setenv("OPENROUTER_API_KEY", "router-test")
+    s = create(LearningApp(tmp_path, demo=True))
+    reply = {"status": "completed", "output": [{"content": [{"type": "output_text", "text": json.dumps(
+        {"problem": "", "feedback": "Look at the ones place.", "step": "", "status": "continue"})}]}]}
+
+    class Response:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *args):
+            pass
+
+        def read(self):
+            return json.dumps(reply).encode()
+
+    with patch("urllib.request.urlopen", return_value=Response()) as call:
+        LiveTutor()("hint", s)
+    request = call.call_args.args[0]
+    assert request.full_url == "https://api.openai.com/v1/responses"
+    assert request.get_header("Authorization") == "Bearer direct-test"
+
+
+def test_openrouter_key_alone_asks_for_openai_key(monkeypatch):
+    monkeypatch.setenv("OPENROUTER_API_KEY", "router-test")
+    with patch("urllib.request.urlopen") as call:
+        with pytest.raises(ValueError, match="OPENAI_API_KEY"):
+            LiveTutor()("generate", {})
+    call.assert_not_called()
 
 
 def test_invalid_provider_fails_without_guessing():
@@ -226,6 +288,7 @@ def test_openrouter_request_and_parser(monkeypatch, tmp_path):
 @pytest.mark.parametrize("finish", ["length", "error", "content_filter"])
 def test_openrouter_incomplete_response_is_not_accepted(monkeypatch, tmp_path, finish):
     import io
+    monkeypatch.setenv("CC_BUDDY_LEARNING_PROVIDER", "openrouter")
     monkeypatch.setenv("OPENROUTER_API_KEY", "router-test")
     s = create(LearningApp(tmp_path, demo=True))
     data = {"choices": [{"finish_reason": finish, "message": {"content": "{}"}}]}
@@ -235,6 +298,7 @@ def test_openrouter_incomplete_response_is_not_accepted(monkeypatch, tmp_path, f
 
 
 def test_openrouter_http_error_never_exposes_credentials(monkeypatch, tmp_path):
+    monkeypatch.setenv("CC_BUDDY_LEARNING_PROVIDER", "openrouter")
     monkeypatch.setenv("OPENROUTER_API_KEY", "private-test-key")
     s = create(LearningApp(tmp_path, demo=True))
     error = urllib.error.HTTPError("https://openrouter.ai/api/v1/chat/completions", 402, "secret-provider-body", {}, None)
@@ -246,6 +310,7 @@ def test_openrouter_http_error_never_exposes_credentials(monkeypatch, tmp_path):
 
 
 def test_config_reports_openrouter_readiness_without_key(monkeypatch, tmp_path):
+    monkeypatch.setenv("CC_BUDDY_LEARNING_PROVIDER", "openrouter")
     monkeypatch.setenv("OPENROUTER_API_KEY", "private-test-key")
     server = start(tmp_path, port=0)
     try:
@@ -261,6 +326,7 @@ def test_config_reports_openrouter_readiness_without_key(monkeypatch, tmp_path):
 
 def test_openrouter_terms_restriction_is_actionable_without_leaking_body(monkeypatch, tmp_path):
     import io
+    monkeypatch.setenv("CC_BUDDY_LEARNING_PROVIDER", "openrouter")
     monkeypatch.setenv("OPENROUTER_API_KEY", "private-test-key")
     s = create(LearningApp(tmp_path, demo=True))
     payload = {"error": {"message": "The request is prohibited due to a violation of provider Terms Of Service."},

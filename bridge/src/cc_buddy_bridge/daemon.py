@@ -176,6 +176,10 @@ class Daemon:
         self._ears_cfg = ears_configured()
         self._voice_cfg = voice_agent.configured()
         self._learning_server = None
+        # The pending "back to idle" after a lesson caption, and a count of lesson notices so
+        # _handle_lesson can tell whether dispatch already put a caption on the robot.
+        self._learning_idle_handle: Optional[asyncio.TimerHandle] = None
+        self._learning_notices = 0
         self._recall_cfg = recall_mod.configured()
         # buddy's memory of what was SAID: one note per conversation, and its own
         # day pass. Separate from the diary, which remembers what it SAW.
@@ -716,16 +720,24 @@ class Daemon:
                                  "hold_ms": 4000, "final": True, "chirp": False})
 
     def _learning_notice(self, text: str, stage: str) -> None:
-        """Web actions wake the robot; the existing voice session speaks tool results."""
+        """A lesson moved on (from the web page, `cc-buddy-bridge lesson`, or an error): the robot
+        shows it. The existing voice session speaks tool results, so nothing is drawn while it is open."""
         import textwrap
         self._note_activity()
+        self._learning_notices = getattr(self, "_learning_notices", 0) + 1
         if self._conversation is not None and not self._conversation.done():
             return  # Live owns captions while the owner is talking.
-        self._on_agent_state("done" if stage == "complete" else "speaking")
-        lines = textwrap.wrap(text, width=28)[:4]
+        state = "error" if stage == "error" else "done" if stage == "complete" else "speaking"
+        self._on_agent_state(state)
+        # The robot screen holds 4 lines of 17 columns (caption_pager.PagerConfig).
+        lines = textwrap.wrap(" ".join(str(text).split()), width=17)[:4] or ["..."]
         self._on_caption({"cmd": "caption", "page": 0, "of": 1, "lines": lines,
-                          "hold_ms": 6000, "final": True, "chirp": True})
-        asyncio.get_running_loop().call_later(6, self._learning_idle)
+                          "hold_ms": 6000, "final": True, "chirp": state != "error"})
+        # Only the latest notice may send the robot back to idle.
+        handle = getattr(self, "_learning_idle_handle", None)
+        if handle is not None:
+            handle.cancel()
+        self._learning_idle_handle = asyncio.get_running_loop().call_later(6, self._learning_idle)
 
     def _learning_idle(self) -> None:
         if self._conversation is None or self._conversation.done():
@@ -975,6 +987,50 @@ class Daemon:
 
     # ---- IPC handler ----
 
+    async def _handle_lesson(self, req: dict[str, Any]) -> dict[str, Any]:
+        """One lesson action over IPC, through the same run_lesson helper the voice tool uses.
+
+        The robot acts it out: "thinking" while the tutor works, then one caption with the answer.
+        While a conversation is open, Live owns the screen and nothing is drawn."""
+        from .learning import TUTOR_ACTIONS, lesson_request, run_lesson
+        try:
+            request = lesson_request(req)
+        except ValueError as e:
+            return {"ok": False, "error": str(e)}
+        action = request["action"]
+        server = getattr(self, "_learning_server", None)
+        voice = server.app.voice if server is not None else None
+        talking = self._conversation is not None and not self._conversation.done()
+        if action != "status":
+            # The board cannot pan the room and teach at once (the wake word does the same).
+            await self._dismiss_explore("lesson")
+            if voice is not None and not talking and action in TUTOR_ACTIONS:
+                self._on_agent_state("thinking")
+        before = getattr(self, "_learning_notices", 0)
+        try:
+            result = await asyncio.to_thread(run_lesson, voice, request)
+        except asyncio.CancelledError:
+            raise
+        except Exception as e:  # noqa: BLE001
+            # run_lesson lets unexpected errors (a disk error, a tutor bug) through. Treat one as a
+            # refusal, so the robot never stays on "thinking". Log only the type: the message may
+            # carry the learner's text.
+            log.warning("lesson: %s failed (%s)", action, type(e).__name__)
+            result = {"ok": False, "reason": "Something went wrong with the lesson. Try again."}
+        # Only the action and the outcome are logged, never the learner's text, topic or answer.
+        log.info("lesson: %s -> ok=%s", action, result.get("ok"))
+        if not result.get("ok"):
+            reason = result.get("reason") or "That did not work."
+            if voice is not None:
+                self._learning_notice(reason, "error")
+            return {**result, "ok": False, "action": action, "reason": reason, "error": reason}
+        # dispatch's notify callback is queued on the loop from the worker thread before to_thread's
+        # completion, so it has run by now. open, ideas and help-mode start never notify: show those here.
+        if getattr(self, "_learning_notices", 0) == before and action != "status":
+            stage = (result.get("lesson") or {}).get("stage") or ""
+            self._learning_notice(result.get("answer") or "", stage)
+        return {**result, "ok": True, "action": action}
+
     async def _handle_ipc(self, req: dict[str, Any]) -> dict[str, Any]:
         evt = req.get("evt")
         # Drop pretooluse from the trace: it has its own dedicated INFO log,
@@ -1003,6 +1059,10 @@ class Daemon:
             elif action != "status":
                 return {"ok": False, "error": f"unknown explore action: {action!r}"}
             return {"ok": True, "connected": self.ble.connected, "explore": self._explorer.status()}
+
+        if evt == "lesson":
+            # `cc-buddy-bridge lesson <action>`: the math_lesson voice tool's path, from a terminal.
+            return await self._handle_lesson(req)
 
         if evt == "notes":
             # `cc-buddy-bridge notes start|stop|status`, and the voice path.

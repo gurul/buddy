@@ -52,11 +52,12 @@ def validate(result, action):
 
 
 def live_settings(environ=None):
-    """Public configuration only. Credentials are never returned to the browser."""
+    """Public configuration only. Credentials are never returned to the browser.
+
+    The provider is ``openai`` (OPENAI_API_KEY) unless CC_BUDDY_LEARNING_PROVIDER=openrouter is set."""
     env = os.environ if environ is None else environ
-    provider = (env.get("CC_BUDDY_LEARNING_PROVIDER") or "").strip().lower()
-    if not provider:
-        provider = "openrouter" if (env.get("OPENROUTER_API_KEY") or "").strip() else "openai"
+    # OpenAI is the default. OpenRouter is opt-in only: an OpenRouter key alone never switches providers.
+    provider = (env.get("CC_BUDDY_LEARNING_PROVIDER") or "").strip().lower() or "openai"
     if provider not in ("openai", "openrouter"):
         raise ValueError("CC_BUDDY_LEARNING_PROVIDER must be openrouter or openai.")
     key_name = "OPENROUTER_API_KEY" if provider == "openrouter" else "OPENAI_API_KEY"

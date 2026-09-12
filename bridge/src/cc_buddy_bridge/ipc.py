@@ -13,10 +13,12 @@ Request shapes (``evt`` field discriminates):
   {"evt":"turn_end","session_id":"...","summary":"..."}
   {"evt":"pretooluse","session_id":"...","tool_use_id":"...","tool_name":"...","hint":"..."}  ← BLOCKS
   {"evt":"posttooluse","session_id":"...","tool_use_id":"..."}
+  {"evt":"lesson","action":"open|start|ideas|hint|check|step|status|recap|end","mode":"learn|help","topic":"...","level":"...","text":"..."}
 
 Response shapes:
   {"ok":true}
   {"ok":true,"decision":"allow"|"deny"}  (for pretooluse)
+  {"ok":true,"action":"...","answer":"...",...}  (for lesson; a refusal adds "reason" next to "error")
   {"ok":false,"error":"..."}
 """
 

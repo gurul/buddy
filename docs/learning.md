@@ -47,11 +47,67 @@ Do not run two learning servers on the same port. Standalone mode provides
 the whiteboard and tutoring; robot voice requires the existing daemon, its
 microphone/wake-word setup, and a working voice API configuration.
 
-### OpenRouter with Astra
+## Drive a lesson from the terminal
 
-Edit `~/.config/cc-buddy-bridge/env` (on this Windows machine:
-`C:\Users\gitsw\.config\cc-buddy-bridge\env`). The file is outside the repository.
-Use these entries, replacing the empty key value locally:
+`cc-buddy-bridge lesson <action>` sends one lesson action to the running daemon.
+It uses the same code path as the `math_lesson` voice tool, so the whiteboard,
+the saved lesson, and the robot stay in sync. The actions are `open`, `start`,
+`ideas`, `hint`, `check`, `step`, `status`, `recap`, and `end`.
+
+```bash
+cc-buddy-bridge lesson open
+cc-buddy-bridge lesson start --mode learn --topic "Fractions" --level "Grade 4"
+cc-buddy-bridge lesson start --mode help
+cc-buddy-bridge lesson ideas --text "I think I add the tops"
+cc-buddy-bridge lesson hint
+cc-buddy-bridge lesson check
+cc-buddy-bridge lesson step
+cc-buddy-bridge lesson status
+cc-buddy-bridge lesson recap
+cc-buddy-bridge lesson end
+```
+
+| Option | Use with | Meaning |
+| --- | --- | --- |
+| `--mode learn` / `--mode help` | `start` | Learn a topic, or get help with your own problem |
+| `--topic`, `--level` | `start` | The topic and starting level for a new lesson |
+| `--text` | `ideas` | Your thinking; an empty text means "I don't know how to start" |
+| `--socket` | any | IPC path or host:port override |
+
+What happens:
+
+- The command prints buddy's answer. `status` also prints the open lesson's
+  topic, mode, stage, and problem.
+- The robot shows **thinking** while the tutor works (`start`, `hint`, `check`,
+  `step`, `recap`), then one caption with the answer. When a voice conversation
+  is open, the voice owns the screen and the robot shows nothing extra.
+- A lesson action ends a manual explore first. `status` does not.
+- Tutor replies can take up to about 2 minutes. The command waits that long.
+- Exit code 0 means success. Exit code 1 means buddy refused, for example when
+  no lesson is open; the reason goes to stderr. Exit code 2 means the daemon is
+  not reachable: start it with `cc-buddy-bridge daemon` or the launchd service.
+  A tutor reply that takes longer than the wait also shows as exit code 2; run
+  `cc-buddy-bridge lesson status` to see the result.
+- With `CC_BUDDY_LEARNING=0`, or when the learning server did not start, every
+  action fails with a message that the workspace is unavailable.
+
+`cc-buddy-bridge learning` is a different command. It starts the whiteboard
+server and opens the browser without the daemon or the robot.
+
+### Tutor provider: OpenAI by default, OpenRouter opt-in
+
+The default provider is **OpenAI** with `OPENAI_API_KEY` and the model
+`gpt-6-astra`. You do not need to set a provider to use it. Put the key in
+`~/.config/cc-buddy-bridge/env` (on Windows:
+`%USERPROFILE%\.config\cc-buddy-bridge\env`). The file is outside the repository:
+
+```dotenv
+OPENAI_API_KEY=
+```
+
+OpenRouter is **opt-in only**. Having an `OPENROUTER_API_KEY` in the file never
+switches providers. To use OpenRouter, set the provider explicitly, replacing
+the empty key value locally:
 
 ```dotenv
 CC_BUDDY_LEARNING_PROVIDER=openrouter
@@ -74,10 +130,9 @@ ID and image/structured-output support; see also
 The key stays on the Python server. OpenRouter and its selected provider handle
 submitted lesson data according to their account/data policies.
 
-Direct OpenAI remains supported with `CC_BUDDY_LEARNING_PROVIDER=openai`,
-`CC_BUDDY_LEARNING_MODEL=gpt-6-astra`, and `OPENAI_API_KEY`. If provider is unset,
-a nonempty OpenRouter key selects OpenRouter; otherwise OpenAI is selected.
-An explicitly selected provider never falls back to the other account's key.
+Without `CC_BUDDY_LEARNING_PROVIDER=openrouter`, the tutor uses OpenAI and asks
+for `OPENAI_API_KEY` if it is missing, even when an OpenRouter key is present.
+A selected provider never falls back to the other account's key.
 Direct OpenAI uses `store: false` on Responses requests. The math provider setting
 does not change Buddy's separate realtime voice connection, which still needs
 its existing OpenAI configuration. Browser Read aloud remains available.
@@ -87,8 +142,11 @@ its existing OpenAI configuration. Browser Read aloud remains available.
 | `CC_BUDDY_LEARNING=0` | Disable the daemon's learning server |
 | `CC_BUDDY_LEARNING_PORT` | Daemon/widget port, default 48766 |
 | `CC_BUDDY_LEARNING_DIR` | Local store, default `~/.config/cc-buddy-bridge/learning` |
-| `CC_BUDDY_LEARNING_PROVIDER` | `openrouter` or `openai` |
-| `CC_BUDDY_LEARNING_MODEL` | `openai/gpt-6-astra` on OpenRouter; `gpt-6-astra` on OpenAI |
+| `CC_BUDDY_LEARNING_PROVIDER` | `openai` (default) or `openrouter` |
+| `CC_BUDDY_LEARNING_MODEL` | `gpt-6-astra` on OpenAI (default); `openai/gpt-6-astra` on OpenRouter |
+| `OPENAI_API_KEY` | Tutor key for the default OpenAI provider |
+| `OPENROUTER_API_KEY` | Tutor key, used only with `CC_BUDDY_LEARNING_PROVIDER=openrouter` |
+| `EXA_API_KEY` | Optional Exa key for practice references |
 | `--demo` | Explicit offline examples; separate default `learning/demo` store |
 | `--data-dir` / `--port` | Standalone and demo overrides |
 
@@ -158,10 +216,12 @@ browser dashboard; WidgetKit is only available on macOS.
 `bridge/tests/test_learning.py` covers the flow, exactly-one-step demo behavior,
 current image inputs, API response validation, durable revisions, conflicts,
 failure recovery, lesson lifecycle, voice delegation, and local HTTP request
-boundaries. Voice tests cover the new tool through the existing connection.
+boundaries. `bridge/tests/test_learning_search.py` covers Exa search and env-file
+loading. `bridge/tests/test_daemon_lesson.py` covers `cc-buddy-bridge lesson` and
+the daemon's IPC handler. Voice tests cover the tool through the existing connection.
 
 ```powershell
-python -m pytest bridge/tests/test_learning.py bridge/tests/test_voice_agent.py -q
+python -m pytest bridge/tests/test_learning.py bridge/tests/test_learning_search.py bridge/tests/test_voice_agent.py bridge/tests/test_daemon_lesson.py -q
 # With Playwright installed (plus its ffmpeg component for video recording):
 python tools/demo_learning.py
 ```
@@ -176,7 +236,7 @@ constrain its output, but they cannot prove that every generated transformation
 is mathematically correct or pedagogically atomic. Handwriting accuracy and
 age-level teaching quality need real learner evaluations before classroom use.
 
-On the Windows development machine, the recorded demo uses offline examples.
+The recorded demo (Windows, 2026-09-12) uses offline examples.
 Live image/voice API calls, physical robot behavior, and the Swift widget build
 require their respective API access/hardware/macOS environment and are not
 represented as verified by that demo.
@@ -193,7 +253,7 @@ represented as verified by that demo.
   read-policy POSIX paths, and a timing-sensitive state ordering assertion.
   These modules were not modified for learning. The full suite is not green.
 - Live API key: absent; live image/voice calls not exercised.
-- macOS Swift build and physical robot: not available on this Windows machine.
+- macOS Swift build and physical robot: not available in that Windows run.
 
 
 ### Running from WSL with a Windows environment file
@@ -201,7 +261,7 @@ represented as verified by that demo.
 WSL's `~` is the Linux home, not the Windows home. To use the same key file:
 
 ```bash
-python tools/start_learning.py --env-file /mnt/c/Users/gitsw/.config/cc-buddy-bridge/env
+python tools/start_learning.py --env-file /mnt/c/Users/<you>/.config/cc-buddy-bridge/env
 ```
 
 Alternatively set `CC_BUDDY_ENV_FILE` to that path before launching the bridge
@@ -236,8 +296,11 @@ a traceback. `--port 48768` can launch a separate instance when intended.
 
 ### Exa practice references
 
-Add `EXA_API_KEY=your-exa-key` to the same bridge environment file and restart
-the service. No additional Python packages are required. Live lesson generation
+Add `EXA_API_KEY=your-exa-key` to `~/.config/cc-buddy-bridge/env`, the same
+bridge environment file, and restart the service. The daemon,
+`cc-buddy-bridge learning`, `python tools/start_learning.py`, and
+`python -m cc_buddy_bridge.learning` all read that file at startup. Variables
+already set in the environment win over values in the file. No additional Python packages are required. Live lesson generation
 searches Exa once for the topic and level, then asks the configured tutor to
 create one original adapted problem from relevant references. Help with an
 existing problem, checks, hints, and steps do not trigger searches. Demo mode
