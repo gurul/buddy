@@ -17,34 +17,15 @@ past-experiments/firmware/**/build/
 # personal session memory — never committed
 debrief/
 
-# tooling caches — never committed
-.opencode/node_modules/
-.claude/worktrees/
-
-# Era - Generated files (do not edit this section)
-.era/memory/DIRECTIVES.md
-.era/memory/.directives-build-hash
-.era/.toolconfig
-.era/config.local.yaml
-.era/governance.local.yaml
-.opencode/agent
-.opencode/command
-.opencode/skill
-.opencode/plugin
-.opencode/_shared
-.opencode/skills
-.claude/settings.json
-.claude/agents
-.claude/commands
-.claude/skills
-.claude/era-shared
+# local agent tooling — never committed
+.era/
+.opencode/
+.claude/
+.codex/
 .mcp.json
-.mcp.json.era-bak
-.codex/config.toml
-.era/memory/handovers/
-.era/runtime/
-.era/tmp/
-# Era - End
+.mcp.json.*
+opencode.jsonc
+AGENTS.md
 
 # Local-only plans (owner choice, 2026-09-10)
 docs/plans/
