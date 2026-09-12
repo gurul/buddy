@@ -1,0 +1,96 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "cc-buddy-bridge"
+version = "0.1.2"
+description = "Bridge Claude Code CLI sessions to the claude-desktop-buddy BLE hardware (bypasses the desktop app)."
+readme = "README.md"
+license = { text = "MIT" }
+authors = [{ name = "Snow" }]
+requires-python = ">=3.11"
+keywords = ["claude-code", "ble", "hardware-buddy", "m5stick", "esp32"]
+classifiers = [
+    "License :: OSI Approved :: MIT License",
+    "Operating System :: MacOS",
+    "Operating System :: Microsoft :: Windows",
+    "Operating System :: POSIX :: Linux",
+    "Programming Language :: Python :: 3",
+]
+dependencies = [
+    "bleak>=0.22",
+    "pyserial>=3.5",
+    "watchfiles>=0.21",
+    # Windows-only: used by BuddyBLE._try_reset_radio to power-cycle the BT
+    # radio when the WinRT advertisement watcher silently stops delivering
+    # callbacks. bleak pulls in some winrt-* packages transitively, but not
+    # Radios, so declare both we import from explicitly (gated to win32 so
+    # macOS/Linux installs don't try to pull Windows projection packages).
+    "winrt-Windows.Devices.Bluetooth>=2.0; sys_platform == 'win32'",
+    "winrt-Windows.Devices.Radios>=2.0; sys_platform == 'win32'",
+    # macOS-only: hold-the-pet push-to-talk synthesizes a global Opt+Space
+    # hold for VoiceFlow via CGEventPost (voice_trigger.py). 12.2.1 current
+    # per `pip index versions`, 2026-08-04. ApplicationServices provides the
+    # AXIsProcessTrusted Accessibility check + prompt.
+    "pyobjc-framework-Quartz>=12.0; sys_platform == 'darwin'",
+    "pyobjc-framework-ApplicationServices>=12.0; sys_platform == 'darwin'",
+    # macOS-only: host face detection for the board's camera frames
+    # (vision.py) — VNDetectFaceRectanglesRequest over a CGImage. 12.2.2
+    # current per `pip index versions`, 2026-09-05.
+    "pyobjc-framework-Vision>=12.0; sys_platform == 'darwin'",
+    # macOS-only: the desktop notes widget (notes_widget.py) is an AppKit
+    # NSPanel. Cocoa bundles AppKit + Foundation. 12.2.2 current per
+    # `pip index versions`, 2026-09-05.
+    "pyobjc-framework-Cocoa>=12.0; sys_platform == 'darwin'",
+    # Idle explorer notes (explore.py), the gpt-6-astra computer agent
+    # (computer_agent.py) and the realtime voice session (voice_agent.py,
+    # needs the [realtime] extra's websockets). 3.8.0 current per PyPI,
+    # 2026-09-06. Imported lazily, only when OPENAI_API_KEY is set.
+    "openai[realtime]>=3.13",
+    # "hey buddy" (ears.py): sherpa-onnx keyword spotting (1.13.7, 2026-09-01)
+    # with sentencepiece to tokenise the phrase; sounddevice (0.5.6,
+    # 2026-08-17, bundles PortAudio) for the mic and the speaker; numpy for
+    # PCM plumbing. All imported lazily — the daemon runs without them.
+    "sherpa-onnx>=1.13",
+    "sentencepiece>=0.2",
+    "sounddevice>=0.5.6",
+    "numpy>=2",
+    # Computer control (desktop_worker.py): PyAutoGUI 0.9.54 + Pillow, the
+    # same pair as openai/openai-cua-sample-app. Only the worker child
+    # process imports them.
+    "pyautogui>=0.9.54",
+    "pillow>=11",
+    # type_text() pastes through the clipboard (desktop_helpers.py); pyperclip
+    # 1.11 comes with PyAutoGUI's MouseInfo already, pinned explicitly here.
+    "pyperclip>=1.9; sys_platform == 'darwin'",
+]
+
+[project.optional-dependencies]
+dev = ["pytest>=8.0", "ruff>=0.6"]
+
+[project.scripts]
+cc-buddy-bridge = "cc_buddy_bridge.cli:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.pytest.ini_options]
+pythonpath = ["src"]
+testpaths = ["tests"]
+
+[tool.ruff]
+line-length = 110
+target-version = "py311"
+extend-exclude = ["build", "dist", ".venv"]
+
+[tool.ruff.lint]
+# Start narrow: catch real correctness/cleanliness issues without arguing about
+# style. Pyflakes (F) covers unused/undefined names; pycodestyle errors (E) catch
+# syntax issues; isort (I) keeps imports tidy. Add more rule sets later if they
+# pay off.
+select = ["F", "E", "W", "I", "B"]
+ignore = [
+    "E501",  # line too long — line-length is advisory; lots of long log strings on purpose
+    "B008",  # function call in argument default — used intentionally for Path() defaults
+]

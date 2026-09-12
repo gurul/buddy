@@ -1,0 +1,793 @@
+"""Entry point. `cc-buddy-bridge [daemon|install|uninstall|status|notes-widget|...]`."""
+
+from __future__ import annotations
+
+import argparse
+import asyncio
+import logging
+import os
+import signal
+import sys
+from typing import Any, Optional
+
+from . import __version__
+from .daemon import Daemon
+from .envfile import load_env_file
+from .ipc import make_transport
+
+
+def main(argv: list[str] | None = None) -> int:
+    # Secrets and knobs the service cannot inherit from a shell
+    # (OPENAI_API_KEY, CC_BUDDY_*) — read before any subcommand looks at
+    # os.environ. Existing variables win; the file only fills gaps.
+    load_env_file()
+    parser = argparse.ArgumentParser(prog="cc-buddy-bridge")
+    parser.add_argument("--version", action="version", version=f"cc-buddy-bridge {__version__}")
+    sub = parser.add_subparsers(dest="cmd")
+
+    p_daemon = sub.add_parser("daemon", help="Run the bridge daemon (connects to BLE device, serves hooks)")
+    p_daemon.add_argument("--socket", default=None, help="IPC path or host:port override")
+    p_daemon.add_argument("--device-name", default="Claude", help="BLE name prefix to match (default: Claude)")
+    p_daemon.add_argument("--device-address", default=None, help="BLE address to connect to (skips scan)")
+    p_daemon.add_argument(
+        "--serial-port",
+        default=os.environ.get("CC_BUDDY_SERIAL_PORT") or None,
+        help="USB serial port of the buddy (e.g. /dev/cu.usbmodem*). Uses serial instead of BLE.",
+    )
+    p_daemon.add_argument("--log-level", default="INFO")
+    p_daemon.add_argument(
+        "--save-frames",
+        default=os.environ.get("CC_BUDDY_SAVE_FRAMES") or None,
+        metavar="DIR",
+        help="Bench debugging: write received camera frames here (at most one per second)",
+    )
+
+    CONFIG_DIR_HELP = (
+        "Claude Code config home to operate on (default: $CLAUDE_CONFIG_DIR, else ~/.claude). "
+        "Wrappers such as era-code run sessions against a private home — hooks installed into "
+        "the wrong one never fire and never warn."
+    )
+
+    p_install = sub.add_parser(
+        "install", help="Register hooks in Claude Code's settings.json")
+    p_install.add_argument("--config-dir", default=None, help=CONFIG_DIR_HELP)
+    p_install.add_argument(
+        "--service", action="store_true",
+        help="Install a user-level service so the daemon auto-starts on login "
+             "(macOS: launchd agent; Linux: systemd user unit) instead of registering hooks",
+    )
+    p_install.add_argument(
+        "--serial-port",
+        default=os.environ.get("CC_BUDDY_SERIAL_PORT") or None,
+        help="With --service: bake this USB serial port (glob ok, e.g. '/dev/cu.usbmodem*') "
+             "into the service so the daemon uses serial instead of BLE.",
+    )
+    p_install.add_argument(
+        "--notes-widget", action="store_true",
+        help="macOS: also install a second launchd agent that shows the robot's idle-explorer "
+             "notes as a desktop widget at login (com.github.cc-buddy-bridge.notes-widget)",
+    )
+    p_uninstall = sub.add_parser(
+        "uninstall", help="Remove cc-buddy-bridge hooks from Claude Code's settings.json")
+    p_uninstall.add_argument("--config-dir", default=None, help=CONFIG_DIR_HELP)
+    p_uninstall.add_argument(
+        "--service", action="store_true",
+        help="Remove the user-level service (launchd agent / systemd unit) instead of removing hooks",
+    )
+    p_uninstall.add_argument(
+        "--notes-widget", action="store_true",
+        help="macOS: remove the notes-widget launchd agent",
+    )
+    p_status = sub.add_parser("status", help="Show install status")
+    p_status.add_argument("--config-dir", default=None, help=CONFIG_DIR_HELP)
+
+    p_celebrate = sub.add_parser(
+        "celebrate",
+        help="Make the pet celebrate — useful to signal a green CI run or a finished job",
+    )
+    p_celebrate.add_argument("--secs", type=float, default=5.0,
+                             help="How long to celebrate (default 5)")
+    p_celebrate.add_argument("--socket", default=None, help="IPC path or host:port override")
+
+    p_species = sub.add_parser(
+        "species",
+        help="Set the pet's character (replaces the retired on-device menu)",
+    )
+    p_species.add_argument(
+        "name",
+        help="Species name (e.g. capybara, bongo, cat) or index; 'gif' selects "
+             "an installed GIF character pack",
+    )
+    p_species.add_argument("--socket", default=None, help="IPC path or host:port override")
+
+    p_widget = sub.add_parser(
+        "notes-widget",
+        help="macOS: show the robot's idle-explorer notes in a desktop widget (foreground)",
+    )
+    p_widget.add_argument("--once", action="store_true",
+                          help="Build the window, print what it rendered, and exit (smoke test)")
+
+    sub.add_parser(
+        "key-check",
+        help="Diagnose swipe-to-key (Accessibility grant, signing, pyobjc)",
+    )
+    p_ears = sub.add_parser(
+        "ears-check",
+        help="Diagnose the \"hey buddy\" wake word (mic, model, then listen for the phrase)",
+    )
+    p_ears.add_argument("--seconds", type=float, default=8.0, help="How long to listen (default 8)")
+
+    p_diag = sub.add_parser(
+        "diag",
+        help="Ask the board why it last reset and what it was doing (crash/hang report)",
+    )
+    p_diag.add_argument("--socket", default=None, help="IPC path or host:port override")
+    p_diag.add_argument("--watch", action="store_true",
+                        help="Poll every 2s — leave running to catch the next freeze")
+
+    p_hud = sub.add_parser(
+        "hud",
+        help="Print a one-line stick status summary (stdout; designed for Claude Code's statusLine)",
+    )
+    p_hud.add_argument("--ascii", action="store_true", help="ASCII-only output (no emoji)")
+    p_hud.add_argument("--socket", default=None, help="IPC path or host:port override")
+
+    sub.add_parser(
+        "unpair",
+        help="Clear the stick's stored BLE bond (you must also Forget on the macOS side afterwards)",
+    )
+
+    p_vision = sub.add_parser(
+        "vision-test",
+        help="Run the host face detector on an image file and print the face cmd it would send",
+    )
+    p_vision.add_argument("image", help="Path to a JPEG/PNG (anything macOS ImageIO decodes)")
+
+    p_scene = sub.add_parser(
+        "scene-test",
+        help="Describe one image with the model buddy's voice sees through (one real API call)",
+    )
+    p_scene.add_argument("image", help="Path to a JPEG or PNG")
+    p_scene.add_argument("--find", default=None, help="Also look for this thing in the image")
+
+    p_intent = sub.add_parser(
+        "intent-test",
+        help="Check the goodbye / mute classifier on phrases (one real API call each)",
+    )
+    p_intent.add_argument("--expect", nargs=2, action="append", required=True, metavar=("LABEL", "TEXT"),
+                          help="leave | mute | unmute | look | stay, then a phrase; repeat for more")
+
+    # "notes" is already the diary's own listing (what buddy SAW). This records
+    # the room, so it takes the name the owner says out loud.
+    p_notes = sub.add_parser(
+        "take-notes",
+        help="Take notes on the room: buddy transcribes what is said until you stop it",
+    )
+    p_notes.add_argument("action", choices=("start", "stop", "status", "list"), nargs="?",
+                         default="status")
+    p_notes.add_argument("--socket", default=None, help="IPC path or host:port override")
+
+    p_move = sub.add_parser(
+        "move",
+        help="Move the head: a named rhythm or gesture the board runs by itself",
+    )
+    p_move.add_argument("preset", nargs="?", default="dance",
+                        help="sway, dance, nod, shake, bounce, wiggle, fig8, doubletake, "
+                             "shrug, tilt, perk, droop, lean_peek, home")
+    p_move.add_argument("--speed", type=float, default=1.0,
+                        help="0.5-2.0; above 1 is a quicker beat, and the board narrows the swing to match")
+    p_move.add_argument("--stop", action="store_true", help="stop whatever is running, where it is")
+    p_move.add_argument("--keys", default=None,
+                        help="a raw keyframe list instead of a preset, e.g. "
+                             "'[[0,127,35,400],[900,127,45,400]]' (127 leaves an axis alone)")
+    p_move.add_argument("--yaw-amp", type=int, default=None)
+    p_move.add_argument("--pitch-amp", type=int, default=None)
+    p_move.add_argument("--period-ms", type=int, default=None)
+    p_move.add_argument("--cycles", type=int, default=None)
+    p_move.add_argument("--socket", default=None, help="IPC path or host:port override")
+
+    p_sound = sub.add_parser(
+        "sound",
+        help="Mute or unmute buddy (the head and lights keep moving), or show which it is",
+    )
+    p_sound.add_argument("action", choices=("on", "off", "status"), nargs="?", default="status")
+    p_sound.add_argument("--socket", default=None, help="IPC path or host:port override")
+
+    p_identity = sub.add_parser(
+        "identity",
+        help="Owner face prints: show what the robot knows, or forget it (enrol by holding Option)",
+    )
+    p_identity.add_argument("action", choices=("status", "reset"), nargs="?", default="status")
+    p_identity.add_argument("--socket", default=None, help="IPC path or host:port override")
+
+    p_explore = sub.add_parser(
+        "explore",
+        help="Send the robot off to look around the room now (or call it back / ask what it is doing)",
+    )
+    p_explore.add_argument("action", choices=("start", "stop", "status"), nargs="?", default="start",
+                           help="start (default): explore now, ignoring the idle timer; "
+                                "stop: come back; status: what the explorer is doing")
+    p_explore.add_argument("--socket", default=None, help="IPC path or host:port override")
+
+    p_notes = sub.add_parser(
+        "notes",
+        help="Print the idle explorer's recent notes (what the robot saw while Claude was quiet)",
+    )
+    p_notes.add_argument("-n", "--last", type=int, default=20,
+                         help="Show the last N notes (default 20; 0 = all)")
+
+    p_photos = sub.add_parser(
+        "photos",
+        help="The pictures buddy kept of views it found cool: list them, or open the newest",
+    )
+    p_photos.add_argument("action", choices=("list", "open"), nargs="?", default="list")
+    p_photos.add_argument("-n", "--last", type=int, default=10,
+                          help="How many to list, newest first (default 10; 0 = all)")
+
+    p_notes_test = sub.add_parser(
+        "notes-test",
+        help="Send one image to the notes model and print the sentence (one real API call)",
+    )
+    p_notes_test.add_argument("image", help="Path to a JPEG or PNG")
+
+    p_push = sub.add_parser(
+        "push-character",
+        help="Upload a GIF character pack folder to the stick (manifest.json + *.gif)",
+    )
+    p_push.add_argument("path", help="Path to the character folder")
+
+    p_update = sub.add_parser(
+        "check-update",
+        help="Check GitHub for a newer cc-buddy-bridge release (forces refresh)",
+    )
+    p_update.add_argument("--no-cache", action="store_true",
+                          help="Ignore cache; always hit the network (default already does)")
+
+    p_upgrade = sub.add_parser(
+        "update",
+        help="Pull latest release, reinstall the package, and restart the daemon",
+    )
+    p_upgrade.add_argument("-y", "--yes", action="store_true",
+                           help="Skip the confirmation prompt")
+
+    p_audit = sub.add_parser(
+        "audit",
+        help="Show the PreToolUse decision audit log (tail + filter + follow)",
+    )
+    p_audit.add_argument("-n", "--last", type=int, default=20, help="Show the last N entries (default 20; 0 = all)")
+    p_audit.add_argument("-f", "--follow", action="store_true", help="Stream new entries as they're written")
+    p_audit.add_argument("--decision", choices=["allow", "deny"], help="Filter by final decision")
+    p_audit.add_argument("--source", choices=["auto_allow", "stick", "timeout", "defer", "ble_disconnected"],
+                         help="Filter by decision source")
+    p_audit.add_argument("--tool", help="Filter by tool name (Bash, Edit, ...)")
+    p_audit.add_argument("--ascii", action="store_true", help="ASCII-only output (no colour)")
+    p_audit.add_argument("--path", action="store_true", help="Print the audit log path and exit")
+
+    args = parser.parse_args(argv)
+    if args.cmd is None:
+        parser.print_help()
+        return 1
+
+    if args.cmd == "daemon":
+        return _run_daemon(args)
+    if args.cmd == "install":
+        # --notes-widget is additive: on its own it installs only the widget
+        # unit; combined with --service it installs both. Without it the
+        # install path is exactly what it was.
+        if getattr(args, "notes_widget", False):
+            from .service import install_notes_widget
+            rc = install_notes_widget()
+            if rc or not getattr(args, "service", False):
+                return rc
+        if getattr(args, "service", False):
+            from .service import install_service
+            return install_service(
+                serial_port=getattr(args, "serial_port", None),
+            )
+        from .installer import install_hooks
+        return install_hooks(config_dir=getattr(args, "config_dir", None))
+    if args.cmd == "uninstall":
+        if getattr(args, "notes_widget", False):
+            from .service import uninstall_notes_widget
+            rc = uninstall_notes_widget()
+            if rc or not getattr(args, "service", False):
+                return rc
+        if getattr(args, "service", False):
+            from .service import uninstall_service
+            return uninstall_service()
+        from .installer import uninstall_hooks
+        return uninstall_hooks(config_dir=getattr(args, "config_dir", None))
+    if args.cmd == "notes-widget":
+        logging.basicConfig(level=logging.INFO,
+                            format="%(asctime)s %(levelname)s %(name)s: %(message)s")
+        from .notes_widget import run as widget_run
+        return widget_run(once=args.once)
+    if args.cmd == "status":
+        from .installer import show_status
+        return show_status(config_dir=getattr(args, "config_dir", None))
+    if args.cmd == "celebrate":
+        from .hooks._client import post
+        resp = post({"evt": "celebrate", "secs": args.secs},
+                    socket_path=args.socket, timeout=3.0)
+        if resp is None:
+            print("cc-buddy-bridge: daemon not reachable", file=sys.stderr)
+            return 2
+        if not resp.get("connected"):
+            print("board not connected — nothing to celebrate on", file=sys.stderr)
+            return 2
+        print(f"pet celebrating for {args.secs:.0f}s")
+        return 0
+    if args.cmd == "species":
+        return _run_species(args.name, args.socket)
+    if args.cmd == "diag":
+        return _run_diag(args.socket, args.watch)
+    if args.cmd == "key-check":
+        from .key_tap import KeyTapper
+        return KeyTapper().diagnose()
+    if args.cmd == "ears-check":
+        from .ears import diagnose as ears_diagnose
+        return ears_diagnose(args.seconds)
+    if args.cmd == "hud":
+        from .hud import run as hud_run
+        return hud_run(ascii_only=args.ascii, socket_path=args.socket)
+    if args.cmd == "unpair":
+        return _run_unpair()
+    if args.cmd == "vision-test":
+        from .vision import run_vision_test
+        return run_vision_test(args.image)
+    if args.cmd == "scene-test":
+        from .scene import run_scene_test
+        return run_scene_test(args.image, find=args.find)
+    if args.cmd == "intent-test":
+        pairs = [(label, text) for label, text in args.expect]
+        bad = [label for label, _ in pairs if label not in ("leave", "mute", "unmute", "look", "stay")]
+        if bad:
+            print(f"intent-test: unknown label(s) {bad}; use leave, mute, unmute, look or stay", file=sys.stderr)
+            return 2
+        from .intent import run_intent_test
+        return run_intent_test(pairs)
+    if args.cmd == "take-notes":
+        return _run_notes(args)
+    if args.cmd == "move":
+        return _run_move(args)
+    if args.cmd == "sound":
+        return _run_sound(args.action, args.socket)
+    if args.cmd == "identity":
+        from .identity import run_identity
+        return run_identity(args.action, args.socket)
+
+    if args.cmd == "explore":
+        return _run_explore(args.action, args.socket)
+    if args.cmd == "notes":
+        from .explore import run_notes_cli
+        return run_notes_cli(args.last)
+    if args.cmd == "photos":
+        return _run_photos(args.action, args.last)
+    if args.cmd == "notes-test":
+        from .explore import run_notes_test
+        return run_notes_test(args.image)
+    if args.cmd == "push-character":
+        return _run_push_character(args.path)
+    if args.cmd == "audit":
+        from .audit import default_path, render
+        if args.path:
+            print(default_path())
+            return 0
+        return render(
+            last=args.last,
+            decision=args.decision,
+            source=args.source,
+            tool=args.tool,
+            ascii_only=args.ascii,
+            follow=args.follow,
+        )
+    if args.cmd == "check-update":
+        from .version_check import check, render_cli
+        info = check(force=True)
+        print(render_cli(info))
+        return 1 if info.has_update else 0
+    if args.cmd == "update":
+        from .update import run_update
+        return run_update(yes=args.yes)
+
+    return 1
+
+
+def _run_daemon(args: argparse.Namespace) -> int:
+    logging.basicConfig(
+        level=getattr(logging, args.log_level.upper(), logging.INFO),
+        format="%(asctime)s %(levelname)s %(name)s: %(message)s",
+    )
+
+    # Refuse to start if another daemon is already listening on this IPC
+    # address. A stale Unix socket is safe to remove and proceed.
+    try:
+        transport = make_transport(args.socket)
+    except ValueError as e:
+        print(f"cc-buddy-bridge: invalid IPC address: {e}", file=sys.stderr)
+        return 2
+    if transport.is_in_use():
+        print(
+            f"cc-buddy-bridge: another daemon is already listening at {transport.address}.\n"
+            f"  Stop it first, or pass --socket to use a different path.",
+            file=sys.stderr,
+        )
+        return 2
+
+    daemon = Daemon(
+        socket_path=args.socket,
+        device_name_prefix=args.device_name,
+        device_address=args.device_address,
+        serial_port=args.serial_port,
+        save_frames=args.save_frames,
+    )
+
+    loop = asyncio.new_event_loop()
+    asyncio.set_event_loop(loop)
+
+    def _sigterm(*_: object) -> None:
+        asyncio.ensure_future(daemon.shutdown(), loop=loop)
+
+    for sig in (signal.SIGINT, signal.SIGTERM):
+        try:
+            loop.add_signal_handler(sig, _sigterm)
+        except NotImplementedError:
+            pass
+
+    try:
+        loop.run_until_complete(daemon.run())
+    except KeyboardInterrupt:
+        pass
+    finally:
+        loop.close()
+    return 0
+
+
+def _run_push_character(path: str) -> int:
+    from .hooks._client import post
+
+    # Pushing a full 1.8 MB pack at BLE speeds can take 1-2 minutes with the
+    # per-chunk ack requirement. Give the IPC call plenty of headroom.
+    resp = post({"evt": "push_character", "path": path}, timeout=600.0)
+    if resp is None:
+        print(
+            "cc-buddy-bridge: daemon not reachable. Start it first.",
+            file=sys.stderr,
+        )
+        return 2
+    if not resp.get("ok"):
+        print(f"push failed: {resp.get('error', 'unknown')}", file=sys.stderr)
+        return 2
+
+    name = resp.get("name", "?")
+    files = resp.get("files", 0)
+    size = resp.get("total_bytes", 0)
+    print(f"pushed '{name}': {files} files, {size:,} bytes")
+    print("the stick has switched to the new character.")
+    return 0
+
+
+def _render_diag(d: dict | None, connected: bool) -> None:
+    """Print a board diag report. Abnormal resets get the loud treatment —
+    that line is the answer to 'why did it freeze'."""
+    print(f"board connected: {connected}")
+    if not d:
+        print("no diag report yet — the board sends one at boot; if it just\n"
+              "reconnected, run this again in a couple of seconds.")
+        return
+    reset = d.get("reset", "?")
+    abnormal = reset in ("PANIC", "TASK-WATCHDOG", "INT-WATCHDOG", "BROWNOUT",
+                         "other-watchdog")
+    mark = "  <-- ABNORMAL" if abnormal else ""
+    print(f"boot #{d.get('boot')}   last reset: {reset}{mark}")
+    print(f"uptime {d.get('up')}s   heap {d.get('heap')} (min {d.get('minheap')})"
+          f"   psram {d.get('psram')}")
+    if d.get("diedIn"):
+        # The single most useful line on a hang: the call that never returned.
+        print(f"\nDIED IN: {d['diedIn']}   (entered {d.get('diedAtMs')}ms, "
+              f"{d.get('loops')} loops)")
+    last = d.get("last") or []
+    if not last:
+        print("no surviving event ring (clean power-on, or first boot on this build)")
+        return
+    print("\nwhat it was doing before that reset (oldest first):")
+    for ev in last:
+        ms, _, text = str(ev).partition(":")
+        try:
+            stamp = f"{int(ms) / 1000:8.2f}s"
+        except ValueError:
+            stamp = ms
+        print(f"  {stamp}  {text}")
+
+
+# Species table order, mirroring firmware src/buddy.cpp SPECIES_TABLE. The
+# saved index is positional, so this list must move with that one.
+SPECIES = [
+    "capybara", "duck", "goose", "blob", "cat", "dragon", "octopus", "owl",
+    "penguin", "turtle", "snail", "ghost", "axolotl", "cactus", "robot",
+    "rabbit", "mushroom", "chonk",
+]
+
+
+def _run_photos(action: str, last: int) -> int:
+    """``cc-buddy-bridge photos [list|open]``: the shelf, straight off disk."""
+    import subprocess
+
+    from .explore import configured as explore_configured
+    from .photos import format_usage, iter_recent
+
+    notes_dir = explore_configured().notes_dir
+    recent = list(iter_recent(notes_dir, last if action == "list" else 1))
+    if not recent:
+        print(f"no photos yet in {notes_dir / 'photos'}")
+        return 0
+    if action == "open":
+        newest = recent[0]
+        if sys.platform != "darwin":
+            print(newest)
+            return 0
+        subprocess.run(["open", str(newest)], check=False)
+        print(f"opened {newest}")
+        return 0
+    for path in recent:
+        try:
+            size = path.stat().st_size
+        except OSError:
+            size = 0
+        print(f"{path.parent.name} {path.stem.split('-')[0]}  {size / 1024:6.0f} KB  {path}")
+    print(f"({format_usage(notes_dir)})")
+    return 0
+
+
+def _run_notes(args: Any) -> int:
+    """``cc-buddy-bridge notes start|stop|status|list``.
+
+    `stop` here is the one with no latency: every other way of stopping has to
+    wait for a segment to come back from the transcriber.
+    """
+    from .hooks._client import post
+    from .notes import recent
+    from .recall import configured as recall_configured
+
+    if args.action == "list":
+        files = recent(recall_configured())
+        if not files:
+            print("no notes yet — say \u201cstart taking notes\u201d, or run `notes start`")
+            return 0
+        for f in files:
+            first = ""
+            try:
+                for line in f.read_text(encoding="utf-8").splitlines():
+                    if line.startswith("# "):
+                        first = line[2:].strip()
+                        break
+            except OSError:
+                pass
+            print(f"{f.parent.name} {f.stem[:4]}  {first or f.stem}")
+            print(f"    {f}")
+        return 0
+
+    resp = post({"evt": "notes", "action": args.action}, socket_path=args.socket, timeout=180.0)
+    if resp is None:
+        print("cc-buddy-bridge: daemon not reachable", file=sys.stderr)
+        return 2
+    if not resp.get("ok"):
+        print(f"cc-buddy-bridge: {resp.get('error') or 'that did not work'}", file=sys.stderr)
+        return 1
+    if args.action == "start":
+        if resp.get("already"):
+            print(f"already taking notes, {resp.get('minutes', 0)} min in")
+        else:
+            print("taking notes — say \u201cstop taking notes\u201d, tap the robot, or run `notes stop`")
+            print("buddy cannot hear its own name while it does this")
+        return 0
+    if args.action == "stop":
+        path = resp.get("path")
+        print(f"stopped after {resp.get('minutes', 0)} min, {resp.get('words', 0)} words")
+        print(path if path else "nothing was said, so nothing was written")
+        return 0
+    if resp.get("active"):
+        print(f"taking notes: {resp.get('minutes', 0)} min, {resp.get('segments', 0)} segments, "
+              f"{resp.get('words', 0)} words")
+        last = (resp.get("last") or "").strip()
+        if last:
+            print(f"  last heard: …{last[-100:]}")
+    else:
+        print("not taking notes")
+    return 0
+
+
+def _run_move(args: Any) -> int:
+    """``cc-buddy-bridge move [preset]``: the bench path, needing no conversation.
+
+    There was no way to move the head without talking to the robot, which made
+    every motion change cost a wake word and a model round trip to look at.
+    """
+    import json as _json
+
+    from . import motion as motion_mod
+    from .hooks._client import post
+
+    req: dict[str, Any] = {"evt": "move"}
+    if args.stop:
+        req["kind"] = "stop"
+    elif args.keys:
+        try:
+            req["kind"], req["keys"] = "keys", _json.loads(args.keys)
+        except ValueError as e:
+            print(f"cc-buddy-bridge: --keys is not JSON ({e})", file=sys.stderr)
+            return 2
+    elif args.preset in motion_mod.KEYS:
+        req["kind"], req["preset"] = "keys", args.preset
+    else:
+        req["kind"], req["preset"], req["speed"] = "osc", args.preset, args.speed
+        for flag in ("yaw_amp", "pitch_amp", "period_ms", "cycles"):
+            value = getattr(args, flag, None)
+            if value is not None:
+                req[flag] = value
+
+    resp = post(req, socket_path=args.socket, timeout=10.0)
+    if resp is None:
+        print("cc-buddy-bridge: daemon not reachable", file=sys.stderr)
+        return 2
+    if not resp.get("ok"):
+        print(f"cc-buddy-bridge: {resp.get('error') or 'the board refused it'}", file=sys.stderr)
+        return 1
+    if req["kind"] == "stop":
+        print("stopped")
+        return 0
+    asked = resp.get("asked") or {}
+    print(f"asked for {motion_mod.describe(resp.get('sent') or {})}")
+    print("the board admits it against its own limits, so the delivered swing may be smaller")
+    if asked.get("ms"):
+        print(f"about {asked['ms'] / 1000:.1f}s of motion")
+    return 0
+
+
+def _run_sound(action: str, socket_path: Optional[str]) -> int:
+    """``cc-buddy-bridge sound [on|off|status]``: the daemon owns the port and the choice."""
+    from .hooks._client import post
+
+    resp = post({"evt": "sound", "action": action}, socket_path=socket_path, timeout=3.0)
+    if resp is None:
+        print("cc-buddy-bridge: daemon not reachable", file=sys.stderr)
+        return 2
+    sound = resp.get("sound", "?")
+    note = "" if resp.get("connected") else " (board not connected: it gets the setting when it connects)"
+    print(("buddy is muted — it still moves and lights up" if sound == "off" else "buddy's sound is on") + note)
+    return 0
+
+
+def _run_explore(action: str, socket_path: Optional[str]) -> int:
+    """``cc-buddy-bridge explore [start|stop|status]``: talk to the daemon."""
+    from .hooks._client import post
+
+    resp = post({"evt": "explore", "action": action}, socket_path=socket_path, timeout=3.0)
+    if resp is None:
+        print("cc-buddy-bridge: daemon not reachable", file=sys.stderr)
+        return 2
+    st = resp.get("explore") or {}
+    if not resp.get("ok"):
+        print(f"explore: {resp.get('error') or 'refused'}", file=sys.stderr)
+        return 1
+    state = st.get("state", "?")
+    how = "manual" if st.get("manual") else "idle"
+    if action == "start":
+        print(f"buddy is off exploring ({state}, {how}; explore stop brings it back)")
+    elif action == "stop":
+        print("buddy is back" if state == "off" else f"explore: {state}")
+    else:
+        if state == "off":
+            print("buddy is not exploring" + ("" if resp.get("connected") else " (board not connected)"))
+        else:
+            wp = st.get("waypoint")
+            where = f" at yaw={wp[0]:+d} pitch={wp[1]}" if wp else ""
+            print(f"buddy is {state} ({how}: {st.get('reason')}){where}; "
+                  f"{st.get('cycles', 0)} cycle(s), {st.get('notes', 0)} note(s) this run")
+    return 0
+
+
+def _run_species(name: str, socket_path: str | None) -> int:
+    """Set the pet's character over the serial link.
+
+    The on-device menu that used to do this is gone: customization belongs on
+    the host, where it is scriptable and does not suspend the pet's gestures.
+    """
+    from .hooks._client import post
+
+    key = name.strip().lower()
+    if key in ("gif", "character", "pack"):
+        idx = 0xFF          # firmware sentinel: use the installed GIF pack
+    elif key.isdigit():
+        idx = int(key)
+        if idx >= len(SPECIES):
+            print(f"index {idx} out of range (0..{len(SPECIES) - 1})", file=sys.stderr)
+            return 2
+    elif key in SPECIES:
+        idx = SPECIES.index(key)
+    else:
+        print(f"unknown species {name!r}\n\navailable: {', '.join(SPECIES)}\n"
+              "or 'gif' for an installed character pack", file=sys.stderr)
+        return 2
+
+    resp = post({"evt": "species", "idx": idx}, socket_path=socket_path, timeout=3.0)
+    if resp is None:
+        print("cc-buddy-bridge: daemon not reachable "
+              "(check `launchctl list | grep cc-buddy`).", file=sys.stderr)
+        return 2
+    if not resp.get("connected"):
+        print("board not connected — the change will not apply until it is.",
+              file=sys.stderr)
+        return 2
+    shown = "GIF pack" if idx == 0xFF else f"{SPECIES[idx]} (index {idx})"
+    print(f"species set to {shown}")
+    return 0
+
+
+def _run_diag(socket_path: str | None, watch: bool) -> int:
+    import time as _t
+
+    from .hooks._client import post
+
+    def ask() -> dict | None:
+        return post({"evt": "diag"}, socket_path=socket_path, timeout=3.0)
+
+    resp = ask()
+    if resp is None:
+        print("cc-buddy-bridge: daemon not reachable "
+              "(start it, or check `launchctl list | grep cc-buddy`).",
+              file=sys.stderr)
+        return 2
+    if not watch:
+        _render_diag(resp.get("diag"), bool(resp.get("connected")))
+        return 0
+
+    # Watch mode: the point is to be running WHEN it freezes, so the
+    # post-reset report is caught the moment the board comes back.
+    print("watching for board resets — Ctrl-C to stop\n")
+    seen: tuple | None = None
+    try:
+        while True:
+            resp = ask()
+            d = (resp or {}).get("diag")
+            key = ((d or {}).get("boot"), (d or {}).get("reset"))
+            if d and key != seen:
+                seen = key
+                print(f"--- {_t.strftime('%H:%M:%S')}")
+                _render_diag(d, bool((resp or {}).get("connected")))
+                print()
+            _t.sleep(2.0)
+    except KeyboardInterrupt:
+        return 0
+
+
+def _run_unpair() -> int:
+    """Tell the running daemon to send cmd:unpair to the stick."""
+    from .hooks._client import post
+
+    resp = post({"evt": "unpair"}, timeout=2.0)
+    if resp is None:
+        print(
+            "cc-buddy-bridge: daemon not reachable. Start it with "
+            "`cc-buddy-bridge daemon` (or via the launchd agent).",
+            file=sys.stderr,
+        )
+        return 2
+    if not resp.get("ok"):
+        err = resp.get("error", "unknown")
+        print(f"cc-buddy-bridge: unpair failed ({err})", file=sys.stderr)
+        return 2
+
+    print("sent cmd:unpair to the stick; its stored bond is cleared.")
+    print("")
+    print("Next: open macOS System Settings > Bluetooth > Claude-5C66 > info")
+    print("'Forget This Device' to purge the cached LTK. Then the next reconnect")
+    print("will prompt for a fresh 6-digit passkey (displayed on the stick).")
+    print("")
+    print("Watch `tail -f ~/Library/Logs/cc-buddy-bridge.log` for the moment of truth:")
+    print("  \"stick link: ENCRYPTED (was None)\"")
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())
