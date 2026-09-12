@@ -67,9 +67,16 @@ function renderLesson() {
   if(ended){$('#ideas').disabled=true;['pen','eraser','undo','clear'].forEach(id=>$('#'+id).disabled=true);}
   status('Saved locally');
 }
+function renderReferences(event) {
+  const sources = (event.sources || []).filter(s => {
+    try { const u = new URL(s.url); return u.protocol === 'https:' && !u.username && !u.password; }
+    catch { return false; }
+  });
+  return `${event.search_note ? `<p>${escapeHTML(event.search_note)}</p>` : ''}${sources.length ? `<details><summary>Practice references (may include answers)</summary><ul>${sources.map(s => `<li><a href="${escapeHTML(s.url)}" target="_blank" rel="noopener noreferrer">${escapeHTML(s.title)}</a></li>`).join('')}</ul></details>` : ''}`;
+}
 function renderFeed() {
   const feed=$('#feed'); if(!feed)return;
-  feed.innerHTML=lesson.events.filter(e=>e.feedback||e.step).map(e=>`<div class="bubble"><span class="eyebrow">${escapeHTML(e.action==='step'?'ONE STEP · BUDDY’S WORK':e.action.toUpperCase())}</span>${e.step?`<strong class="math-step">${escapeHTML(e.step)}</strong>`:''}${escapeHTML(e.feedback)}</div>`).join('') || `<div class="bubble">${lesson.mode==='help'?'First, add your problem. Then write your ideas—even a small start helps.':'Take your time. Try an idea, draw it out, or ask me for a hint.'}</div>`;
+  feed.innerHTML=lesson.events.filter(e=>e.feedback||e.step).map(e=>`<div class="bubble"><span class="eyebrow">${escapeHTML(e.action==='step'?'ONE STEP · BUDDY’S WORK':e.action.toUpperCase())}</span>${e.step?`<strong class="math-step">${escapeHTML(e.step)}</strong>`:''}${escapeHTML(e.feedback)}${renderReferences(e)}</div>`).join('') || `<div class="bubble">${lesson.mode==='help'?'First, add your problem. Then write your ideas—even a small start helps.':'Take your time. Try an idea, draw it out, or ask me for a hint.'}</div>`;
   feed.scrollTop=feed.scrollHeight;
 }
 function point(e) { const r=$('#board').getBoundingClientRect();return [Math.max(0,Math.min(1,(e.clientX-r.left)/r.width)),Math.max(0,Math.min(1,(e.clientY-r.top)/r.height))]; }

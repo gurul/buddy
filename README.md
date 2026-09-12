@@ -89,6 +89,9 @@ says port 48766 is already in use, open the existing dashboard at
 `http://127.0.0.1:48766/` instead of starting it again.
 See [setup, workflow, and widget integration](docs/learning.md) and the
 [recorded browser demo](docs/learning-demo/buddy-learning-demo.webm).
+Add `EXA_API_KEY` to the same environment file to find practice references
+when generating live lessons. Reference links are saved with each lesson;
+search failures fall back to model-generated problems.
 
 Host (macOS, Python 3.12):
 
