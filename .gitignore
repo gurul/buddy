@@ -45,3 +45,6 @@ docs/plans/
 .test-results.txt
 docs/learning-demo/video/
 docs/learning-debug.png
+
+# Web export of the launch film for the show-and-tell deck (built, not committed; see docs/launch-video/remotion/README.md)
+docs/launch-video/reference/launch-video.mp4
