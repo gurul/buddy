@@ -1,6 +1,13 @@
 # reference clones of upstream repos (not part of this project)
 vendor/
 
+# Local environment files containing credentials
+env
+.env
+.env.*
+!.env.example
+!.env.sample
+
 # python
 bridge/.venv/
 __pycache__/
@@ -29,3 +36,12 @@ AGENTS.md
 
 # Local-only plans (owner choice, 2026-09-10)
 docs/plans/
+
+# Local learning demos and verification tools
+.devtools/
+.demo-data/
+.test-artifacts/
+
+.test-results.txt
+docs/learning-demo/video/
+docs/learning-debug.png

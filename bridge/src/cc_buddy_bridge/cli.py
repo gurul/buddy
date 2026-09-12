@@ -263,11 +263,27 @@ def main(argv: list[str] | None = None) -> int:
     p_audit.add_argument("--ascii", action="store_true", help="ASCII-only output (no colour)")
     p_audit.add_argument("--path", action="store_true", help="Print the audit log path and exit")
 
+    p_learning = sub.add_parser("learning", help="Open the saved math lessons and whiteboard")
+    p_learning.add_argument("--demo", action="store_true")
+    p_learning.add_argument("--port", type=int, default=48766)
+    p_learning.add_argument("--data-dir")
+    p_learning.add_argument("--no-open", action="store_true")
+
     args = parser.parse_args(argv)
     if args.cmd is None:
         parser.print_help()
         return 1
 
+    if args.cmd == "learning":
+        from .learning.server import main as learning_main
+        options = ["--port", str(args.port)]
+        if args.demo:
+            options.append("--demo")
+        if args.no_open:
+            options.append("--no-open")
+        if args.data_dir:
+            options.extend(["--data-dir", args.data_dir])
+        return learning_main(options)
     if args.cmd == "daemon":
         return _run_daemon(args)
     if args.cmd == "install":

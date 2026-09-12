@@ -65,6 +65,31 @@ under a caption, and for a few seconds after one, its eyes stay open and there i
 
 ## Get one running
 
+### Math lessons and saved whiteboards
+
+Buddy now has a learning workspace: learn a topic or bring a screenshot/written
+problem, put down your ideas, ask for hints, check your work, or reveal exactly
+one next step at a time. Whiteboard revisions and tutor explanations are saved
+to a searchable dashboard, linked from the macOS widget. The existing voice
+agent launches and controls lessons with `math_lesson`.
+
+Try the offline browser demo from this repository (Python 3.11+):
+
+```bash
+python tools/start_learning.py --demo --data-dir .demo-data --port 48767
+```
+
+Click **Play workflow demo**, or work through an example yourself. This demo
+uses fixed examples; live handwriting/image tutoring supports Astra through
+OpenRouter (`OPENROUTER_API_KEY`) or direct OpenAI. Configure the provider and
+key in `~/.config/cc-buddy-bridge/env` and restart without `--demo`. In WSL,
+use `--env-file /mnt/c/Users/gitsw/.config/cc-buddy-bridge/env` to read the
+Windows file; Linux and Windows home directories are separate. If the launcher
+says port 48766 is already in use, open the existing dashboard at
+`http://127.0.0.1:48766/` instead of starting it again.
+See [setup, workflow, and widget integration](docs/learning.md) and the
+[recorded browser demo](docs/learning-demo/buddy-learning-demo.webm).
+
 Host (macOS, Python 3.12):
 
 ```bash

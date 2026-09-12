@@ -94,3 +94,6 @@ ignore = [
     "E501",  # line too long — line-length is advisory; lots of long log strings on purpose
     "B008",  # function call in argument default — used intentionally for Path() defaults
 ]
+
+[tool.setuptools.package-data]
+cc_buddy_bridge = ["learning/web/*.html", "learning/web/*.css", "learning/web/*.js"]

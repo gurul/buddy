@@ -210,6 +210,13 @@ def _session(conn: FakeConnection, agents: list[FakeAgent], clock: dict | None =
     return s, states, mic
 
 
+async def _eventually(predicate, timeout=2.0):
+    """Wait for a state transition, independent of Windows timer granularity."""
+    async with asyncio.timeout(timeout):
+        while not predicate():
+            await asyncio.sleep(0.001)
+
+
 # ---- config -------------------------------------------------------------------------------
 
 def test_configured_defaults_and_env() -> None:
@@ -238,7 +245,7 @@ def test_session_config_shape() -> None:
     assert d["type"] == "responses" and d["responses"]["model"] == "gpt-6-astra"
     assert d["responses"]["reasoning"] == {"effort": "low"}
     assert [t.get("name", t["type"]) for t in d["responses"]["tools"]] == [
-        "start_task", "steer_task", "stop_task", "task_status", "answer_question",
+        "math_lesson", "start_task", "steer_task", "stop_task", "task_status", "answer_question",
         "go_explore", "end_conversation", "look", "move_head", "look_around", "find",
         "set_sound", "think_hard", "web_search"]
     assert all(t["type"] == "function" for t in TOOLS)
@@ -376,13 +383,13 @@ def test_ask_user_is_spoken_and_answered_through_the_tool() -> None:
 
     async def go():
         task = asyncio.create_task(s.run())
-        await asyncio.sleep(0.01)
+        await _eventually(lambda: bool(conn.user_messages()))
         assert conn.user_messages() == ["[task question] Send the email to Sam?"]
         assert states[-1] == "asking"
         conn.feed(_tool_call("answer_question", "c2", answer="yes"))
-        await asyncio.sleep(0.01)
+        await _eventually(lambda: len(conn.tool_outputs()) >= 2)
         agent.release.set()
-        await asyncio.sleep(0.01)
+        await _eventually(lambda: any("Sent. (answer=yes)" in c for c in conn.commentary()))
         conn.feed(_tool_call("end_conversation", "c3"), None)
         await task
     asyncio.run(go())
@@ -801,7 +808,7 @@ def test_prompts_do_not_let_a_started_task_read_as_done() -> None:
     # never asks a clarifying question (the "what city?" round trip cost 10.4 s)
     assert "reply with an empty message" in BACKEND_INSTRUCTIONS
     assert "return exactly: On it" not in BACKEND_INSTRUCTIONS
-    assert "Never ask the owner a clarifying question" in BACKEND_INSTRUCTIONS
+    assert "Outside math lessons, never ask the owner a clarifying question" in BACKEND_INSTRUCTIONS
 
 
 def test_idle_timeout_closes_when_the_server_goes_quiet() -> None:
@@ -961,10 +968,11 @@ def test_look_tool_answers_from_a_background_task() -> None:
 
 def test_think_hard_answers_from_a_background_task_and_keeps_the_voice_company() -> None:
     asked: list[str] = []
+    release = asyncio.Event()
 
     async def thinker(question: str) -> dict:
         asked.append(question)
-        await asyncio.sleep(0.02)                    # the slow brain takes its time
+        await release.wait()
         return {"ok": True, "answer": "Forty-two, because the question was the easy part."}
 
     conn = FakeConnection([_tool_call("think_hard", "c1", question="what is six times seven, and why?")])
@@ -972,11 +980,12 @@ def test_think_hard_answers_from_a_background_task_and_keeps_the_voice_company()
 
     async def go():
         task = asyncio.create_task(s.run())
-        await asyncio.sleep(0.01)
+        await _eventually(lambda: bool(asked))
         # while the brain works: the voice was told to keep the owner company, nothing answered yet
         assert any("worked on in the background" in t for t in _thinking(conn))
         assert conn.tool_outputs() == []
-        await asyncio.sleep(0.05)
+        release.set()
+        await _eventually(lambda: bool(conn.tool_outputs()))
         conn.feed(_tool_call("end_conversation", "c9"), None)
         await task
     asyncio.run(go())
@@ -1315,3 +1324,28 @@ def test_a_muted_session_starts_by_telling_the_voice() -> None:
     asyncio.run(s.run())
     assert _thinking(conn)[0].startswith("[sound] You are muted")
 
+
+
+def test_math_lesson_dispatch_uses_existing_voice_and_returns_saved_step():
+    called = []
+    def learning(**args):
+        called.append(args)
+        return {"ok": True, "answer": "2x = 8. Subtract three from both sides."}
+    conn = FakeConnection([])
+    session, _, _ = _session(conn, [FakeAgent(None, None)], learning=learning)
+    async def go():
+        await session._tool("math_lesson", "math1", '{"action":"step"}')
+        await asyncio.gather(*session._slow_tasks)
+    asyncio.run(go())
+    assert called == [{"action": "step"}]
+    assert conn.tool_outputs()[0]["ok"] is True
+
+
+def test_math_lesson_without_service_returns_an_actionable_error():
+    conn = FakeConnection([])
+    session, _, _ = _session(conn, [FakeAgent(None, None)])
+    async def go():
+        await session._tool("math_lesson", "math1", '{"action":"open"}')
+        await asyncio.gather(*session._slow_tasks)
+    asyncio.run(go())
+    assert conn.tool_outputs()[0]["ok"] is False

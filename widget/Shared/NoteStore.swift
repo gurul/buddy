@@ -707,3 +707,44 @@ enum NoteStore {
         return (snap, files.first)
     }
 }
+
+
+// Learning is deliberately separate from the room diary and its automatic memory.
+struct LearningLesson: Codable, Identifiable, Sendable {
+    let id: String
+    let topic: String
+    let problem: String
+    let stage: String
+    let updated: Double
+    let demo: Bool
+}
+
+struct LearningSnapshot: Codable, Sendable {
+    let total: Int
+    let completed: Int
+    let lessons: [LearningLesson]
+    static let empty = LearningSnapshot(total: 0, completed: 0, lessons: [])
+
+    static var fileURL: URL? {
+        AppGroup.containerURL?.appendingPathComponent("learning-dashboard.json")
+    }
+
+    static func load() -> LearningSnapshot {
+        guard let url = fileURL, let data = try? Data(contentsOf: url),
+              let value = try? JSONDecoder().decode(LearningSnapshot.self, from: data) else { return .empty }
+        return value
+    }
+
+    /// The helper app can read the bridge store; the widget only gets this summary.
+    static func mirror() throws -> Bool {
+        let path = ProcessInfo.processInfo.environment["CC_BUDDY_LEARNING_DIR"] ?? "~/.config/cc-buddy-bridge/learning"
+        let directory = URL(fileURLWithPath: (path as NSString).expandingTildeInPath)
+        let source = directory.appendingPathComponent("dashboard.json")
+        guard FileManager.default.fileExists(atPath: source.path), let destination = fileURL else { return false }
+        let data = try Data(contentsOf: source)
+        _ = try JSONDecoder().decode(LearningSnapshot.self, from: data)
+        if (try? Data(contentsOf: destination)) == data { return false }
+        try data.write(to: destination, options: .atomic)
+        return true
+    }
+}

@@ -79,6 +79,11 @@ final class NotesMirror {
     }
 
     func sync() {
+        do {
+            if try LearningSnapshot.mirror() { WidgetCenter.shared.reloadAllTimelines() }
+        } catch {
+            log.error("learning mirror failed: \(error.localizedDescription, privacy: .public)")
+        }
         armDirWatcher()
         let (snapshot, newest) = NoteStore.read(notesDir: notesDir)
         armFileWatcher(newest)

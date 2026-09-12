@@ -437,8 +437,15 @@ def run(once: bool = False, directory: Optional[Path] = None,
             panel.orderFrontRegardless()
             return self
 
+        def openLearning_(self, sender):  # noqa: N802
+            import webbrowser
+            port = int(os.environ.get("CC_BUDDY_LEARNING_PORT", "48766"))
+            webbrowser.open(f"http://127.0.0.1:{port}/")
+
         def _context_menu(self):
             menu = AppKit.NSMenu.alloc().initWithTitle_(TITLE)
+            learning_item = menu.addItemWithTitle_action_keyEquivalent_("Open learning dashboard", "openLearning:", "")
+            learning_item.setTarget_(self)
             open_item = menu.addItemWithTitle_action_keyEquivalent_("Open what it saw", "openNotes:", "")
             open_item.setTarget_(self)
             said_item = menu.addItemWithTitle_action_keyEquivalent_("Open what was said", "openSaid:", "")

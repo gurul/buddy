@@ -234,3 +234,14 @@ def test_real_model_through_ears_fanout(tmp_path: Path) -> None:
 def test_model_present_negative_control(tmp_path: Path) -> None:
     assert not model_present(tmp_path)
     assert not ears.model_present(tmp_path / "nope")
+
+
+def test_default_wake_word_includes_okay_buddy_aliases(tmp_path, monkeypatch):
+    monkeypatch.setattr(ears, "encode_phrase", lambda phrase, _: phrase.upper().split())
+    output = ears.write_keywords_file(EarsConfig(model_dir=tmp_path), tmp_path / "keywords.txt")
+    lines = output.read_text().splitlines()
+    assert len(lines) == 3
+    assert lines[1].endswith("@okay_buddy")
+    assert lines[2].endswith("@ok_buddy")
+    output = ears.write_keywords_file(EarsConfig(model_dir=tmp_path, wake_word="hello robot"), output)
+    assert len(output.read_text().splitlines()) == 1
