@@ -276,13 +276,16 @@ def main(argv: list[str] | None = None) -> int:
         "lesson",
         help="Drive buddy's math lesson from the terminal (same path as the voice tool)",
         description="Drive buddy's math lesson on the running daemon. "
-                    "Actions: open, start, ideas, hint, check, step, status, recap, end.",
+                    "Actions: open, start, ideas, hint, check, step, status, recap, end, "
+                    "listen, stop-listening.",
     )
     p_lesson.add_argument("action", choices=LESSON_ACTIONS, metavar="action",
                           help="open: show the whiteboard; start: new lesson (--mode, --topic, --level); "
                                "ideas: save your thinking (--text; empty means stuck); hint: a nudge; "
                                "check: review your work; step: exactly one next step; status: latest "
-                               "feedback; recap: summary and a question; end: save and finish")
+                               "feedback; recap: summary and a question; end: save and finish; "
+                               "listen: buddy listens while you think out loud about the open lesson; "
+                               "stop-listening: buddy stops listening and the microphone closes")
     p_lesson.add_argument("--mode", choices=("learn", "help"), default=None,
                           help="start: learn a topic (default) or get help with your own problem")
     p_lesson.add_argument("--topic", default=None, help="start: the topic, for example Fractions")

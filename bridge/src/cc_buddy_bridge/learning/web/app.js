@@ -4,6 +4,9 @@ const $ = s => document.querySelector(s);
 const escapeHTML = v => String(v ?? '').replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
 let config, lesson, dirty = false, busy = false, drawing = false, tool = 'pen', stroke, saveTimer, checkTimer;
 let speak = false, supervise = false, tour = false, lastRevision = 0, saveInFlight = false;
+/* Think out loud. listening mirrors GET /api/listening; ideasBase is the revision whose ideas text this page last loaded,
+   so the server can put back a spoken line that arrived while the learner was typing. */
+let listening = {available:false, state:'off', lesson_id:null, reason:''}, listenBusy = false, ideasBase = 0;
 const main = $('#main');
 function fail(error) { $('#error').textContent = error.message || error; $('#error').classList.remove('hidden'); }
 function clearError() { $('#error').classList.add('hidden'); }
@@ -13,7 +16,8 @@ async function api(path, data) {
   const result = await r.json(); if (!r.ok) throw new Error(result.error || 'Request failed'); return result;
 }
 function status(text) { $('#save-status').textContent = text; }
-function setBusy(value) { busy = value; document.querySelectorAll('main button, main textarea, main input, #new-side, #dashboard-link').forEach(b => { if ('disabled' in b) b.disabled=value; }); }
+/* The Think out loud toggle stays usable while the tutor works: a learner must always be able to stop the microphone. */
+function setBusy(value) { busy = value; document.querySelectorAll('main button, main textarea, main input, #new-side, #dashboard-link').forEach(b => { if ('disabled' in b && b.id !== 'think-aloud') b.disabled=value; }); }
 const art = topic => /calculus|derivative/i.test(topic) ? ['calculus','dy / dx'] : /algebra|equation/i.test(topic) ? ['algebra','2x + 3 = 11'] : ['', '7 + 5 = ?'];
 const readableStage = stage => ({setup:'Ready to begin',input:'Add your problem',confirm:'Confirm problem',working:'In progress',complete:'Completed',ended:'Saved for later'}[stage] || stage);
 /* Static robot drawings from the Show-and-Tell deck. SVG presentation attributes are CSP-safe; no animation. */
@@ -33,10 +37,11 @@ async function dashboard() {
     document.querySelectorAll('[data-open]').forEach(b=>b.onclick=()=>location.hash='lesson/'+b.dataset.open);
   }; cards(''); $('#search').oninput=e=>cards(e.target.value); $('#new-main').onclick=openNew;
   if ($('#walkthrough')) $('#walkthrough').onclick=()=>walkthrough().catch(fail);
+  renderListen();
 }
 function openNew() { if (busy) return; $('#new-dialog').showModal(); $('#topic').focus(); say('Would you like to learn a topic or work on a problem you already have?'); }
 async function openLesson(id) {
-  clearTimeout(checkTimer); await flush(); lesson=await api('/api/action',{action:'select',id}); dirty=false; lastRevision=lesson.revision; renderLesson();
+  clearTimeout(checkTimer); await flush(); lesson=await api('/api/action',{action:'select',id}); dirty=false; lastRevision=lesson.revision; ideasBase=lesson.revision; renderLesson();
   const draft=localStorage.getItem('buddy-draft-'+id);
   if (draft) { const parsed=JSON.parse(draft); if (parsed.revision===lesson.revision) { Object.assign(lesson,parsed.work); dirty=true; renderLesson(); status('Recovered unsaved work'); scheduleSave(); } }
 }
@@ -50,7 +55,7 @@ function renderLesson() {
   <div class="ideas-area"><label for="ideas">${s.mode==='help'?'How would you start? Show your ideas or tell Buddy where you are stuck.':'Your ideas, working, or answer'}</label><textarea id="ideas" placeholder="I think the first thing to do is…">${escapeHTML(s.ideas)}</textarea></div>
   ${done?'<div class="completion"><h3>One more idea figured out. ✦</h3><p class="small">Review how you got here, then try something new.</p><button id="recap">Explain the method</button><button id="another" class="primary">Another problem</button><button id="change">Change topic</button></div>':''}
   ${s.stage==='setup'?'<div class="completion"><button id="generate" class="primary">Give me a problem</button></div>':''}</section>
-  <aside class="tutor-panel"><div class="tutor-head">${FACE}<div><h3>Buddy is here.</h3><p>Let's take it one step at a time.</p></div></div><div class="tutor-feed" id="feed"></div><div class="tutor-controls"><button id="hint" class="help help--hint">✦ Give me a hint</button><button id="check" class="help help--check">✓ Check my work</button><button id="step" class="help help--step">→ Show one step</button><button id="stuck">I don't know how to start</button></div><label class="supervise"><input type="checkbox" id="supervise" ${supervise?'checked':''}>Check after a pause (5 seconds)</label><p class="small supervise">Your writing stays on the board. Buddy's steps appear here.</p></aside></div>`;
+  <aside class="tutor-panel"><div class="tutor-head">${FACE}<div><h3>Buddy is here.</h3><p>Let's take it one step at a time.</p></div></div><p id="listen-banner" class="listen-banner hidden" aria-hidden="true"><span class="listen-dot"></span>buddy is listening</p><div class="tutor-feed" id="feed"></div><div class="tutor-controls"><div class="listen-box"><button id="think-aloud" class="help help--listen" aria-pressed="false" aria-describedby="listen-note">◉ Think out loud</button><p id="listen-note" class="small listen-note"></p></div><button id="hint" class="help help--hint">✦ Give me a hint</button><button id="check" class="help help--check">✓ Check my work</button><button id="step" class="help help--step">→ Show one step</button><button id="stuck">I don't know how to start</button></div><label class="supervise"><input type="checkbox" id="supervise" ${supervise?'checked':''}>Check after a pause (5 seconds)</label><p class="small supervise">Your writing stays on the board. Buddy's steps appear here.</p></aside></div>`;
   if ($('#source-preview')) $('#source-preview').src=s.source_image;
   renderFeed(); bindCanvas(); drawBoard();
   $('#ideas').oninput=()=>{lesson.ideas=$('#ideas').value; markDirty();};
@@ -66,10 +71,39 @@ function renderLesson() {
   if($('#another')) $('#another').onclick=()=>createLesson({mode:'learn',topic:s.topic,level:s.level}).catch(fail);
   if($('#change')) $('#change').onclick=openNew;
   $('#supervise').onchange=e=>{supervise=e.target.checked;if(!supervise)clearTimeout(checkTimer);};
+  $('#think-aloud').onclick=()=>toggleListen();
   if($('#upload')) $('#upload').onchange=e=>upload(e.target.files[0]).catch(fail);
   if(input || done || ended || s.stage==='setup') ['hint','check','step','stuck'].forEach(id=>$('#'+id).disabled=true);
   if(ended){$('#ideas').disabled=true;['pen','eraser','undo','clear'].forEach(id=>$('#'+id).disabled=true);}
   status('Saved locally');
+  renderListen();
+}
+/* Think out loud: the toggle, the note under it, the panel banner and the header pill, all from one state. */
+function renderListen() {
+  const on=listening.state==='on', starting=listening.state==='starting', active=on||starting;
+  const text=on?'buddy is listening':starting?'Getting buddy’s ears ready…':'';
+  const pill=$('#listen-pill');
+  if(pill.textContent!==text){pill.innerHTML=text?`<span class="listen-dot" aria-hidden="true"></span>${escapeHTML(text)}`:'';}
+  pill.classList.toggle('hidden',!text); pill.classList.toggle('listen-pill--on',on);
+  const button=$('#think-aloud'); if(!button||!lesson) return;
+  const here=!listening.lesson_id||listening.lesson_id===lesson.id, ready=['working','complete'].includes(lesson.stage);
+  button.setAttribute('aria-pressed',String(active));
+  button.textContent=active?'■ Stop listening':'◉ Think out loud';
+  button.disabled=listenBusy||(!active&&(!listening.available||!ready));
+  $('#listen-note').textContent=!listening.available?(listening.reason||'Think out loud needs the buddy robot app running.')
+    :active?(here?'Talk through your thinking. buddy saves what you say to your ideas. Say “I’m done” to finish.':'buddy is listening to another lesson. Stop it here first.')
+    :!ready?(lesson.stage==='ended'?'Resume this lesson to think out loud.':'Get your problem ready, then think out loud.')
+    :'buddy listens with the microphone only while this is on. Nothing is recorded.';
+  $('#listen-banner').classList.toggle('hidden',!on);
+}
+function setListening(result) { listening={available:!!result.available,state:result.state||'off',lesson_id:result.lesson_id||null,reason:result.reason||''}; renderListen(); }
+async function pollListen() { try { const fresh=await api('/api/listening'); if(JSON.stringify(fresh)!==JSON.stringify(listening)) setListening(fresh); } catch { /* Keep the last state during a transient disconnect. */ } }
+async function toggleListen() {
+  if(listenBusy||!lesson) return; clearError();
+  const stop=listening.state!=='off'; listenBusy=true; renderListen();
+  try { if(!stop) await flush(); setListening(await api('/api/action',{action:stop?'stop-listening':'listen',id:lesson.id})); if(!stop) say('I am listening.'); }
+  catch(e) { fail(e); await pollListen(); }
+  finally { listenBusy=false; renderListen(); }
 }
 function renderReferences(event) {
   const sources = (event.sources || []).filter(s => {
@@ -91,9 +125,11 @@ function work(){return {ideas:lesson.ideas,problem:lesson.problem,stuck:lesson.s
 function markDirty(){dirty=true;status('Saving…');try{localStorage.setItem('buddy-draft-'+lesson.id,JSON.stringify({revision:lesson.revision,work:work()}));}catch{/* Server persistence remains primary when browser quota is full. */}scheduleSave();clearTimeout(checkTimer);if(supervise&&lesson.stage==='working')checkTimer=setTimeout(()=>{if(!busy&&!drawing)act('check').catch(fail);},5000);}
 function scheduleSave(){clearTimeout(saveTimer);saveTimer=setTimeout(()=>flush().catch(fail),650);}
 let saving=Promise.resolve();
-function flush(){clearTimeout(saveTimer);saving=saving.catch(()=>{}).then(async()=>{if(!dirty||!lesson)return;const current=lesson;const payload=work();dirty=false;saveInFlight=true;try{const saved=await api('/api/action',{action:'save',id:current.id,revision:current.revision,work:payload});if(lesson===current){lesson.revision=saved.revision;lastRevision=saved.revision;if(!dirty){localStorage.removeItem('buddy-draft-'+current.id);status('Saved locally');}else scheduleSave();}}catch(e){dirty=true;status('Not saved — retry needed');throw e;}});return saving;}
-async function act(action){if(busy||!lesson)return;clearError();clearTimeout(checkTimer);setBusy(true);try{await flush();status(action==='step'?'Buddy is working on one step…':'Buddy is thinking…');lesson=await api('/api/action',{action,id:lesson.id,revision:lesson.revision});lastRevision=lesson.revision;renderLesson();const last=lesson.events.at(-1);if(last)say([last.step,last.feedback].filter(Boolean).join('. '));}finally{setBusy(false);if(lesson)renderLesson();}}
-async function createLesson(data){clearTimeout(checkTimer);await flush();setBusy(true);try{lesson=await api('/api/action',{action:'create',...data});dirty=false;historyReplace(lesson.id);renderLesson();}finally{setBusy(false);if(lesson)renderLesson();}if(lesson.mode==='learn')await act('generate');}
+/* A save can come back with more ideas than it sent: lines buddy heard while the learner typed. Show them unless the learner
+   typed again meanwhile; then keep ideasBase old, so the next save asks the server to put them back again. */
+function flush(){clearTimeout(saveTimer);saving=saving.catch(()=>{}).then(async()=>{if(!dirty||!lesson)return;const current=lesson;const payload=work();dirty=false;saveInFlight=true;try{const saved=await api('/api/action',{action:'save',id:current.id,revision:current.revision,ideas_base:ideasBase,work:payload});if(lesson===current){lesson.revision=saved.revision;lastRevision=saved.revision;const box=$('#ideas');if(saved.ideas===payload.ideas){ideasBase=saved.revision;}else if(!dirty&&(!box||box.value===payload.ideas)){lesson.ideas=saved.ideas;if(box)box.value=saved.ideas;ideasBase=saved.revision;}if(!dirty){localStorage.removeItem('buddy-draft-'+current.id);status('Saved locally');}else scheduleSave();}}catch(e){dirty=true;status('Not saved — retry needed');throw e;}finally{saveInFlight=false;}});return saving;}
+async function act(action){if(busy||!lesson)return;clearError();clearTimeout(checkTimer);setBusy(true);try{await flush();status(action==='step'?'Buddy is working on one step…':'Buddy is thinking…');lesson=await api('/api/action',{action,id:lesson.id,revision:lesson.revision});lastRevision=lesson.revision;ideasBase=lesson.revision;renderLesson();const last=lesson.events.at(-1);if(last)say([last.step,last.feedback].filter(Boolean).join('. '));}finally{setBusy(false);if(lesson)renderLesson();}}
+async function createLesson(data){clearTimeout(checkTimer);await flush();setBusy(true);try{lesson=await api('/api/action',{action:'create',...data});dirty=false;ideasBase=lesson.revision;historyReplace(lesson.id);renderLesson();}finally{setBusy(false);if(lesson)renderLesson();}if(lesson.mode==='learn')await act('generate');}
 function historyReplace(id){window.history.replaceState(null,'','#lesson/'+id);}
 async function upload(file){if(!file||!lesson||!['input','confirm'].includes(lesson.stage))return;if(!/^image\/(png|jpeg|webp)$/.test(file.type)||file.size>10*1024*1024)throw new Error('Choose a PNG, JPEG or WebP smaller than 10 MB.');const image=await createImageBitmap(file);const c=document.createElement('canvas');const scale=Math.min(1,1600/Math.max(image.width,image.height));c.width=image.width*scale;c.height=image.height*scale;c.getContext('2d').drawImage(image,0,0,c.width,c.height);image.close();lesson.source_image=c.toDataURL('image/jpeg',.9);markDirty();await flush();renderLesson();}
 document.addEventListener('paste',e=>{const file=[...(e.clipboardData?.items||[])].find(x=>x.type.startsWith('image/'))?.getAsFile();if(file&&lesson&&['input','confirm'].includes(lesson.stage)){e.preventDefault();upload(file).catch(fail);}});
@@ -107,4 +143,7 @@ $('#speak-toggle').onclick=()=>{speak=!speak;$('#speak-toggle').textContent='Rea
 window.addEventListener('beforeunload',e=>{if(dirty||busy){e.preventDefault();e.returnValue='';}});
 async function route(){clearError();if(busy)return;const id=location.hash.startsWith('#lesson/')?location.hash.slice(8):null;if(id)await openLesson(id);else await dashboard();}
 window.addEventListener('hashchange',()=>route().catch(fail));
-(async()=>{config=await api('/api/config');$('#mode-label').textContent=config.demo?'OFFLINE DEMO':`${config.provider.toUpperCase()} · ${config.model}`;await route();setInterval(async()=>{if(!lesson||busy||dirty||drawing||saveInFlight)return;try{const fresh=await api('/api/lessons/'+lesson.id);if(fresh.revision>lastRevision){lesson=fresh;lastRevision=fresh.revision;renderLesson();}}catch{/* Keep work visible during transient disconnects. */}},3000);})().catch(fail);
+/* A spoken idea lands as a new revision. While the learner's cursor is in the ideas box, update the text in place instead of
+   redrawing the page, so the caret and focus stay where they are. */
+function applyFresh(fresh){const box=$('#ideas');const focused=box&&document.activeElement===box&&fresh.stage===lesson.stage&&fresh.events.length===lesson.events.length;lesson=fresh;lastRevision=fresh.revision;ideasBase=fresh.revision;if(focused){const end=box.selectionStart===box.value.length;const at=box.selectionStart;box.value=fresh.ideas;if(end)box.selectionStart=box.selectionEnd=box.value.length;else box.selectionStart=box.selectionEnd=Math.min(at,box.value.length);renderListen();}else renderLesson();}
+(async()=>{config=await api('/api/config');$('#mode-label').textContent=config.demo?'OFFLINE DEMO':`${config.provider.toUpperCase()} · ${config.model}`;listening.available=!!config.listen_available;await pollListen();await route();setInterval(pollListen,1500);setInterval(async()=>{if(!lesson||busy||dirty||drawing||saveInFlight)return;try{const fresh=await api('/api/lessons/'+lesson.id);if(fresh.revision>lastRevision&&!dirty&&lesson.id===fresh.id)applyFresh(fresh);}catch{/* Keep work visible during transient disconnects. */}},3000);})().catch(fail);

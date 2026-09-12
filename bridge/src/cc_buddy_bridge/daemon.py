@@ -42,6 +42,7 @@ from .identity import default_path as identity_default_path
 from .intent import make_intent_classifier
 from .ipc import IPCServer
 from .jsonl_tailer import JSONLTailer
+from .learning.think_aloud import LISTEN_ACTIONS
 from .listen_key import Stopper, start_listen_key
 from .matchers import MatcherConfig, classify_command
 from .matchers import load_config as load_matcher_config
@@ -80,6 +81,11 @@ from .vision import (
 _ENTRY_PAYLOAD_MAX_BYTES = ENTRY_MAX_BYTES - 2
 
 log = logging.getLogger(__name__)
+
+# Think out loud: how long the learning server's thread waits for the loop to take a listen request,
+# and the name of a conversation task opened for listening (so a stop can cancel one still connecting).
+THINK_ALOUD_CALL_SECS = 12.0
+THINK_ALOUD_TASK = "think-aloud-conversation"
 
 # PERMISSION_WAIT_SECS moved to protocol.py — the wire `prompt.ttl` field is
 # derived from it, so it lives next to the serializer. Re-exported via the
@@ -180,6 +186,14 @@ class Daemon:
         # _handle_lesson can tell whether dispatch already put a caption on the robot.
         self._learning_idle_handle: Optional[asyncio.TimerHandle] = None
         self._learning_notices = 0
+        # Think out loud (learning/think_aloud.py). All of it changes on the loop thread only.
+        #   _voice_session      the open conversation's VoiceSession, once connected
+        #   _think_aloud_wish   a lesson waiting for a conversation that is still connecting or closing
+        #   _think_aloud_state  "off", "starting" (asked, microphone not yet live) or "on"
+        self._voice_session: Optional[voice_agent.VoiceSession] = None
+        self._think_aloud_wish: Optional[dict[str, Any]] = None
+        self._think_aloud_state = "off"
+        self._think_aloud_lesson_id: Optional[str] = None
         self._recall_cfg = recall_mod.configured()
         # buddy's memory of what was SAID: one note per conversation, and its own
         # day pass. Separate from the diary, which remembers what it SAW.
@@ -277,7 +291,8 @@ class Daemon:
                 loop.call_soon_threadsafe(self._learning_notice, text, stage)
             try:
                 self._learning_server = start_learning(
-                    port=int(os.environ.get("CC_BUDDY_LEARNING_PORT", "48766")), notify=learning_notice)
+                    port=int(os.environ.get("CC_BUDDY_LEARNING_PORT", "48766")), notify=learning_notice,
+                    listener=self._make_listener(loop))
                 log.info("learning: %s", self._learning_server.app.url)
             except (OSError, ValueError):
                 log.exception("learning: could not start the local workspace")
@@ -619,9 +634,10 @@ class Daemon:
             await asyncio.sleep(10.0)
             await self._resync_agent()
 
-    async def _converse(self) -> None:
+    async def _converse(self, think_aloud: Optional[dict[str, Any]] = None) -> None:
         if self._ears is None:
             return
+        server = getattr(self, "_learning_server", None)
         mic = self._ears.subscribe()
         keepalive = asyncio.create_task(self._agent_keepalive(), name="agent-keepalive")
         # What buddy remembers of talking with the owner (recall.py). Read here
@@ -640,9 +656,15 @@ class Daemon:
                                            thinker=self._thinker, memory=memory,
                                            on_closed=self._remember_conversation,
                                            on_star=self._star_by_voice,
-                                           learning=self._learning_server.app.voice if getattr(self, "_learning_server", None) else None)
+                                           learning=server.app.voice if server is not None else None,
+                                           think_aloud=think_aloud,
+                                           on_spoken_idea=server.app.append_spoken if server is not None else None,
+                                           on_think_aloud=lambda on, lesson_id: Daemon._on_think_aloud(
+                                               self, on, lesson_id),
+                                           on_open=lambda session: Daemon._on_voice_session(self, session))
         except asyncio.CancelledError:
             self._explore_after_conversation = None      # hushed: stay put
+            self._think_aloud_wish = None                # a hush or a stop cancels a pending listen too
             raise
         except Exception as e:  # noqa: BLE001
             log.warning("voice: conversation failed: %s: %s", type(e).__name__, e)
@@ -650,8 +672,16 @@ class Daemon:
         finally:
             keepalive.cancel()
             await asyncio.gather(keepalive, return_exceptions=True)
-            self._ears.unsubscribe(mic)
+            self._ears.unsubscribe(mic)                  # the microphone stops reaching the session here
+            self._voice_session = None
+            if getattr(self, "_think_aloud_state", "off") != "off":
+                Daemon._on_think_aloud(self, False, None)
             self._on_agent_state("idle")
+            wish = getattr(self, "_think_aloud_wish", None)
+            if wish is not None and not self._shutdown.is_set():
+                # Listening was asked for while this conversation was closing: open it now.
+                self._think_aloud_wish = None
+                self._start_think_aloud_conversation(wish)
             # Last, and on every exit path including a hush: the conversation
             # happened, so the next one can say how long ago it was.
             recall_mod.note_conversation_time(self._recall_cfg)
@@ -743,6 +773,111 @@ class Daemon:
         if self._conversation is None or self._conversation.done():
             self._on_agent_state("idle")
 
+    # ---- think out loud ----
+
+    def _make_listener(self, loop: asyncio.AbstractEventLoop) -> Any:
+        """The learning server's handle on buddy's microphone (LearningApp.listener).
+
+        start() and stop() are called on the server's worker threads (an HTTP request, or run_lesson
+        in asyncio.to_thread). They hand the change to the event loop, which owns every piece of
+        think-aloud state, so the browser toggle, `cc-buddy-bridge lesson` and the voice tool cannot
+        race each other. status() only reads."""
+        daemon = self
+
+        def call(make: Any) -> dict[str, Any]:
+            try:
+                on_loop = asyncio.get_running_loop() is loop
+            except RuntimeError:
+                on_loop = False
+            if on_loop:
+                raise RuntimeError("the think-out-loud listener blocks; call it from a worker thread")
+            future = asyncio.run_coroutine_threadsafe(make(), loop)
+            try:
+                return future.result(timeout=THINK_ALOUD_CALL_SECS)
+            except TimeoutError:
+                future.cancel()
+                return {"ok": False, "reason": "buddy did not answer in time. Try again."}
+            except Exception as e:  # noqa: BLE001
+                log.warning("think aloud: request failed (%s)", type(e).__name__)
+                return {"ok": False, "reason": "Something went wrong. Try again."}
+
+        class Listener:
+            def start(self, lesson: dict[str, Any]) -> dict[str, Any]:
+                return call(lambda: daemon._think_aloud_start(lesson))
+
+            def stop(self) -> dict[str, Any]:
+                return call(daemon._think_aloud_stop)
+
+            def status(self) -> dict[str, Any]:
+                return {"state": daemon._think_aloud_state, "lesson_id": daemon._think_aloud_lesson_id}
+
+        return Listener()
+
+    async def _think_aloud_start(self, lesson: dict[str, Any]) -> dict[str, Any]:
+        """Listen while the learner thinks out loud. Idempotent; never opens a second conversation."""
+        if self._ears is None:
+            return {"ok": False, "reason": "buddy's microphone is off (CC_BUDDY_VOICE=0, or no microphone "
+                                           "was found), so buddy cannot listen."}
+        if not (os.environ.get("OPENAI_API_KEY") or "").strip():
+            return {"ok": False, "reason": "buddy cannot listen yet: its voice needs OPENAI_API_KEY in "
+                                           "~/.config/cc-buddy-bridge/env."}
+        self._note_activity()
+        session = self._voice_session
+        talking = self._conversation is not None and not self._conversation.done()
+        entered = False
+        if talking and session is not None and not session.ended:
+            # A conversation is open (the wake word, or listening already): it switches, no second session.
+            result = await session.enter_think_aloud(lesson)
+            entered = bool(result.get("ok"))
+            if not entered and not session.ended:
+                log.info("think aloud: start -> ok=False")
+                return {"ok": False, "reason": result.get("reason") or "buddy cannot listen right now."}
+        if not entered and talking:
+            # Still connecting (on_open applies it) or closing (_converse opens a new one after it).
+            self._think_aloud_wish = lesson
+            if self._think_aloud_state == "off":
+                self._think_aloud_state, self._think_aloud_lesson_id = "starting", str(lesson.get("id"))
+        elif not entered:
+            self._start_think_aloud_conversation(lesson)
+        log.info("think aloud: start -> ok=True (%s)", self._think_aloud_state)
+        return {"ok": True, "answer": "I'm listening. Think out loud whenever you're ready."}
+
+    async def _think_aloud_stop(self) -> dict[str, Any]:
+        """Stop listening now: the toggle, the command, or the voice tool outside a listening session."""
+        was = self._think_aloud_state
+        self._think_aloud_wish = None
+        session = self._voice_session
+        conversation = self._conversation
+        if session is not None and session.think_aloud_lesson_id is not None:
+            session.stop_think_aloud("stopped")
+        elif (conversation is not None and not conversation.done() and session is None
+              and conversation.get_name() == THINK_ALOUD_TASK):
+            conversation.cancel()               # still connecting for listening: nothing to say goodbye to
+        if was != "off":
+            self._on_think_aloud(False, None)
+        log.info("think aloud: stop -> ok=True (was %s)", was)
+        return {"ok": True, "answer": "Okay, I stopped listening." if was != "off" else "buddy was not listening."}
+
+    def _start_think_aloud_conversation(self, lesson: dict[str, Any]) -> None:
+        """Open a conversation for listening, without the wake word."""
+        self._think_aloud_state, self._think_aloud_lesson_id = "starting", str(lesson.get("id"))
+        asyncio.create_task(self._dismiss_explore("think out loud"))
+        self._conversation = asyncio.create_task(self._converse(think_aloud=lesson), name=THINK_ALOUD_TASK)
+
+    def _on_voice_session(self, session: Any) -> None:
+        """open_session connected: remember the session, and hand it a listen asked for while connecting."""
+        self._voice_session = session
+        wish, self._think_aloud_wish = getattr(self, "_think_aloud_wish", None), None
+        if wish is not None:
+            session.prepare_think_aloud(wish)
+
+    def _on_think_aloud(self, on: bool, lesson_id: Optional[str]) -> None:
+        """The session started or stopped listening. The web page polls this state."""
+        self._think_aloud_state = "on" if on else "off"
+        self._think_aloud_lesson_id = lesson_id if on else None
+        log.info("think aloud: %s", "listening" if on else "off")
+        Daemon._sync_listen_pose(self)
+
     def _on_caption(self, msg: dict) -> None:
         """One page of buddy's reply (or a clear) onto the robot's screen; the pager owns the timing.
         Muted, the page goes without its talk chirp (older firmware has no sound command)."""
@@ -758,6 +893,21 @@ class Daemon:
         log.info("agent: %s", state)
         if self.ble.connected:
             asyncio.create_task(self.ble.send({"cmd": "agent", "state": state}))
+        Daemon._sync_listen_pose(self)   # by class: test stubs bind only the handlers they exercise
+
+    def _sync_listen_pose(self) -> None:
+        """The board's listening pose (face the learner, solid blue "mic is live" LEDs).
+
+        Raised while the dictation key is held, or while buddy listens to a learner thinking out loud.
+        The pose pins the head and overrides the phase LEDs, so it is lowered while buddy thinks or
+        speaks: the robot acts those out like any conversation, then shows listening again."""
+        listening = getattr(self, "_think_aloud_state", "off") == "on" and getattr(
+            self, "_agent_state", "idle") not in ("thinking", "speaking", "working", "error", "done")
+        want = bool(getattr(self, "_listen_down", False)) or listening
+        if not self.ble.connected or want == getattr(self, "_listen_sent", None):
+            return
+        self._listen_sent = want
+        asyncio.create_task(self.ble.send({"cmd": "listen", "on": want}))
 
     # ---- idle explorer ----
 
@@ -946,10 +1096,8 @@ class Daemon:
         log.info("listen key: %s", "down" if on else "up")
         self._listen_down = on
         self._note_activity()
-        if not self.ble.connected or on == self._listen_sent:
-            return
-        self._listen_sent = on
-        asyncio.create_task(self.ble.send({"cmd": "listen", "on": on}))
+        # Releasing the key while buddy listens to a learner keeps the pose up.
+        Daemon._sync_listen_pose(self)   # by class: test stubs bind only the handlers they exercise
 
     async def _reset_listen(self) -> None:
         """Board (re)connected or rebooted: tell it the key is up. Its listen
@@ -957,6 +1105,8 @@ class Daemon:
         pose stuck until the next key press."""
         await self.ble.send({"cmd": "listen", "on": False})
         self._listen_sent = False
+        if getattr(self, "_think_aloud_state", "off") == "on":
+            Daemon._sync_listen_pose(self)   # buddy is listening to a learner: raise the pose again
 
     async def _update_check_loop(self) -> None:
         """Poll GitHub releases once at startup, then every 24 hours.
@@ -1026,7 +1176,9 @@ class Daemon:
             return {**result, "ok": False, "action": action, "reason": reason, "error": reason}
         # dispatch's notify callback is queued on the loop from the worker thread before to_thread's
         # completion, so it has run by now. open, ideas and help-mode start never notify: show those here.
-        if getattr(self, "_learning_notices", 0) == before and action != "status":
+        # listen and stop-listening show the listening pose instead of a caption over the new session.
+        if (getattr(self, "_learning_notices", 0) == before and action != "status"
+                and action not in LISTEN_ACTIONS):
             stage = (result.get("lesson") or {}).get("stage") or ""
             self._learning_notice(result.get("answer") or "", stage)
         return {**result, "ok": True, "action": action}

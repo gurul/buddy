@@ -52,7 +52,8 @@ microphone/wake-word setup, and a working voice API configuration.
 `cc-buddy-bridge lesson <action>` sends one lesson action to the running daemon.
 It uses the same code path as the `math_lesson` voice tool, so the whiteboard,
 the saved lesson, and the robot stay in sync. The actions are `open`, `start`,
-`ideas`, `hint`, `check`, `step`, `status`, `recap`, and `end`.
+`ideas`, `hint`, `check`, `step`, `status`, `recap`, `end`, `listen`, and
+`stop-listening` (see [Think out loud](#think-out-loud)).
 
 ```bash
 cc-buddy-bridge lesson open
@@ -93,6 +94,75 @@ What happens:
 
 `cc-buddy-bridge learning` is a different command. It starts the whiteboard
 server and opens the browser without the daemon or the robot.
+
+## Think out loud
+
+A learner can talk through a problem, or ask questions in their own words.
+buddy listens and gives short feedback on the robot's screen.
+
+### Start and stop listening
+
+A lesson must be open, with its problem ready (stage "In progress" or
+"Completed"). If not, buddy says what to do first.
+
+| Way | Start | Stop |
+| --- | --- | --- |
+| Voice, in a buddy conversation | "Can I think out loud?", "Let me talk it through" | "I'm done", "stop listening", "bye" |
+| Web app, lesson page | **◉ Think out loud** | **■ Stop listening** (the same button) |
+| Terminal | `cc-buddy-bridge lesson listen` | `cc-buddy-bridge lesson stop-listening` |
+
+All three use the same `listen` and `stop-listening` lesson actions. Pressing
+start twice, or starting by voice while the button is on, does not open a
+second session.
+
+Listening also stops:
+
+- after about 60 seconds with nothing said,
+- at the conversation cap (10 minutes, the same cap as every conversation),
+- when a touch on the robot hushes it.
+
+The toggle needs the robot app (the daemon). `cc-buddy-bridge learning` runs
+the web app by itself. There, the button is off and the page says that the
+robot app is not running.
+
+### What buddy does
+
+- No wake word is needed. Starting opens a normal buddy conversation that
+  waits through thinking pauses.
+- If a "hey buddy" conversation is already open, it switches to listening.
+- buddy mostly listens. At a pause it says one or two short sentences: some
+  encouragement, a guiding question, or where the first slip is.
+- Questions get hints. buddy never says the final answer and never does a step,
+  unless the learner asks to see one step. That step goes through the lesson,
+  so it shows on the whiteboard.
+- Each thing the learner says is added to the end of their ideas. Typed ideas
+  are never replaced. If the learner types while buddy saves a line, the save
+  keeps both.
+- While listening, buddy does not run computer tasks, explore, or remember the
+  conversation in its chat memory.
+- The robot shows the listening pose with solid blue lights while it listens. It
+  drops the pose to act out thinking and speaking, then shows it again.
+- The web app shows a **buddy is listening** badge in the page header and the
+  lesson panel for the whole time. It checks the state every 1.5 seconds.
+
+The listening rules and the lesson (problem, stage, ideas, buddy's steps) are
+in `bridge/src/cc_buddy_bridge/learning/think_aloud.py`. A session opened for
+listening gets them in its start instructions. A conversation that switches
+gets them as silent context, and the backend gets them through
+`session.update`, because the voice instructions cannot change after start.
+
+### Privacy
+
+- The microphone audio goes to the voice session only while listening (or a
+  "hey buddy" conversation) is on. Stopping closes the session.
+- No audio is saved.
+- The learner's words are saved only into their lesson's ideas, on this
+  computer. They are not written to logs or to buddy's chat memory.
+- Logs record the action and whether it worked (for example
+  `lesson: listen -> ok=True`, `voice: spoken idea saved ok=True`).
+- Separately, the "hey buddy" wake-word detector runs on this computer all the
+  time while voice is on (`CC_BUDDY_VOICE=0` turns it off, and think out loud
+  with it). It sends nothing anywhere until it hears its name.
 
 ### Tutor provider: OpenAI by default, OpenRouter opt-in
 
@@ -170,7 +240,7 @@ its existing OpenAI configuration. Browser Read aloud remains available.
    change topic, or end. A lesson can be ended at any stage and resumed later.
 
 The voice tool supports open, start, ideas, hint, check, step, status, recap,
-and end. Selecting a lesson in the browser makes it the voice tool's active
+end, listen, and stop-listening. Selecting a lesson in the browser makes it the voice tool's active
 lesson. The browser polls saved revisions to display voice-originated updates.
 The optional browser **Read aloud** control uses the operating system/browser
 speech synthesizer; it is labelled separately from the robot's existing voice.
@@ -219,6 +289,11 @@ failure recovery, lesson lifecycle, voice delegation, and local HTTP request
 boundaries. `bridge/tests/test_learning_search.py` covers Exa search and env-file
 loading. `bridge/tests/test_daemon_lesson.py` covers `cc-buddy-bridge lesson` and
 the daemon's IPC handler. Voice tests cover the tool through the existing connection.
+`bridge/tests/test_learning_think_aloud.py` covers think out loud on the learning
+side (actions, the browser toggle, the standalone answer, spoken ideas that
+append, the listening instructions). The think-out-loud tests at the end of
+`test_voice_agent.py` and `test_daemon_lesson.py` cover the session (silence
+stop, cap, saved and unlogged words) and the daemon (IPC, races, robot pose).
 
 ```powershell
 python -m pytest bridge/tests/test_learning.py bridge/tests/test_learning_search.py bridge/tests/test_voice_agent.py bridge/tests/test_daemon_lesson.py -q

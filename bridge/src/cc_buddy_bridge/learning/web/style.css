@@ -723,7 +723,45 @@ p.small.supervise { display: block; margin: 0; }
   .problem-strip strong { font-size: 22px; }
 }
 
+/* ---------- Think out loud ---------- */
+/* The toggle is one of the chunky help buttons; pressed, it inks over like a selected tool. */
+.listen-box { display: grid; gap: 6px; }
+.help--listen { background: var(--sky); }
+.help--listen[aria-pressed="true"] { background: var(--ink); color: var(--sheet); box-shadow: 4px 4px 0 var(--pink); }
+.help--listen[aria-pressed="true"]:hover:not(:disabled) { box-shadow: 5px 5px 0 var(--pink); }
+.listen-note { margin: 0; color: var(--ink-soft); }
+/* "buddy is listening": the robot's own screen colours, so it reads as buddy, not as a warning. */
+.listen-banner,
+.listen-pill {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  background: var(--screen);
+  color: var(--sheet);
+  border: 2.5px solid var(--ink);
+  font: 700 16px/1.2 var(--body);
+}
+.listen-banner { display: flex; margin: 0; padding: 10px 18px; border-width: 0 0 2.5px; font-size: 18px; }
+.listen-pill { padding: 4px 12px; border-radius: 999px; box-shadow: 2px 2px 0 var(--pink); margin-right: 12px; }
+.listen-pill:not(.listen-pill--on) { background: var(--sheet); color: var(--ink); }
+.listen-banner.hidden, .listen-pill.hidden { display: none !important; }
+.listen-dot {
+  width: 12px;
+  height: 12px;
+  flex: none;
+  border-radius: 50%;
+  background: var(--screen-eye);
+  box-shadow: 0 0 0 3px rgba(255, 116, 212, .35);
+  animation: listen-pulse 1.4s ease-in-out infinite;
+}
+.listen-pill:not(.listen-pill--on) .listen-dot { background: var(--sun); box-shadow: none; }
+@keyframes listen-pulse {
+  0%, 100% { box-shadow: 0 0 0 2px rgba(255, 116, 212, .45); }
+  50% { box-shadow: 0 0 0 7px rgba(255, 116, 212, 0); }
+}
+
 @media (prefers-reduced-motion: reduce) {
   button, #dashboard-link { transition: none; }
   button:hover, button:active, #dashboard-link:hover, #dashboard-link:active { transform: none !important; }
+  .listen-dot { animation: none; }
 }

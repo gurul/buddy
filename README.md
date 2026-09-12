@@ -117,7 +117,7 @@ one next step at a time. Whiteboard revisions and tutor explanations are saved
 to a searchable dashboard, linked from the macOS widget. The existing voice
 agent launches and controls lessons with `math_lesson`, and
 `cc-buddy-bridge lesson <action>` (`open`, `start`, `ideas`, `hint`, `check`,
-`step`, `status`, `recap`, `end`) drives the same lesson from a terminal while
+`step`, `status`, `recap`, `end`, `listen`, `stop-listening`) drives the same lesson from a terminal while
 the daemon runs.
 
 Try the offline browser demo from this repository (Python 3.11+):
