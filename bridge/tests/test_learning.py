@@ -14,7 +14,7 @@ from cc_buddy_bridge.learning.tutor import LiveTutor, live_settings, validate
 
 @pytest.fixture(autouse=True)
 def isolated_tutor_environment(monkeypatch):
-    for key in ("CC_BUDDY_LEARNING_PROVIDER", "CC_BUDDY_LEARNING_MODEL", "OPENROUTER_API_KEY", "OPENAI_API_KEY"):
+    for key in ("CC_BUDDY_LEARNING_PROVIDER", "CC_BUDDY_LEARNING_MODEL", "OPENROUTER_API_KEY", "OPENAI_API_KEY", "EXA_API_KEY"):
         monkeypatch.delenv(key, raising=False)
 
 

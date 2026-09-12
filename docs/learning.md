@@ -232,3 +232,28 @@ arguments. In WSL, `pgrep -af start_learning.py` identifies standalone launchers
 Do not terminate WSL itself or unrelated processes. The launcher now reports
 an occupied port with this guidance and exits with status 2 instead of showing
 a traceback. `--port 48768` can launch a separate instance when intended.
+
+
+### Exa practice references
+
+Add `EXA_API_KEY=your-exa-key` to the same bridge environment file and restart
+the service. No additional Python packages are required. Live lesson generation
+searches Exa once for the topic and level, then asks the configured tutor to
+create one original adapted problem from relevant references. Help with an
+existing problem, checks, hints, and steps do not trigger searches. Demo mode
+makes no search requests.
+
+The integration uses [Exa Search](https://exa.ai/docs/reference/search), with
+three results, moderation enabled, and educational sources: Khan Academy,
+OpenStax, Math Is Fun, MIT OpenCourseWare, and Paul's Online Math Notes.
+Only topic and level are sent to Exa; learner work and images are not sent.
+Retrieved text is treated as untrusted reference material. Search cannot
+independently verify mathematical correctness or guarantee an appropriate result.
+
+The lesson feedback shows the search outcome and expandable reference links
+(which may lead to pages containing answers). Links are saved in lesson events
+and remain available when reopening a lesson from the widget/dashboard. These
+are search references, not a claim that a particular exercise was copied from
+a page. Raw retrieved text is not saved. Missing keys, empty results, and search
+errors fall back to ordinary problem generation with a visible explanation.
+The tutor API key is still required; Exa uses its own account and credits.
