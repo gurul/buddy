@@ -184,6 +184,96 @@ HEARD IT at 1.4 s — ears are working.
 | `CC_BUDDY_AGENT_VERIFY_REASONING` | `low` | reasoning effort for that check |
 | `CC_BUDDY_AGENT_RUNS_DIR` | `~/.config/cc-buddy-bridge/agent-runs` | one JSONL action log per task: goal, every code block, text results, questions, answers, final line — never the screenshots |
 
+## What buddy remembers of talking with you
+
+Every conversation used to start from nothing. Now it does not.
+
+```
+a conversation closes
+  └─ chat_memory.py distils the turns held in RAM into one short note
+       ~/.config/cc-buddy-bridge/debrief/sessions/<day>/<HHMM>-<id>.md   status: machine-draft
+       └─ buddy's own day pass, every 30 min, aggregates a finished day
+            <day>-<slug>.md  +  a row in INDEX.md
+a conversation opens
+  └─ recall.py reads the gap and one carried-over line, into the session prompt
+```
+
+- **The transcript is never written to disk.** The words go to a small model and a
+  few lines come back. That was the owner's choice: distilled memories only.
+- **The gap comes from one integer** in `notes/last_conversation`. "Been a day."
+  costs no model call, no index and no network.
+- **The best thing buddy can open with is a debt of its own.** The distiller records
+  what it failed to answer as `buddy owes …`, and the reader prefers those lines over
+  anything else, so the next morning sounds like *"I still owe you an answer about
+  the right servo"* rather than a summary of you.
+- **buddy runs its own day pass.** In the owner's claude-debrief system a human
+  curates; buddy's store is its own system and curates itself (owner instruction
+  2026-09-11). What it will not do is **star**: a highlight is permanent, so buddy
+  only proposes a `★ (candidate)` line.
+- **Starring is by voice.** Say *"remember that"*, *"don't forget that"*, *"keep that
+  in mind"* and the claim from the previous turn goes into
+  `debrief/HIGHLIGHTS.md` under `## From talking`, dated. It is anaphoric on purpose:
+  the claim is in the turn before, not in the words "remember that". Two independent
+  paths catch it — a phrase table and the classifier — so it does not depend on the
+  model choosing a tool. "I remember that" and "remember when you said that?"
+  promote nothing.
+- **A conversation two minutes after the last one gets no time clause**, because to a
+  person that is one conversation.
+- **Silence is the right answer when there is nothing.** An empty store means the
+  session prompt is byte-identical to before, so the first ever conversation sounds
+  exactly as it always did. buddy never announces that it has no memories.
+- **All of it is visible in the widget**, under Talking —
+  [widget.md](widget.md#the-two-provenances).
+
+Knobs: `CC_BUDDY_DEBRIEF_DIR` (the store), `CC_BUDDY_CHAT_MEMORY_MODEL` (the
+distiller, default `gpt-5.4-nano`). No key means buddy talks and remembers nothing,
+and says so once in the log.
+
+## Taking notes on the room
+
+Say **"start taking notes"** and buddy stops being a conversationalist and becomes a
+recorder. Say **"stop taking notes"**, tap it, or run `cc-buddy-bridge take-notes stop`,
+and it writes the meeting up.
+
+```
+"start taking notes"
+  └─ the conversation closes (the recorder needs the microphone)
+       └─ notes.py subscribes to the same 24 kHz stream ears.py already runs
+            12 s segments ─▶ gpt-4o-mini-transcribe ─▶ a running transcript
+            each segment's tail primes the next, so names stay spelled the same
+"stop taking notes"  (or a tap, or the command)
+  └─ one summary call ─▶ ~/.config/cc-buddy-bridge/debrief/notes/<day>/<HHMM>-<slug>.md
+       the write-up AND the full transcript, stamped by minute
+```
+
+**Why 12-second segments.** While anything is subscribed to the microphone the wake
+word is bypassed (`ears._on_block`: *"muted: never wake on our own voice"*), so buddy
+cannot hear its own name while recording and learns to stop only by reading its own
+transcript. The segment length is therefore the stop latency. Two stops have none: the
+command, and a tap on the robot.
+
+**What is kept.** The write-up — gist, points, decisions, actions, open questions, and
+what it could not make out — **and the full transcript**, because the point of notes on a
+meeting is being able to go back to the words. That is the opposite of the rule for
+conversations, where only the distillation is kept, and it is deliberate: a conversation
+is remembered, a meeting is recorded. `CC_BUDDY_NOTES_KEEP_TRANSCRIPT=0` drops the
+transcript.
+
+**Ordering.** Segments are transcribed one at a time by a single worker. Transcribing
+them concurrently scrambles the transcript, because a slow segment lands after the one
+that followed it, and it leaves every context prompt empty.
+
+**Reading them back.** They are in the widget under **Notes**, each with *Open*, *Save a
+copy…* and *Show in Finder* — the save is a copy, so nothing moves out from under
+anything that links to it. From the shell, `cc-buddy-bridge take-notes list`.
+
+| Variable | Default | Purpose |
+|---|---|---|
+| `CC_BUDDY_NOTES_SEGMENT_SECS` | `12` | segment length, which is also the spoken-stop latency (4-60) |
+| `CC_BUDDY_NOTES_MAX_MINUTES` | `180` | a recording stops itself here even if nobody does |
+| `CC_BUDDY_NOTES_KEEP_TRANSCRIPT` | on | `0` writes the summary only |
+| `CC_BUDDY_NOTES_MODEL_STT` | `gpt-4o-mini-transcribe` | the transcription model |
+
 ## Safety
 
 The task runs on your real desktop, so the guard rails are real too:

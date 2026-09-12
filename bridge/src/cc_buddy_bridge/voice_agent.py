@@ -78,7 +78,7 @@ from typing import Any, Awaitable, Callable, Optional
 from . import head as head_mod
 from .caption_pager import CaptionPager, Event, PagerConfig, caption_instructions
 from .computer_agent import AgentConfig, AgentEvent, ComputerAgent
-from .intent import LEAVE, LOOK, MUTE, UNMUTE, fast_intent
+from .intent import LEAVE, LOOK, MUTE, REMEMBER, UNMUTE, fast_intent
 
 log = logging.getLogger(__name__)
 
@@ -190,6 +190,32 @@ never started as a task, even if an app could show the answer.
 
 Return at most one short sentence, except a think_hard answer, which may be three. Never invent a result
 you did not get from a tool."""
+
+# What buddy remembers of talking with its owner, folded into the session prompt
+# (recall.py). Empty when there is nothing to carry over, and then the
+# instructions string is byte-identical to a session with no memory at all — so
+# the first ever conversation cannot sound like a robot apologising for having
+# none. The rules matter more than the content: a memory is a clause, not a
+# recital, and buddy must not ask the owner to confirm its own memory.
+MEMORY_HEADER = """
+
+You remember your last conversations with your owner. Here is what you have:"""
+
+MEMORY_RULES = """
+Use it the way a person would. Mention the gap only if it is worth mentioning, in your own words, as part
+of your greeting — never as a separate announcement. You may bring up one open thing, once, if it fits what
+they are saying now. Anything you attribute to them is what they said, not what you saw. Never read this
+back as a list, never say more than one clause about it, never ask them to confirm it, and never mention
+having or not having memories. If none of it fits, say nothing about it at all."""
+
+
+def memory_block(memory: str) -> str:
+    """The memory paragraph for the session prompt, or "" when there is none."""
+    text = (memory or "").strip()
+    if not text:
+        return ""
+    return MEMORY_HEADER + "\n" + text + MEMORY_RULES
+
 
 TOOLS: list[dict[str, Any]] = [
     {"type": "function", "name": "start_task",
@@ -311,7 +337,7 @@ def configured(environ: Any = None) -> VoiceConfig:
                        idle_timeout_secs=idle, output=out, caption_cps=cps, web_search=web)
 
 
-def session_config(config: VoiceConfig) -> dict[str, Any]:
+def session_config(config: VoiceConfig, memory: str = "") -> dict[str, Any]:
     """The `session.start` payload (Live API, openai 3.13).
 
     There is no `output_modalities` and no turn-detection block: gpt-live-1 is
@@ -321,8 +347,9 @@ def session_config(config: VoiceConfig) -> dict[str, Any]:
     captions = config.output == "captions"
     return {
         "model": config.model,
-        "instructions": INSTRUCTIONS + (caption_instructions(PagerConfig(read_cps=config.caption_cps))
-                                        if captions else ""),
+        "instructions": INSTRUCTIONS + memory_block(memory)
+                        + (caption_instructions(PagerConfig(read_cps=config.caption_cps))
+                           if captions else ""),
         "audio": {
             "format": {"type": "audio/pcm", "rate": SAMPLE_RATE},
             "output": {"voice": config.voice},
@@ -493,6 +520,8 @@ class VoiceSession:
         on_sound: Optional[Callable[[bool], None]] = None,  # the owner muted (False) / unmuted (True)
         muted: Callable[[], bool] = lambda: False,
         thinker: Optional[Callable[[str], Awaitable[dict[str, Any]]]] = None,   # think.make_thinker(...)
+        memory: str = "",                                   # recall.opening_brief(...)
+        on_star: Optional[Callable[[str], Optional[str]]] = None,   # chat_memory.star(...)
     ) -> None:
         self.conn = connection
         self.scene = scene
@@ -523,6 +552,15 @@ class VoiceSession:
         self.agent_factory = agent_factory
         self.on_state = on_state
         self.config = config or VoiceConfig()
+        self.memory = memory
+        # Both sides of the conversation, in order, held in RAM only. chat_memory.py
+        # distils this into a few lines when the session closes; the words
+        # themselves are never written to disk (owner choice, 2026-09-11).
+        self.turns: list[tuple[str, str]] = []
+        # Promoting something to the permanent layer, by voice. In the owner's
+        # memory system only a human may star, and out loud is how the owner does
+        # it — nothing about this goes through a terminal.
+        self.on_star = on_star
         self.agent_config = agent_config or AgentConfig()
         self._clock = clock
         # Captions: the pager decides which page is up and for how long; the
@@ -572,7 +610,7 @@ class VoiceSession:
     async def run(self) -> None:
         self._set("wake")
         self._started_at = self._last_activity = self._clock()
-        await self.conn.session.start(session=session_config(self.config))
+        await self.conn.session.start(session=session_config(self.config, self.memory))
         await self._await_started()
         # A fixed greeting needs no backend round-trip: commentary is context the
         # Live model speaks itself.
@@ -856,6 +894,8 @@ class VoiceSession:
     def _close_turn(self, who: str, text: str) -> None:
         if not text:
             return
+        if who in ("user", "assistant"):
+            self.turns.append((who, text))
         if who == "user":
             self._on_user_turn(text)
             return
@@ -1072,6 +1112,47 @@ class VoiceSession:
             self._set_sound(True, how)
         elif label == LOOK:
             self._bg(self._route_look(text, self._user_turn_started_at))
+        elif label == REMEMBER:
+            self._remember(self._last_substantive_turn(text))
+
+    def _last_substantive_turn(self, said: str) -> str:
+        """What "remember that" points at.
+
+        It is anaphoric: the claim is in the previous turn, not in the words
+        "remember that". The owner's own last turn is preferred — it is their
+        claim about themselves — and buddy's last line is the fallback, for
+        "that's interesting, remember that".
+        """
+        phrase = " ".join(said.lower().split())
+        for who in ("user", "assistant"):
+            for turn_who, text in reversed(self.turns):
+                body = " ".join(str(text).split())
+                if turn_who != who or not body:
+                    continue
+                if body.lower() == phrase or len(body) < 8:
+                    continue
+                return body
+        return ""
+
+    def _remember(self, claim: str) -> None:
+        """Star it, and say so in one clause. Silence would look like it failed."""
+        if self.on_star is None:
+            return
+        if not claim:
+            self._bg(self._quiet("[memory] They asked you to remember something, but nothing was said before "
+                                 "it that you could keep. Ask what you should remember, in one short line."))
+            return
+        try:
+            kept = self.on_star(claim)
+        except Exception:  # noqa: BLE001
+            log.exception("voice: could not star it")
+            kept = None
+        if kept:
+            log.info("voice: starred %r", kept[:80])
+            self._bg(self._quiet("[memory] You have written that down for good. Tell them you will remember "
+                                 "it, in three or four words. Do not repeat it back to them."))
+        else:
+            self._bg(self._quiet("[memory] You could not write it down. Say so in one short line, plainly."))
 
     async def _route_look(self, text: str, turn_started_at: float) -> None:
         """Hand a head request to the backend unless the voice already delegated this
@@ -1239,6 +1320,9 @@ async def open_session(
     on_sound: Optional[Callable[[bool], None]] = None,
     muted: Callable[[], bool] = lambda: False,
     thinker: Optional[Callable[[str], Awaitable[dict[str, Any]]]] = None,
+    memory: str = "",
+    on_closed: Optional[Callable[[list[tuple[str, str]]], None]] = None,
+    on_star: Optional[Callable[[str], Optional[str]]] = None,
 ) -> None:
     """Run one full conversation on the real Live API — captions to the robot,
     or the real speaker in audio mode."""
@@ -1253,7 +1337,17 @@ async def open_session(
             session = VoiceSession(conn, mic, speaker, agent_factory, on_state, config=cfg,
                                    agent_enabled=agent_enabled, on_caption=on_caption,
                                    on_explore=on_explore, scene=scene, head=head, intent=intent,
-                                   on_sound=on_sound, muted=muted, thinker=thinker)
-            await session.run()
+                                   on_sound=on_sound, muted=muted, thinker=thinker,
+                                   memory=memory, on_star=on_star)
+            try:
+                await session.run()
+            finally:
+                # Hand the conversation to whoever wants to remember it, on every
+                # exit path including a hush and an exception.
+                if on_closed is not None:
+                    try:
+                        on_closed(list(session.turns))
+                    except Exception:  # noqa: BLE001
+                        log.exception("voice: on_closed failed")
     finally:
         speaker.close()

@@ -4,6 +4,7 @@
 #include <stdarg.h>
 #include "ble_bridge.h"
 #include "data.h"
+#include "hostlook.h"
 #include "buddy.h"
 
 // Parent must come from halDisplay(), not &M5.Lcd: M5.Lcd is a reference
@@ -31,6 +32,7 @@ static void startBt() {
 #include "face.h"
 #include "ticks.h"
 #include "body.h"
+#include "motion.h"
 #include "eyes.h"
 #include "chirp.h"
 #include "gaze.h"
@@ -613,6 +615,42 @@ void loop() {
       moodLogMs = now;
       Serial.printf("[mood] %s v=%.2f a=%.2f social=%.2f stim=%.2f\n", mood.expr.word, mood.v, mood.a,
                     mood.social, mood.stimulation);
+    }
+  }
+  // While a motion runs, report where the head actually is, ten times a second.
+  // Nothing else can: the camera frames that normally carry the pose are
+  // quarantined for the whole of a movement plus a settling window
+  // (look.cpp `quarantined`), which is exactly when the pose is interesting.
+  // One short line, ~40 bytes, only while moving.
+  {
+    static uint32_t lastPoseMs = 0;
+    static bool wasMoving = false;
+    const bool moving = bodyMotionRunning();
+    if (moving && now - lastPoseMs >= 100) {
+      lastPoseMs = now;
+      Serial.printf("{\"pose\":{\"y\":%d,\"p\":%d}}\n",
+                    bodyCmdYawTenths(), bodyCmdPitchTenths());
+    }
+    if (wasMoving && !moving) {      // one last sample so the end of the bout is recorded
+      Serial.printf("{\"pose\":{\"y\":%d,\"p\":%d,\"end\":true}}\n",
+                    bodyCmdYawTenths(), bodyCmdPitchTenths());
+    }
+    wasMoving = moving;
+  }
+
+  // A host motion is consumed BEFORE bodyUpdate so it takes the head in the
+  // same frame it arrived: the pose it asks for is streamed by this loop's own
+  // stepTween, not the next one's. Admission lives on the board (motion.h).
+  if (tama.moveReq) {
+    const uint8_t req = tama.moveReq;
+    tama.moveReq = 0;
+    if (req == 3) {
+      bodyStopMotion();
+      Serial.println("[body] motion stop");
+    } else if (hostlook::accepted(false, listenNow, tama.agentState != AG_IDLE, false, true)) {
+      uint32_t ms = (req == 1) ? bodyMotion(tama.moveOsc, tama.moveCentreHere)
+                               : bodyPlayKeys(tama.moveKeys, tama.moveNKeys);
+      Serial.printf("[body] motion %s ran=%ums\n", req == 1 ? "osc" : "keys", (unsigned)ms);
     }
   }
   bodyUpdate(activeState, baseState == P_ATTENTION, now);
