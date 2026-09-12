@@ -1,0 +1,287 @@
+{
+  "$schema": "https://opencode.ai/config.json",
+  "instructions": [
+    "AGENTS.md",
+    ".era/memory/constitution.md",
+    ".era/memory/DIRECTIVES.md",
+    "/Users/gurucharan/.era/era-code/guidance/era-engineering-ethos.md"
+  ],
+  // ============================================================
+  // AGENTS - Loaded from .opencode/agent/ directory
+  // ============================================================
+  // Available agents (defined in .opencode/agent/*.md):
+  //
+  // Primary agents (cycle with Tab key):
+  //   - plan                      → Strategic planning, creates docs/plans/ documents
+  //   - orchestration             → Main coding agent, coordinates implementation pipeline
+  //
+  // Planning & Architecture:
+  //   - requirements-analyst      → Translates business needs into structured requirements
+  //   - solutions-architect       → System design, trade-off analysis, ADRs
+  //   - task-decomposer           → Multi-repo task decomposition with dependency graphs
+  //
+  // Implementation:
+  //   - backend-developer         → Server-side: APIs, middleware, services
+  //   - frontend-developer        → UI: components, state management, interactions
+  //   - database-engineer         → Schema design, migrations, queries
+  //   - infrastructure-engineer   → Dockerfiles, K8s, CI/CD, IaC
+  //   - api-integrator            → Webhooks, SDK clients, service integration
+  //   - code-refactorer           → Code improvement without behavior change
+  //   - migration-engineer        → Technology/framework migration
+  //
+  // Build & Dependencies:
+  //   - ci-pipeline-engineer      → CI/CD pipeline design and optimization
+  //   - container-engineer        → Dockerfile optimization, image security
+  //   - dependency-analyst        → Dependency audit, CVE remediation
+  //
+  // Testing:
+  //   - unit-test-engineer        → Unit tests for functions, classes, modules
+  //   - integration-test-engineer → API tests, cross-service tests
+  //   - e2e-test-engineer         → End-to-end user flow tests
+  //   - performance-test-engineer → Load tests, benchmarks, profiling
+  //   - security-test-engineer    → OWASP scanning, secrets detection
+  //
+  // Review (all read-only, produce APPROVE/REJECT):
+  //   - correctness-reviewer      → Logic bugs, edge cases, error handling
+  //   - security-reviewer         → Security vulnerabilities, OWASP Top 10
+  //   - architecture-reviewer     → Pattern adherence, coupling, cohesion
+  //   - accessibility-reviewer    → WCAG compliance, keyboard navigation
+  //
+  // Release & Deploy:
+  //   - release-engineer          → Version bumps, changelogs, release notes
+  //   - rollout-strategist        → Deployment strategy, canary/blue-green
+  //   - ui-preview-generator      → Visual UI preview generation
+  //
+  // Operations:
+  //   - incident-analyst          → Bug investigation, root cause analysis
+  //   - runbook-author            → Operational runbook creation
+  //   - observability-engineer    → Metrics, logging, tracing instrumentation
+  //   - alerting-engineer         → Alert rules, notification routing
+  //
+  // Research & Documentation:
+  //   - technology-researcher     → Library docs, API research, comparisons
+  //   - codebase-explorer         → Codebase navigation, file discovery
+  //   - api-docs-writer           → OpenAPI specs, endpoint documentation
+  //   - developer-guide-author    → README, setup guides, architecture docs
+  //   - readme-generator          → README.md generation
+  //
+  // Engineer Personas (component-owning specialists with deep codebase knowledge):
+  //   - persona-agent-systems     → era-code-agent: orchestration, Redis Streams, HITL gates
+  //   - persona-platform-api      → era-code-manager: Hono API, Drizzle, K8s pods, JWT auth
+  //   - persona-ide-frontend      → era-code-ui: React 19, TanStack Query, xterm.js, Tailwind
+  //   - persona-governance-cli    → era-code-session: governance plugin, session container
+  //   - persona-codenomad         → era-nomos: Fastify, Solid.js, Electron, Tauri
+  //   - persona-ios               → gcp-auth-platform: SwiftUI, BLE, OAuth2, Hono API
+  //   - persona-infrastructure    → era-core-platform: Terraform, GKE, ArgoCD, Kustomize
+  //   - persona-cli-templates     → era-code: CLI, templates, governance engine
+  //
+  // Deprecated (route to specialists):
+  //   - coder       → orchestration delegates to implementation specialists
+  //   - reviewer    → orchestration delegates to review specialists
+  //   - test-writer → orchestration delegates to testing specialists
+  //   - debugger    → routes to incident-analyst
+  //   - explore     → routes to codebase-explorer
+  //   - researcher  → routes to technology-researcher
+  //   - docs-generator    → routes to developer-guide-author
+  //   - readme-generator  → routes to developer-guide-author
+  //
+  // Disable the built-in build agent (we use orchestration instead)
+  "agent": {
+    "build": {
+      "disable": true
+    },
+    // Plan agent: restricted to read-only operations.
+    // Prevents accidental code changes during planning phase.
+    "plan": {
+      "permission": {
+        "bash": {
+          "ls *": "allow",
+          "cat *": "allow",
+          "head *": "allow",
+          "tail *": "allow",
+          "wc *": "allow",
+          "file *": "allow",
+          "find *": "allow",
+          "tree *": "allow",
+          "grep *": "allow",
+          "rg *": "allow",
+          "git log*": "allow",
+          "git diff*": "allow",
+          "git status*": "allow",
+          "git show*": "allow",
+          "git branch*": "allow",
+          "git remote*": "allow",
+          "git rev-parse*": "allow",
+          "gh pr view*": "allow",
+          "gh pr list*": "allow",
+          "gh issue view*": "allow",
+          "gh issue list*": "allow",
+          "era-code *": "allow",
+          "kubectl get *": "allow",
+          "kubectl describe *": "allow",
+          "kubectl logs *": "allow",
+          "kubectl top *": "allow",
+          "gcloud *": "ask",
+          "*": "ask"
+        },
+        "edit": "deny"
+      }
+    }
+  },
+  // ============================================================
+  // COMMANDS - Loaded from .opencode/command/ directory
+  // ============================================================
+  // Available commands (defined in .opencode/command/*.md):
+  //
+  // Era governance commands:
+  //   /era-audit              → Run constitution compliance audit
+  //   /era-directives         → Create or update project directives
+  //   /era-bootstrap-directives → Bootstrap directives from codebase
+  //   /era-sync-directives    → Sync directives from main branch
+  //   /era-constitution-fix   → Fix constitution violations
+  //
+  // General commands:
+  //   /era-project-status → Get project status overview
+  //   /era-research       → Research using internal docs, external docs, or web
+  //   /era-readme         → Generate/update README.md
+  //   /era-plan           → Start collaborative planning session
+  //   /era-explore        → Explore codebase structure
+  //   /era-discover       → Map system architecture before proposing changes
+  //   /era-debug          → Apply systematic debugging methodology
+  //   /era-handover       → Generate context handover document
+  //
+  // ============================================================
+  // MCP SERVERS - Documentation and External Sources
+  
+    "mcp": {
+      "notion-docs-reader": {
+        "type": "local",
+        "command": [
+          "npx",
+          "-y",
+          "mcp-remote@0.1.38",
+          "https://mcp.notion.com/mcp"
+        ],
+        "enabled": true
+      },
+      "context7": {
+        "type": "local",
+        "command": [
+          "npx",
+          "-y",
+          "@upstash/context7-mcp"
+        ],
+        "enabled": true,
+        "environment": {
+          "CONTEXT7_API_KEY": "{env:CONTEXT7_API_KEY}"
+        }
+      },
+      "linear": {
+        "type": "local",
+        "command": [
+          "npx",
+          "-y",
+          "mcp-remote@0.1.38",
+          "https://mcp.linear.app/mcp",
+          "--header",
+          "Authorization:Bearer ${LINEAR_API_KEY}"
+        ],
+        "enabled": true,
+        "environment": {
+          "LINEAR_API_KEY": "{env:LINEAR_API_KEY}"
+        }
+      },
+      "slack": {
+        "type": "local",
+        "command": [
+          "npx",
+          "-y",
+          "mcp-remote@0.1.38",
+          "https://mcp.slack.com/mcp",
+          "3334",
+          "--static-oauth-client-info",
+          "@/Users/gurucharan/Library/Application Support/era-code/slack-oauth-client.json"
+        ],
+        "enabled": true
+      },
+      "exa-websearch": {
+        "type": "local",
+        "command": [
+          "npx",
+          "-y",
+          "@anthropic/exa-mcp-server"
+        ],
+        "enabled": false,
+        "environment": {
+          "EXA_API_KEY": "{env:EXA_API_KEY}"
+        }
+      },
+      "observability": {
+        "type": "local",
+        "command": [
+          "npx",
+          "-y",
+          "@era-laboratories/observability-mcp"
+        ],
+        "enabled": true,
+        "environment": {
+          "LOKI_URL": "{env:LOKI_URL}",
+          "KUBE_NAMESPACES": "{env:KUBE_NAMESPACES}",
+          "GCLOUD_PROJECT": "{env:GCLOUD_PROJECT}"
+        }
+      }
+    }
+  ,
+  // ============================================================
+
+  // ============================================================
+  // PERMISSIONS - Default behavior across all agents
+  // ============================================================
+  "permission": {
+    "read": {
+      "*": "allow",
+      // Block reading sensitive files
+      "*.env": "deny",
+      "*.env.*": "deny",
+      "*.env.local": "deny",
+      ".env.example": "allow",
+      "*.pem": "deny",
+      "*.key": "deny"
+    },
+    "edit": "ask",
+    "glob": "allow",
+    "grep": "allow",
+    "task": "allow",
+    "dispatch": "deny",
+    "external_directory": "ask",
+    "todowrite": "allow",
+    "todoread": "allow",
+    "webfetch": "allow",
+    "websearch": "allow",
+    "lsp": "allow",
+    "doom_loop": "ask",
+    // ============================================================
+    // BASH PERMISSIONS
+    // ============================================================
+    // Governance (deny rules) is handled by the era-governance plugin.
+    // This section only defines which commands are pre-approved.
+    // Commands not listed here will be allowed but subject to plugin governance.
+    //
+    // To override governance rules, edit .era/governance.yaml
+    "bash": "allow",
+    // Skill permissions - all skills allowed by default
+    "skill": {
+      "*": "allow"
+    }
+  },
+  // ============================================================
+  // OTHER CONFIGURATIONS
+  // ============================================================
+  "default_agent": "plan",
+  "compaction": {
+    "auto": true,
+    "prune": true
+  },
+  "logLevel": "INFO",
+  "autoupdate": true
+}
