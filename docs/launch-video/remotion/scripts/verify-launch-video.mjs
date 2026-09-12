@@ -18,7 +18,8 @@ const required = [
   ['gpt-5.4-nano', source.includes('gpt-5.4-nano')],
   ['Exa', source.includes('Exa')],
   ['teacher guardrail', source.includes('never on the menu')],
-  ['real robot image', existsSync(resolve(root, 'public/assets/hero.png'))],
+  ['robot drawing', source.includes('function Robot(')],
+  ['no old readme photo', !source.includes('hero.png')],
 ];
 
 const failures = required.filter(([, ok]) => !ok).map(([name]) => name);
