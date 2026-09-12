@@ -1,2 +1,2 @@
-# buddyTinkeres
+# buddyTinkerer
 desktop companion
