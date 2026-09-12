@@ -58,9 +58,9 @@ def load_env_file(
     Returns the names that were set. A missing or unreadable file sets
     nothing and returns an empty list — the file is optional.
     """
-    p = (path if path is not None else DEFAULT_PATH).expanduser()
+    p = (path if path is not None else Path(environ.get("CC_BUDDY_ENV_FILE") or DEFAULT_PATH)).expanduser()
     try:
-        text = p.read_text(encoding="utf-8")
+        text = p.read_text(encoding="utf-8-sig")
     except FileNotFoundError:
         return []
     except OSError as e:

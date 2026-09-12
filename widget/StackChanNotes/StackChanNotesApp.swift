@@ -6,6 +6,7 @@
 import AppKit
 import ServiceManagement
 import SwiftUI
+import WebKit
 import os
 
 @main
@@ -24,6 +25,11 @@ struct StackChanNotesApp: App {
         .windowResizability(.contentMinSize)
         .defaultSize(width: 720, height: 560)
         .handlesExternalEvents(matching: ["diary"])
+        Window("Buddy Learning", id: "learning") {
+            LearningDashboardView()
+        }
+        .defaultSize(width: 1200, height: 820)
+        .handlesExternalEvents(matching: ["learning"])
     }
 }
 
@@ -84,6 +90,10 @@ private struct MenuContent: View {
             openWindow(id: "diary")
         }
         .keyboardShortcut("d")
+        Button("Open learning dashboard") {
+            NSApp.activate(ignoringOtherApps: true)
+            openWindow(id: "learning")
+        }
         Button("Refresh now") { mirror.sync() }
         Button("Open notes folder") { NSWorkspace.shared.open(mirror.notesDir) }
         Toggle("Launch at login", isOn: $launchAtLogin)
@@ -103,4 +113,32 @@ private struct MenuContent: View {
         let when = mirror.lastSync.map { $0.formatted(date: .omitted, time: .shortened) } ?? "never"
         return "\(mirror.count) thoughts · synced \(when)"
     }
+}
+
+
+/// The same local web workspace as Windows, embedded in the widget's helper app.
+struct LearningDashboardView: View {
+    @State private var retry = UUID()
+    var body: some View {
+        VStack(spacing: 0) {
+            HStack {
+                Text("Buddy Learning").font(.headline)
+                Spacer()
+                Text("Start the bridge daemon if the workspace is offline.").font(.caption).foregroundStyle(.secondary)
+                Button("Reload") { retry = UUID() }
+            }.padding(12)
+            LearningWebView().id(retry)
+        }
+        .frame(minWidth: 850, minHeight: 600)
+    }
+}
+
+struct LearningWebView: NSViewRepresentable {
+    func makeNSView(context: Context) -> WKWebView {
+        let view = WKWebView()
+        let port = Int(ProcessInfo.processInfo.environment["CC_BUDDY_LEARNING_PORT"] ?? "48766") ?? 48766
+        view.load(URLRequest(url: URL(string: "http://127.0.0.1:\(port)/")!))
+        return view
+    }
+    func updateNSView(_ view: WKWebView, context: Context) {}
 }

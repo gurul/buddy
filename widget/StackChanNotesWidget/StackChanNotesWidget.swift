@@ -13,6 +13,7 @@ import WidgetKit
 struct StackChanNotesWidgetBundle: WidgetBundle {
     var body: some Widget {
         StackChanNotesWidget()
+        BuddyLearningWidget()
     }
 }
 
@@ -99,6 +100,12 @@ struct NotesView: View {
 
     var body: some View {
         VStack(alignment: .leading, spacing: family == .systemSmall ? 6 : 8) {
+            if family != .systemSmall {
+                Link(destination: URL(string: "stackchan://learning")!) {
+                    Label("Learning dashboard", systemImage: "pencil.and.outline")
+                        .font(.caption).foregroundStyle(.green)
+                }
+            }
             Header(mood: entry.snapshot.mood, count: max(entry.snapshot.notes.count, entry.snapshot.thoughts.filter(\.written).count),
                    compact: family == .systemSmall)
             if rows.isEmpty {
@@ -250,4 +257,55 @@ private struct ThoughtRow: View {
 } timeline: {
     NotesEntry(date: .now, snapshot: .placeholder)
     NotesEntry(date: .now, snapshot: .empty)
+}
+
+
+struct LearningEntry: TimelineEntry {
+    let date: Date
+    let snapshot: LearningSnapshot
+}
+
+struct LearningProvider: TimelineProvider {
+    func placeholder(in context: Context) -> LearningEntry {
+        LearningEntry(date: .now, snapshot: .empty)
+    }
+    func getSnapshot(in context: Context, completion: @escaping (LearningEntry) -> Void) {
+        completion(LearningEntry(date: .now, snapshot: LearningSnapshot.load()))
+    }
+    func getTimeline(in context: Context, completion: @escaping (Timeline<LearningEntry>) -> Void) {
+        completion(Timeline(entries: [LearningEntry(date: .now, snapshot: LearningSnapshot.load())],
+                            policy: .after(.now.addingTimeInterval(15 * 60))))
+    }
+}
+
+struct BuddyLearningWidget: Widget {
+    var body: some WidgetConfiguration {
+        StaticConfiguration(kind: "BuddyLearning", provider: LearningProvider()) { entry in
+            VStack(alignment: .leading, spacing: 10) {
+                Label("buddy's learning", systemImage: "pencil.and.outline").font(.headline)
+                Text("\(entry.snapshot.total) lessons saved / \(entry.snapshot.completed) completed")
+                    .font(.caption).foregroundStyle(.secondary)
+                if entry.snapshot.lessons.isEmpty {
+                    Text("Big ideas start with little steps. Tap to begin a math lesson.").font(.callout)
+                } else {
+                    ForEach(entry.snapshot.lessons.prefix(3)) { lesson in
+                        HStack {
+                            Image(systemName: lesson.stage == "complete" ? "checkmark.circle.fill" : "pencil.circle")
+                            VStack(alignment: .leading) {
+                                Text(lesson.topic).font(.caption.weight(.semibold)).lineLimit(1)
+                                Text(lesson.problem).font(.caption2).lineLimit(1).foregroundStyle(.secondary)
+                            }
+                        }
+                    }
+                }
+                Spacer(minLength: 0)
+                Text("Open learning dashboard").font(.caption2).foregroundStyle(.secondary)
+            }
+            .containerBackground(Color(red: 0.93, green: 0.95, blue: 0.90), for: .widget)
+            .widgetURL(URL(string: "stackchan://learning")!)
+        }
+        .configurationDisplayName("buddy's learning")
+        .description("Saved math lessons, whiteboards, and one-step help. Tap to continue learning.")
+        .supportedFamilies([.systemMedium, .systemLarge])
+    }
 }

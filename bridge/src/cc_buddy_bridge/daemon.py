@@ -175,6 +175,7 @@ class Daemon:
         # its phases through {"cmd":"agent","state":...}.
         self._ears_cfg = ears_configured()
         self._voice_cfg = voice_agent.configured()
+        self._learning_server = None
         self._recall_cfg = recall_mod.configured()
         # buddy's memory of what was SAID: one note per conversation, and its own
         # day pass. Separate from the diary, which remembers what it SAW.
@@ -265,6 +266,17 @@ class Daemon:
     async def run(self) -> None:
         _log_permission_config_summary(self.matchers)
         await self.ipc.start()
+        if os.environ.get("CC_BUDDY_LEARNING", "1").lower() not in ("0", "false", "off"):
+            from .learning.server import start as start_learning
+            loop = asyncio.get_running_loop()
+            def learning_notice(text, stage):
+                loop.call_soon_threadsafe(self._learning_notice, text, stage)
+            try:
+                self._learning_server = start_learning(
+                    port=int(os.environ.get("CC_BUDDY_LEARNING_PORT", "48766")), notify=learning_notice)
+                log.info("learning: %s", self._learning_server.app.url)
+            except (OSError, ValueError):
+                log.exception("learning: could not start the local workspace")
         self._listen_stop = start_listen_key(self._on_listen_key, asyncio.get_running_loop())
         self._start_ears(asyncio.get_running_loop())
         self._vision.detect = make_detector()
@@ -331,6 +343,10 @@ class Daemon:
                 self._listen_stop()
             await self.ble.stop()
             await self.ipc.stop()
+            if self._learning_server is not None:
+                await asyncio.to_thread(self._learning_server.shutdown)
+                self._learning_server.server_close()
+                self._learning_server = None
 
     async def shutdown(self) -> None:
         self._shutdown.set()
@@ -619,7 +635,8 @@ class Daemon:
                                            on_sound=self._set_sound, muted=lambda: self._sound.muted,
                                            thinker=self._thinker, memory=memory,
                                            on_closed=self._remember_conversation,
-                                           on_star=self._star_by_voice)
+                                           on_star=self._star_by_voice,
+                                           learning=self._learning_server.app.voice if getattr(self, "_learning_server", None) else None)
         except asyncio.CancelledError:
             self._explore_after_conversation = None      # hushed: stay put
             raise
@@ -697,6 +714,22 @@ class Daemon:
         if self.ble.connected:
             await self.ble.send({"cmd": "caption", "lines": [f"stopped: {reason}"[:17]], "page": 0, "of": 1,
                                  "hold_ms": 4000, "final": True, "chirp": False})
+
+    def _learning_notice(self, text: str, stage: str) -> None:
+        """Web actions wake the robot; the existing voice session speaks tool results."""
+        import textwrap
+        self._note_activity()
+        if self._conversation is not None and not self._conversation.done():
+            return  # Live owns captions while the owner is talking.
+        self._on_agent_state("done" if stage == "complete" else "speaking")
+        lines = textwrap.wrap(text, width=28)[:4]
+        self._on_caption({"cmd": "caption", "page": 0, "of": 1, "lines": lines,
+                          "hold_ms": 6000, "final": True, "chirp": True})
+        asyncio.get_running_loop().call_later(6, self._learning_idle)
+
+    def _learning_idle(self) -> None:
+        if self._conversation is None or self._conversation.done():
+            self._on_agent_state("idle")
 
     def _on_caption(self, msg: dict) -> None:
         """One page of buddy's reply (or a clear) onto the robot's screen; the pager owns the timing.

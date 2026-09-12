@@ -121,6 +121,11 @@ When the result arrives, tell them it in one short line.
 Delegate anything that changes what a running task is doing, ends the conversation, or sends you off to
 explore. Chit-chat you answer yourself.
 
+For a math lesson, learning a topic, or help with a written problem, delegate to the math_lesson tool.
+Ask whether they want to learn a topic or bring a problem; then ask the topic and starting level if needed.
+This lesson flow is an exception to the short-answer rule. Never solve ahead of the learner.
+Spoken hints, checks, one-step requests, and learner ideas must use math_lesson so the whiteboard stays in sync.
+
 You are the receptionist; a slower brain works behind you. Anything that needs today's facts — weather,
 scores, news, prices, opening hours, "what's happening with…" — delegate; it searches the web. Anything
 hard — maths, code, logic, a plan, a comparison — delegate; it thinks it through, which can take a while.
@@ -154,7 +159,13 @@ never started as a task, even if an app could show the answer.
   words plus any app or site they named. Never guess an app or hedge ("likely in a music app"). When
   start_task returns ok, reply with an empty message: buddy has already acknowledged the request, and the
   result reaches buddy on its own when the task finishes.
-- Never ask the owner a clarifying question. Call start_task with their words as they are; the task can
+- Math lessons are an exception to the computer-task and clarification rules: use math_lesson, never
+  start_task. "I want a math lesson" -> action open, then ask learn-a-topic or help-with-a-problem.
+  Ask for topic and level when learning. Once known, action start with mode learn/help, topic and level.
+  In an active lesson, use ideas to save spoken thinking (empty text means stuck), hint for a nudge,
+  check to review current work, step to reveal exactly ONE step, status for the latest feedback,
+  recap to summarize, end to save and finish. Do not independently solve or reveal future steps.
+- Outside math lessons, never ask the owner a clarifying question. Call start_task with their words as they are; the task can
   ask them itself if it truly needs an answer.
 - While a task runs: "stop" / "cancel" / "never mind" → stop_task. A correction or addition ("use Safari
   instead", "also save it") → steer_task with the text. "How's it going?" → task_status, summarised in one
@@ -218,6 +229,13 @@ def memory_block(memory: str) -> str:
 
 
 TOOLS: list[dict[str, Any]] = [
+    {"type": "function", "name": "math_lesson",
+     "description": "Open Buddy's math whiteboard, start learning or help with a problem, save ideas, give a hint, check work, or show exactly one step. Use for math lessons instead of computer control.",
+     "parameters": {"type": "object", "properties": {
+         "action": {"type": "string", "enum": ["open", "start", "status", "ideas", "hint", "check", "step", "recap", "end"]},
+         "mode": {"type": "string", "enum": ["learn", "help", ""]},
+         "topic": {"type": "string"}, "level": {"type": "string"}, "text": {"type": "string"}},
+         "required": ["action"], "additionalProperties": False}},
     {"type": "function", "name": "start_task",
      "description": "Start a computer-use task on the owner's Mac: it clicks and types for them. Last resort — "
                     "only for a request the Mac itself must carry out or show, never for a question. Returns "
@@ -522,7 +540,9 @@ class VoiceSession:
         thinker: Optional[Callable[[str], Awaitable[dict[str, Any]]]] = None,   # think.make_thinker(...)
         memory: str = "",                                   # recall.opening_brief(...)
         on_star: Optional[Callable[[str], Optional[str]]] = None,   # chat_memory.star(...)
+        learning: Optional[Callable[..., dict[str, Any]]] = None,
     ) -> None:
+        self.learning = learning
         self.conn = connection
         self.scene = scene
         self.head = head
@@ -973,7 +993,7 @@ class VoiceSession:
                 result = {"ok": True, "sound": "on" if on else "off"}
             else:
                 result = {"ok": False, "reason": "on must be true or false"}
-        elif name in ("look", "look_around", "find", "think_hard"):
+        elif name in ("look", "look_around", "find", "think_hard", "math_lesson"):
             # Seconds (or a minute, for think_hard) of camera, head or model work:
             # answered from a background task, so Live events (the owner talking,
             # captions) keep flowing meanwhile.
@@ -1007,7 +1027,17 @@ class VoiceSession:
     def _slow_tool(self, name: str, call_id: str, args: dict[str, Any]) -> None:
         async def run() -> None:
             try:
-                if name == "look":
+                if name == "math_lesson":
+                    if self.learning is None:
+                        result = {"ok": False, "reason": "The learning workspace is unavailable. Start the bridge learning service."}
+                    elif self.task_running:
+                        result = {"ok": False, "reason": "Stop the computer task before starting a lesson."}
+                    else:
+                        try:
+                            result = await asyncio.to_thread(self.learning, **args)
+                        except ValueError as exc:
+                            result = {"ok": False, "reason": str(exc)}
+                elif name == "look":
                     result = await self._look()
                 elif name == "look_around":
                     result = await self._look_around()
@@ -1323,6 +1353,7 @@ async def open_session(
     memory: str = "",
     on_closed: Optional[Callable[[list[tuple[str, str]]], None]] = None,
     on_star: Optional[Callable[[str], Optional[str]]] = None,
+    learning: Optional[Callable[..., dict[str, Any]]] = None,
 ) -> None:
     """Run one full conversation on the real Live API — captions to the robot,
     or the real speaker in audio mode."""
@@ -1338,7 +1369,7 @@ async def open_session(
                                    agent_enabled=agent_enabled, on_caption=on_caption,
                                    on_explore=on_explore, scene=scene, head=head, intent=intent,
                                    on_sound=on_sound, muted=muted, thinker=thinker,
-                                   memory=memory, on_star=on_star)
+                                   memory=memory, on_star=on_star, learning=learning)
             try:
                 await session.run()
             finally:
