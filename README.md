@@ -71,7 +71,10 @@ Buddy now has a learning workspace: learn a topic or bring a screenshot/written
 problem, put down your ideas, ask for hints, check your work, or reveal exactly
 one next step at a time. Whiteboard revisions and tutor explanations are saved
 to a searchable dashboard, linked from the macOS widget. The existing voice
-agent launches and controls lessons with `math_lesson`.
+agent launches and controls lessons with `math_lesson`, and
+`cc-buddy-bridge lesson <action>` (`open`, `start`, `ideas`, `hint`, `check`,
+`step`, `status`, `recap`, `end`) drives the same lesson from a terminal while
+the daemon runs.
 
 Try the offline browser demo from this repository (Python 3.11+):
 
@@ -80,10 +83,10 @@ python tools/start_learning.py --demo --data-dir .demo-data --port 48767
 ```
 
 Click **Play workflow demo**, or work through an example yourself. This demo
-uses fixed examples; live handwriting/image tutoring supports Astra through
-OpenRouter (`OPENROUTER_API_KEY`) or direct OpenAI. Configure the provider and
-key in `~/.config/cc-buddy-bridge/env` and restart without `--demo`. In WSL,
-use `--env-file /mnt/c/Users/gitsw/.config/cc-buddy-bridge/env` to read the
+uses fixed examples; live handwriting/image tutoring uses OpenAI
+(`OPENAI_API_KEY`) by default; OpenRouter is opt-in via
+`CC_BUDDY_LEARNING_PROVIDER=openrouter`. Put the key in `~/.config/cc-buddy-bridge/env` and restart without `--demo`. In WSL,
+use `--env-file /mnt/c/Users/<you>/.config/cc-buddy-bridge/env` to read the
 Windows file; Linux and Windows home directories are separate. If the launcher
 says port 48766 is already in use, open the existing dashboard at
 `http://127.0.0.1:48766/` instead of starting it again.

@@ -1,7 +1,9 @@
 """Exa fallbacks and persisted references."""
+import errno
 import io
 import json
-from unittest.mock import patch
+import os
+from unittest.mock import Mock, patch
 
 import pytest
 
@@ -60,3 +62,40 @@ def test_demo_never_searches(monkeypatch, tmp_path):
     with patch("urllib.request.urlopen") as call:
         app.dispatch({"action": "generate"})
     call.assert_not_called()
+
+
+def test_env_file_supplies_exa_key_to_standalone_launcher(monkeypatch, tmp_path):
+    """tools/start_learning.py and `python -m cc_buddy_bridge.learning` go through server.main,
+    which loads the env file before the server starts and before any search runs."""
+    from cc_buddy_bridge.learning import server
+
+    env_file = tmp_path / "env"
+    env_file.write_text("EXA_API_KEY=exa-from-file\n")
+    # delenv records the keys as absent, so teardown removes what load_env_file adds.
+    monkeypatch.delenv("EXA_API_KEY", raising=False)
+    monkeypatch.delenv("CC_BUDDY_ENV_FILE", raising=False)
+    seen = {}
+
+    def fake_start(*args, **kwargs):
+        seen["key"] = os.environ.get("EXA_API_KEY")
+        raise OSError(errno.EACCES, "stop before serving")
+
+    with patch.object(server, "start", side_effect=fake_start):
+        with pytest.raises(OSError):
+            server.main(["--env-file", str(env_file), "--data-dir", str(tmp_path), "--no-open"])
+    assert seen["key"] == "exa-from-file"
+    with patch("urllib.request.urlopen", return_value=response({"results": []})) as call:
+        search_problems("Fractions", "Grade 4")
+    assert call.call_args.args[0].get_header("X-api-key") == "exa-from-file"
+
+
+def test_daemon_cli_loads_env_before_subcommands(monkeypatch):
+    """The launchd daemon and `cc-buddy-bridge learning` both start in cli.main, which loads the env file."""
+    from cc_buddy_bridge import cli
+
+    loader = Mock()
+    monkeypatch.setattr(cli, "load_env_file", loader)
+    with patch("cc_buddy_bridge.learning.server.main", return_value=0) as learning_main:
+        assert cli.main(["learning", "--no-open"]) == 0
+    loader.assert_called_once()
+    learning_main.assert_called_once()

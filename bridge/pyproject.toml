@@ -96,4 +96,4 @@ ignore = [
 ]
 
 [tool.setuptools.package-data]
-cc_buddy_bridge = ["learning/web/*.html", "learning/web/*.css", "learning/web/*.js"]
+cc_buddy_bridge = ["learning/web/*.html", "learning/web/*.css", "learning/web/*.js", "learning/web/fonts/*.woff2", "learning/web/fonts/OFL.txt"]

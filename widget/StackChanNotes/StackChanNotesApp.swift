@@ -13,6 +13,10 @@ import os
 struct StackChanNotesApp: App {
     @NSApplicationDelegateAdaptor(AppDelegate.self) private var delegate
 
+    /// Window scenes can be built before the delegate runs, so register the brand
+    /// fonts here too. Registration runs once however often it is called.
+    init() { BrandFonts.register() }
+
     var body: some Scene {
         MenuBarExtra("StackChan Notes", systemImage: "note.text") {
             MenuContent()
@@ -38,6 +42,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private static let registeredKey = "loginItemRegistered"
 
     func applicationDidFinishLaunching(_ notification: Notification) {
+        BrandFonts.register()
         registerLoginItemOnce()
         NotesMirror.shared.start()
     }
@@ -121,12 +126,19 @@ struct LearningDashboardView: View {
     @State private var retry = UUID()
     var body: some View {
         VStack(spacing: 0) {
-            HStack {
-                Text("Buddy Learning").font(.headline)
+            HStack(spacing: 12) {
+                InkHeading("Buddy Learning", size: 20)
                 Spacer()
-                Text("Start the bridge daemon if the workspace is offline.").font(.caption).foregroundStyle(.secondary)
+                Text("Start the bridge daemon if the workspace is offline.")
+                    .font(BrandFont.body(12))
+                    .foregroundStyle(Color.brandInkSoft)
                 Button("Reload") { retry = UUID() }
-            }.padding(12)
+                    .buttonStyle(ChunkyButtonStyle())
+            }
+            .padding(12)
+            .background(Color.brandPaper)
+            .overlay(alignment: .bottom) { Rectangle().fill(Color.brandInk).frame(height: 2) }
+            .environment(\.colorScheme, .light)
             LearningWebView().id(retry)
         }
         .frame(minWidth: 850, minHeight: 600)

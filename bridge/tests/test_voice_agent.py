@@ -1349,3 +1349,53 @@ def test_math_lesson_without_service_returns_an_actionable_error():
         await asyncio.gather(*session._slow_tasks)
     asyncio.run(go())
     assert conn.tool_outputs()[0]["ok"] is False
+
+
+def _run_math_lesson(learning, arguments):
+    conn = FakeConnection([])
+    session, _, _ = _session(conn, [FakeAgent(None, None)], learning=learning)
+
+    async def go():
+        await session._tool("math_lesson", "math1", arguments)
+        await asyncio.gather(*session._slow_tasks)
+    asyncio.run(go())
+    return conn.tool_outputs()[0]
+
+
+def test_math_lesson_drops_unknown_arguments():
+    called = []
+
+    def learning(**args):
+        called.append(args)
+        return {"ok": True, "answer": "Try the ones place."}
+    out = _run_math_lesson(learning, '{"action":"step","bogus":1}')
+    assert called == [{"action": "step"}]
+    assert out["ok"] is True
+
+
+def test_math_lesson_with_unreadable_arguments_does_not_open_the_whiteboard():
+    called = []
+
+    def learning(**args):
+        called.append(args)
+        return {"ok": True}
+    for arguments in ("not json", "[1, 2]"):
+        out = _run_math_lesson(learning, arguments)
+        assert out["ok"] is False and "Unknown lesson action" in out["reason"]
+    assert called == []
+
+
+def test_math_lesson_stale_lesson_is_actionable():
+    def learning(**args):
+        raise KeyError("gone")
+    out = _run_math_lesson(learning, '{"action":"hint"}')
+    assert out["ok"] is False
+    assert "no longer there" in out["reason"] and "math_lesson failed" not in out["reason"]
+
+
+def test_math_lesson_schema_uses_the_shared_action_set():
+    from cc_buddy_bridge.learning import LESSON_ACTIONS
+    from cc_buddy_bridge.voice_agent import TOOLS
+    tool = next(t for t in TOOLS if t["name"] == "math_lesson")
+    assert tool["parameters"]["properties"]["action"]["enum"] == list(LESSON_ACTIONS)
+    assert tool["parameters"]["additionalProperties"] is False

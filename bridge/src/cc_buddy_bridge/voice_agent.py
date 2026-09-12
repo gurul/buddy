@@ -79,6 +79,7 @@ from . import head as head_mod
 from .caption_pager import CaptionPager, Event, PagerConfig, caption_instructions
 from .computer_agent import AgentConfig, AgentEvent, ComputerAgent
 from .intent import LEAVE, LOOK, MUTE, REMEMBER, UNMUTE, fast_intent
+from .learning import LESSON_ACTIONS, run_lesson
 
 log = logging.getLogger(__name__)
 
@@ -232,7 +233,7 @@ TOOLS: list[dict[str, Any]] = [
     {"type": "function", "name": "math_lesson",
      "description": "Open Buddy's math whiteboard, start learning or help with a problem, save ideas, give a hint, check work, or show exactly one step. Use for math lessons instead of computer control.",
      "parameters": {"type": "object", "properties": {
-         "action": {"type": "string", "enum": ["open", "start", "status", "ideas", "hint", "check", "step", "recap", "end"]},
+         "action": {"type": "string", "enum": list(LESSON_ACTIONS)},
          "mode": {"type": "string", "enum": ["learn", "help", ""]},
          "topic": {"type": "string"}, "level": {"type": "string"}, "text": {"type": "string"}},
          "required": ["action"], "additionalProperties": False}},
@@ -941,6 +942,8 @@ class VoiceSession:
             args = json.loads(arguments) if arguments else {}
         except ValueError:
             args = {}
+        if not isinstance(args, dict):
+            args = {}  # a JSON list or string: every tool reads args with .get
         self.tool_calls.append((name, args))
         self._last_activity = self._clock()
         if name in ("move_head", "look_around", "find", "look"):
@@ -1028,15 +1031,12 @@ class VoiceSession:
         async def run() -> None:
             try:
                 if name == "math_lesson":
-                    if self.learning is None:
-                        result = {"ok": False, "reason": "The learning workspace is unavailable. Start the bridge learning service."}
-                    elif self.task_running:
+                    if self.learning is not None and self.task_running:
                         result = {"ok": False, "reason": "Stop the computer task before starting a lesson."}
                     else:
-                        try:
-                            result = await asyncio.to_thread(self.learning, **args)
-                        except ValueError as exc:
-                            result = {"ok": False, "reason": str(exc)}
+                        # run_lesson validates the model's arguments and maps a missing workspace,
+                        # a user error and a stale lesson to a reason the voice can say.
+                        result = await asyncio.to_thread(run_lesson, self.learning, args)
                 elif name == "look":
                     result = await self._look()
                 elif name == "look_around":
