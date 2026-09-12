@@ -1,0 +1,50 @@
+# reference clones of upstream repos (not part of this project)
+vendor/
+
+# python
+bridge/.venv/
+__pycache__/
+*.pyc
+*.egg-info/
+
+# arduino build artifacts
+firmware/**/build/
+past-experiments/firmware/**/build/
+
+# macOS
+.DS_Store
+
+# personal session memory — never committed
+debrief/
+
+# tooling caches — never committed
+.opencode/node_modules/
+.claude/worktrees/
+
+# Era - Generated files (do not edit this section)
+.era/memory/DIRECTIVES.md
+.era/memory/.directives-build-hash
+.era/.toolconfig
+.era/config.local.yaml
+.era/governance.local.yaml
+.opencode/agent
+.opencode/command
+.opencode/skill
+.opencode/plugin
+.opencode/_shared
+.opencode/skills
+.claude/settings.json
+.claude/agents
+.claude/commands
+.claude/skills
+.claude/era-shared
+.mcp.json
+.mcp.json.era-bak
+.codex/config.toml
+.era/memory/handovers/
+.era/runtime/
+.era/tmp/
+# Era - End
+
+# Local-only plans (owner choice, 2026-09-10)
+docs/plans/
