@@ -16,7 +16,9 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from urllib.parse import urlsplit
 
+from . import ROBOT_APP_NOT_RUNNING
 from .store import Store, default_dir
+from .think_aloud import LISTEN_ACTIONS, MAX_SPOKEN_IDEA, listen_refusal
 from .tutor import DemoTutor, LiveTutor, live_settings
 
 log = logging.getLogger(__name__)
@@ -27,6 +29,9 @@ ASSETS = Path(__file__).parent / "web"
 FONTS = ASSETS / "fonts"
 FONT_FILE = re.compile(r"[a-z0-9-]+\.woff2")
 CSP = "default-src 'self'; img-src 'self' data:; style-src 'self'; script-src 'self'; font-src 'self'; frame-ancestors 'none'"
+# Spoken lines kept per lesson so a browser save that missed them can put them back.
+SPOKEN_KEEP = 50
+LISTEN_OFF = {"available": False, "state": "off", "lesson_id": None}
 
 
 def validate_work(data):
@@ -71,12 +76,26 @@ def validate_work(data):
     return result
 
 
+def merge_spoken(ideas, lesson, base):
+    """Put back spoken lines saved after revision ``base`` that ``ideas`` does not contain.
+
+    A browser that saves typed ideas can miss a line buddy appended a moment earlier. Only lines newer
+    than the text the browser last loaded are restored, so a learner can still delete an older line."""
+    missing = [e["text"] for e in lesson.get("spoken", []) if e["rev"] > base and e["text"] not in ideas]
+    if not missing:
+        return ideas
+    return "\n".join(filter(None, [ideas.rstrip()] + missing))
+
+
 class LearningApp:
-    def __init__(self, directory=None, demo=False, tutor=None, notify=None):
+    def __init__(self, directory=None, demo=False, tutor=None, notify=None, listener=None):
         self.store = Store(directory or default_dir())
         self.tutor = tutor or (DemoTutor() if demo else LiveTutor())
         self.demo = self.tutor.demo
         self.notify = notify
+        # The daemon's microphone, for think out loud: an object with start(lesson), stop() and
+        # status(). None when this server runs without the daemon.
+        self.listener = listener
         self.lock = threading.RLock()
         self.active = None
         self.url = ""
@@ -107,8 +126,13 @@ class LearningApp:
                 if self.active == key:
                     self.active = None
                 return {"deleted": True}
-            if data.get("revision", s["revision"]) != s["revision"]:
-                raise ValueError("This lesson changed in another window. Reload it before continuing.")
+            revision = data.get("revision", s["revision"])
+            if revision != s["revision"]:
+                # The only change since the browser loaded is spoken lines appended while buddy listened:
+                # merge a save into them instead of refusing it.
+                if not (action == "save" and isinstance(revision, int)
+                        and revision >= s.get("last_other_revision", s["revision"])):
+                    raise ValueError("This lesson changed in another window. Reload it before continuing.")
             if s["demo"] != self.demo:
                 raise ValueError("Open this lesson using the same demo/live mode it was created in.")
             if s["stage"] == "ended" and action != "resume":
@@ -118,6 +142,9 @@ class LearningApp:
                 if s["stage"] not in ("input", "confirm"):
                     work.pop("problem", None)
                     work.pop("source_image", None)
+                if "ideas" in work and s.get("spoken"):
+                    base = data.get("ideas_base", revision)
+                    work["ideas"] = merge_spoken(work["ideas"], s, base if isinstance(base, int) else revision)
                 s.update(work)
             elif action == "generate":
                 if s["stage"] != "setup":
@@ -161,6 +188,8 @@ class LearningApp:
                     s["stage"] = s.pop("resume_stage", "working")
             else:
                 raise ValueError("Unknown lesson action.")
+            # Every change except a spoken append moves this mark: a stale save may merge only past appends.
+            s["last_other_revision"] = s["revision"] + 1
             s = self.store.save(s, expected=s["revision"])
             self.active = s["id"]
             if self.notify and action != "save" and s["events"]:
@@ -170,10 +199,78 @@ class LearningApp:
                     log.exception("learning: robot notification failed; lesson is saved")
             return s
 
+    # ---- think out loud ----
+
+    def append_spoken(self, lesson_id, text):
+        """Add one thing the learner said while buddy listened to the end of their ideas.
+
+        Typed ideas are never replaced. Returns True when the line was saved."""
+        line = " ".join(str(text).split())[:MAX_SPOKEN_IDEA]
+        if not line:
+            return False
+        with self.lock:
+            s = self.store.get(lesson_id)
+            if s["stage"] == "ended" or s["demo"] != self.demo:
+                return False
+            s["ideas"] = "\n".join(filter(None, [s["ideas"].rstrip(), line]))[-20000:]
+            s["stuck"] = False
+            s["spoken"] = (s.get("spoken", []) + [{"rev": s["revision"] + 1, "text": line}])[-SPOKEN_KEEP:]
+            s = self.store.save(s, expected=s["revision"])
+            return True
+
+    def listen_status(self):
+        if self.listener is None:
+            return dict(LISTEN_OFF, reason=ROBOT_APP_NOT_RUNNING)
+        try:
+            status = self.listener.status()
+        except Exception:
+            log.exception("learning: listen status failed")
+            return dict(LISTEN_OFF, reason="buddy could not say whether it is listening.")
+        return {"available": True, "state": status.get("state", "off"), "lesson_id": status.get("lesson_id"),
+                "reason": status.get("reason", "")}
+
+    def _listen_result(self, result):
+        """The listener's answer plus the current state. The status goes first, so its empty "reason"
+        can never overwrite the sentence that explains a refusal."""
+        return {**self.listen_status(), **result}
+
+    def _call_listener(self, name, *args):
+        try:
+            return getattr(self.listener, name)(*args)
+        except Exception:
+            log.exception("learning: %s failed", name)
+            return {"ok": False, "reason": "buddy could not change listening. Try again."}
+
+    def listen(self, lesson_id=None):
+        """Start think out loud for a lesson (the browser's, else the active one). Never raises."""
+        if self.listener is None:
+            return {**LISTEN_OFF, "ok": False, "reason": ROBOT_APP_NOT_RUNNING}
+        with self.lock:
+            key = lesson_id or self.active
+            try:
+                s = self.store.get(key) if key else None
+            except KeyError:
+                s = None
+            refusal = listen_refusal(s)
+            if refusal:
+                return self._listen_result({"ok": False, "reason": refusal})
+            self.active = s["id"]
+        # Outside the lock: the daemon may take a moment, and saving spoken ideas needs the lock.
+        return self._listen_result(self._call_listener("start", s))
+
+    def stop_listening(self):
+        if self.listener is None:
+            return {**LISTEN_OFF, "ok": False, "reason": ROBOT_APP_NOT_RUNNING}
+        return self._listen_result(self._call_listener("stop"))
+
     def voice(self, action="open", mode="", topic="", level="", text=""):
         if action == "open":
             webbrowser.open(self.url)
             return {"ok": True, "answer": "Would you like to learn a topic or work on a problem you already have?"}
+        if action == "listen":
+            return self.listen()
+        if action == "stop-listening":
+            return self.stop_listening()
         if action == "start":
             s = self.dispatch({"action": "create", "mode": mode or "learn", "topic": topic, "level": level})
             if s["mode"] == "learn":
@@ -219,7 +316,10 @@ class Handler(BaseHTTPRequestHandler):
         try:
             if path == "/api/config":
                 settings = {"provider": "demo", "model": "offline examples", "ready": True, "key_name": ""} if app.demo else live_settings()
-                return self.reply(200, {**settings, "token": self.server.token, "demo": app.demo, "active": app.active})
+                return self.reply(200, {**settings, "token": self.server.token, "demo": app.demo, "active": app.active,
+                                        "listen_available": app.listener is not None})
+            if path == "/api/listening":
+                return self.reply(200, app.listen_status())
             if path == "/api/lessons":
                 return self.reply(200, app.store.list())
             if path.startswith("/api/lessons/"):
@@ -260,7 +360,17 @@ class Handler(BaseHTTPRequestHandler):
             data = json.loads(self.rfile.read(length))
             if not isinstance(data, dict):
                 raise ValueError("Invalid request.")
-            return self.reply(200, self.server.app.dispatch(data))
+            app = self.server.app
+            if data.get("action") in LISTEN_ACTIONS:
+                # The "Think out loud" toggle. The daemon owns the microphone; standalone, nobody does.
+                key = data.get("id")
+                result = app.listen(key if isinstance(key, str) else None) if data["action"] == "listen" else app.stop_listening()
+                log.info("learning: %s from the browser -> ok=%s", data["action"], result.get("ok"))
+                if not result.get("ok"):
+                    status = 503 if not result.get("available") else 409
+                    return self.reply(status, {**result, "error": result.get("reason") or "buddy cannot listen now."})
+                return self.reply(200, result)
+            return self.reply(200, app.dispatch(data))
         except KeyError:
             return self.reply(404, {"error": "Lesson not found"})
         except (ValueError, TypeError) as exc:
@@ -270,8 +380,8 @@ class Handler(BaseHTTPRequestHandler):
             return self.reply(500, {"error": "Buddy could not finish this request. Your previously saved work is safe."})
 
 
-def start(directory=None, demo=False, port=DEFAULT_PORT, notify=None):
-    app = LearningApp(directory, demo, notify=notify)
+def start(directory=None, demo=False, port=DEFAULT_PORT, notify=None, listener=None):
+    app = LearningApp(directory, demo, notify=notify, listener=listener)
     server = ThreadingHTTPServer(("127.0.0.1", port), Handler)
     server.app = app
     server.token = secrets.token_urlsafe(32)

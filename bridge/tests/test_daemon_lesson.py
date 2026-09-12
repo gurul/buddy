@@ -386,3 +386,204 @@ def test_status_prints_the_lesson(fake_post, capsys) -> None:
     assert cli.main(["lesson", "status"]) == 0
     out = capsys.readouterr().out
     assert "Fractions (learn, practice): 1/2 + 1/4" in out and "Nice work." in out
+
+
+@pytest.mark.parametrize("action", ["listen", "stop-listening"])
+def test_listen_commands_send_the_lesson_event_with_a_short_timeout(fake_post, capsys, action) -> None:
+    sent, reply = fake_post
+    reply["value"] = {"ok": True, "action": action, "answer": "I'm listening."}
+    assert cli.main(["lesson", action]) == 0
+    assert sent[0][0] == {"evt": "lesson", "action": action}
+    assert sent[0][1]["timeout"] < 60
+    assert "I'm listening." in capsys.readouterr().out
+
+
+# ---- think out loud on the daemon ----------------------------------------------------------------
+
+LISTEN_ON = {"cmd": "listen", "on": True}
+LISTEN_OFF = {"cmd": "listen", "on": False}
+
+
+class _FakeSession:
+    def __init__(self, lesson_id=None) -> None:
+        self.think_aloud_lesson_id = lesson_id
+        self.ended = False
+        self.entered: list = []
+        self.prepared: list = []
+        self.stopped: list = []
+
+    async def enter_think_aloud(self, lesson):
+        self.entered.append(lesson["id"])
+        self.think_aloud_lesson_id = lesson["id"]
+        return {"ok": True}
+
+    def prepare_think_aloud(self, lesson):
+        self.prepared.append(lesson["id"])
+
+    def stop_think_aloud(self, reason="stopped"):
+        self.stopped.append(reason)
+        self.ended = True
+
+
+def _listening_daemon(tmp_path, monkeypatch, ears=True):
+    """A stub daemon wired to a real demo LearningApp whose listener is the daemon's own."""
+    from cc_buddy_bridge.learning.server import LearningApp
+    monkeypatch.setenv("OPENAI_API_KEY", "test-placeholder")     # only its presence is checked; nothing connects
+    app = LearningApp(tmp_path, demo=True)
+    d = _daemon()
+    d._learning_server = SimpleNamespace(app=app)
+    d._ears = object() if ears else None
+    d._voice_session = None
+    d._think_aloud_wish = None
+    d._think_aloud_state = "off"
+    d._think_aloud_lesson_id = None
+    d._shutdown = asyncio.Event()
+    d.started: list = []
+
+    async def fake_converse(think_aloud=None):
+        d.started.append(think_aloud["id"] if think_aloud else None)
+        await asyncio.Event().wait()                 # a conversation that stays open until cancelled
+    d._converse = fake_converse
+    for name in ("_make_listener", "_think_aloud_start", "_think_aloud_stop", "_start_think_aloud_conversation",
+                 "_on_voice_session", "_on_think_aloud", "_sync_listen_pose"):
+        setattr(d, name, MethodType(getattr(Daemon, name), d))
+    s = app.dispatch({"action": "create", "mode": "learn", "topic": "Algebra", "level": "Grade 5"})
+    d.lesson = app.dispatch({"action": "generate", "id": s["id"]})
+    return d, app
+
+
+async def _close(d) -> None:
+    if d._conversation is not None and not d._conversation.done():
+        d._conversation.cancel()
+        await asyncio.gather(d._conversation, return_exceptions=True)
+    _cancel_idle(d)
+
+
+def test_ipc_listen_opens_a_conversation_and_stop_listening_closes_it(tmp_path, monkeypatch) -> None:
+    async def go():
+        d, app = _listening_daemon(tmp_path, monkeypatch)
+        app.listener = d._make_listener(asyncio.get_running_loop())
+        resp = await d._handle_ipc({"evt": "lesson", "action": "listen"})
+        await _settle()
+        assert resp["ok"] and resp["action"] == "listen" and resp["state"] == "starting"
+        assert d.started == [d.lesson["id"]] and d._conversation.get_name() == "think-aloud-conversation"
+        assert _captions(d) == [] and "thinking" not in _states(d)
+
+        again = await d._handle_ipc({"evt": "lesson", "action": "listen"})     # a second press: no second session
+        await _settle()
+        assert again["ok"] and d.started == [d.lesson["id"]]
+
+        session = _FakeSession(d.lesson["id"])                              # the session connected and listens
+        d._on_voice_session(session)
+        d._on_think_aloud(True, d.lesson["id"])
+        await _settle()
+        assert LISTEN_ON in d.ble.sent
+        assert app.listen_status() == {"available": True, "state": "on", "lesson_id": d.lesson["id"], "reason": ""}
+
+        resp = await d._handle_ipc({"evt": "lesson", "action": "stop-listening"})
+        await _settle()
+        assert resp["ok"] and resp["state"] == "off" and session.stopped == ["stopped"]
+        assert d.ble.sent[-1] == LISTEN_OFF
+        json.dumps(resp)
+        await _close(d)
+    asyncio.run(go())
+
+
+def test_ipc_listen_with_no_lesson_open_is_refused_with_a_caption(tmp_path, monkeypatch) -> None:
+    async def go():
+        d, app = _listening_daemon(tmp_path, monkeypatch)
+        app.listener = d._make_listener(asyncio.get_running_loop())
+        app.active = None
+        resp = await d._handle_ipc({"evt": "lesson", "action": "listen"})
+        await _settle()
+        assert resp["ok"] is False and "Open a lesson first" in resp["error"]
+        assert d.started == [] and d._think_aloud_state == "off"
+        assert len(_captions(d)) == 1 and _states(d)[-1] == "error"
+        await _close(d)
+    asyncio.run(go())
+
+
+def test_listen_without_a_microphone_says_why(tmp_path, monkeypatch) -> None:
+    async def go():
+        d, app = _listening_daemon(tmp_path, monkeypatch, ears=False)
+        app.listener = d._make_listener(asyncio.get_running_loop())
+        out = await asyncio.to_thread(app.listen)
+        assert out["ok"] is False and "microphone is off" in out["reason"] and d.started == []
+    asyncio.run(go())
+
+
+def test_a_wake_word_conversation_switches_instead_of_opening_another(tmp_path, monkeypatch) -> None:
+    async def go():
+        d, app = _listening_daemon(tmp_path, monkeypatch)
+        d._conversation = _Talking()
+        d._voice_session = session = _FakeSession()
+        out = await d._think_aloud_start(d.lesson)
+        assert out["ok"] and session.entered == [d.lesson["id"]] and d.started == []
+    asyncio.run(go())
+
+
+def test_listen_while_connecting_is_handed_to_the_session_when_it_opens(tmp_path, monkeypatch) -> None:
+    async def go():
+        d, app = _listening_daemon(tmp_path, monkeypatch)
+        d._conversation = _Talking()                      # the wake word opened one; it is still connecting
+        out = await d._think_aloud_start(d.lesson)
+        assert out["ok"] and d._think_aloud_state == "starting" and d.started == []
+        session = _FakeSession()
+        d._on_voice_session(session)
+        assert session.prepared == [d.lesson["id"]] and d._think_aloud_wish is None
+    asyncio.run(go())
+
+
+def test_stop_while_a_listening_conversation_is_still_connecting_cancels_it(tmp_path, monkeypatch) -> None:
+    async def go():
+        d, app = _listening_daemon(tmp_path, monkeypatch)
+        await d._think_aloud_start(d.lesson)
+        await asyncio.sleep(0)
+        conversation = d._conversation
+        out = await d._think_aloud_stop()
+        await asyncio.gather(conversation, return_exceptions=True)
+        assert out["ok"] and conversation.cancelled() and d._think_aloud_state == "off"
+        out = await d._think_aloud_stop()                  # stopping twice is harmless
+        assert out["ok"] and "not listening" in out["answer"]
+        await _close(d)
+    asyncio.run(go())
+
+
+def test_the_listening_pose_drops_while_buddy_thinks_or_speaks(tmp_path, monkeypatch) -> None:
+    async def go():
+        d, _ = _listening_daemon(tmp_path, monkeypatch)
+        d._on_think_aloud(True, d.lesson["id"])
+        d._on_agent_state("thinking")
+        d._on_agent_state("speaking")
+        d._on_agent_state("listening")
+        await _settle()
+        listens = [m["on"] for m in d.ble.sent if m.get("cmd") == "listen"]
+        assert listens == [True, False, True]
+        d._on_think_aloud(False, None)
+        await _settle()
+        assert d.ble.sent[-1] == LISTEN_OFF
+    asyncio.run(go())
+
+
+def test_a_listener_call_on_the_event_loop_is_refused_rather_than_deadlocking(tmp_path, monkeypatch) -> None:
+    async def go():
+        d, _ = _listening_daemon(tmp_path, monkeypatch)
+        listener = d._make_listener(asyncio.get_running_loop())
+        with pytest.raises(RuntimeError, match="worker thread"):
+            listener.stop()
+    asyncio.run(go())
+
+
+def test_an_open_session_that_refuses_is_answered_not_queued(tmp_path, monkeypatch) -> None:
+    class _Busy(_FakeSession):
+        async def enter_think_aloud(self, lesson):
+            return {"ok": False, "reason": "buddy is busy with a computer task. Stop it first, then think out loud."}
+
+    async def go():
+        d, _ = _listening_daemon(tmp_path, monkeypatch)
+        d._conversation = _Talking()
+        d._voice_session = _Busy()
+        out = await d._think_aloud_start(d.lesson)
+        assert out["ok"] is False and "computer task" in out["reason"]
+        assert d._think_aloud_wish is None and d._think_aloud_state == "off" and d.started == []
+    asyncio.run(go())

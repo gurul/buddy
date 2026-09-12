@@ -9,13 +9,18 @@ from __future__ import annotations
 
 from typing import Any, Callable, Mapping, Optional
 
-LESSON_ACTIONS = ("open", "start", "ideas", "hint", "check", "step", "status", "recap", "end")
+from .think_aloud import LISTEN_ACTIONS
+
+LESSON_ACTIONS = ("open", "start", "ideas", "hint", "check", "step", "status", "recap", "end", *LISTEN_ACTIONS)
 LESSON_MODES = ("learn", "help")
 # Actions that can call the tutor model, so they can take a long time.
 TUTOR_ACTIONS = ("start", "hint", "check", "step", "recap")
 UNAVAILABLE = ("The learning workspace is unavailable. It is off (CC_BUDDY_LEARNING=0) or its server "
                "did not start; check the bridge log.")
 STALE_LESSON = "That saved lesson is no longer there. Open the learning window and choose a lesson."
+# The learning server runs without the daemon (`cc-buddy-bridge learning`): nothing owns a microphone.
+ROBOT_APP_NOT_RUNNING = ("Think out loud needs the buddy robot app, and it is not running. "
+                         "Start it with `cc-buddy-bridge daemon` or the launchd service.")
 _LIMITS = {"topic": 200, "level": 100, "text": 20000}
 
 
