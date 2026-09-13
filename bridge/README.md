@@ -657,6 +657,7 @@ buddy, go explore"* sends the robot off to look around the room right away
 | Variable | Default | Purpose |
 |---|---|---|
 | `CC_BUDDY_VOICE` | on | `0` disables the microphone and the wake word |
+| `CC_BUDDY_MIC_ALWAYS` | off | `1`: keep the microphone open from boot; default: open only while the robot is connected (`cc-buddy-bridge mic off` closes it for good) |
 | `CC_BUDDY_WAKE_WORD` | `hey buddy` | any short English phrase (tokenised at startup, no training) |
 | `CC_BUDDY_WAKE_THRESHOLD` | `0.25` | lower = more sensitive |
 | `CC_BUDDY_MIC` | default input | input device name substring |

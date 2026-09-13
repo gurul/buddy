@@ -351,7 +351,7 @@ class RoomNotes:
             return {"ok": True, "already": True, "minutes": self.minutes()}
         if self.client is None:
             return {"ok": False, "error": "no OPENAI_API_KEY, so buddy cannot transcribe"}
-        if self.ears is None:
+        if self.ears is None or not getattr(self.ears, "listening", True):
             return {"ok": False, "error": "the microphone is not running"}
         self.state = NotesState(active=True, started_at=self.clock(), started_wall=self.wall())
         self.lines = []

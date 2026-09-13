@@ -23,7 +23,9 @@ daemon on your Mac that gives it ears, hands and a memory.
 ## What it does
 
 **It listens.** A keyword spotter on your Mac hears "hey buddy". Nothing leaves the Mac
-until you speak. Its head comes up with a chirp and its back glows blue.
+until you speak. Its head comes up with a chirp and its back glows blue. The Mac
+microphone is open only while the robot is plugged in, and a switch in the menu-bar
+app (or `cc-buddy-bridge mic off`) closes it for good until you say otherwise.
 
 **It answers on its own screen.** Replies appear as captions under its eyes while it
 beeps and boops. No voice comes out of your Mac.

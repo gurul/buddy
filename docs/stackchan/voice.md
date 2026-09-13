@@ -27,8 +27,12 @@ daemon ─{"cmd":"agent","state":…}─▶ robot: wake · listening · thinking
 
 ## What happens, step by step
 
-1. **Wake.** The daemon keeps one microphone stream open and runs every 100 ms block
-   through a streaming keyword spotter. On "hey buddy" the robot's head comes up
+1. **Wake.** While the robot is connected the daemon keeps one microphone stream open
+   and runs every 100 ms block through a streaming keyword spotter. The mic closes
+   when the robot drops off the cable and opens again when it is back
+   (`CC_BUDDY_MIC_ALWAYS=1` keeps it open from boot). `cc-buddy-bridge mic off`, or
+   the *Microphone* switch in the menu-bar app, closes it for good until you turn it
+   back on; `cc-buddy-bridge mic` says what it is doing right now. On "hey buddy" the robot's head comes up
    with a chirp (`wake`) and a conversation opens. A wake is ignored while a
    conversation is already open.
 2. **Talk.** A Live session (`gpt-live-1`) hears the same microphone. The model is
@@ -110,7 +114,8 @@ daemon ─{"cmd":"agent","state":…}─▶ robot: wake · listening · thinking
 6. **Stopping it listening.** Any of: say *bye*, *thanks*, *stop listening*, *go to
    sleep* or *be quiet*; **touch the robot** (a tap or a hold on the pet ends the
    conversation and any task it is running, at once); 20 quiet seconds with no task
-   running; the 10-minute cap. `CC_BUDDY_VOICE=0` turns the microphone off entirely.
+   running; the 10-minute cap. `cc-buddy-bridge mic off` closes the microphone until
+   `mic on` (persisted, like mute); `CC_BUDDY_VOICE=0` never opens it at all.
 7. **Sending it exploring.** *"hey buddy, go explore"* (or *look around*, *go play*):
    buddy answers with a two-word send-off and calls `go_explore`, which closes the
    conversation like `end_conversation`; once the robot has dropped the conversation
@@ -153,6 +158,8 @@ HEARD IT at 1.4 s — ears are working.
 | `CC_BUDDY_WAKE_WORD` | `hey buddy` | any short English phrase; it is tokenised into the spotter's keywords file at startup (no training) |
 | `CC_BUDDY_WAKE_THRESHOLD` | `0.25` | spotter threshold; lower = more sensitive (bench: 0.25 fired on a synthesized clip, stayed quiet on a control sentence) |
 | `CC_BUDDY_MIC` | default input | substring of the input device name to use |
+| `CC_BUDDY_MIC_ALWAYS` | off | `1`: open the microphone at boot and keep it open; default: only while the robot is connected |
+| `CC_BUDDY_MIC_FILE` | `~/.config/cc-buddy-bridge/mic.json` | where the owner's `mic on/off` choice is kept |
 | `CC_BUDDY_KWS_MODEL_DIR` | see above | where the sherpa-onnx model lives |
 | `CC_BUDDY_LIVE_MODEL` | `gpt-live-1` | the voice model (Live API) |
 | `CC_BUDDY_LIVE_BACKEND_MODEL` | `gpt-6-astra` | the Responses backend that owns the tools (`gpt-5-mini` answers faster, calls tools less reliably) |

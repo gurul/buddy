@@ -165,6 +165,10 @@ class Daemon:
         # The owner's mute choice (sound.py): persisted, re-sent on every connect.
         self._sound = SoundSetting()
         self._sound.load()
+        # The owner's microphone switch (`cc-buddy-bridge mic`, or the menu-bar
+        # app): persisted, and one of the two things the mic policy checks.
+        self._mic = SoundSetting(name="mic")
+        self._mic.load()
         # "Go away" / "mute" in any words (intent.py); resolved in run().
         self._intent: Optional[Any] = None
         self._thinker: Optional[Any] = None
@@ -447,9 +451,37 @@ class Daemon:
             await self._resync_agent()
             await self._send_cam(True)
             await self._send_sound()
+            self._apply_mic("the robot connected")
             # Wait for the connection to drop before waiting again.
             while self.ble.connected and not self._shutdown.is_set():
                 await asyncio.sleep(1.0)
+            self._apply_mic("the robot is not connected")
+
+    # ---- the Mac microphone ----
+
+    def _mic_wanted(self) -> bool:
+        """The mic policy: the owner's switch is on, and the robot is connected
+        (or CC_BUDDY_MIC_ALWAYS=1 says to listen from boot)."""
+        return self._mic.on and (self._ears_cfg.always or self.ble.connected)
+
+    def _apply_mic(self, why: str) -> None:
+        """Open or close the Mac microphone to match _mic_wanted. Called at boot,
+        on every robot connect and drop, and when the owner flips the switch."""
+        if self._ears is None:
+            return
+        want = self._mic_wanted()
+        if want and not self._ears.listening:
+            if not self._ears.start():
+                log.warning("ears: the microphone did not open (%s); the wake word is off until it does", why)
+        elif not want and self._ears.listening:
+            self._ears.stop()
+            log.info("ears: microphone closed — %s", why)
+
+    def _mic_status(self) -> dict[str, Any]:
+        listening = self._ears is not None and self._ears.listening
+        return {"ok": True, "mic": "on" if self._mic.on else "off", "listening": listening,
+                "connected": self.ble.connected, "always": self._ears_cfg.always,
+                "available": self._ears is not None}
 
     async def _status_poller(self) -> None:
         """Poll the stick for status, and use the replies as a TX health check.
@@ -590,9 +622,18 @@ class Daemon:
             log.info("ears: disabled (CC_BUDDY_VOICE=0)")
             return
         self._ears = Ears(self._ears_cfg, self._on_wake, loop, suppressed=self._wake_suppressed)
-        if not self._ears.start():
+        # Load the model now so a missing one shows at boot; the mic itself opens
+        # and closes in _apply_mic, to the policy in _mic_wanted.
+        if not self._ears.prepare():
             self._ears = None
             return
+        if not self._mic.on:
+            log.info("ears: microphone off (owner's choice, %s) — `cc-buddy-bridge mic on` turns it back on",
+                     self._mic.path)
+        elif not self._ears_cfg.always:
+            log.info("ears: the microphone opens when the robot connects and closes when it leaves "
+                     "(CC_BUDDY_MIC_ALWAYS=1 keeps it open)")
+        self._apply_mic("boot")
         if not (os.environ.get("OPENAI_API_KEY") or "").strip():
             log.warning("voice: OPENAI_API_KEY not set — buddy will hear its name but cannot talk back "
                         "(put it in ~/.config/cc-buddy-bridge/env)")
@@ -635,7 +676,8 @@ class Daemon:
             await self._resync_agent()
 
     async def _converse(self, think_aloud: Optional[dict[str, Any]] = None) -> None:
-        if self._ears is None:
+        # getattr: the daemon tests stand in a bare object for the ears.
+        if self._ears is None or not getattr(self._ears, "listening", True):
             return
         server = getattr(self, "_learning_server", None)
         mic = self._ears.subscribe()
@@ -818,6 +860,9 @@ class Daemon:
         if self._ears is None:
             return {"ok": False, "reason": "buddy's microphone is off (CC_BUDDY_VOICE=0, or no microphone "
                                            "was found), so buddy cannot listen."}
+        if not getattr(self._ears, "listening", True):
+            return {"ok": False, "reason": "buddy's microphone is closed because the robot is not connected. "
+                                           "Plug buddy in, or set CC_BUDDY_MIC_ALWAYS=1."}
         if not (os.environ.get("OPENAI_API_KEY") or "").strip():
             return {"ok": False, "reason": "buddy cannot listen yet: its voice needs OPENAI_API_KEY in "
                                            "~/.config/cc-buddy-bridge/env."}
@@ -1396,6 +1441,15 @@ class Daemon:
                 self._set_sound(action == "on")
             return {"ok": True, "sound": "on" if self._sound.on else "off", "connected": self.ble.connected}
 
+        if evt == "mic":
+            # `cc-buddy-bridge mic [on|off|status]`, and the menu-bar app's switch.
+            action = req.get("action")
+            if action in ("on", "off"):
+                if self._mic.set(action == "on"):
+                    log.info("mic: %s (owner's choice)", action)
+                self._apply_mic("your choice")
+            return self._mic_status()
+
         if evt == "get_state":
             # Queried by the `cc-buddy-bridge hud` subcommand (or anyone else
             # who wants a one-shot snapshot). Kept small on purpose.
@@ -1404,6 +1458,7 @@ class Daemon:
                 "ok": True,
                 "state": {
                     "ble_connected": self.ble.connected,
+                    "mic_listening": self._ears is not None and self._ears.listening,
                     "sec": self._last_stick_sec,
                     "battery_pct": self._last_stick_battery_pct,
                     "total": self.state.total,
