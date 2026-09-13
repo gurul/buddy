@@ -753,3 +753,45 @@ def test_the_pan_itself_stays_cheap(tmp_path: Path) -> None:
     asyncio.run(t.take(_note(surprise=0.5)))
     assert t.photographed == 0 and t.examined == 0
     assert client.examine_contexts == []
+
+
+# ---- a photo the owner asked for ----------------------------------------------------------------
+
+def test_keep_saves_an_asked_for_photo_outside_the_budget_and_captions_it(tmp_path: Path) -> None:
+    clock = Clock(datetime(2026, 9, 13, 12, 0, 0))
+    examination = json.dumps({"sees": ["a red bicycle leaning on the door"], "caption": "the red bike by the door",
+                              "thought": "The red bike is parked by the door.", "objects": ["bicycle", "door"],
+                              "confident": True})
+    client = FakeClient([], examination=examination)
+    taker = _photo_taker(tmp_path, client, clock)
+
+    rec = asyncio.run(taker.keep(_jpeg_frame(), said="my bike", yaw=20, pitch=40))
+    assert rec is not None and rec.photo == "photos/2026-09-13/120000-1.jpg"
+    assert (tmp_path / "notes" / rec.photo).read_bytes() == JPEG
+    assert rec.caption == "the red bike by the door" and rec.written and rec.cool == 1.0
+    assert "asked" in rec.tags and "bicycle" in rec.tags
+    assert rec.thought == "A picture you asked for: the red bike by the door"
+    day = (tmp_path / "notes" / "2026-09-13.md").read_text()
+    assert "- 12:00 yaw=+20 pitch=40 — A picture you asked for: the red bike by the door" in day
+    assert "  ![](photos/2026-09-13/120000-1.jpg)" in day
+    assert taker.photographed == 1 and taker.written == 1 and taker.taken == 1
+    assert client.examine_contexts and "my bike" in client.examine_contexts[0]
+
+    # a second one straight away: no budget, no habituation, no "same thing twice" gate
+    rec2 = asyncio.run(taker.keep(_jpeg_frame(), said="my bike"))
+    assert rec2 is not None and rec2.id == 2 and taker.photographed == 2
+
+
+def test_keep_refuses_a_non_jpeg_and_a_failed_look_keeps_the_owners_words(tmp_path: Path) -> None:
+    clock = Clock(datetime(2026, 9, 13, 12, 0, 0))
+    taker = _photo_taker(tmp_path, FakeClient([]), clock)
+    assert asyncio.run(taker.keep(Frame(seq=1, w=160, h=120, fmt="gray", data=b"\x00" * 10))) is None
+
+    class Broken(FakeClient):
+        def examine(self, image, mime, context):
+            raise RuntimeError("no model")
+
+    taker = _photo_taker(tmp_path, Broken([]), clock)
+    rec = asyncio.run(taker.keep(_jpeg_frame(), said="the plant"))
+    assert rec is not None and rec.caption == "the plant"
+    assert rec.thought == "A picture you asked for: the plant"

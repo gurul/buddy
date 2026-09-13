@@ -966,6 +966,45 @@ class DiaryTaker:
             asyncio.create_task(self.reflect(when), name="diary-reflect")
         return path
 
+    async def keep(self, frame: Frame, said: str = "", yaw: int = 0, pitch: int = 45) -> Optional[Record]:
+        """A photo the owner asked for ("hey buddy, take a picture of this").
+
+        Kept whatever the cool factor says and outside the photo budget — the
+        owner's judgment outranks buddy's — written to the diary at once, then
+        looked at properly so the record and the voice's answer carry a real
+        caption. None when the frame is not a JPEG or the shelf refused it.
+        """
+        if frame is None or frame.fmt != "jpeg":
+            return None
+        self.memory.load()
+        when = self.wall()
+        said = " ".join((said or "").split())[:120]
+        rec = Record(
+            id=self.memory.next_id(), ts=when.timestamp(), weekday=when.weekday(), hour=when.hour,
+            yaw=int(yaw), pitch=int(pitch),
+            thought=f"A picture you asked for: {said}" if said else "A picture you asked for",
+            tags=["asked"] + ([t for t in re.findall(r"[a-z]+", said.lower()) if len(t) > 3][:4]),
+            novelty=5, importance=6, valence=30, arousal=20, label="glad", last_accessed=when.timestamp(),
+            cool=1.0,
+        )
+        rel = photos.save(self.notes_dir, when, rec.id, frame.data, self.photo_config)
+        if rel is None:
+            return None
+        rec.photo = rel
+        rec.caption = said[:CAPTION_CHARS] or rec.thought[:CAPTION_CHARS]
+        # The proper look names what is in the picture; the framing stays the owner's.
+        await self._look_closer(rec, frame)
+        if rec.caption:
+            rec.thought = f"A picture you asked for: {rec.caption}"
+        rec.written = True
+        self.memory.add(rec)
+        self.taken += 1
+        self.photographed += 1
+        append_note(self.notes_dir, when, rec.yaw, rec.pitch, rec.thought, extra=photos.photo_line(rel))
+        self.written += 1
+        log.info("diary: photo on request -> %s", rel)
+        return rec
+
     async def _consider_photo(self, rec: Record, note: Note, reply: dict[str, Any], when: datetime) -> bool:
         """Score the view, and if buddy finds it cool enough, keep the picture.
 

@@ -12,13 +12,13 @@ from types import MethodType, SimpleNamespace
 
 from cc_buddy_bridge import daemon as daemon_mod
 from cc_buddy_bridge.caption_pager import CaptionPager
-from cc_buddy_bridge.scene import SceneWatcher
-from cc_buddy_bridge.diary import Thought
-from cc_buddy_bridge.thought_screen import ThoughtScreen
-from cc_buddy_bridge.daemon import Daemon
-from cc_buddy_bridge.explore import WAYPOINTS, ExploreConfig, Explorer, Look, Mode
 from cc_buddy_bridge.chat_memory import ChatMemory
+from cc_buddy_bridge.daemon import Daemon
+from cc_buddy_bridge.diary import Thought
+from cc_buddy_bridge.explore import WAYPOINTS, ExploreConfig, Explorer
 from cc_buddy_bridge.recall import RecallConfig
+from cc_buddy_bridge.scene import SceneWatcher
+from cc_buddy_bridge.thought_screen import ThoughtScreen
 
 MODE_ON = {"cmd": "mode", "explore": True}
 
@@ -89,6 +89,7 @@ def _daemon(connected: bool = True, pending: int = 0, listen_sent=None, enabled:
         _sound=SimpleNamespace(on=True, muted=False),
         _intent=None,
         _thinker=None,
+        _photo_for_owner=None,
         _set_sound=lambda on: None,
     )
     d._thought_pager = CaptionPager()

@@ -6,13 +6,14 @@ import asyncio
 import logging
 import os
 import time
+from datetime import datetime
 from typing import TYPE_CHECKING, Any, Optional
 
 if TYPE_CHECKING:
     from .key_tap import KeyTapper
 
+from . import photos, voice_agent
 from . import recall as recall_mod
-from . import voice_agent
 from .audit import AuditLog
 from .ble import BuddyBLE
 from .caption_pager import CaptionPager, PagerConfig
@@ -32,6 +33,7 @@ from .explore import (
     Note,
     NoteTaker,
     Rest,
+    append_note,
     build_look_cmd,
     build_mode_cmd,
 )
@@ -695,7 +697,8 @@ class Daemon:
                                            on_caption=self._on_caption, on_explore=self._on_voice_explore,
                                            scene=self._scene, head=self._head, intent=self._intent,
                                            on_sound=self._set_sound, muted=lambda: self._sound.muted,
-                                           thinker=self._thinker, memory=memory,
+                                           thinker=self._thinker, on_photo=self._photo_for_owner,
+                                           memory=memory,
                                            on_closed=self._remember_conversation,
                                            on_star=self._star_by_voice,
                                            learning=server.app.voice if server is not None else None,
@@ -1106,6 +1109,42 @@ class Daemon:
             return None
         finally:
             self._snap_waiter = None
+
+    async def _photo_for_owner(self, said: str) -> dict[str, Any]:
+        """The voice's take_photo: one full-size frame from the board (or the
+        newest streamed frame when it cannot snap), kept in the diary as a
+        picture the owner asked for. The answer is what the picture shows."""
+        if not self.ble.connected:
+            return {"ok": False, "reason": "the robot is not connected, so there is no camera"}
+        frame = await self._take_snapshot()
+        if frame is None:
+            raw = self._scene.newest_frame()
+            if raw is not None:
+                try:
+                    frame = decode_frame(raw)
+                except ValueError:
+                    frame = None
+        if frame is None or frame.fmt != "jpeg":
+            return {"ok": False, "reason": "the camera gave no picture just now"}
+        yaw, pitch = int(round(self._head.yaw)), int(round(self._head.pitch))
+        if self._notes is not None:
+            rec = await self._notes.keep(frame, said=said, yaw=yaw, pitch=pitch)
+            if rec is None:
+                return {"ok": False, "reason": "the picture could not be saved"}
+            rel, caption = rec.photo, rec.caption
+        else:
+            # No diary model (no OPENAI_API_KEY for it): keep the file and a plain line.
+            when = datetime.now()
+            rel = photos.save(self._explore_cfg.notes_dir, when, 0, frame.data)
+            if rel is None:
+                return {"ok": False, "reason": "the picture could not be saved"}
+            caption = said or "a picture you asked for"
+            append_note(self._explore_cfg.notes_dir, when, yaw, pitch, f"A picture you asked for: {caption}",
+                        extra=photos.photo_line(rel))
+        self._note_activity()
+        log.info("voice: photo on request -> %s", rel)
+        return {"ok": True, "path": str(self._explore_cfg.notes_dir / rel), "caption": caption,
+                "answer": f"Kept it: {caption}"}
 
     async def _request_explore(self, reason: str) -> None:
         """The owner asked (CLI or voice): start a manual explore now.

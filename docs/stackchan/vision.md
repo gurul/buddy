@@ -56,6 +56,20 @@ most one describe timeout (8 s). With the camera lost it answers that nothing ca
 A slow answer is dropped, never queued: at most one describe runs, and only the newest
 frame waits.
 
+## Taking a photo on request
+
+"Hey buddy, take a picture of this" (or *a photo*, *snap this*, *remember what this looks
+like*) goes to the backend, which calls `take_photo` with the owner's words as the note. The
+daemon asks the board for one full-size frame (`{"cmd":"snap"}`, the same request the diary
+uses for a photo it finds cool) and falls back to the newest streamed frame when the board
+cannot answer. The picture is kept by `DiaryTaker.keep`: **outside** the explorer's photo
+budget and habituation gates, because the owner's judgment outranks buddy's, written to
+today's diary at once as *"A picture you asked for: …"* with the image line under it, then
+looked at properly so the caption names what is in it. The tool returns that caption and the
+voice says it back ("Kept it: the red bike by the door"). With the robot unplugged, or no
+frame within 20 s, it returns why and the voice says that instead of claiming a photo.
+`cc-buddy-bridge photos open` shows the newest one.
+
 ## Turning the head
 
 The backend reads your words and picks the numbers. One robot-centred frame, shared with

@@ -58,7 +58,8 @@ knows about the room and about you. Every conversation is distilled into a few l
 
 **It takes pictures of things it finds cool.** A first, someone in the room, its own
 things moved: those get a full-resolution photo, on its own judgment, and never the same
-thing twice.
+thing twice. Say *"hey buddy, take a picture of this"* and it takes one on yours: the photo
+lands in the diary with a caption, and it tells you what it kept.
 
 **It takes notes for you.** Run `cc-buddy-bridge take-notes start` and it transcribes the
 room until you stop it, then writes up the decisions, the actions and what was left open.

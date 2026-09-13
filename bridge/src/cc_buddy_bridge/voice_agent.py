@@ -175,8 +175,8 @@ never started as a task, even if an app could show the answer.
   instead", "also save it") → steer_task with the text. "How's it going?" → task_status, summarised in one
   line.
 - A message tagged [look request] is the owner's own words asking buddy to turn its head, look somewhere,
-  look around or find something. Act on it now with move_head, look_around, find or look — never answer it
-  without one of those tools.
+  look around or find something, or to take a picture. Act on it now with move_head, look_around, find,
+  look or take_photo — never answer it without one of those tools.
 - A message tagged [task question] is a question buddy has just asked the owner out loud for the running
   task. When the owner answers, relay it with answer_question as plain words ("yes", "no", "the second one").
 - Goodbye, thanks-that's-all, "stop listening", "go to sleep", "I want you to leave", or "never mind" with no
@@ -185,6 +185,9 @@ never started as a task, even if an app could show the answer.
   already stopped when you woke — say so and call end_conversation.
 - "What do you see?", "what am I holding?", "look at this" → look, then answer from its view in one short
   line with only what the view says. If it says the camera is not connected, or the view is stale, say that.
+- "Take a photo", "take a picture of this", "snap this", "remember what this looks like" → take_photo, with
+  what they said it is as the note. Then say in a few words what you kept, from its caption ("Got it: the
+  red bike by the door"). If it returns ok false, say why in one line; never say you took one.
 - Turning the head: you choose the numbers from the owner's words. Angles are the robot's own. yaw 0 faces
   the owner; negative turns to the robot's left, positive to its right; ±120 is as far as the neck turns, so
   "behind you" is 120 (or -120 if they said left). pitch 45 is level, 5 is down at the desk, 85 is up at the
@@ -293,6 +296,13 @@ TOOLS: list[dict[str, Any]] = [
      "parameters": {"type": "object", "properties": {"target": {"type": "string",
                     "description": "What to find, in the owner's own words."}},
                     "required": ["target"], "additionalProperties": False}},
+    {"type": "function", "name": "take_photo",
+     "description": "Take a photo with your camera and keep it in your diary. Use when the owner asks for a "
+                    "picture, a photo, a snap, or to remember how something looks. Returns what the picture "
+                    "shows, or why none could be taken. Takes a few seconds.",
+     "parameters": {"type": "object", "properties": {"note": {"type": "string",
+                    "description": "What the owner said the picture is of, in their words; empty if they did not say."}},
+                    "required": ["note"], "additionalProperties": False}},
     {"type": "function", "name": "set_sound",
      "description": "Mute or unmute yourself. Muted: no beeps, chirps or voice; you still move and light up.",
      "parameters": {"type": "object", "properties": {"on": {"type": "boolean",
@@ -550,6 +560,7 @@ class VoiceSession:
         on_sound: Optional[Callable[[bool], None]] = None,  # the owner muted (False) / unmuted (True)
         muted: Callable[[], bool] = lambda: False,
         thinker: Optional[Callable[[str], Awaitable[dict[str, Any]]]] = None,   # think.make_thinker(...)
+        on_photo: Optional[Callable[[str], Awaitable[dict[str, Any]]]] = None,   # Daemon._photo_for_owner
         memory: str = "",                                   # recall.opening_brief(...)
         on_star: Optional[Callable[[str], Optional[str]]] = None,   # chat_memory.star(...)
         learning: Optional[Callable[..., dict[str, Any]]] = None,
@@ -572,6 +583,7 @@ class VoiceSession:
         self.head = head
         self.intent = intent
         self.thinker = thinker
+        self.on_photo = on_photo
         self.on_sound = on_sound
         self.muted = muted
         # "Go away" was heard: the mic stops, and the session closes once buddy's
@@ -1134,7 +1146,7 @@ class VoiceSession:
                 result = {"ok": True, "sound": "on" if on else "off"}
             else:
                 result = {"ok": False, "reason": "on must be true or false"}
-        elif name in ("look", "look_around", "find", "think_hard", "math_lesson"):
+        elif name in ("look", "look_around", "find", "think_hard", "math_lesson", "take_photo"):
             # Seconds (or a minute, for think_hard) of camera, head or model work:
             # answered from a background task, so Live events (the owner talking,
             # captions) keep flowing meanwhile.
@@ -1198,6 +1210,8 @@ class VoiceSession:
                     result = await self._look_around()
                 elif name == "think_hard":
                     result = await self._think_hard(str(args.get("question", "")))
+                elif name == "take_photo":
+                    result = await self._take_photo(str(args.get("note", "")))
                 else:
                     result = await self._find(str(args.get("target", "")))
             except asyncio.CancelledError:
@@ -1224,6 +1238,17 @@ class VoiceSession:
         if self.scene is None:
             return {"ok": False, "reason": "vision is not set up on this computer"}
         return await self.scene.look()
+
+    PHOTO_TIMEOUT_SECS = 20.0
+
+    async def _take_photo(self, note: str) -> dict[str, Any]:
+        """The owner asked for a picture: the daemon snaps, keeps and captions it."""
+        if self.on_photo is None:
+            return {"ok": False, "reason": "no camera to take a photo with right now"}
+        try:
+            return await asyncio.wait_for(self.on_photo(note), timeout=self.PHOTO_TIMEOUT_SECS)
+        except asyncio.TimeoutError:
+            return {"ok": False, "reason": "the camera did not answer in time"}
 
     async def _look_around(self) -> dict[str, Any]:
         if self.head is None or self.scene is None:
@@ -1518,6 +1543,7 @@ async def open_session(
     on_sound: Optional[Callable[[bool], None]] = None,
     muted: Callable[[], bool] = lambda: False,
     thinker: Optional[Callable[[str], Awaitable[dict[str, Any]]]] = None,
+    on_photo: Optional[Callable[[str], Awaitable[dict[str, Any]]]] = None,
     memory: str = "",
     on_closed: Optional[Callable[[list[tuple[str, str]]], None]] = None,
     on_star: Optional[Callable[[str], Optional[str]]] = None,
@@ -1543,7 +1569,7 @@ async def open_session(
             session = VoiceSession(conn, mic, speaker, agent_factory, on_state, config=cfg,
                                    agent_enabled=agent_enabled, on_caption=on_caption,
                                    on_explore=on_explore, scene=scene, head=head, intent=intent,
-                                   on_sound=on_sound, muted=muted, thinker=thinker,
+                                   on_sound=on_sound, muted=muted, thinker=thinker, on_photo=on_photo,
                                    memory=memory, on_star=on_star, learning=learning,
                                    think_aloud=think_aloud, on_spoken_idea=on_spoken_idea,
                                    on_think_aloud=on_think_aloud)

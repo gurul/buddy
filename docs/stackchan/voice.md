@@ -39,8 +39,8 @@ daemon ─{"cmd":"agent","state":…}─▶ robot: wake · listening · thinking
    full duplex — it listens while it speaks and does its own turn-taking, so there is
    no VAD to configure. It answers chit-chat itself and delegates anything needing a
    tool to a Responses backend (`gpt-6-astra`) that owns the tools: the seven for tasks,
-   exploring and ending, plus `look`, `move_head`, `look_around`, `find` and `set_sound`
-   ([vision.md](vision.md)), the built-in `web_search`, and `think_hard`. The voice is
+   exploring and ending, plus `look`, `move_head`, `look_around`, `find`, `take_photo` and
+   `set_sound` ([vision.md](vision.md)), the built-in `web_search`, and `think_hard`. The voice is
    the receptionist: a question that needs today's facts (weather, a score, a price) is
    delegated and the backend searches the web itself, server-side; a genuinely hard
    question (maths, code, logic, a plan) goes through `think_hard` to `think.py` — one
