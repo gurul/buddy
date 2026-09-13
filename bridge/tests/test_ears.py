@@ -197,7 +197,7 @@ def _run_clip(spot: WakeSpotter, pcm: np.ndarray) -> list[tuple[float, str]]:
 def test_real_model_hears_hey_buddy_and_ignores_a_control_sentence(tmp_path: Path) -> None:
     cfg = EarsConfig()
     spot = WakeSpotter(cfg, keywords_file=None)
-    assert spot.keywords_file.read_text().strip().endswith("@hey_buddy")
+    assert "@hey_buddy" in spot.keywords_file.read_text()   # the default file also lists okay/ok buddy
     hits = _run_clip(spot, _synth(tmp_path, "pos", "hey buddy, open my email"))
     assert [k for _, k in hits] == ["hey_buddy"], hits
     assert _run_clip(spot, _synth(tmp_path, "neg", "the weather is nice today, nothing to see here")) == []
