@@ -106,9 +106,13 @@ def encode_phrase(phrase: str, bpe_model: Path) -> list[str]:
 
 
 def write_keywords_file(config: EarsConfig, path: Optional[Path] = None) -> Path:
-    tokens = encode_phrase(config.wake_word, config.model_dir / "bpe.model")
+    phrases = [config.wake_word]
+    if config.wake_word.strip().lower() == "hey buddy":
+        phrases.extend(["okay buddy", "ok buddy"])
+    lines = [keyword_line(encode_phrase(phrase, config.model_dir / "bpe.model"),
+                          phrase, config.boost, config.threshold) for phrase in phrases]
     out = path or (config.model_dir / f"keywords-{keyword_id(config.wake_word)}.txt")
-    out.write_text(keyword_line(tokens, config.wake_word, config.boost, config.threshold) + "\n", encoding="utf-8")
+    out.write_text("\n".join(lines) + "\n", encoding="utf-8")
     return out
 
 

@@ -5,6 +5,8 @@
 #include "chirp.h"
 #include "gaze.h"
 #include "hostlook.h"
+#include "motion.h"
+#include "ticks.h"
 #include <M5StackChan.h>
 
 // ---- servo limits (degrees) ----
@@ -55,8 +57,10 @@ static int clampYaw(int deg) {
 // A sequence is a list of {delay from sequence start, yaw, pitch, speed}.
 // KEEP leaves that axis at its last commanded target. bodyUpdate() steps the
 // player; nothing here blocks.
-static const int8_t KEEP = 127;
-struct Key { uint16_t atMs; int8_t yaw; int8_t pitch; uint16_t speed; };
+// The Key struct and its KEEP sentinel now live in motion.h so the host can
+// send a keyframe list in exactly the shape this player already steps.
+using motion::Key;
+static const int8_t KEEP = motion::KEEP;
 
 static const Key* seq      = nullptr;
 static uint8_t    seqN     = 0;
@@ -65,6 +69,16 @@ static uint32_t   seqStart = 0;
 static int        curYaw   = 0;
 static int        curPitch = PITCH_LEVEL;
 static Key        dyn[8];            // scratch for sequences built at runtime
+static Key        hostKeys[motion::kKeysMax];   // a host-sent keyframe list (48 B)
+// ---- host motion (motion.h) ----
+static motion::Osc osc;              // the running oscillation, already admitted
+static bool        oscOn    = false;
+static uint32_t    oscStart = 0;
+// Duty. Every per-motion limit can be satisfied and still cook a servo, because
+// "dance" said ten times running is ten legal bouts back to back. A motion earns
+// twice its own length of rest before another may start; the refusal is visible
+// on the wire rather than silent, so buddy can say "give me a second".
+static uint32_t    oscCoolUntil = 0;
 
 // ---- motion tween ----
 // The BSP already runs a critically-damped spring per servo (stiffness from
@@ -109,6 +123,8 @@ static void headTo(int yawDeg, int pitchDeg, int speed) {
 bool bodyMoving() { return gliding || M5StackChan.Motion.isMoving(); }
 int  bodyCmdYawDeg()   { return (int)lroundf(cmdYaw); }
 int  bodyCmdPitchDeg() { return (int)lroundf(cmdPitch); }
+int  bodyCmdYawTenths()   { return (int)lroundf(cmdYaw * 10.0f); }
+int  bodyCmdPitchTenths() { return (int)lroundf(cmdPitch * 10.0f); }
 
 static bool exploring = false;   // host drives the head; sleep pose not applied
 static void onEnterSilent(PersonaState s, uint32_t now);
@@ -116,7 +132,25 @@ static void onEnterSilent(PersonaState s, uint32_t now);
 // Advance the glide, add the idle micro-drift, stream to the BSP at 25 Hz.
 static void stepTween(uint32_t now) {
   float y = cmdYaw, p = cmdPitch;
-  if (gliding) {
+  // A host motion owns the pose while it runs: it replaces the glide rather
+  // than fighting it, and shares this function's 25 Hz gate, speed mapping and
+  // final clamp. Nothing else in the file changes.
+  if (oscOn) {
+    // ticks::elapsedMs, not `now - oscStart`. bodyMotion() stamps oscStart with
+    // millis() from main.cpp's consumer, which runs AFTER loop() captured `now`
+    // and immediately before bodyUpdate — so the plain subtraction underflows to
+    // about 4e9 ms on the very first tick and the motion ends before it starts.
+    // The head echoed "ran=7200ms" and never moved. Same trap, same fix, as the
+    // agent-phase staleness bug in main.cpp.
+    if (motion::pose(osc, ticks::elapsedMs(now, oscStart), &y, &p)) {
+      cmdYaw = y; cmdPitch = p; gliding = false;
+    } else {
+      oscOn = false;
+      cmdYaw = y; cmdPitch = p;          // ends exactly at its own centre
+      curYaw = (int)lroundf(y); curPitch = (int)lroundf(p);
+    }
+  }
+  if (!oscOn && gliding) {
     float t = glideMs ? (float)(now - glideStart) / (float)glideMs : 1.0f;
     if (t >= 1.0f) { t = 1.0f; gliding = false; }
     float e = easeInOutCubic(t);
@@ -127,7 +161,7 @@ static void stepTween(uint32_t now) {
   // Perlin-ish micro-drift: two sines at unrelated periods (5.3 s / 4.1 s),
   // ±1.5 deg yaw, ±1 deg pitch. Only while awake and not gliding, so the
   // head never looks parked but a sleeping pet stays still (torque releases).
-  if (driftOn && !gliding) {
+  if (driftOn && !gliding && !oscOn) {
     float ty = (float)now / 1000.0f;
     y += 1.5f * sinf(ty * (6.2832f / 5.3f)) * 0.7f + 1.5f * sinf(ty * (6.2832f / 7.9f)) * 0.3f;
     p += 1.0f * sinf(ty * (6.2832f / 4.1f) + 1.0f);
@@ -258,7 +292,11 @@ void bodySetAgent(AgentState s) {
   uint32_t now = millis();
   agentState = s;
   agentSince = now;
-  seq = nullptr;
+  // A host motion survives a phase change, exactly as a host look already does
+  // (`keep` below). Clearing seq unconditionally killed a keyframe gesture
+  // mid-way while leaving an oscillation running — the same request treated two
+  // different ways depending on which shape it arrived in.
+  if (!hostHeld(now)) seq = nullptr;
   // A look the owner asked for keeps the head through phase changes: buddy goes
   // on looking where it was told while it answers (hostlook.h). The phase still
   // chirps; only its pose and its beat stand aside until the hold runs out.
@@ -356,6 +394,66 @@ void bodyHostLook(int8_t yawDeg, int8_t pitchDeg, uint16_t holdMs) {
   if (holdMs) gazePitch = clampPitch(pitchDeg);
   gazeFromHost = holdMs > 0;
 }
+
+// ---- host motion -----------------------------------------------------------
+// A motion takes the same hold a host look takes, so the whole precedence story
+// in this file (hostHeld: no agent poses, no beats, no sway, no automatic gaze)
+// applies to it unchanged. The centre defaults to the pose the head is holding,
+// so a rhythm always grows out of where it already is.
+uint32_t bodyMotion(const motion::Osc& want, bool centreHere) {
+  uint32_t now = millis();
+  if (!oscOn && oscCoolUntil && (int32_t)(now - oscCoolUntil) < 0) {
+    Serial.printf("[body] motion refused: resting %lums more\n",
+                  (unsigned long)(oscCoolUntil - now));
+    return 0;
+  }
+  motion::Osc o = want;
+  if (centreHere) { o.centerYaw = (int16_t)lroundf(cmdYaw); o.centerPitch = (int16_t)lroundf(cmdPitch); }
+  osc = motion::admit(o);
+  if (osc.ampYaw == 0 && osc.ampPitch == 0) return 0;      // nothing safe to run
+  seq = nullptr;
+  gliding = false;
+  oscOn = true;
+  oscStart = now;
+  uint32_t dur = motion::durationMs(osc);
+  oscCoolUntil = now + dur + 2 * dur;          // the bout, then twice it at rest
+  gazeYaw = clampYaw(osc.centerYaw); gazePitch = clampPitch(osc.centerPitch);
+  gazeUntil = now + dur + 250; gazePending = false; gazeSide = 0; gazeFromHost = true;
+  return dur;
+}
+
+uint32_t bodyPlayKeys(motion::Key* k, uint8_t n) {
+  uint32_t now = millis();
+  n = motion::admitKeys(k, n);
+  if (!n) return 0;
+  for (uint8_t i = 0; i < n; i++) hostKeys[i] = k[i];
+  oscOn = false;
+  gliding = false;
+  play(hostKeys, n, now);
+  uint32_t dur = (uint32_t)hostKeys[n - 1].atMs + 600;     // the last glide, then silence
+  gazeYaw = 0; gazePitch = -1;
+  gazeUntil = now + dur; gazePending = false; gazeSide = 0; gazeFromHost = true;
+  return dur;
+}
+
+// Stop now, wherever the head is. This clears `gliding` and `seq` as well as
+// the hold — which hold:0 never did, so before this there was no path in the
+// firmware that stopped a motion already in flight. Streaming then falls under
+// stepTween's 0.05 deg gate within one tick, the BSP's spring brings the head
+// to rest from wherever it was, and torque releases. Nothing snaps.
+void bodyStopMotion() {
+  // A motion the owner stopped has not spent its duty, so it does not owe the
+  // rest. Stopping and asking again is the owner correcting it, not a loophole:
+  // the next motion earns its own cooldown from its own length.
+  oscCoolUntil = 0;
+  oscOn = false;
+  seq = nullptr;
+  gliding = false;
+  curYaw = (int)lroundf(cmdYaw); curPitch = (int)lroundf(cmdPitch);
+  gazeUntil = 0; gazePending = false; gazeSide = 0; gazeFromHost = false;
+}
+
+bool bodyMotionRunning() { return oscOn || seq != nullptr; }
 
 void bodyNoteToucher(int8_t side) {
   toucherSide = side;

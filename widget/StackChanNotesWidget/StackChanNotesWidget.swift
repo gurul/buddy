@@ -1,18 +1,29 @@
 // WidgetKit extension — sandboxed, reads only the mirrored notes.json from the App Group.
 //
-// Design: a dark, warm card. A header with buddy's name and the current feeling
-// (emoji + label + a colour dot: hue from valence, brightness from arousal — the
-// same mapping as the robot's LEDs), then the newest thoughts, each with its
-// time and a thin colour bar for the feeling it was written in. Tapping the
-// widget opens the diary window in the helper app (stackchan://diary).
+// Design: the Buddy Show-and-Tell look — a sheet of paper with ink text and
+// cut-paper cards (see Shared/BuddyBrand.swift). In full colour it is always paper,
+// on light and dark desktops alike. When the desktop draws it vibrant or accented
+// (an app window in front), the system removes the paper, so text and lines use
+// `BrandStyle`, which turns white and drops fills and shadows in those modes.
+//
+// The diary widget shows buddy's name and current feeling, a debt of buddy's own
+// if it has one, and the newest thoughts as cards whose offset shadow is the
+// colour of the feeling they were written in. Tapping it opens the diary window
+// in the helper app (stackchan://diary). The learning widget shows the saved math
+// lessons and opens the learning dashboard (stackchan://learning).
 
 import SwiftUI
 import WidgetKit
 
 @main
 struct StackChanNotesWidgetBundle: WidgetBundle {
+    /// The brand fonts ship in this extension's Resources; register them for the
+    /// extension process before any view asks for them.
+    init() { BrandFonts.register() }
+
     var body: some Widget {
         StackChanNotesWidget()
+        BuddyLearningWidget()
     }
 }
 
@@ -44,26 +55,28 @@ struct StackChanNotesWidget: Widget {
     var body: some WidgetConfiguration {
         StaticConfiguration(kind: Self.kind, provider: NotesProvider()) { entry in
             NotesView(entry: entry)
-                .containerBackground(for: .widget) {
-                    LinearGradient(colors: [Color(red: 0.11, green: 0.11, blue: 0.13),
-                                            Color(red: 0.07, green: 0.07, blue: 0.09)],
-                                   startPoint: .topLeading, endPoint: .bottomTrailing)
-                }
+                .containerBackground(for: .widget) { NotesCardBackground() }
                 .widgetURL(AppGroup.diaryURL)
         }
         .configurationDisplayName("buddy's diary")
-        .description("What your desk robot noticed, and how it felt about it. Tap to open the diary.")
+        .description("What buddy noticed around your desk, and how it felt. Tap to open the diary.")
         .supportedFamilies([.systemSmall, .systemMedium, .systemLarge])
     }
 }
 
+/// The paper the diary widget is drawn on.
+struct NotesCardBackground: View {
+    var body: some View { Color.brandPaper }
+}
+
 extension Color {
+    /// The brand colour for the feeling a thought was written in.
     static func mood(_ t: Thought?) -> Color {
-        guard let t else { return Color.white.opacity(0.35) }
-        let (r, g, b) = MoodColor.rgb(valence: t.valence, arousal: t.arousal, label: t.label)
-        return Color(red: r, green: g, blue: b)
+        BrandMood.color(t?.label)
     }
 }
+
+private let learningURL = URL(string: "stackchan://learning")!
 
 struct NotesView: View {
     @Environment(\.widgetFamily) private var family
@@ -97,60 +110,253 @@ struct NotesView: View {
         return nil
     }
 
+    private var debt: String? { entry.snapshot.newestDebt }
+
+    /// How many thought cards fit under everything else in this family.
+    private var visibleCount: Int {
+        switch family {
+        case .systemSmall: 1
+        case .systemMedium: debt == nil ? 3 : 2
+        default: max(1, 3 - (debt == nil ? 0 : 1) - (lead == nil ? 0 : 1))
+        }
+    }
+
+    private var shown: [Row] { Array(rows.prefix(visibleCount)) }
+
+    private var count: Int {
+        max(entry.snapshot.notes.count, entry.snapshot.thoughts.filter(\.written).count)
+    }
+
     var body: some View {
-        VStack(alignment: .leading, spacing: family == .systemSmall ? 6 : 8) {
-            Header(mood: entry.snapshot.mood, count: max(entry.snapshot.notes.count, entry.snapshot.thoughts.filter(\.written).count),
-                   compact: family == .systemSmall)
+        Group {
+            switch family {
+            case .systemSmall: small
+            case .systemMedium: medium
+            default: large
+            }
+        }
+        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
+        .foregroundStyle(BrandStyle.ink)
+        .environment(\.colorScheme, .light)
+    }
+
+    // MARK: small
+
+    private var small: some View {
+        VStack(alignment: .leading, spacing: 6) {
+            HStack(spacing: 6) {
+                InkHeading("buddy", size: 17)
+                Spacer(minLength: 0)
+                if let mood = entry.snapshot.mood { MoodPill(mood: mood, size: 9.5) }
+            }
             if rows.isEmpty {
                 Spacer(minLength: 0)
-                Text("Nothing noticed yet — buddy explores when Claude is idle.")
-                    .font(.footnote)
-                    .foregroundStyle(.white.opacity(0.6))
-                    .multilineTextAlignment(.leading)
+                RobotFace(size: 54, compact: true)
+                Text("Nothing yet! buddy looks around when Claude is resting.")
+                    .font(BrandFont.hand(14))
+                    .lineLimit(3)
+                    .fixedSize(horizontal: false, vertical: true)
                 Spacer(minLength: 0)
             } else {
-                if let lead {
-                    PhotoStrip(url: lead.url, height: family == .systemLarge ? 96 : 64)
+                if let debt { DebtLine(text: debt, size: 13, lines: 2) }
+                ForEach(shown) { row in
+                    ThoughtRow(row: row, family: family, lines: debt == nil ? 3 : 2)
                 }
-                VStack(alignment: .leading, spacing: family == .systemSmall ? 5 : 7) {
-                    ForEach(rows.prefix(lead == nil ? lineBudget : max(1, lineBudget - 2))) { row in
-                        ThoughtRow(row: row, family: family)
+                .padding(.trailing, 3)
+                .padding(.bottom, 3)
+                Spacer(minLength: 0)
+            }
+        }
+    }
+
+    // MARK: medium
+
+    private var medium: some View {
+        HStack(alignment: .top, spacing: 12) {
+            Group {
+                if let lead, let image = NSImage(contentsOf: lead.url) {
+                    PhotoStrip(image: image, shadow: .brandSun)
+                        .frame(width: 89)
+                        .padding(.trailing, 3)
+                        .padding(.bottom, 3)
+                } else {
+                    RobotFace(size: 92, line: rows.isEmpty ? "Hi!" : entry.snapshot.mood?.label)
+                        .frame(maxHeight: .infinity)
+                }
+            }
+            .frame(width: 92)
+
+            VStack(alignment: .leading, spacing: 5) {
+                HStack(spacing: 6) {
+                    InkHeading("buddy", size: 18)
+                    if let mood = entry.snapshot.mood { MoodPill(mood: mood, size: 9.5) }
+                    Spacer(minLength: 0)
+                    Link(destination: learningURL) {
+                        BrandPill("lessons", fill: .brandSun, size: 9.5)
                     }
                 }
-                Spacer(minLength: 0)
-                if family != .systemSmall {
-                    Text("tap to open the diary")
-                        .font(.caption2)
-                        .foregroundStyle(.white.opacity(0.35))
+                if rows.isEmpty {
+                    Spacer(minLength: 0)
+                    Text("Nothing noticed yet.")
+                        .font(BrandFont.display(16))
+                    Text("buddy explores when Claude is resting.")
+                        .font(BrandFont.body(12))
+                        .foregroundStyle(BrandStyle.inkSoft)
+                        .fixedSize(horizontal: false, vertical: true)
+                    Spacer(minLength: 0)
+                } else {
+                    if let debt { DebtLine(text: debt, size: 14, lines: 1) }
+                    VStack(alignment: .leading, spacing: 6) {
+                        ForEach(shown) { row in ThoughtRow(row: row, family: family, lines: 1) }
+                    }
+                    .padding(.trailing, 3)
+                    .padding(.bottom, 3)
+                    Spacer(minLength: 0)
                 }
             }
         }
-        .foregroundStyle(.white)
+    }
+
+    // MARK: large
+
+    private var large: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            HStack(alignment: .firstTextBaseline) {
+                Text("what buddy noticed")
+                    .font(BrandFont.hand(16))
+                    .foregroundStyle(BrandStyle.inkSoft)
+                Spacer(minLength: 0)
+                Link(destination: learningURL) {
+                    BrandPill("lessons", fill: .brandSun)
+                }
+            }
+            HStack(spacing: 8) {
+                InkHeading("buddy", size: 26)
+                if let mood = entry.snapshot.mood { MoodPill(mood: mood, size: 10.5) }
+                Spacer(minLength: 0)
+                BrandPill("\(count) notes")
+            }
+            if rows.isEmpty {
+                Spacer(minLength: 0)
+                HStack(spacing: 14) {
+                    RobotFace(size: 80, line: "Hi!")
+                    VStack(alignment: .leading, spacing: 4) {
+                        Text("Nothing noticed yet.")
+                            .font(BrandFont.display(16))
+                        Text("buddy explores when Claude is resting.")
+                            .font(BrandFont.body(12))
+                            .foregroundStyle(BrandStyle.inkSoft)
+                            .fixedSize(horizontal: false, vertical: true)
+                    }
+                }
+                Spacer(minLength: 0)
+            } else {
+                if let debt {
+                    DebtCard(text: debt)
+                        .padding(.trailing, 4)
+                        .padding(.bottom, 2)
+                }
+                if let lead, let image = NSImage(contentsOf: lead.url) {
+                    PhotoStrip(image: image, shadow: .brandTeal)
+                        .frame(height: 84)
+                        .padding(.trailing, 3)
+                        .padding(.bottom, 3)
+                }
+                VStack(alignment: .leading, spacing: 7) {
+                    ForEach(shown) { row in ThoughtRow(row: row, family: family, lines: 2) }
+                }
+                .padding(.trailing, 3)
+                .padding(.bottom, 3)
+                Spacer(minLength: 0)
+                Text("tap to open the diary")
+                    .font(BrandFont.hand(14))
+                    .foregroundStyle(BrandStyle.inkSoft)
+            }
+        }
     }
 }
 
-/// The mirrored photo, rounded and cropped to a wide strip.
-private struct PhotoStrip: View {
-    let url: URL
-    let height: CGFloat
+/// The feeling as a pill: emoji and label, or the label alone when space is short.
+private struct MoodPill: View {
+    let mood: Thought
+    var size: CGFloat = 10.5
 
     var body: some View {
-        if let image = NSImage(contentsOf: url) {
-            Image(nsImage: image)
-                .resizable()
-                .aspectRatio(contentMode: .fill)
-                .frame(height: height)
-                .frame(maxWidth: .infinity)
-                .clipShape(RoundedRectangle(cornerRadius: 8))
-                .overlay(alignment: .topTrailing) {
-                    Image(systemName: "camera.fill")
-                        .font(.caption2)
-                        .foregroundStyle(.white.opacity(0.85))
-                        .padding(4)
-                        .background(.black.opacity(0.35), in: Circle())
-                        .padding(5)
-                }
+        ViewThatFits(in: .horizontal) {
+            BrandPill("\(MoodColor.emoji(for: mood.label)) \(mood.label)", fill: BrandMood.color(mood.label), size: size)
+            BrandPill(mood.label, fill: BrandMood.color(mood.label), size: size)
+            Text(MoodColor.emoji(for: mood.label)).font(.system(size: size + 3))
         }
+        .accessibilityLabel("feeling \(mood.label)")
+    }
+}
+
+/// A debt of buddy's own, as a handwritten line.
+private struct DebtLine: View {
+    let text: String
+    let size: CGFloat
+    let lines: Int
+
+    var body: some View {
+        HStack(alignment: .firstTextBaseline, spacing: 4) {
+            Image(systemName: "arrow.uturn.backward")
+                .font(.system(size: 9, weight: .bold))
+                .foregroundStyle(BrandStyle.pink)
+            Text(text)
+                .font(BrandFont.hand(size))
+                .foregroundStyle(BrandStyle.inkSoft)
+                .lineLimit(lines)
+                .fixedSize(horizontal: false, vertical: true)
+        }
+    }
+}
+
+/// A debt of buddy's own, as a sun-coloured card pinned slightly askew (large only).
+private struct DebtCard: View {
+    let text: String
+
+    var body: some View {
+        HStack(alignment: .firstTextBaseline, spacing: 6) {
+            Image(systemName: "arrow.uturn.backward")
+                .font(.system(size: 10, weight: .bold))
+            Text(text)
+                .font(BrandFont.body(12, bold: true))
+                .lineLimit(2)
+                .fixedSize(horizontal: false, vertical: true)
+            Spacer(minLength: 0)
+        }
+        .foregroundStyle(BrandStyle.ink)
+        .padding(.horizontal, 9)
+        .padding(.vertical, 6)
+        .paperCard(shadow: .brandPink, offset: 3, fill: .brandSun)
+        .rotationEffect(.degrees(-0.6))
+    }
+}
+
+/// The mirrored photo, cropped to fill its frame, as a cut-paper print.
+private struct PhotoStrip: View {
+    let image: NSImage
+    let shadow: Color
+
+    var body: some View {
+        Color.brandSheet
+            .overlay {
+                Image(nsImage: image)
+                    .resizable()
+                    .aspectRatio(contentMode: .fill)
+            }
+            .clipShape(RoundedRectangle(cornerRadius: 5))
+            .overlay(alignment: .topTrailing) {
+                Image(systemName: "camera.fill")
+                    .font(.system(size: 8, weight: .bold))
+                    .foregroundStyle(BrandStyle.ink)
+                    .padding(4)
+                    .background(Circle().fill(BrandStyle.fill(.brandSheet)))
+                    .overlay(Circle().strokeBorder(BrandStyle.ink, lineWidth: 1.5))
+                    .padding(5)
+            }
+            .paperCard(shadow: shadow, offset: 3, fill: .clear)
+            .accessibilityLabel("a photo buddy kept")
     }
 }
 
@@ -164,69 +370,64 @@ struct Row: Identifiable {
     var photo: URL? = nil
 }
 
-private struct Header: View {
-    let mood: Thought?
-    let count: Int
-    let compact: Bool
-
-    var body: some View {
-        HStack(alignment: .center, spacing: 8) {
-            Circle()
-                .fill(Color.mood(mood))
-                .frame(width: compact ? 9 : 11, height: compact ? 9 : 11)
-                .shadow(color: Color.mood(mood).opacity(0.8), radius: 4)
-            Text("buddy")
-                .font(compact ? .subheadline.weight(.semibold) : .headline)
-            if let mood {
-                Text("\(MoodColor.emoji(for: mood.label)) \(mood.label)")
-                    .font(.caption)
-                    .foregroundStyle(.white.opacity(0.75))
-                    .lineLimit(1)
-            }
-            Spacer(minLength: 0)
-            if !compact {
-                Text("\(count)")
-                    .font(.caption.monospacedDigit())
-                    .foregroundStyle(.white.opacity(0.45))
-            }
-        }
-    }
-}
-
+/// One thought as a card; the offset shadow is the colour of its feeling.
 private struct ThoughtRow: View {
     let row: Row
     let family: WidgetFamily
+    let lines: Int
+
+    private var time: some View {
+        Text(row.time)
+            .font(BrandFont.body(10, bold: true))
+            .monospacedDigit()
+            .foregroundStyle(BrandStyle.inkSoft)
+    }
+
+    private var text: some View {
+        Text(row.text)
+            .font(BrandFont.body(family == .systemSmall ? 12 : 12.5))
+            .foregroundStyle(BrandStyle.ink)
+            .lineLimit(lines)
+            .truncationMode(.tail)
+            .fixedSize(horizontal: false, vertical: true)
+    }
 
     var body: some View {
-        HStack(alignment: .top, spacing: 8) {
-            RoundedRectangle(cornerRadius: 1.5)
-                .fill(Color.mood(row.mood))
-                .frame(width: 3)
-                .padding(.vertical, 1)
-            VStack(alignment: .leading, spacing: 2) {
-                HStack(alignment: .firstTextBaseline, spacing: 6) {
-                    Text(row.time)
-                        .font(.caption2.monospacedDigit())
-                        .foregroundStyle(.white.opacity(0.5))
-                    if family == .systemLarge, let m = row.mood {
-                        Text(m.label)
-                            .font(.caption2)
-                            .foregroundStyle(Color.mood(m).opacity(0.9))
-                    }
+        Group {
+            switch family {
+            case .systemSmall:
+                VStack(alignment: .leading, spacing: 1) {
+                    time
+                    text
                 }
-                Text(row.text)
-                    .font(family == .systemSmall ? .caption : .footnote)
-                    .lineLimit(family == .systemSmall ? 3 : family == .systemMedium ? 2 : 2)
-                    .truncationMode(.tail)
-                    .fixedSize(horizontal: false, vertical: true)
-                if family == .systemLarge, let changed = row.changed {
-                    Text("changed: \(changed)")
-                        .font(.caption2)
-                        .foregroundStyle(.white.opacity(0.45))
-                        .lineLimit(1)
+            case .systemMedium:
+                HStack(alignment: .firstTextBaseline, spacing: 7) {
+                    time
+                    text
+                }
+            default:
+                VStack(alignment: .leading, spacing: 2) {
+                    HStack(alignment: .center, spacing: 6) {
+                        time
+                        if let m = row.mood {
+                            BrandPill(m.label, fill: BrandMood.color(m.label), size: 9)
+                        }
+                        if let changed = row.changed {
+                            Text("changed: \(changed)")
+                                .font(BrandFont.body(10.5))
+                                .foregroundStyle(BrandStyle.inkSoft)
+                                .lineLimit(1)
+                        }
+                    }
+                    text
                 }
             }
         }
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .padding(.vertical, 5)
+        .padding(.horizontal, 9)
+        // A plain note (no feeling recorded) still gets a visible paper shadow.
+        .paperCard(shadow: row.mood == nil ? .brandSky : Color.mood(row.mood), offset: 3)
     }
 }
 
@@ -235,4 +436,129 @@ private struct ThoughtRow: View {
 } timeline: {
     NotesEntry(date: .now, snapshot: .placeholder)
     NotesEntry(date: .now, snapshot: .empty)
+}
+
+
+struct LearningEntry: TimelineEntry {
+    let date: Date
+    let snapshot: LearningSnapshot
+}
+
+struct LearningProvider: TimelineProvider {
+    func placeholder(in context: Context) -> LearningEntry {
+        LearningEntry(date: .now, snapshot: .empty)
+    }
+    func getSnapshot(in context: Context, completion: @escaping (LearningEntry) -> Void) {
+        completion(LearningEntry(date: .now, snapshot: LearningSnapshot.load()))
+    }
+    func getTimeline(in context: Context, completion: @escaping (Timeline<LearningEntry>) -> Void) {
+        completion(Timeline(entries: [LearningEntry(date: .now, snapshot: LearningSnapshot.load())],
+                            policy: .after(.now.addingTimeInterval(15 * 60))))
+    }
+}
+
+struct BuddyLearningWidget: Widget {
+    var body: some WidgetConfiguration {
+        StaticConfiguration(kind: "BuddyLearning", provider: LearningProvider()) { entry in
+            LearningCardView(entry: entry)
+                .containerBackground(for: .widget) { LearningCardBackground() }
+                .widgetURL(learningURL)
+        }
+        .configurationDisplayName("buddy's learning")
+        .description("Your saved math lessons with buddy. Tap to keep learning.")
+        .supportedFamilies([.systemMedium, .systemLarge])
+    }
+}
+
+/// The paper the learning widget is drawn on.
+struct LearningCardBackground: View {
+    var body: some View { Color.brandPaper }
+}
+
+struct LearningCardView: View {
+    let entry: LearningEntry
+    @Environment(\.widgetFamily) private var family
+
+    private var isLarge: Bool { family == .systemLarge }
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 7) {
+            if isLarge {
+                Text("let's learn!")
+                    .font(BrandFont.hand(16))
+                    .foregroundStyle(BrandStyle.inkSoft)
+            }
+            HStack(spacing: 6) {
+                InkHeading("buddy's learning", size: isLarge ? 22 : 18)
+                Spacer(minLength: 4)
+                BrandPill("\(entry.snapshot.total) saved", size: isLarge ? 10.5 : 9.5)
+                BrandPill("\(entry.snapshot.completed) done", fill: .brandTeal, size: isLarge ? 10.5 : 9.5)
+            }
+            if entry.snapshot.lessons.isEmpty {
+                Spacer(minLength: 0)
+                HStack(spacing: 14) {
+                    RobotFace(size: isLarge ? 110 : 80, line: "Hey there!")
+                    Text("Big ideas start with little steps. Tap to start a math lesson.")
+                        .font(BrandFont.body(isLarge ? 15 : 13))
+                        .foregroundStyle(BrandStyle.ink)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
+                Spacer(minLength: 0)
+            } else {
+                VStack(alignment: .leading, spacing: isLarge ? 9 : 6) {
+                    ForEach(entry.snapshot.lessons.prefix(isLarge ? 3 : 2)) { lesson in
+                        LessonRow(lesson: lesson, roomy: isLarge)
+                    }
+                }
+                .padding(.trailing, 3)
+                .padding(.bottom, 3)
+                Spacer(minLength: 0)
+            }
+            if isLarge {
+                Text("Open my lessons →")
+                    .font(BrandFont.body(13, bold: true))
+                    .foregroundStyle(BrandStyle.ink)
+                    .padding(.horizontal, 12)
+                    .padding(.vertical, 5)
+                    .paperCard(shadow: .brandInk, offset: 3, radius: 8, fill: .brandSun)
+                    .padding(.trailing, 3)
+                    .padding(.bottom, 3)
+                    .accessibilityAddTraits(.isLink)
+            }
+        }
+        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
+        .foregroundStyle(BrandStyle.ink)
+        .environment(\.colorScheme, .light)
+    }
+}
+
+/// One saved lesson as a card: teal when done, sun while buddy and the kid are on it.
+private struct LessonRow: View {
+    let lesson: LearningLesson
+    let roomy: Bool
+
+    private var done: Bool { lesson.stage == "complete" }
+
+    var body: some View {
+        HStack(spacing: 8) {
+            BrandPill(done ? "done" : "on it", fill: done ? .brandTeal : .brandSun, size: 9.5)
+                .frame(minWidth: 52, alignment: .leading)
+            VStack(alignment: .leading, spacing: 0) {
+                Text(lesson.topic)
+                    .font(BrandFont.body(13, bold: true))
+                    .foregroundStyle(BrandStyle.ink)
+                    .lineLimit(1)
+                if !lesson.problem.isEmpty {
+                    Text(lesson.problem)
+                        .font(BrandFont.body(11.5))
+                        .foregroundStyle(BrandStyle.inkSoft)
+                        .lineLimit(1)
+                }
+            }
+            Spacer(minLength: 0)
+        }
+        .padding(.vertical, roomy ? 6 : 3)
+        .padding(.horizontal, 9)
+        .paperCard(shadow: done ? .brandTeal : .brandSun, offset: 3)
+    }
 }

@@ -9,6 +9,7 @@
 #include <stdint.h>
 #include "persona.h"
 #include "mood.h"
+#include "motion.h"
 
 // After halBegin(). Servo power on, goHome() once, torque managed by the
 // BSP auto-release. Arms the top touch sensor 3 s later (see bodyUpdate).
@@ -78,6 +79,11 @@ bool   bodyMoving();
 // The pose actually streamed to the servos right now (mid-glide value), for
 // tagging camera frames with the pose at capture.
 int    bodyCmdYawDeg();
+// The live tween pose in tenths of a degree. Whole degrees hide the small end of
+// a swing, and this is the only readout of where the head actually is while a
+// motion runs — camera frames are quarantined for the whole of it (look.cpp).
+int    bodyCmdYawTenths();
+int    bodyCmdPitchTenths();
 int    bodyCmdPitchDeg();
 
 // Explore mode ({"cmd":"mode","explore":true}): the host drives the head
@@ -97,3 +103,20 @@ void   bodySetMood(const MoodExpr* e);
 // the last call; the look-around started a new glance since the last call.
 bool   bodyTakeTouched();
 bool   bodyTakeNewView();
+
+// ---- host motion ({"cmd":"move"}, motion.h) --------------------------------
+// Start a parametric oscillation. The request is admitted (amplitude shrunk to
+// fit travel, the per-axis velocity budget and the bout cap) before it runs;
+// `centreHere` centres it on the pose the head is holding. Returns the motion's
+// length in ms, or 0 when nothing safe was left to run. Takes the head with the
+// same hold a host look takes, so it outranks the automatic choreography.
+uint32_t bodyMotion(const motion::Osc& want, bool centreHere);
+
+// Play a host-sent keyframe list (at most motion::kKeysMax keys). Sanitized in
+// place. Returns the length in ms, or 0 when no key survived.
+uint32_t bodyPlayKeys(motion::Key* k, uint8_t n);
+
+// Stop a motion now, wherever the head is, and hand the head straight back.
+// Clears the glide and the sequence as well as the hold.
+void bodyStopMotion();
+bool bodyMotionRunning();

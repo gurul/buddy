@@ -210,6 +210,13 @@ def _session(conn: FakeConnection, agents: list[FakeAgent], clock: dict | None =
     return s, states, mic
 
 
+async def _eventually(predicate, timeout=2.0):
+    """Wait for a state transition, independent of Windows timer granularity."""
+    async with asyncio.timeout(timeout):
+        while not predicate():
+            await asyncio.sleep(0.001)
+
+
 # ---- config -------------------------------------------------------------------------------
 
 def test_configured_defaults_and_env() -> None:
@@ -238,7 +245,7 @@ def test_session_config_shape() -> None:
     assert d["type"] == "responses" and d["responses"]["model"] == "gpt-6-astra"
     assert d["responses"]["reasoning"] == {"effort": "low"}
     assert [t.get("name", t["type"]) for t in d["responses"]["tools"]] == [
-        "start_task", "steer_task", "stop_task", "task_status", "answer_question",
+        "math_lesson", "start_task", "steer_task", "stop_task", "task_status", "answer_question",
         "go_explore", "end_conversation", "look", "move_head", "look_around", "find",
         "set_sound", "think_hard", "web_search"]
     assert all(t["type"] == "function" for t in TOOLS)
@@ -376,13 +383,13 @@ def test_ask_user_is_spoken_and_answered_through_the_tool() -> None:
 
     async def go():
         task = asyncio.create_task(s.run())
-        await asyncio.sleep(0.01)
+        await _eventually(lambda: bool(conn.user_messages()))
         assert conn.user_messages() == ["[task question] Send the email to Sam?"]
         assert states[-1] == "asking"
         conn.feed(_tool_call("answer_question", "c2", answer="yes"))
-        await asyncio.sleep(0.01)
+        await _eventually(lambda: len(conn.tool_outputs()) >= 2)
         agent.release.set()
-        await asyncio.sleep(0.01)
+        await _eventually(lambda: any("Sent. (answer=yes)" in c for c in conn.commentary()))
         conn.feed(_tool_call("end_conversation", "c3"), None)
         await task
     asyncio.run(go())
@@ -801,7 +808,7 @@ def test_prompts_do_not_let_a_started_task_read_as_done() -> None:
     # never asks a clarifying question (the "what city?" round trip cost 10.4 s)
     assert "reply with an empty message" in BACKEND_INSTRUCTIONS
     assert "return exactly: On it" not in BACKEND_INSTRUCTIONS
-    assert "Never ask the owner a clarifying question" in BACKEND_INSTRUCTIONS
+    assert "Outside math lessons, never ask the owner a clarifying question" in BACKEND_INSTRUCTIONS
 
 
 def test_idle_timeout_closes_when_the_server_goes_quiet() -> None:
@@ -961,10 +968,11 @@ def test_look_tool_answers_from_a_background_task() -> None:
 
 def test_think_hard_answers_from_a_background_task_and_keeps_the_voice_company() -> None:
     asked: list[str] = []
+    release = asyncio.Event()
 
     async def thinker(question: str) -> dict:
         asked.append(question)
-        await asyncio.sleep(0.02)                    # the slow brain takes its time
+        await release.wait()
         return {"ok": True, "answer": "Forty-two, because the question was the easy part."}
 
     conn = FakeConnection([_tool_call("think_hard", "c1", question="what is six times seven, and why?")])
@@ -972,11 +980,12 @@ def test_think_hard_answers_from_a_background_task_and_keeps_the_voice_company()
 
     async def go():
         task = asyncio.create_task(s.run())
-        await asyncio.sleep(0.01)
+        await _eventually(lambda: bool(asked))
         # while the brain works: the voice was told to keep the owner company, nothing answered yet
         assert any("worked on in the background" in t for t in _thinking(conn))
         assert conn.tool_outputs() == []
-        await asyncio.sleep(0.05)
+        release.set()
+        await _eventually(lambda: bool(conn.tool_outputs()))
         conn.feed(_tool_call("end_conversation", "c9"), None)
         await task
     asyncio.run(go())
@@ -1315,3 +1324,347 @@ def test_a_muted_session_starts_by_telling_the_voice() -> None:
     asyncio.run(s.run())
     assert _thinking(conn)[0].startswith("[sound] You are muted")
 
+
+
+def test_math_lesson_dispatch_uses_existing_voice_and_returns_saved_step():
+    called = []
+    def learning(**args):
+        called.append(args)
+        return {"ok": True, "answer": "2x = 8. Subtract three from both sides."}
+    conn = FakeConnection([])
+    session, _, _ = _session(conn, [FakeAgent(None, None)], learning=learning)
+    async def go():
+        await session._tool("math_lesson", "math1", '{"action":"step"}')
+        await asyncio.gather(*session._slow_tasks)
+    asyncio.run(go())
+    assert called == [{"action": "step"}]
+    assert conn.tool_outputs()[0]["ok"] is True
+
+
+def test_math_lesson_without_service_returns_an_actionable_error():
+    conn = FakeConnection([])
+    session, _, _ = _session(conn, [FakeAgent(None, None)])
+    async def go():
+        await session._tool("math_lesson", "math1", '{"action":"open"}')
+        await asyncio.gather(*session._slow_tasks)
+    asyncio.run(go())
+    assert conn.tool_outputs()[0]["ok"] is False
+
+
+def _run_math_lesson(learning, arguments):
+    conn = FakeConnection([])
+    session, _, _ = _session(conn, [FakeAgent(None, None)], learning=learning)
+
+    async def go():
+        await session._tool("math_lesson", "math1", arguments)
+        await asyncio.gather(*session._slow_tasks)
+    asyncio.run(go())
+    return conn.tool_outputs()[0]
+
+
+def test_math_lesson_drops_unknown_arguments():
+    called = []
+
+    def learning(**args):
+        called.append(args)
+        return {"ok": True, "answer": "Try the ones place."}
+    out = _run_math_lesson(learning, '{"action":"step","bogus":1}')
+    assert called == [{"action": "step"}]
+    assert out["ok"] is True
+
+
+def test_math_lesson_with_unreadable_arguments_does_not_open_the_whiteboard():
+    called = []
+
+    def learning(**args):
+        called.append(args)
+        return {"ok": True}
+    for arguments in ("not json", "[1, 2]"):
+        out = _run_math_lesson(learning, arguments)
+        assert out["ok"] is False and "Unknown lesson action" in out["reason"]
+    assert called == []
+
+
+def test_math_lesson_stale_lesson_is_actionable():
+    def learning(**args):
+        raise KeyError("gone")
+    out = _run_math_lesson(learning, '{"action":"hint"}')
+    assert out["ok"] is False
+    assert "no longer there" in out["reason"] and "math_lesson failed" not in out["reason"]
+
+
+def test_math_lesson_schema_uses_the_shared_action_set():
+    from cc_buddy_bridge.learning import LESSON_ACTIONS
+    from cc_buddy_bridge.voice_agent import TOOLS
+    tool = next(t for t in TOOLS if t["name"] == "math_lesson")
+    assert tool["parameters"]["properties"]["action"]["enum"] == list(LESSON_ACTIONS)
+    assert tool["parameters"]["additionalProperties"] is False
+
+
+# ---- think out loud ------------------------------------------------------------------------------
+
+LESSON = {"id": "L1", "topic": "Algebra", "level": "Grade 5", "problem": "Solve 2x + 3 = 11.", "stage": "working",
+          "ideas": "typed first", "events": [{"action": "step", "step": "2x = 11 - 3"}]}
+
+
+def _listening(conn, clock, **kw):
+    notices: list = []
+    saved: list = []
+
+    def save(lesson_id, text):
+        saved.append((lesson_id, text))
+        return True
+    kw.setdefault("think_aloud", LESSON)
+    s, states, mic = _session(conn, [FakeAgent(None, None)], clock=clock, on_spoken_idea=save,
+                              on_think_aloud=lambda on, lid: notices.append((on, lid)), **kw)
+    return s, states, notices, saved
+
+
+def test_session_config_for_listening_carries_the_rules_and_the_lesson() -> None:
+    plain = session_config(VoiceConfig())
+    listening = session_config(VoiceConfig(), think_aloud=LESSON)
+    assert "[think out loud]" not in plain["instructions"]
+    assert "think out loud" not in plain["delegation"]["responses"]["instructions"].lower()
+    assert listening["instructions"].startswith(plain["instructions"])
+    assert "Never say the final answer" in listening["instructions"]
+    assert "Solve 2x + 3 = 11." in listening["instructions"]
+    backend = listening["delegation"]["responses"]["instructions"]
+    assert "Never state the final answer" in backend and "Solve 2x + 3 = 11." in backend
+
+
+def test_a_listening_session_opens_without_the_wake_greeting_and_reports_on_and_off() -> None:
+    clock = {"now": 0.0}
+    conn = FakeConnection([])
+    s, states, notices, _ = _listening(conn, clock)
+
+    async def go():
+        task = asyncio.create_task(s.run())
+        await asyncio.sleep(0.02)
+        assert notices == [(True, "L1")]
+        s.stop_think_aloud()
+        conn.feed(None)
+        await task
+    asyncio.run(go())
+    assert states[0] == "listening" and "wake" not in states
+    assert "I'm listening" in conn.commentary()[0]
+    assert "Solve 2x + 3 = 11." in conn.sent[0][1]["session"]["instructions"]
+    assert notices == [(True, "L1"), (False, None)] and s.end_reason == "stopped"
+
+
+def test_listening_waits_through_pauses_and_stops_after_a_minute_of_silence() -> None:
+    clock = {"now": 0.0}
+    conn = FakeConnection([])
+    s, _, notices, _ = _listening(conn, clock)
+
+    async def go():
+        task = asyncio.create_task(s.run())
+        await asyncio.sleep(0.02)
+        clock["now"] = 45.0                   # past the 20 s idle timeout: a thinking pause, not the end
+        await asyncio.sleep(0.6)
+        assert not s._ended.is_set()
+        clock["now"] = 61.5
+        await asyncio.sleep(0.6)
+        assert s._ended.is_set() and s.end_reason == "silence"
+        conn.feed(None)
+        await task
+    asyncio.run(go())
+    assert notices[-1] == (False, None)
+
+
+def test_listening_still_ends_at_the_session_cap() -> None:
+    clock = {"now": 0.0}
+    conn = FakeConnection([])
+    s, _, _, _ = _listening(conn, clock, config=VoiceConfig(idle_timeout_secs=20.0, max_session_secs=100.0,
+                                                            output="audio"))
+
+    async def go():
+        task = asyncio.create_task(s.run())
+        await asyncio.sleep(0.02)
+        for t in (40.0, 80.0, 101.0):         # someone keeps talking: silence never closes it
+            clock["now"] = t
+            s._last_activity = t
+            await asyncio.sleep(0.6)
+        assert s._ended.is_set() and s.end_reason == "cap"
+        conn.feed(None)
+        await task
+    asyncio.run(go())
+
+
+def test_spoken_thinking_is_saved_to_the_lesson_and_never_logged_or_remembered(caplog) -> None:
+    caplog.set_level("INFO")
+    clock = {"now": 0.0}
+    conn = FakeConnection([])
+    s, _, _, saved = _listening(conn, clock)
+
+    async def go():
+        task = asyncio.create_task(s.run())
+        await asyncio.sleep(0.02)
+        conn.feed(_heard("I think I take away three from both sides"))
+        await asyncio.sleep(0.02)
+        clock["now"] = 2.0                    # past the turn gap: the turn closes
+        await _eventually(lambda: saved)
+        conn.feed(_spoke("Nice start. What is left on the right side?"))
+        await asyncio.sleep(0.02)
+        clock["now"] = 4.0
+        await asyncio.sleep(0.1)
+        s.stop_think_aloud()
+        conn.feed(None)
+        await task
+    asyncio.run(go())
+    assert saved == [("L1", "I think I take away three from both sides")]
+    assert s.turns == []                      # nothing reaches chat memory
+    assert "take away three" not in caplog.text and "What is left" not in caplog.text
+    assert "spoken idea saved ok=True" in caplog.text
+
+
+def test_saying_done_says_goodbye_and_is_not_saved_as_an_idea() -> None:
+    clock = {"now": 0.0}
+    conn = FakeConnection([])
+    s, _, _, saved = _listening(conn, clock)
+
+    async def go():
+        task = asyncio.create_task(s.run())
+        await asyncio.sleep(0.02)
+        conn.feed(_heard("okay I'm done thinking"))
+        await asyncio.sleep(0.02)
+        clock["now"] = 2.0
+        await _eventually(lambda: s._farewell)
+        clock["now"] = 2.0 + FAREWELL_MAX_SECS + 1
+        await _eventually(lambda: s._ended.is_set())
+        conn.feed(None)
+        await task
+    asyncio.run(go())
+    assert saved == [] and s.end_reason == "goodbye"
+
+
+def test_while_listening_math_lesson_ideas_never_overwrites_and_stop_listening_says_goodbye() -> None:
+    called: list = []
+
+    def learning(**args):
+        called.append(args)
+        return {"ok": True, "answer": "One step."}
+    conn = FakeConnection([])
+    s, _, _, _ = _listening(conn, {"now": 0.0}, learning=learning)
+
+    async def go():
+        await s._tool("math_lesson", "m1", '{"action":"ideas","text":"erase it all"}')
+        await s._tool("math_lesson", "m2", '{"action":"stop-listening"}')
+        await asyncio.gather(*s._slow_tasks)
+        await s._tool("start_task", "t1", '{"goal":"open Safari"}')
+        await s._tool("go_explore", "t2", "{}")
+    asyncio.run(go())
+    assert called == []
+    outs = conn.tool_outputs()
+    assert outs[0]["ok"] is True and "Already saved" in outs[0]["answer"]
+    assert outs[1]["ok"] is True and s._farewell
+    assert outs[2]["ok"] is False and outs[3]["ok"] is False
+    assert s.agent is None and not s.explore_requested
+
+
+def test_a_step_while_listening_waits_for_what_the_learner_just_said() -> None:
+    order: list = []
+
+    def save(lesson_id, text):
+        order.append("saved")
+        return True
+
+    def learning(**args):
+        order.append(args["action"])
+        return {"ok": True, "answer": "2x = 8"}
+    conn = FakeConnection([])
+    s, _, _ = _session(conn, [FakeAgent(None, None)], think_aloud=LESSON, on_spoken_idea=save, learning=learning)
+
+    async def go():
+        s._transcript_delta("user", "can you show me one step")   # the turn is still open when the tool is called
+        await s._tool("math_lesson", "m1", '{"action":"step"}')
+        await asyncio.gather(*s._slow_tasks)
+    asyncio.run(go())
+    assert order == ["saved", "step"]
+    assert conn.tool_outputs()[0]["ok"] is True
+
+
+def test_an_open_conversation_switches_to_listening_without_a_second_session() -> None:
+    clock = {"now": 0.0}
+    conn = FakeConnection([])
+    notices: list = []
+    s, _, _ = _session(conn, [FakeAgent(None, None)], clock=clock,
+                       on_think_aloud=lambda on, lid: notices.append((on, lid)))
+
+    async def go():
+        task = asyncio.create_task(s.run())
+        await asyncio.sleep(0.02)
+        out = await s.enter_think_aloud(LESSON)
+        again = await s.enter_think_aloud(LESSON)
+        clock["now"] = 30.0                   # past the conversation's idle timeout
+        await asyncio.sleep(0.6)
+        assert not s._ended.is_set()
+        s.stop_think_aloud()
+        conn.feed(None)
+        await task
+        return out, again
+    out, again = asyncio.run(go())
+    assert out == {"ok": True} and again["already"] is True
+    assert "Greet them" in conn.commentary()[0]
+    assert any("[think out loud]" in t and "Solve 2x + 3 = 11." in t for t in _thinking(conn))
+    updates = [kw for k, kw in conn.sent if k == "session.update"]
+    assert len(updates) == 1
+    assert "Never state the final answer" in updates[0]["session"]["delegation"]["responses"]["instructions"]
+    assert notices == [(True, "L1"), (False, None)]
+
+
+def test_a_closing_conversation_refuses_to_switch() -> None:
+    conn = FakeConnection([])
+    s, _, _ = _session(conn, [FakeAgent(None, None)])
+    s.end()
+    out = asyncio.run(s.enter_think_aloud(LESSON))
+    assert out["ok"] is False and s.think_aloud_lesson_id is None
+
+
+def test_outside_listening_buddys_words_are_logged_as_before(caplog) -> None:
+    """Positive control for the no-words log test: the same reply is logged when nobody is thinking out loud."""
+    caplog.set_level("INFO")
+    conn = FakeConnection([])
+    s, _, _ = _session(conn, [FakeAgent(None, None)])
+    s._close_turn("assistant", "Nice start. What is left on the right side?")
+    assert "What is left" in caplog.text
+
+
+def test_while_listening_only_goodbye_and_mute_act_and_nothing_is_starred() -> None:
+    starred: list = []
+    sounds: list = []
+    conn = FakeConnection([])
+    s, _, _, saved = _listening(conn, {"now": 0.0}, on_star=lambda claim: starred.append(claim) or claim,
+                                on_sound=sounds.append)
+    classified: list = []
+
+    async def classify(text):
+        classified.append(text)
+        return "leave"
+    s.intent = classify
+
+    async def go():
+        s._close_turn("user", "I think the answer has a 3 in it")
+        s._close_turn("user", "remember that")
+        s._close_turn("user", "look to your left")
+        s._close_turn("user", "mute")
+        await asyncio.sleep(0.05)
+    asyncio.run(go())
+    assert starred == [] and not s._farewell and classified == []
+    assert sounds == [False]
+    assert [t for _, t in saved] == ["I think the answer has a 3 in it", "remember that", "look to your left"]
+
+
+def test_a_running_task_refuses_listening() -> None:
+    agent = FakeAgent(None, None)
+    conn = FakeConnection([])
+    s, _, _ = _session(conn, [agent])
+
+    async def go():
+        s._started.set()
+        await s._tool("start_task", "t1", '{"goal":"open Mail"}')
+        out = await s.enter_think_aloud(LESSON)
+        agent.cancel()
+        await asyncio.gather(s._agent_task, return_exceptions=True)
+        return out
+    out = asyncio.run(go())
+    assert out["ok"] is False and "computer task" in out["reason"]

@@ -17,6 +17,8 @@ from cc_buddy_bridge.diary import Thought
 from cc_buddy_bridge.thought_screen import ThoughtScreen
 from cc_buddy_bridge.daemon import Daemon
 from cc_buddy_bridge.explore import WAYPOINTS, ExploreConfig, Explorer, Look, Mode
+from cc_buddy_bridge.chat_memory import ChatMemory
+from cc_buddy_bridge.recall import RecallConfig
 
 MODE_ON = {"cmd": "mode", "explore": True}
 
@@ -72,6 +74,13 @@ def _daemon(connected: bool = True, pending: int = 0, listen_sent=None, enabled:
         _explore_after_conversation=None,
         _voice=SimpleNamespace(start=lambda: None, stop=lambda: None, tap=lambda name: None),
         _voice_cfg=None,
+        # recall.py: buddy's memory of talking with the owner. A temp store keeps
+        # these tests off the real one, and an absent store means an empty brief.
+        _recall_cfg=RecallConfig(store=Path("/nonexistent/debrief"), notes=Path("/nonexistent/notes")),
+        # chat_memory with no client remembers nothing, which is what these tests want
+        _chat_memory=ChatMemory(RecallConfig(store=Path("/nonexistent/debrief"),
+                                            notes=Path("/nonexistent/notes")), None),
+        _background=set(),
         _agent_cfg=SimpleNamespace(enabled=False),
         _last_diag=None,
         # The voice's eyes, head and mute (scene.py / head.py / sound.py): inert here.
@@ -88,7 +97,8 @@ def _daemon(connected: bool = True, pending: int = 0, listen_sent=None, enabled:
                  "_request_explore", "_dismiss_explore", "_clear_thought", "_flush_thought_pager",
                  "_show_thought", "_handle_ipc", "_handle_ble", "_on_wake",
                  "_converse", "_on_voice_explore", "_on_agent_state", "_resync_agent", "_agent_keepalive",
-                 "_cancel_active_task", "_make_agent", "_wake_suppressed", "_on_caption"):
+                 "_cancel_active_task", "_make_agent", "_wake_suppressed", "_on_caption",
+                 "_remember_conversation", "_star_by_voice"):
         setattr(d, name, MethodType(getattr(Daemon, name), d))
     return d
 
