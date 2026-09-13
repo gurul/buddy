@@ -247,7 +247,7 @@ def test_session_config_shape() -> None:
     assert [t.get("name", t["type"]) for t in d["responses"]["tools"]] == [
         "math_lesson", "start_task", "steer_task", "stop_task", "task_status", "answer_question",
         "go_explore", "end_conversation", "look", "move_head", "look_around", "find",
-        "set_sound", "think_hard", "web_search"]
+        "take_photo", "set_sound", "think_hard", "web_search"]
     assert all(t["type"] == "function" for t in TOOLS)
     # web search is a built-in Responses tool, on by default and switchable off
     assert d["responses"]["tools"][-1] == {"type": "web_search"}
@@ -1668,3 +1668,51 @@ def test_a_running_task_refuses_listening() -> None:
         return out
     out = asyncio.run(go())
     assert out["ok"] is False and "computer task" in out["reason"]
+
+
+# ---- take_photo -----------------------------------------------------------------------------
+
+def test_take_photo_hands_the_note_to_the_daemon_and_returns_the_caption() -> None:
+    asked: list[str] = []
+
+    async def on_photo(note: str) -> dict:
+        asked.append(note)
+        return {"ok": True, "path": "/n/photos/2026-09-13/120000-7.jpg", "caption": "a red bike by the door",
+                "answer": "Kept it: a red bike by the door"}
+
+    conn = FakeConnection([_tool_call("take_photo", "c1", note="my bike")])
+    s, _, _ = _session(conn, [FakeAgent(None, None)], on_photo=on_photo)
+
+    async def go():
+        task = asyncio.create_task(s.run())
+        await _eventually(lambda: bool(conn.tool_outputs()))
+        conn.feed(_tool_call("end_conversation", "c9"), None)
+        await task
+    asyncio.run(go())
+    assert asked == ["my bike"]
+    assert conn.tool_outputs()[0]["ok"] is True and conn.tool_outputs()[0]["caption"] == "a red bike by the door"
+
+
+def test_take_photo_without_a_camera_or_when_it_stalls_says_why() -> None:
+    conn = FakeConnection([_tool_call("take_photo", "c1", note="")])
+    s, _, _ = _session(conn, [FakeAgent(None, None)])
+
+    async def go():
+        task = asyncio.create_task(s.run())
+        await _eventually(lambda: bool(conn.tool_outputs()))
+        conn.feed(_tool_call("end_conversation", "c9"), None)
+        await task
+    asyncio.run(go())
+    out = conn.tool_outputs()[0]
+    assert out["ok"] is False and "no camera" in out["reason"]
+
+    async def stalls(_note: str) -> dict:
+        await asyncio.sleep(5)
+        return {"ok": True}
+
+    conn = FakeConnection([_tool_call("take_photo", "c1", note="")])
+    s, _, _ = _session(conn, [FakeAgent(None, None)], on_photo=stalls)
+    s.PHOTO_TIMEOUT_SECS = 0.02
+    asyncio.run(go())
+    out = conn.tool_outputs()[0]
+    assert out["ok"] is False and "did not answer in time" in out["reason"]

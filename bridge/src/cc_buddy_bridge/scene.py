@@ -345,6 +345,13 @@ class SceneWatcher:
         self._frame = raw
         self._frame_at = self.clock()
 
+    def newest_frame(self) -> Optional[dict[str, Any]]:
+        """The newest raw frame, for a photo when the board cannot snap one. None
+        when there is none, or it is older than the camera-lost window."""
+        if self._frame is None or self.clock() - self._frame_at > self.config.camera_lost_secs:
+            return None
+        return self._frame
+
     # -- state ------------------------------------------------------------------
 
     def camera_state(self, now: float) -> str:
