@@ -1,5 +1,5 @@
 <p align="center">
-  <img src="docs/assets/hero.png" alt="buddy — a small, open companion for a more capable world" width="100%">
+  <img src="docs/assets/buddy-sidekick.png" alt="buddy, your desktop sidekick: a cut-paper illustration of the buddy robot saying Hey there!" width="100%">
 </p>
 
 **A small robot that lives on your desk, has feelings, keeps a diary, and runs your Mac
@@ -53,6 +53,23 @@ time, its profile of you, its dreams.
 while Claude works, head up and searching for you when a session is blocked on you.
 Tap it and it raises that terminal. It is never asleep while it is showing you words:
 under a caption, and for a few seconds after one, its eyes stay open and there is no "zzz".
+
+## It teaches (hackathon)
+
+<p align="center">
+  <img src="docs/assets/buddy-lesson.png" alt="A buddy math lesson: the problem Solve 2x + 3 = 11, a whiteboard, buddy's hint and one step, and the Give me a hint, Check my work and Show one step buttons" width="80%">
+</p>
+
+For the OpenAI, OpenRouter and CopilotKit *Agents, Everywhere* global hackathon, a team
+of three (Gurucharan Lingamallu, Swetank Griyage, Emaha Tekle) forked this repo and taught
+buddy math. The rule: **buddy helps you think, and never hands over the whole answer.**
+A kid picks a topic or pastes a problem, works on a whiteboard, and asks for a hint, a
+check, or exactly one step. Lessons start by voice or from `cc-buddy-bridge lesson`, and
+every whiteboard revision lands on a dashboard with a card on the Mac widget.
+
+That work lives in its own repo, [gurul/buddyTinkerer](https://github.com/gurul/buddyTinkerer),
+with the launch video and the offline browser demo. This repo is the companion itself and
+does not include the lessons.
 
 ## Get one running
 
@@ -108,10 +125,16 @@ camera frames ◀──────────────▶ macOS Vision (fac
 | Seeing, turning its head, goodbye, mute | `bridge/src/cc_buddy_bridge/scene.py`, `head.py`, `intent.py`, `sound.py`; `firmware/claude_pet_stackchan/src/hostlook.h` | [vision.md](docs/stackchan/vision.md) |
 | Feelings, phases, the diary | `firmware/claude_pet_stackchan/src/mood.cpp`, `body.cpp`, `eyes.cpp`; `bridge/src/cc_buddy_bridge/diary.py` | [personality.md](docs/stackchan/personality.md) |
 | Widget and diary window | `widget/` | [widget.md](docs/stackchan/widget.md) |
+| Math lessons, whiteboard, tutor (hackathon fork) | [gurul/buddyTinkerer](https://github.com/gurul/buddyTinkerer) | [learning.md](https://github.com/gurul/buddyTinkerer/blob/buddy-lesson-tool/docs/learning.md) |
 | The robot itself: build, wire protocol, gaze, bench notes | `firmware/claude_pet_stackchan` | [build.md](docs/stackchan/build.md), [DESIGN.md](DESIGN.md) |
 | Daemon commands and every knob | `bridge/` | [bridge/README.md](bridge/README.md) |
 
 ## Credits
+
+The math lessons in [buddyTinkerer](https://github.com/gurul/buddyTinkerer) were built for the
+OpenAI, OpenRouter and CopilotKit *Agents, Everywhere* global hackathon with Swetank Griyage
+and Emaha Tekle, starting from Swetank's `smartboard` work. The cut-paper buddy illustration
+above comes from that fork.
 
 The firmware began as [anthropics/claude-desktop-buddy](https://github.com/anthropics/claude-desktop-buddy)
 and the daemon as [SnowWarri0r/cc-buddy-bridge](https://github.com/SnowWarri0r/cc-buddy-bridge),
