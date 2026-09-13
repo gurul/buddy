@@ -1,7 +1,8 @@
 """Ears: the "hey buddy" wake word on the Mac's microphone.
 
-The daemon keeps one microphone stream open (24 kHz mono int16, 100 ms
-blocks) and runs every block through a sherpa-onnx keyword spotter — a
+The daemon keeps one microphone stream open while the robot is connected
+(24 kHz mono int16, 100 ms blocks; `CC_BUDDY_MIC_ALWAYS=1` keeps it open from
+boot) and runs every block through a sherpa-onnx keyword spotter — a
 3.3M-parameter streaming zipformer that needs no training for a new
 phrase: the phrase is written as BPE tokens into a keywords file and the
 spotter fires when the decoded lattice contains it. Bench 2026-09-06 on an
@@ -66,6 +67,7 @@ class EarsConfig:
     boost: float = DEFAULT_BOOST
     cooldown_secs: float = DEFAULT_COOLDOWN_SECS
     device: Optional[str] = None      # sounddevice input name substring; None = default
+    always: bool = False              # open the mic at boot, not only while the robot is connected
 
 
 def configured(environ: Any = None) -> EarsConfig:
@@ -82,7 +84,9 @@ def configured(environ: Any = None) -> EarsConfig:
         except ValueError:
             log.warning("ears: CC_BUDDY_WAKE_THRESHOLD=%r is not a number; using %s", raw_thr, thr)
     device = (env.get("CC_BUDDY_MIC") or "").strip() or None
-    return EarsConfig(enabled=enabled, wake_word=word, model_dir=model_dir, threshold=thr, device=device)
+    always = (env.get("CC_BUDDY_MIC_ALWAYS") or "").strip().lower() in ("1", "true", "yes", "on")
+    return EarsConfig(enabled=enabled, wake_word=word, model_dir=model_dir, threshold=thr, device=device,
+                      always=always)
 
 
 # ---- keyword file ---------------------------------------------------------------
@@ -279,10 +283,16 @@ class Ears:
                         self.last_rms, sys.executable)
 
     # -- lifecycle --
-    def start(self) -> bool:
-        """Open the mic. False (with one warning) when audio or the model is unavailable."""
+    @property
+    def listening(self) -> bool:
+        """True while the microphone stream is open."""
+        return self._stream is not None
+
+    def prepare(self) -> bool:
+        """Load the wake-word model without opening the mic. False (with one warning)
+        when audio or the model is unavailable, so the daemon can say so at boot."""
         try:
-            import sounddevice as sd
+            import sounddevice  # noqa: F401
         except ImportError as e:
             log.warning("ears: sounddevice not importable (%s) — no wake word (pip install sounddevice)", e)
             return False
@@ -292,6 +302,16 @@ class Ears:
             except Exception as e:  # noqa: BLE001
                 log.warning("ears: wake-word model unavailable (%s) — no wake word", e)
                 return False
+        return True
+
+    def start(self) -> bool:
+        """Open the mic. Idempotent: a second call while open is a no-op. False (with
+        one warning) when audio or the model is unavailable."""
+        if self._stream is not None:
+            return True
+        if not self.prepare():
+            return False
+        import sounddevice as sd
         device = None
         if self.config.device:
             device = _find_input_device(sd, self.config.device)
@@ -321,6 +341,7 @@ class Ears:
         return True
 
     def stop(self) -> None:
+        """Close the mic. The model stays loaded, so start() again is cheap."""
         if self._stream is not None:
             try:
                 self._stream.stop()
@@ -328,6 +349,8 @@ class Ears:
             except Exception:  # noqa: BLE001
                 pass
             self._stream = None
+            self._silent_since = None
+            self._silence_warned = False
 
 
 def _offer(q: "asyncio.Queue[bytes]", raw: bytes) -> None:

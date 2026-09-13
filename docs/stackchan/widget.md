@@ -118,8 +118,15 @@ pluginkit -m -v -p com.apple.widgetkit-extension | grep -i stackchan   # widget 
 ```
 
 The helper shows a small `note.text` icon in the menu bar with the note count,
-last sync time, *Refresh now*, *Open notes folder*, a *Launch at login* toggle,
-and *Quit*.
+last sync time, a *Microphone* line and switch, *Refresh now*, *Open notes
+folder*, a *Launch at login* toggle, and *Quit*.
+
+The *Microphone* line says what the Mac mic is doing (listening, closed because
+the robot is not connected, off by your choice, or daemon not reachable). The
+switch is the owner's mic switch: off closes the mic until you turn it back on,
+across restarts, the same as `cc-buddy-bridge mic off`. It talks to the daemon
+over its IPC socket (`/tmp/cc-buddy-bridge.sock`), so it needs the daemon
+running; the WidgetKit widget itself is sandboxed and only shows notes.
 
 ## Add the widget to the desktop (manual)
 

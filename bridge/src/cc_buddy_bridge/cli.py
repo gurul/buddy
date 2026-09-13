@@ -194,6 +194,13 @@ def main(argv: list[str] | None = None) -> int:
     p_sound.add_argument("action", choices=("on", "off", "status"), nargs="?", default="status")
     p_sound.add_argument("--socket", default=None, help="IPC path or host:port override")
 
+    p_mic = sub.add_parser(
+        "mic",
+        help="Turn the Mac microphone (the wake word) off or on for good, or show whether buddy is listening",
+    )
+    p_mic.add_argument("action", choices=("on", "off", "status"), nargs="?", default="status")
+    p_mic.add_argument("--socket", default=None, help="IPC path or host:port override")
+
     p_identity = sub.add_parser(
         "identity",
         help="Owner face prints: show what the robot knows, or forget it (enrol by holding Option)",
@@ -396,6 +403,8 @@ def main(argv: list[str] | None = None) -> int:
         return _run_move(args)
     if args.cmd == "sound":
         return _run_sound(args.action, args.socket)
+    if args.cmd == "mic":
+        return _run_mic(args.action, args.socket)
     if args.cmd == "identity":
         from .identity import run_identity
         return run_identity(args.action, args.socket)
@@ -685,6 +694,31 @@ def _run_move(args: Any) -> int:
     print("the board admits it against its own limits, so the delivered swing may be smaller")
     if asked.get("ms"):
         print(f"about {asked['ms'] / 1000:.1f}s of motion")
+    return 0
+
+
+def describe_mic(resp: dict) -> str:
+    """One line for `cc-buddy-bridge mic` and the menu-bar app: what the mic is doing and why."""
+    if not resp.get("available", True):
+        return "buddy has no microphone (CC_BUDDY_VOICE=0, or no input device or wake-word model)"
+    if resp.get("mic") == "off":
+        return "microphone off (your choice) — `cc-buddy-bridge mic on` turns it back on"
+    if resp.get("listening"):
+        return "microphone on: listening for the wake word" + (" (CC_BUDDY_MIC_ALWAYS=1)" if resp.get("always") else "")
+    if not resp.get("connected"):
+        return "microphone closed: it opens when the robot connects"
+    return "microphone closed: it could not be opened (see the daemon log)"
+
+
+def _run_mic(action: str, socket_path: Optional[str]) -> int:
+    """``cc-buddy-bridge mic [on|off|status]``: the owner's switch, and what the mic is doing now."""
+    from .hooks._client import post
+
+    resp = post({"evt": "mic", "action": action}, socket_path=socket_path, timeout=3.0)
+    if resp is None:
+        print("cc-buddy-bridge: daemon not reachable", file=sys.stderr)
+        return 2
+    print(describe_mic(resp))
     return 0
 
 

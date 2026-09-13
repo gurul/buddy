@@ -10,6 +10,7 @@
 		034B90A58D5D77B652F052EF /* Andika-Regular.ttf in Resources */ = {isa = PBXBuildFile; fileRef = CC5C119E441B8C5FE796F0EB /* Andika-Regular.ttf */; };
 		0D9D2B38517F4928E7660D15 /* StackChanNotesWidget.appex in Embed Foundation Extensions */ = {isa = PBXBuildFile; fileRef = 90B0C584761D23A8F5B381DC /* StackChanNotesWidget.appex */; settings = {ATTRIBUTES = (RemoveHeadersOnCopy, ); }; };
 		10F996DECC3621CDBC0238EE /* OFL-vt323.txt in Resources */ = {isa = PBXBuildFile; fileRef = 3B6DC1423A552A4697862DF9 /* OFL-vt323.txt */; };
+		16A8EA1C124984DBD1E9E49B /* BuddyDaemon.swift in Sources */ = {isa = PBXBuildFile; fileRef = FF97E4D3AD70892D4607419A /* BuddyDaemon.swift */; };
 		1AFEE56DD21647A645159D29 /* DiaryView.swift in Sources */ = {isa = PBXBuildFile; fileRef = F62C19E6D654259E691D6474 /* DiaryView.swift */; };
 		222BCF384FF72B610420E7CD /* VT323-Regular.ttf in Resources */ = {isa = PBXBuildFile; fileRef = DC9EE994781EFA1409635389 /* VT323-Regular.ttf */; };
 		2C0F57478F5F508B1FF7EEED /* GochiHand-Regular.ttf in Resources */ = {isa = PBXBuildFile; fileRef = 2FE44DF443242C51DA997F4B /* GochiHand-Regular.ttf */; };
@@ -85,6 +86,7 @@
 		F3A6DCDD52C01951B686501D /* Grandstander-Bold.ttf */ = {isa = PBXFileReference; lastKnownFileType = file; path = "Grandstander-Bold.ttf"; sourceTree = "<group>"; };
 		F54C4933A274AD6C400BBE85 /* StackChanNotes.entitlements */ = {isa = PBXFileReference; lastKnownFileType = text.plist.entitlements; path = StackChanNotes.entitlements; sourceTree = "<group>"; };
 		F62C19E6D654259E691D6474 /* DiaryView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DiaryView.swift; sourceTree = "<group>"; };
+		FF97E4D3AD70892D4607419A /* BuddyDaemon.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = BuddyDaemon.swift; sourceTree = "<group>"; };
 /* End PBXFileReference section */
 
 /* Begin PBXGroup section */
@@ -147,6 +149,7 @@
 		DA3BA2039F222259ED015254 /* StackChanNotes */ = {
 			isa = PBXGroup;
 			children = (
+				FF97E4D3AD70892D4607419A /* BuddyDaemon.swift */,
 				F62C19E6D654259E691D6474 /* DiaryView.swift */,
 				7D9ED287F21568518C44885F /* Info.plist */,
 				8D991EA2CD7ADE334CFD65C9 /* NotesMirror.swift */,
@@ -289,6 +292,7 @@
 			buildActionMask = 2147483647;
 			files = (
 				35DF1F3E0A641A9204BC459C /* BuddyBrand.swift in Sources */,
+				16A8EA1C124984DBD1E9E49B /* BuddyDaemon.swift in Sources */,
 				1AFEE56DD21647A645159D29 /* DiaryView.swift in Sources */,
 				61576D5572BCCEA5587116ED /* NoteStore.swift in Sources */,
 				7F505FC43B317BECFBCF1ED1 /* NotesMirror.swift in Sources */,

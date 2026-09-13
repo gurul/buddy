@@ -78,6 +78,10 @@ private struct MenuContent: View {
     @Environment(\.openWindow) private var openWindow
     @State private var mirror = NotesMirror.shared
     @State private var launchAtLogin = SMAppService.mainApp.status == .enabled
+    /// The daemon's answer to `mic status`; nil until asked, or when it is not reachable.
+    @State private var mic: MicState?
+    @State private var micAsked = false
+    @State private var micOn = true
 
     var body: some View {
         Text(status)
@@ -89,6 +93,18 @@ private struct MenuContent: View {
         if let err = mirror.lastError {
             Text("Error: \(err)")
         }
+        Divider()
+        // The owner's microphone switch: the same thing as `cc-buddy-bridge mic on|off`.
+        // The mic itself opens only while the robot is connected (or CC_BUDDY_MIC_ALWAYS=1);
+        // this switch closes it for good until it is turned back on, across restarts.
+        Text(micLine)
+        Toggle("Microphone", isOn: $micOn)
+            .disabled(mic == nil || !(mic?.available ?? false))
+            .onChange(of: micOn) { _, on in
+                guard let current = mic, current.switchOn != on else { return }
+                Task { await flipMic(on) }
+            }
+        .task { await refreshMic() }
         Divider()
         Button("Open diary") {
             NSApp.activate(ignoringOtherApps: true)
@@ -117,6 +133,26 @@ private struct MenuContent: View {
     private var status: String {
         let when = mirror.lastSync.map { $0.formatted(date: .omitted, time: .shortened) } ?? "never"
         return "\(mirror.count) thoughts · synced \(when)"
+    }
+
+    private var micLine: String {
+        if let mic { return mic.line }
+        return micAsked ? "Microphone: daemon not reachable" : "Microphone: asking the daemon…"
+    }
+
+    private func refreshMic() async {
+        let state = await BuddyDaemon.micStatus()
+        mic = state
+        micAsked = true
+        if let state { micOn = state.switchOn }
+    }
+
+    private func flipMic(_ on: Bool) async {
+        let state = await BuddyDaemon.setMic(on: on)
+        mic = state
+        micAsked = true
+        // The daemon is the truth: if it could not be reached, show the switch where it really is.
+        if let state { micOn = state.switchOn } else if let current = mic { micOn = current.switchOn }
     }
 }
 

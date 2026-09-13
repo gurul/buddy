@@ -25,12 +25,13 @@ from typing import Any, Optional
 log = logging.getLogger(__name__)
 
 
-def default_path(environ: Any = None) -> Path:
+def default_path(environ: Any = None, name: str = "sound") -> Path:
+    """``~/.config/cc-buddy-bridge/<name>.json``, or ``CC_BUDDY_<NAME>_FILE``."""
     env = os.environ if environ is None else environ
-    raw = (env.get("CC_BUDDY_SOUND_FILE") or "").strip()
+    raw = (env.get(f"CC_BUDDY_{name.upper()}_FILE") or "").strip()
     if raw:
         return Path(raw).expanduser()
-    return Path.home() / ".config" / "cc-buddy-bridge" / "sound.json"
+    return Path.home() / ".config" / "cc-buddy-bridge" / f"{name}.json"
 
 
 def build_sound_cmd(on: bool) -> dict[str, Any]:
@@ -45,10 +46,15 @@ def quiet_caption(msg: dict[str, Any], muted: bool) -> dict[str, Any]:
 
 
 class SoundSetting:
-    """On or off, persisted. A missing or unreadable file means on."""
+    """On or off, persisted. A missing or unreadable file means on.
 
-    def __init__(self, path: Optional[Path] = None) -> None:
-        self.path = path or default_path()
+    ``name`` is the switch's name in log lines and its default file: the
+    daemon keeps two, ``sound`` (mute) and ``mic`` (the owner's microphone
+    switch, see ears.py)."""
+
+    def __init__(self, path: Optional[Path] = None, name: str = "sound") -> None:
+        self.name = name
+        self.path = path or default_path(name=name)
         self.on = True
 
     @property
@@ -62,7 +68,7 @@ class SoundSetting:
         except FileNotFoundError:
             self.on = True
         except (OSError, ValueError) as e:
-            log.warning("sound: cannot read %s (%s) — sound stays on", self.path, e)
+            log.warning("%s: cannot read %s (%s) — %s stays on", self.name, self.path, e, self.name)
             self.on = True
         return self.on
 
@@ -76,5 +82,5 @@ class SoundSetting:
             tmp.write_text(json.dumps({"muted": not self.on}) + "\n", encoding="utf-8")
             os.replace(tmp, self.path)
         except OSError as e:
-            log.warning("sound: cannot save %s (%s) — the choice lasts until the daemon restarts", self.path, e)
+            log.warning("%s: cannot save %s (%s) — the choice lasts until the daemon restarts", self.name, self.path, e)
         return changed
