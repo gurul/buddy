@@ -164,6 +164,10 @@ Every other verb is the pet build's (`time`, `status`, `focus`, `key`).
 | board → host | `{"frame":{"seq":n,"w":160,"h":120,"fmt":"jpeg","b64":"...","yaw":Y,"pitch":P}}` | one line per frame, written from the camera task |
 | host → board | `{"cmd":"face","seq":n,"bx":..,"by":..,"size":..,"conf":..,"yaw":Y,"pitch":P,"who":"owner"\|"unknown"}` | largest face; `conf:0` = no face |
 | host → board | `{"cmd":"look","yaw":-120..120,"pitch":5..85,"hold":ms}` | absolute pose request (explorer, and the voice's `move_head` / `look_around` / `find`); `+yaw` = the robot's right; `hold:0` hands the head back |
+| host → board | `{"cmd":"move","kind":"osc","yaw_amp":25,"pitch_amp":12,"period_ms":900,"phase_deg":90,"cycles":8,"dwell_pct":8,"jitter_pct":10}` | a rhythm the **board** runs by itself at 25 Hz — one line for a whole dance instead of one per beat. Every number is re-checked by `motion::admit()` on the firmware, which shrinks amplitude to fit the travel, the per-axis velocity budget and the bout cap. The beat is kept and the swing yields. Centres are optional: without them the rhythm grows out of the pose the head already holds |
+| host → board | `{"cmd":"move","kind":"keys","keys":[[at_ms,yaw,pitch,speed],…]}` | up to 8 keyframes for a gesture whose shape is the point; `127` on an axis leaves it alone |
+| host → board | `{"cmd":"move","kind":"stop"}` | stop the motion where it is, and hand the head back to gaze |
+| board → host | `{"pose":{"y":<tenths>,"p":<tenths>}}` | the commanded pose in tenths of a degree, at 10 Hz **while a motion runs** and never otherwise. This exists because an echo saying a motion ran is not evidence it moved: the first dance reported `ran=7200ms` with a motionless head. One last line carries `"end":true` as the motion finishes, so a watcher knows the stream stopped rather than stalled |
 | host → board | `{"cmd":"sound","on":true\|false}` | the owner muted / unmuted buddy; persisted (NVS `s_snd`) and applied to every chirp and beep; motion and LEDs unaffected. The status ack reports it as `"snd"` |
 | host → board | `{"cmd":"mode","explore":true\|false}` | enter/leave explore mode |
 | host → board | `{"cmd":"snap"}` | one full-size photo: the look task answers with a single frame line at 320x240, quality 85, carrying `"snap":true` |
@@ -174,6 +178,42 @@ Every other verb is the pet build's (`time`, `status`, `focus`, `key`).
 
 Frames pause while a character transfer owns the wire. On this machine: ~4 fps,
 ~2.5 KB JPEGs (quality 60), macOS Vision detects faces in 5–20 ms per frame.
+
+## Named motion
+
+buddy used to move one absolute pose at a time, so a rhythm cost a model round
+trip per beat. Measured: 2.3 s median from the words to the head moving, of which
+the delegated model call was 1.86 s. The vocabulary therefore lives on the board
+(`src/motion.h`, `src/body.cpp`), and the host only names a preset.
+
+```bash
+cc-buddy-bridge move dance            # a preset
+cc-buddy-bridge move sway --speed 1.6 # a quicker beat; the board narrows the swing
+cc-buddy-bridge move --stop
+```
+
+Rhythms: `sway`, `dance`, `nod`, `shake`, `bounce`, `wiggle`, `fig8`.
+Gestures: `doubletake`, `shrug`, `tilt`, `perk`, `droop`, `lean_peek`, `home`.
+The host-side table is `bridge/src/cc_buddy_bridge/motion.py`. The plan that
+carries the velocity-gate evidence is `docs/plans/buddy-motion-control.md`, which
+stays local: `docs/plans/` is not tracked.
+
+**The board decides what is safe, not the host.** A request for 120 degrees at
+10 Hz comes back as 15 degrees at 1.5 Hz rather than being obeyed or refused. So
+the host table is a set of friendly starting points and nothing more — `dance`
+asks for 25 degrees rather than 28 because 28 is what the board reduces it to.
+
+**Elapsed time is computed with `ticks::elapsedMs`, never by subtraction.** The
+oscillator's start is stamped by the consumer, which runs after `loop()` captured
+`now`, so a plain `now - oscStart` underflows to about 4e9 ms on the first tick
+and the motion ends before it starts.
+
+## Taking notes
+
+`cc-buddy-bridge take-notes start|stop|status|list`, or say "start taking notes".
+See [voice.md](voice.md#taking-notes-on-the-room). The recorder subscribes to the
+same microphone stream the wake word uses, so buddy is deaf to its own name while
+recording and learns to stop by reading its own transcript.
 
 ## Daemon setup (this machine)
 

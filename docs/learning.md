@@ -1,0 +1,397 @@
+# Buddy math lessons
+
+Buddy's learning workspace implements the two paths in the activity diagram:
+learn a topic, or bring a problem. It shares a saved lesson with the existing
+voice agent and opens a mouse/pen whiteboard in a local browser or the macOS
+widget helper window.
+
+## Try the working demo
+
+From the repository root, with Python 3.11 or newer:
+
+```powershell
+python tools/start_learning.py --demo --data-dir .demo-data --port 48767
+```
+
+Open `http://127.0.0.1:48767/`. Click **Play workflow demo** to watch Buddy
+create an algebra problem, save an idea, give a hint, reveal three individual
+steps, recap, and return to the saved dashboard. You can also use the controls
+yourself. The demo has fixed addition, algebra, and derivative examples. It
+never calls an API and explicitly does **not** recognize images or handwriting.
+For a screenshot demo, choose **Help with my problem**, attach an image, type
+`Solve 2x + 3 = 11.`, confirm it, and enter your ideas or select **I don't know
+how to start**. Type `2x = 8` to see Buddy continue with `x = 4`.
+
+The recorded browser walkthrough is [buddy-learning-demo.webm](learning-demo/buddy-learning-demo.webm).
+It exercises both paths against the real local server. The screenshots and
+machine-readable check results are in [learning-demo/](learning-demo/).
+
+## Live tutoring
+
+The existing bridge daemon starts the learning server at
+`http://127.0.0.1:48766/`. Restart the daemon after updating this checkout.
+The browser window uses the same service as voice. Say **"okay buddy, I want
+to do a math lesson"** (the default wake-word file also includes "hey buddy"
+and "ok buddy"). Buddy asks which path you want, and asks for a topic and
+starting level when needed. It uses the `math_lesson` tool instead of taking
+over the computer with the computer-control agent.
+
+Alternatively, run the learning service by itself:
+
+```powershell
+python tools/start_learning.py
+```
+
+Or, with the bridge installed: `cc-buddy-bridge learning`.
+Do not run two learning servers on the same port. Standalone mode provides
+the whiteboard and tutoring; robot voice requires the existing daemon, its
+microphone/wake-word setup, and a working voice API configuration.
+
+## Drive a lesson from the terminal
+
+`cc-buddy-bridge lesson <action>` sends one lesson action to the running daemon.
+It uses the same code path as the `math_lesson` voice tool, so the whiteboard,
+the saved lesson, and the robot stay in sync. The actions are `open`, `start`,
+`ideas`, `hint`, `check`, `step`, `status`, `recap`, `end`, `listen`, and
+`stop-listening` (see [Think out loud](#think-out-loud)).
+
+```bash
+cc-buddy-bridge lesson open
+cc-buddy-bridge lesson start --mode learn --topic "Fractions" --level "Grade 4"
+cc-buddy-bridge lesson start --mode help
+cc-buddy-bridge lesson ideas --text "I think I add the tops"
+cc-buddy-bridge lesson hint
+cc-buddy-bridge lesson check
+cc-buddy-bridge lesson step
+cc-buddy-bridge lesson status
+cc-buddy-bridge lesson recap
+cc-buddy-bridge lesson end
+```
+
+| Option | Use with | Meaning |
+| --- | --- | --- |
+| `--mode learn` / `--mode help` | `start` | Learn a topic, or get help with your own problem |
+| `--topic`, `--level` | `start` | The topic and starting level for a new lesson |
+| `--text` | `ideas` | Your thinking; an empty text means "I don't know how to start" |
+| `--socket` | any | IPC path or host:port override |
+
+What happens:
+
+- The command prints buddy's answer. `status` also prints the open lesson's
+  topic, mode, stage, and problem.
+- The robot shows **thinking** while the tutor works (`start`, `hint`, `check`,
+  `step`, `recap`), then one caption with the answer. When a voice conversation
+  is open, the voice owns the screen and the robot shows nothing extra.
+- A lesson action ends a manual explore first. `status` does not.
+- Tutor replies can take up to about 2 minutes. The command waits that long.
+- Exit code 0 means success. Exit code 1 means buddy refused, for example when
+  no lesson is open; the reason goes to stderr. Exit code 2 means the daemon is
+  not reachable: start it with `cc-buddy-bridge daemon` or the launchd service.
+  A tutor reply that takes longer than the wait also shows as exit code 2; run
+  `cc-buddy-bridge lesson status` to see the result.
+- With `CC_BUDDY_LEARNING=0`, or when the learning server did not start, every
+  action fails with a message that the workspace is unavailable.
+
+`cc-buddy-bridge learning` is a different command. It starts the whiteboard
+server and opens the browser without the daemon or the robot.
+
+## Think out loud
+
+A learner can talk through a problem, or ask questions in their own words.
+buddy listens and gives short feedback on the robot's screen.
+
+### Start and stop listening
+
+A lesson must be open, with its problem ready (stage "In progress" or
+"Completed"). If not, buddy says what to do first.
+
+| Way | Start | Stop |
+| --- | --- | --- |
+| Voice, in a buddy conversation | "Can I think out loud?", "Let me talk it through" | "I'm done", "stop listening", "bye" |
+| Web app, lesson page | **◉ Think out loud** | **■ Stop listening** (the same button) |
+| Terminal | `cc-buddy-bridge lesson listen` | `cc-buddy-bridge lesson stop-listening` |
+
+All three use the same `listen` and `stop-listening` lesson actions. Pressing
+start twice, or starting by voice while the button is on, does not open a
+second session.
+
+Listening also stops:
+
+- after about 60 seconds with nothing said,
+- at the conversation cap (10 minutes, the same cap as every conversation),
+- when a touch on the robot hushes it.
+
+The toggle needs the robot app (the daemon). `cc-buddy-bridge learning` runs
+the web app by itself. There, the button is off and the page says that the
+robot app is not running.
+
+### What buddy does
+
+- No wake word is needed. Starting opens a normal buddy conversation that
+  waits through thinking pauses.
+- If a "hey buddy" conversation is already open, it switches to listening.
+- buddy mostly listens. At a pause it says one or two short sentences: some
+  encouragement, a guiding question, or where the first slip is.
+- Questions get hints. buddy never says the final answer and never does a step,
+  unless the learner asks to see one step. That step goes through the lesson,
+  so it shows on the whiteboard.
+- Each thing the learner says is added to the end of their ideas. Typed ideas
+  are never replaced. If the learner types while buddy saves a line, the save
+  keeps both.
+- While listening, buddy does not run computer tasks, explore, or remember the
+  conversation in its chat memory.
+- The robot shows the listening pose with solid blue lights while it listens. It
+  drops the pose to act out thinking and speaking, then shows it again.
+- The web app shows a **buddy is listening** badge in the page header and the
+  lesson panel for the whole time. It checks the state every 1.5 seconds.
+
+The listening rules and the lesson (problem, stage, ideas, buddy's steps) are
+in `bridge/src/cc_buddy_bridge/learning/think_aloud.py`. A session opened for
+listening gets them in its start instructions. A conversation that switches
+gets them as silent context, and the backend gets them through
+`session.update`, because the voice instructions cannot change after start.
+
+### Privacy
+
+- The microphone audio goes to the voice session only while listening (or a
+  "hey buddy" conversation) is on. Stopping closes the session.
+- No audio is saved.
+- The learner's words are saved only into their lesson's ideas, on this
+  computer. They are not written to logs or to buddy's chat memory.
+- Logs record the action and whether it worked (for example
+  `lesson: listen -> ok=True`, `voice: spoken idea saved ok=True`).
+- Separately, the "hey buddy" wake-word detector runs on this computer all the
+  time while voice is on (`CC_BUDDY_VOICE=0` turns it off, and think out loud
+  with it). It sends nothing anywhere until it hears its name.
+
+### Tutor provider: OpenAI by default, OpenRouter opt-in
+
+The default provider is **OpenAI** with `OPENAI_API_KEY` and the model
+`gpt-6-astra`. You do not need to set a provider to use it. Put the key in
+`~/.config/cc-buddy-bridge/env` (on Windows:
+`%USERPROFILE%\.config\cc-buddy-bridge\env`). The file is outside the repository:
+
+```dotenv
+OPENAI_API_KEY=
+```
+
+OpenRouter is **opt-in only**. Having an `OPENROUTER_API_KEY` in the file never
+switches providers. To use OpenRouter, set the provider explicitly, replacing
+the empty key value locally:
+
+```dotenv
+CC_BUDDY_LEARNING_PROVIDER=openrouter
+CC_BUDDY_LEARNING_MODEL=openai/gpt-6-astra
+OPENROUTER_API_KEY=
+```
+
+Restart the learning server or daemon after saving the key. Start **without**
+`--demo`: `python tools/start_learning.py`. The dashboard displays the provider
+and model, and reports a missing OpenRouter key without exposing its value.
+All questions, screenshots, handwritten work, hints and steps use Astra; there
+is no automatic switch to a cheaper model. OpenRouter can select an upstream
+provider serving that same model.
+
+The adapter uses OpenRouter's Chat Completions endpoint with base64 images and
+strict JSON schema, requiring endpoint support for the requested parameters.
+[Astra's OpenRouter page](https://openrouter.ai/openai/gpt-6-astra) lists its model
+ID and image/structured-output support; see also
+[OpenRouter structured outputs](https://openrouter.ai/docs/guides/features/structured-outputs).
+The key stays on the Python server. OpenRouter and its selected provider handle
+submitted lesson data according to their account/data policies.
+
+Without `CC_BUDDY_LEARNING_PROVIDER=openrouter`, the tutor uses OpenAI and asks
+for `OPENAI_API_KEY` if it is missing, even when an OpenRouter key is present.
+A selected provider never falls back to the other account's key.
+Direct OpenAI uses `store: false` on Responses requests. The math provider setting
+does not change Buddy's separate realtime voice connection, which still needs
+its existing OpenAI configuration. Browser Read aloud remains available.
+
+| Setting | Meaning |
+| --- | --- |
+| `CC_BUDDY_LEARNING=0` | Disable the daemon's learning server |
+| `CC_BUDDY_LEARNING_PORT` | Daemon/widget port, default 48766 |
+| `CC_BUDDY_LEARNING_DIR` | Local store, default `~/.config/cc-buddy-bridge/learning` |
+| `CC_BUDDY_LEARNING_PROVIDER` | `openai` (default) or `openrouter` |
+| `CC_BUDDY_LEARNING_MODEL` | `gpt-6-astra` on OpenAI (default); `openai/gpt-6-astra` on OpenRouter |
+| `OPENAI_API_KEY` | Tutor key for the default OpenAI provider |
+| `OPENROUTER_API_KEY` | Tutor key, used only with `CC_BUDDY_LEARNING_PROVIDER=openrouter` |
+| `EXA_API_KEY` | Optional Exa key for practice references |
+| `--demo` | Explicit offline examples; separate default `learning/demo` store |
+| `--data-dir` / `--port` | Standalone and demo overrides |
+
+## Activity workflow
+
+1. **Learn a topic:** choose topic and starting level (K through college year
+   two). Buddy generates a problem without revealing its answer.
+2. **Help with my problem:** paste/upload a PNG, JPEG, or WebP, write on the
+   board, or type a problem. Buddy transcribes the problem. Correct unclear
+   symbols and explicitly confirm before tutoring begins.
+3. Put down ideas. The help path asks for a starting attempt or an explicit
+   "I don't know how to start" before it gives help. Writing the original
+   problem does not count as a new attempt.
+4. **Hint** nudges without completing a step. **Check my work** reviews current
+   writing and ideas. **Show one step** adds one next transformation to Buddy's
+   separate panel. Click again for the next step. The learner's board is never
+   overwritten by the tutor.
+5. Optional supervision checks after a five-second pause following an edit.
+   It does not continuously poll the model or interrupt individual pen strokes.
+6. When complete, ask for a recap/understanding check, try another problem,
+   change topic, or end. A lesson can be ended at any stage and resumed later.
+
+The voice tool supports open, start, ideas, hint, check, step, status, recap,
+end, listen, and stop-listening. Selecting a lesson in the browser makes it the voice tool's active
+lesson. The browser polls saved revisions to display voice-originated updates.
+The optional browser **Read aloud** control uses the operating system/browser
+speech synthesizer; it is labelled separately from the robot's existing voice.
+
+## Saved work and dashboard
+
+SQLite transactions save the problem, source screenshot, typed ideas, pen and
+eraser strokes, flattened whiteboard image, tutor hints/steps/feedback, mode,
+level, and completion state. Every autosave and tutoring action has a revision.
+**Saved work** opens those revisions; **Export** downloads the lesson and its
+full revision history as JSON. Ending a lesson preserves its previous stage.
+Revision checks reject stale writes from another window instead of overwriting
+newer work. The browser keeps a temporary local recovery draft while edits are
+unsaved, and warns before closing with unsaved work.
+
+The files are `lessons.sqlite3` and a small `dashboard.json` widget summary.
+They are separate from the room diary, automatic memories, and photo pruning.
+All saved revisions are retained, including erased writing; history can grow
+large over time. Protect/back up the directory as appropriate for learner data.
+Uploaded images are resized to a maximum dimension of 1600 pixels. Live checks
+send the selected screenshot, current board, and relevant lesson context to
+the tutor. No automatic desktop capture is used.
+
+## Widget integration (macOS)
+
+Build the existing `widget/StackChanNotes.xcodeproj` in Xcode on a Mac. All Swift
+changes are in files already included in that project; regeneration is not
+required. Start the helper and bridge daemon, then add **buddy's learning**
+from the widget gallery. The helper mirrors the summary into its App Group
+every 30 seconds. The card shows lesson counts and recent problems; click it
+to open the full dashboard embedded in the helper app. The existing diary
+widget's medium/large layouts also contain a **Learning dashboard** link,
+and the menu-bar app has an **Open learning dashboard** command. The older
+Python `notes-widget` panel also includes this command in its right-click menu.
+
+If using a custom directory or port, give the helper app the same environment
+values as the daemon. The demo is separate from live widget data unless you
+explicitly point the helper at the demo directory and port. Windows uses the
+browser dashboard; WidgetKit is only available on macOS.
+
+## Verification and current limits
+
+`bridge/tests/test_learning.py` covers the flow, exactly-one-step demo behavior,
+current image inputs, API response validation, durable revisions, conflicts,
+failure recovery, lesson lifecycle, voice delegation, and local HTTP request
+boundaries. `bridge/tests/test_learning_search.py` covers Exa search and env-file
+loading. `bridge/tests/test_daemon_lesson.py` covers `cc-buddy-bridge lesson` and
+the daemon's IPC handler. Voice tests cover the tool through the existing connection.
+`bridge/tests/test_learning_think_aloud.py` covers think out loud on the learning
+side (actions, the browser toggle, the standalone answer, spoken ideas that
+append, the listening instructions). The think-out-loud tests at the end of
+`test_voice_agent.py` and `test_daemon_lesson.py` cover the session (silence
+stop, cap, saved and unlogged words) and the daemon (IPC, races, robot pose).
+
+```powershell
+python -m pytest bridge/tests/test_learning.py bridge/tests/test_learning_search.py bridge/tests/test_voice_agent.py bridge/tests/test_daemon_lesson.py -q
+# With Playwright installed (plus its ffmpeg component for video recording):
+python tools/demo_learning.py
+```
+
+The demo runner needs `bridge/src` on `PYTHONPATH` (or an editable bridge install)
+and Chrome at its standard Windows path; `--browser` accepts another executable.
+It runs headless and saves a video and screenshots. Playwright's test context
+bypasses CSP only for its assertion machinery; the application keeps its strict
+same-origin content policy. The live tutor is model-based, not an independently
+verified symbolic mathematics engine. The single-step schema and instruction
+constrain its output, but they cannot prove that every generated transformation
+is mathematically correct or pedagogically atomic. Handwriting accuracy and
+age-level teaching quality need real learner evaluations before classroom use.
+
+The recorded demo (Windows, 2026-09-12) uses offline examples.
+Live image/voice API calls, physical robot behavior, and the Swift widget build
+require their respective API access/hardware/macOS environment and are not
+represented as verified by that demo.
+
+
+### Verification in this checkout (Windows, 2026-09-12)
+
+- Targeted learning/voice/wake-word/daemon/widget suite: **142 passed, 3 skipped**.
+- Browser demo: **15 workflow checks passed**, no JavaScript page errors.
+- Changed Python files: Ruff passed.
+- Full bridge suite with dependencies installed and UTF-8 enabled: **993 passed,
+  9 failed, 5 skipped**. Remaining failures are in chat-memory/identity/notes/
+  photos/recall POSIX-permission assertions, environment home expansion,
+  read-policy POSIX paths, and a timing-sensitive state ordering assertion.
+  These modules were not modified for learning. The full suite is not green.
+- Live API key: absent; live image/voice calls not exercised.
+- macOS Swift build and physical robot: not available in that Windows run.
+
+
+### Running from WSL with a Windows environment file
+
+WSL's `~` is the Linux home, not the Windows home. To use the same key file:
+
+```bash
+python tools/start_learning.py --env-file /mnt/c/Users/<you>/.config/cc-buddy-bridge/env
+```
+
+Alternatively set `CC_BUDDY_ENV_FILE` to that path before launching the bridge
+or learning server. Explicit `--env-file` takes precedence over that variable;
+existing shell settings still take precedence over values inside the file.
+Restart the server after changing settings. Windows PowerShell users can keep
+using `python tools/start_learning.py` with the default Windows home path.
+
+
+### OpenRouter 403: provider Terms of Service restriction
+
+If Buddy reports this specific restriction, the request reached OpenRouter but
+was rejected under a provider policy. A simple addition-generation request also
+returned this error during diagnosis on 2026-09-12. The response does not name
+the specific policy or identify whether the restriction is account-wide or
+model-specific. Ask OpenRouter support to review access to `openai/gpt-6-astra`.
+Changing the worksheet or adding an OpenAI key is not an established fix for
+this error. Buddy preserves saved work and does not automatically retry or
+switch models. Raw response metadata and account identifiers are not shown.
+
+
+### Address already in use
+
+Only one service can listen on port 48766. If Buddy is already running, open
+`http://127.0.0.1:48766/` instead of launching it again. To reload changed
+settings, stop that specific Buddy process, then restart it with the same
+arguments. In WSL, `pgrep -af start_learning.py` identifies standalone launchers.
+Do not terminate WSL itself or unrelated processes. The launcher now reports
+an occupied port with this guidance and exits with status 2 instead of showing
+a traceback. `--port 48768` can launch a separate instance when intended.
+
+
+### Exa practice references
+
+Add `EXA_API_KEY=your-exa-key` to `~/.config/cc-buddy-bridge/env`, the same
+bridge environment file, and restart the service. The daemon,
+`cc-buddy-bridge learning`, `python tools/start_learning.py`, and
+`python -m cc_buddy_bridge.learning` all read that file at startup. Variables
+already set in the environment win over values in the file. No additional Python packages are required. Live lesson generation
+searches Exa once for the topic and level, then asks the configured tutor to
+create one original adapted problem from relevant references. Help with an
+existing problem, checks, hints, and steps do not trigger searches. Demo mode
+makes no search requests.
+
+The integration uses [Exa Search](https://exa.ai/docs/reference/search), with
+three results, moderation enabled, and educational sources: Khan Academy,
+OpenStax, Math Is Fun, MIT OpenCourseWare, and Paul's Online Math Notes.
+Only topic and level are sent to Exa; learner work and images are not sent.
+Retrieved text is treated as untrusted reference material. Search cannot
+independently verify mathematical correctness or guarantee an appropriate result.
+
+The lesson feedback shows the search outcome and expandable reference links
+(which may lead to pages containing answers). Links are saved in lesson events
+and remain available when reopening a lesson from the widget/dashboard. These
+are search references, not a claim that a particular exercise was copied from
+a page. Raw retrieved text is not saved. Missing keys, empty results, and search
+errors fall back to ordinary problem generation with a visible explanation.
+The tutor API key is still required; Exa uses its own account and credits.

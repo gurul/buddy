@@ -78,7 +78,9 @@ from typing import Any, Awaitable, Callable, Optional
 from . import head as head_mod
 from .caption_pager import CaptionPager, Event, PagerConfig, caption_instructions
 from .computer_agent import AgentConfig, AgentEvent, ComputerAgent
-from .intent import LEAVE, LOOK, MUTE, UNMUTE, fast_intent
+from .intent import LEAVE, LOOK, MUTE, REMEMBER, UNMUTE, fast_intent, normalize
+from .learning import LESSON_ACTIONS, run_lesson
+from .learning import think_aloud as think_aloud_mod
 
 log = logging.getLogger(__name__)
 
@@ -101,6 +103,8 @@ MUTED_NOTE = ("[sound] You are muted: nobody hears you. You still move and light
               "show on your screen, so keep them short.")
 UNMUTED_NOTE = "[sound] Your sound is back on."
 SAMPLE_RATE = 24000
+# While a learner thinks out loud, only these standing orders act; every other phrase is about the problem.
+LISTENING_INTENTS = (LEAVE, MUTE, UNMUTE)
 
 # The Live model owns voice, timing and interruptions. Tool workflow lives in
 # the backend prompt, per OpenAI's Live delegation guidance.
@@ -120,6 +124,11 @@ When the result arrives, tell them it in one short line.
 
 Delegate anything that changes what a running task is doing, ends the conversation, or sends you off to
 explore. Chit-chat you answer yourself.
+
+For a math lesson, learning a topic, or help with a written problem, delegate to the math_lesson tool.
+Ask whether they want to learn a topic or bring a problem; then ask the topic and starting level if needed.
+This lesson flow is an exception to the short-answer rule. Never solve ahead of the learner.
+Spoken hints, checks, one-step requests, and learner ideas must use math_lesson so the whiteboard stays in sync.
 
 You are the receptionist; a slower brain works behind you. Anything that needs today's facts — weather,
 scores, news, prices, opening hours, "what's happening with…" — delegate; it searches the web. Anything
@@ -154,7 +163,13 @@ never started as a task, even if an app could show the answer.
   words plus any app or site they named. Never guess an app or hedge ("likely in a music app"). When
   start_task returns ok, reply with an empty message: buddy has already acknowledged the request, and the
   result reaches buddy on its own when the task finishes.
-- Never ask the owner a clarifying question. Call start_task with their words as they are; the task can
+- Math lessons are an exception to the computer-task and clarification rules: use math_lesson, never
+  start_task. "I want a math lesson" -> action open, then ask learn-a-topic or help-with-a-problem.
+  Ask for topic and level when learning. Once known, action start with mode learn/help, topic and level.
+  In an active lesson, use ideas to save spoken thinking (empty text means stuck), hint for a nudge,
+  check to review current work, step to reveal exactly ONE step, status for the latest feedback,
+  recap to summarize, end to save and finish. Do not independently solve or reveal future steps.
+- Outside math lessons, never ask the owner a clarifying question. Call start_task with their words as they are; the task can
   ask them itself if it truly needs an answer.
 - While a task runs: "stop" / "cancel" / "never mind" → stop_task. A correction or addition ("use Safari
   instead", "also save it") → steer_task with the text. "How's it going?" → task_status, summarised in one
@@ -191,7 +206,40 @@ never started as a task, even if an app could show the answer.
 Return at most one short sentence, except a think_hard answer, which may be three. Never invent a result
 you did not get from a tool."""
 
+# What buddy remembers of talking with its owner, folded into the session prompt
+# (recall.py). Empty when there is nothing to carry over, and then the
+# instructions string is byte-identical to a session with no memory at all — so
+# the first ever conversation cannot sound like a robot apologising for having
+# none. The rules matter more than the content: a memory is a clause, not a
+# recital, and buddy must not ask the owner to confirm its own memory.
+MEMORY_HEADER = """
+
+You remember your last conversations with your owner. Here is what you have:"""
+
+MEMORY_RULES = """
+Use it the way a person would. Mention the gap only if it is worth mentioning, in your own words, as part
+of your greeting — never as a separate announcement. You may bring up one open thing, once, if it fits what
+they are saying now. Anything you attribute to them is what they said, not what you saw. Never read this
+back as a list, never say more than one clause about it, never ask them to confirm it, and never mention
+having or not having memories. If none of it fits, say nothing about it at all."""
+
+
+def memory_block(memory: str) -> str:
+    """The memory paragraph for the session prompt, or "" when there is none."""
+    text = (memory or "").strip()
+    if not text:
+        return ""
+    return MEMORY_HEADER + "\n" + text + MEMORY_RULES
+
+
 TOOLS: list[dict[str, Any]] = [
+    {"type": "function", "name": "math_lesson",
+     "description": "Open Buddy's math whiteboard, start learning or help with a problem, save ideas, give a hint, check work, or show exactly one step. Use for math lessons instead of computer control.",
+     "parameters": {"type": "object", "properties": {
+         "action": {"type": "string", "enum": list(LESSON_ACTIONS)},
+         "mode": {"type": "string", "enum": ["learn", "help", ""]},
+         "topic": {"type": "string"}, "level": {"type": "string"}, "text": {"type": "string"}},
+         "required": ["action"], "additionalProperties": False}},
     {"type": "function", "name": "start_task",
      "description": "Start a computer-use task on the owner's Mac: it clicks and types for them. Last resort — "
                     "only for a request the Mac itself must carry out or show, never for a question. Returns "
@@ -311,18 +359,26 @@ def configured(environ: Any = None) -> VoiceConfig:
                        idle_timeout_secs=idle, output=out, caption_cps=cps, web_search=web)
 
 
-def session_config(config: VoiceConfig) -> dict[str, Any]:
+def session_config(config: VoiceConfig, memory: str = "",
+                   think_aloud: Optional[dict[str, Any]] = None) -> dict[str, Any]:
     """The `session.start` payload (Live API, openai 3.13).
 
     There is no `output_modalities` and no turn-detection block: gpt-live-1 is
     full duplex and always speaks. Captions mode reads the output transcript and
     drops the audio, so the voice is configured either way.
+
+    `think_aloud` is the open lesson when the session is opened for think out loud:
+    its listening rules and the lesson go into both instructions, because the
+    voice's instructions cannot change after session.start.
     """
     captions = config.output == "captions"
+    listening = think_aloud is not None
     return {
         "model": config.model,
-        "instructions": INSTRUCTIONS + (caption_instructions(PagerConfig(read_cps=config.caption_cps))
-                                        if captions else ""),
+        "instructions": INSTRUCTIONS + memory_block(memory)
+                        + (caption_instructions(PagerConfig(read_cps=config.caption_cps))
+                           if captions else "")
+                        + (think_aloud_mod.voice_instructions(think_aloud) if listening else ""),
         "audio": {
             "format": {"type": "audio/pcm", "rate": SAMPLE_RATE},
             "output": {"voice": config.voice},
@@ -331,7 +387,8 @@ def session_config(config: VoiceConfig) -> dict[str, Any]:
             "type": "responses",
             "responses": {
                 "model": config.backend_model,
-                "instructions": BACKEND_INSTRUCTIONS,
+                "instructions": BACKEND_INSTRUCTIONS
+                                + (think_aloud_mod.backend_instructions(think_aloud) if listening else ""),
                 "tools": TOOLS + ([WEB_SEARCH_TOOL] if config.web_search else []),
                 "tool_choice": "auto",
                 "reasoning": {"effort": config.backend_effort},
@@ -493,7 +550,23 @@ class VoiceSession:
         on_sound: Optional[Callable[[bool], None]] = None,  # the owner muted (False) / unmuted (True)
         muted: Callable[[], bool] = lambda: False,
         thinker: Optional[Callable[[str], Awaitable[dict[str, Any]]]] = None,   # think.make_thinker(...)
+        memory: str = "",                                   # recall.opening_brief(...)
+        on_star: Optional[Callable[[str], Optional[str]]] = None,   # chat_memory.star(...)
+        learning: Optional[Callable[..., dict[str, Any]]] = None,
+        think_aloud: Optional[dict[str, Any]] = None,       # the lesson, when opened for think out loud
+        on_spoken_idea: Optional[Callable[[str, str], Any]] = None,   # LearningApp.append_spoken (blocking)
+        on_think_aloud: Optional[Callable[[bool, Optional[str]], None]] = None,   # (listening, lesson id)
     ) -> None:
+        self.learning = learning
+        # Think out loud: the lesson the learner is talking through, or None. While it is set the
+        # session waits through long thinking pauses, saves what the learner says into the lesson's
+        # ideas, and never logs or remembers the learner's words.
+        self._think_aloud: Optional[dict[str, Any]] = think_aloud
+        self.on_spoken_idea = on_spoken_idea
+        self.on_think_aloud = on_think_aloud
+        self._idea_saves: set[asyncio.Future[Any]] = set()
+        self.end_reason = ""
+        self._started = asyncio.Event()     # session.started arrived: context sent now is not discarded
         self.conn = connection
         self.scene = scene
         self.head = head
@@ -523,6 +596,15 @@ class VoiceSession:
         self.agent_factory = agent_factory
         self.on_state = on_state
         self.config = config or VoiceConfig()
+        self.memory = memory
+        # Both sides of the conversation, in order, held in RAM only. chat_memory.py
+        # distils this into a few lines when the session closes; the words
+        # themselves are never written to disk (owner choice, 2026-09-11).
+        self.turns: list[tuple[str, str]] = []
+        # Promoting something to the permanent layer, by voice. In the owner's
+        # memory system only a human may star, and out loud is how the owner does
+        # it — nothing about this goes through a terminal.
+        self.on_star = on_star
         self.agent_config = agent_config or AgentConfig()
         self._clock = clock
         # Captions: the pager decides which page is up and for how long; the
@@ -570,15 +652,21 @@ class VoiceSession:
 
     # -- lifecycle --
     async def run(self) -> None:
-        self._set("wake")
+        listening = self._think_aloud is not None
+        self._set("listening" if listening else "wake")
         self._started_at = self._last_activity = self._clock()
-        await self.conn.session.start(session=session_config(self.config))
+        await self.conn.session.start(session=session_config(self.config, self.memory, self._think_aloud))
         await self._await_started()
+        self._started.set()
         # A fixed greeting needs no backend round-trip: commentary is context the
         # Live model speaks itself.
         await self.conn.session.commentary.append(
-            content="The owner just said your wake word. Greet them in one or two words, like 'Yeah?'.",
+            content=("The learner asked you to listen while they think out loud. Say 'I'm listening' in two or "
+                     "three words, then stay quiet while they think." if listening else
+                     "The owner just said your wake word. Greet them in one or two words, like 'Yeah?'."),
             delegation_id=None)
+        if listening:
+            self._notify_think_aloud(True)
         if self.muted():
             await self._quiet(MUTED_NOTE)
         if self.scene is not None:
@@ -621,6 +709,12 @@ class VoiceSession:
 
             await self._drain_speaker()
             self.speaker.stop()
+            if self._idea_saves:
+                # A line the learner said just before the close is still being written to the lesson.
+                await asyncio.gather(*self._idea_saves, return_exceptions=True)
+            if self._think_aloud is not None:
+                self._think_aloud = None
+                self._notify_think_aloud(False)
             self._set("idle")
 
     async def _await_started(self, timeout: float = 15.0) -> None:
@@ -639,7 +733,95 @@ class VoiceSession:
             log.warning("voice: no session.started within %.0f s — continuing anyway", timeout)
 
     def end(self) -> None:
+        self._finish("ended")
+
+    def _finish(self, reason: str) -> None:
+        """Close the session, remembering the first reason (cap, silence, goodbye, stopped, ...)."""
+        if not self._ended.is_set():
+            self.end_reason = reason
         self._ended.set()
+
+    # -- think out loud --
+    @property
+    def ended(self) -> bool:
+        return self._ended.is_set()
+
+    @property
+    def think_aloud_lesson_id(self) -> Optional[str]:
+        return str(self._think_aloud.get("id")) if self._think_aloud is not None else None
+
+    def _notify_think_aloud(self, on: bool) -> None:
+        if self.on_think_aloud is None:
+            return
+        try:
+            self.on_think_aloud(on, self.think_aloud_lesson_id if on else None)
+        except Exception:  # noqa: BLE001
+            log.exception("voice: on_think_aloud failed")
+
+    async def enter_think_aloud(self, lesson: dict[str, Any]) -> dict[str, Any]:
+        """Switch an open conversation to think out loud (a voice request, or a toggle while talking).
+
+        The voice's instructions are fixed at session.start, so its listening rules and the lesson go in
+        as silent context; the backend's instructions are replaced through session.update."""
+        if self._ended.is_set():
+            return {"ok": False, "reason": "the conversation is closing"}
+        try:
+            await asyncio.wait_for(self._started.wait(), timeout=8.0)
+        except asyncio.TimeoutError:
+            return {"ok": False, "reason": "the conversation is not connected yet"}
+        if self._ended.is_set():
+            return {"ok": False, "reason": "the conversation is closing"}
+        if self.task_running:
+            return {"ok": False, "reason": "buddy is busy with a computer task. Stop it first, then think out loud."}
+        same = self._think_aloud is not None and self._think_aloud.get("id") == lesson.get("id")
+        self._think_aloud = lesson
+        self._last_activity = self._clock()
+        if same:
+            return {"ok": True, "already": True}
+        await self._quiet(think_aloud_mod.voice_instructions(lesson))
+        try:
+            await self.conn.session.update(session={"delegation": {"type": "responses", "responses": {
+                "instructions": BACKEND_INSTRUCTIONS + think_aloud_mod.backend_instructions(lesson)}}})
+        except Exception as e:  # noqa: BLE001
+            # The voice still has the rules; the backend keeps its lesson rules from BACKEND_INSTRUCTIONS.
+            log.warning("voice: could not give the backend the listening rules (%s)", type(e).__name__)
+        log.info("voice: think out loud on")
+        self._notify_think_aloud(True)
+        return {"ok": True}
+
+    def prepare_think_aloud(self, lesson: dict[str, Any]) -> None:
+        """Before run(): open this session for think out loud (asked for while it was connecting)."""
+        if not self._started.is_set():
+            self._think_aloud = lesson
+
+    def stop_think_aloud(self, reason: str = "stopped") -> None:
+        """The toggle or the command stopped listening: the microphone closes now."""
+        if self._think_aloud is not None:
+            log.info("voice: think out loud off (%s)", reason)
+        self._finish(reason)
+
+    def _save_spoken_idea(self, text: str) -> None:
+        """Append one finished learner turn to the lesson's ideas, off the event loop.
+
+        A dismissal ("I'm done", "stop listening") is a command, not thinking, and is not saved."""
+        lesson_id = self.think_aloud_lesson_id
+        if self.on_spoken_idea is None or not lesson_id:
+            return
+        if think_aloud_mod.said_done(normalize(text)) or fast_intent(text) in LISTENING_INTENTS:
+            return
+        save = self.on_spoken_idea
+
+        async def run() -> None:
+            try:
+                ok = await asyncio.to_thread(save, lesson_id, text)
+            except Exception as e:  # noqa: BLE001
+                ok = False
+                log.warning("voice: spoken idea not saved (%s)", type(e).__name__)
+            log.info("voice: spoken idea saved ok=%s", bool(ok))   # never the words
+
+        task = asyncio.ensure_future(run())
+        self._idea_saves.add(task)
+        task.add_done_callback(self._idea_saves.discard)
 
     async def _drain_speaker(self, timeout: float = 15.0) -> None:
         """Let a queued reply finish playing (barge-in and errors skip this)."""
@@ -720,17 +902,20 @@ class VoiceSession:
         while not self._ended.is_set():
             await asyncio.sleep(0.5)
             now = self._clock()
+            # Think out loud waits through thinking pauses: a minute of quiet, not the idle timeout.
+            quiet_secs = (think_aloud_mod.SILENCE_SECS if self._think_aloud is not None
+                          else self.config.idle_timeout_secs)
             if now - self._started_at > self.config.max_session_secs:
                 log.info("voice: session hit its %.0f s cap", self.config.max_session_secs)
-                self._ended.set()
+                self._finish("cap")
             elif self._farewell and self._farewell_due(now):
                 log.info("voice: goodbye said — closing")
-                self._ended.set()
+                self._finish("goodbye")
             elif (not self.task_running and self._pending_answer is None and not self.speaker.busy
-                  and not self._pager.busy and not self._slow_tasks
-                  and now - self._last_activity > self.config.idle_timeout_secs):
-                log.info("voice: nothing said for %.0f s — closing", self.config.idle_timeout_secs)
-                self._ended.set()
+                  and not self._pager.busy and not self._slow_tasks and not self._idea_saves
+                  and now - self._last_activity > quiet_secs):
+                log.info("voice: nothing said for %.0f s — closing", quiet_secs)
+                self._finish("silence")
 
     async def _until_ended(self) -> None:
         """Serve Live events until the session ends — by an event, or by the watchdog.
@@ -815,7 +1000,9 @@ class VoiceSession:
             # What the backend handed the voice. Logged because the voice speaks its own
             # words: without this line a wrong reply cannot be traced to either half.
             text = str(_attr(ev, "text") or "")
-            if text:
+            if text and self._think_aloud is not None:
+                log.info("voice: backend replied (%d chars; words not logged while listening)", len(text))
+            elif text:
                 log.info("voice: backend said: %s", text[:160])
         elif et == "error":
             log.warning("voice: backend error: %s", _attr(ev, "error") or ev)
@@ -856,14 +1043,23 @@ class VoiceSession:
     def _close_turn(self, who: str, text: str) -> None:
         if not text:
             return
+        listening = self._think_aloud is not None
+        # While listening, neither side is kept for chat memory: the learner's words go to their lesson only.
+        if who in ("user", "assistant") and not listening:
+            self.turns.append((who, text))
         if who == "user":
+            if listening:
+                self._save_spoken_idea(text)
             self._on_user_turn(text)
             return
         if who != "assistant":
             return
         now = self._clock()
         self.transcript.append(text)
-        log.info("buddy: %s", text)
+        if listening:
+            log.info("buddy: replied (%d chars; words not logged while listening)", len(text))
+        else:
+            log.info("buddy: %s", text)
         self._last_activity = now
         if self._captions:
             if not self._reply_open:
@@ -881,12 +1077,17 @@ class VoiceSession:
             args = json.loads(arguments) if arguments else {}
         except ValueError:
             args = {}
+        if not isinstance(args, dict):
+            args = {}  # a JSON list or string: every tool reads args with .get
         self.tool_calls.append((name, args))
         self._last_activity = self._clock()
         if name in ("move_head", "look_around", "find", "look"):
             self._last_head_tool_at = self._clock()
         result: dict[str, Any]
-        if name == "start_task":
+        if self._think_aloud is not None and name in ("start_task", "go_explore", "think_hard"):
+            # A child is working a problem: buddy does not take over the Mac, wander off, or solve it elsewhere.
+            result = {"ok": False, "reason": "not while the learner is thinking out loud; listen and give a hint"}
+        elif name == "start_task":
             result = self._start_task(str(args.get("goal", "")).strip())
         elif name == "steer_task":
             ok = self.agent is not None and self.agent.steer(str(args.get("text", "")))
@@ -933,7 +1134,7 @@ class VoiceSession:
                 result = {"ok": True, "sound": "on" if on else "off"}
             else:
                 result = {"ok": False, "reason": "on must be true or false"}
-        elif name in ("look", "look_around", "find", "think_hard"):
+        elif name in ("look", "look_around", "find", "think_hard", "math_lesson"):
             # Seconds (or a minute, for think_hard) of camera, head or model work:
             # answered from a background task, so Live events (the owner talking,
             # captions) keep flowing meanwhile.
@@ -967,7 +1168,31 @@ class VoiceSession:
     def _slow_tool(self, name: str, call_id: str, args: dict[str, Any]) -> None:
         async def run() -> None:
             try:
-                if name == "look":
+                if name == "math_lesson":
+                    action = str(args.get("action") or "").strip().lower()
+                    if self._think_aloud is not None:
+                        # The check, hint or step must see what the learner just said: close their open
+                        # turn and wait for its line to reach the lesson first.
+                        if self._turns.speaker == "user":
+                            closing = self._turns.flush()
+                            if closing is not None:
+                                self._close_turn(*closing)
+                        if self._idea_saves:
+                            await asyncio.gather(*self._idea_saves, return_exceptions=True)
+                    if self._think_aloud is not None and action == "stop-listening":
+                        # Said out loud: buddy's goodbye is spoken first, then the session closes.
+                        self._begin_farewell(self._clock())
+                        result = {"ok": True, "answer": "Say a two- or three-word goodbye."}
+                    elif self._think_aloud is not None and action == "ideas":
+                        # Never overwrite typed ideas: spoken thinking is already appended turn by turn.
+                        result = {"ok": True, "answer": "Already saved: what the learner says is added to their ideas."}
+                    elif self.learning is not None and self.task_running:
+                        result = {"ok": False, "reason": "Stop the computer task before starting a lesson."}
+                    else:
+                        # run_lesson validates the model's arguments and maps a missing workspace,
+                        # a user error and a stale lesson to a reason the voice can say.
+                        result = await asyncio.to_thread(run_lesson, self.learning, args)
+                elif name == "look":
                     result = await self._look()
                 elif name == "look_around":
                     result = await self._look_around()
@@ -1050,10 +1275,16 @@ class VoiceSession:
         # The owner's turn ends when buddy starts answering it (or on a silence gap),
         # so this instant is also where buddy's reply to it begins.
         said_at = self._clock()
+        if self._think_aloud is not None and think_aloud_mod.said_done(normalize(text)):
+            log.info("voice: the learner is done thinking out loud")
+            self._begin_farewell(said_at)
+            return
         label = fast_intent(text)
         if label is not None:
             self._apply_intent(label, text, "phrase", said_at)
-        elif self.intent is not None:
+        elif self.intent is not None and self._think_aloud is None:
+            # Not while listening: math talk is not a command, and each classification is one more model call
+            # carrying the learner's words. The backend still ends listening when they say they are done.
             self._bg(self._classify(text, said_at))
 
     async def _classify(self, text: str, said_at: float) -> None:
@@ -1063,7 +1294,14 @@ class VoiceSession:
             self._apply_intent(label, text, "classifier", said_at)
 
     def _apply_intent(self, label: str, text: str, how: str, said_at: float) -> None:
-        log.info("voice: %r means %s (%s)", text[:80], label, how)
+        if self._think_aloud is not None:
+            if label not in LISTENING_INTENTS:
+                # "Look at the left side" is about the problem, and "remember that" must never star a child's
+                # words into buddy's permanent memory.
+                return
+            log.info("voice: a turn means %s (%s)", label, how)     # a learner's words are never logged
+        else:
+            log.info("voice: %r means %s (%s)", text[:80], label, how)
         if label == LEAVE:
             self._begin_farewell(said_at)
         elif label == MUTE:
@@ -1072,6 +1310,47 @@ class VoiceSession:
             self._set_sound(True, how)
         elif label == LOOK:
             self._bg(self._route_look(text, self._user_turn_started_at))
+        elif label == REMEMBER:
+            self._remember(self._last_substantive_turn(text))
+
+    def _last_substantive_turn(self, said: str) -> str:
+        """What "remember that" points at.
+
+        It is anaphoric: the claim is in the previous turn, not in the words
+        "remember that". The owner's own last turn is preferred — it is their
+        claim about themselves — and buddy's last line is the fallback, for
+        "that's interesting, remember that".
+        """
+        phrase = " ".join(said.lower().split())
+        for who in ("user", "assistant"):
+            for turn_who, text in reversed(self.turns):
+                body = " ".join(str(text).split())
+                if turn_who != who or not body:
+                    continue
+                if body.lower() == phrase or len(body) < 8:
+                    continue
+                return body
+        return ""
+
+    def _remember(self, claim: str) -> None:
+        """Star it, and say so in one clause. Silence would look like it failed."""
+        if self.on_star is None:
+            return
+        if not claim:
+            self._bg(self._quiet("[memory] They asked you to remember something, but nothing was said before "
+                                 "it that you could keep. Ask what you should remember, in one short line."))
+            return
+        try:
+            kept = self.on_star(claim)
+        except Exception:  # noqa: BLE001
+            log.exception("voice: could not star it")
+            kept = None
+        if kept:
+            log.info("voice: starred %r", kept[:80])
+            self._bg(self._quiet("[memory] You have written that down for good. Tell them you will remember "
+                                 "it, in three or four words. Do not repeat it back to them."))
+        else:
+            self._bg(self._quiet("[memory] You could not write it down. Say so in one short line, plainly."))
 
     async def _route_look(self, text: str, turn_started_at: float) -> None:
         """Hand a head request to the backend unless the voice already delegated this
@@ -1239,9 +1518,20 @@ async def open_session(
     on_sound: Optional[Callable[[bool], None]] = None,
     muted: Callable[[], bool] = lambda: False,
     thinker: Optional[Callable[[str], Awaitable[dict[str, Any]]]] = None,
+    memory: str = "",
+    on_closed: Optional[Callable[[list[tuple[str, str]]], None]] = None,
+    on_star: Optional[Callable[[str], Optional[str]]] = None,
+    learning: Optional[Callable[..., dict[str, Any]]] = None,
+    think_aloud: Optional[dict[str, Any]] = None,
+    on_spoken_idea: Optional[Callable[[str, str], Any]] = None,
+    on_think_aloud: Optional[Callable[[bool, Optional[str]], None]] = None,
+    on_open: Optional[Callable[[VoiceSession], None]] = None,
 ) -> None:
     """Run one full conversation on the real Live API — captions to the robot,
-    or the real speaker in audio mode."""
+    or the real speaker in audio mode.
+
+    `think_aloud` opens it for think out loud on that lesson. `on_open` hands the
+    session to the daemon, so a toggle can switch or stop it while it runs."""
     from openai import AsyncOpenAI
 
     cfg = config or configured()
@@ -1253,7 +1543,21 @@ async def open_session(
             session = VoiceSession(conn, mic, speaker, agent_factory, on_state, config=cfg,
                                    agent_enabled=agent_enabled, on_caption=on_caption,
                                    on_explore=on_explore, scene=scene, head=head, intent=intent,
-                                   on_sound=on_sound, muted=muted, thinker=thinker)
-            await session.run()
+                                   on_sound=on_sound, muted=muted, thinker=thinker,
+                                   memory=memory, on_star=on_star, learning=learning,
+                                   think_aloud=think_aloud, on_spoken_idea=on_spoken_idea,
+                                   on_think_aloud=on_think_aloud)
+            if on_open is not None:
+                on_open(session)
+            try:
+                await session.run()
+            finally:
+                # Hand the conversation to whoever wants to remember it, on every
+                # exit path including a hush and an exception.
+                if on_closed is not None:
+                    try:
+                        on_closed(list(session.turns))
+                    except Exception:  # noqa: BLE001
+                        log.exception("voice: on_closed failed")
     finally:
         speaker.close()

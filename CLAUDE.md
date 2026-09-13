@@ -1,4 +1,4 @@
-# claude-pet
+# buddy
 
 A personal project. No Era governance applies here — no constitution, no
 directives, no `era-code`.

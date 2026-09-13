@@ -50,3 +50,22 @@ def test_load_expands_user(monkeypatch, tmp_path: Path) -> None:
     env: dict[str, str] = {}
     assert load_env_file(Path("~/env"), env) == ["K"]
     assert env["K"] == "v"
+
+
+def test_load_explicit_shared_env_override(tmp_path):
+    shared = tmp_path / "windows-env"
+    shared.write_text("CC_BUDDY_LEARNING_PROVIDER=openrouter\nOPENROUTER_API_KEY=test-only\n", encoding="utf-8-sig")
+    env = {"CC_BUDDY_ENV_FILE": str(shared)}
+    load_env_file(environ=env)
+    assert env["CC_BUDDY_LEARNING_PROVIDER"] == "openrouter"
+    assert env["OPENROUTER_API_KEY"] == "test-only"
+
+
+def test_explicit_path_wins_over_env_override(tmp_path):
+    shared = tmp_path / "shared"
+    explicit = tmp_path / "explicit"
+    shared.write_text("A=shared\n")
+    explicit.write_text("A=explicit\n")
+    env = {"CC_BUDDY_ENV_FILE": str(shared)}
+    load_env_file(explicit, env)
+    assert env["A"] == "explicit"

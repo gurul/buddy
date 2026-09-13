@@ -10,6 +10,7 @@ from types import SimpleNamespace
 import pytest
 
 from cc_buddy_bridge.intent import (
+    LABELS,
     LEAVE,
     LOOK,
     MUTE,
@@ -125,8 +126,7 @@ def test_request_is_not_stored_and_is_strict_json() -> None:
     body = OpenAIIntentClient("gpt-5.4-nano", api_key="sk-test").request("bye")
     assert body["store"] is False
     fmt = body["text"]["format"]
-    assert fmt["strict"] is True and set(fmt["schema"]["properties"]["intent"]["enum"]) == {
-        LEAVE, MUTE, UNMUTE, LOOK, NONE}
+    assert fmt["strict"] is True and set(fmt["schema"]["properties"]["intent"]["enum"]) == set(LABELS)
 
 
 def test_classify_parses_the_sdk_answer() -> None:

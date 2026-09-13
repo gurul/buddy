@@ -67,6 +67,10 @@ _IS_CRASH = re.compile(
 # firmware's own boot line are the tell; the daemon hooks them via `on_boot`.
 _IS_BOOT = re.compile(r"rst:0x|^\[boot\] ")
 
+# What the board says when a host motion is admitted, reduced, refused or stopped
+# (body.cpp / main.cpp). Promoted to INFO: see _on_line.
+_IS_MOTION = re.compile(r"^\[body\] motion|^\[gaze\] host look")
+
 # Treat the link as dead after this long with no bytes read at all.
 #
 # A USB re-enumeration — which every board reset causes, including the one
@@ -310,10 +314,17 @@ class BuddySerial:
                 # backtrace logged at DEBUG is invisible exactly when it
                 # matters, and asking someone to reproduce a freeze under a
                 # hand-started DEBUG daemon is a bad trade.
-                log.log(
-                    logging.WARNING if _IS_CRASH.search(text) else logging.DEBUG,
-                    "stick: %s", text,
-                )
+                # The board's answer to a motion request is the only way to know
+                # whether it admitted, reduced or refused it, and a bench run that
+                # needs a DEBUG daemon to see that is a bench run nobody does. So
+                # the motion echo rides at INFO while the rest of the board's
+                # chatter stays at DEBUG.
+                level = logging.DEBUG
+                if _IS_CRASH.search(text):
+                    level = logging.WARNING
+                elif _IS_MOTION.search(text):
+                    level = logging.INFO
+                log.log(level, "stick: %s", text)
                 if (self.on_boot is not None
                         and _IS_BOOT.search(text)
                         and time.monotonic() - self._last_boot_hook > 5.0):

@@ -35,8 +35,10 @@ LEAVE = "leave"
 MUTE = "mute"
 UNMUTE = "unmute"
 LOOK = "look"             # turn the head, look somewhere, look around, find something with its eyes
+REMEMBER = "remember"     # the owner is promoting something to the permanent layer, out loud
+NOTES = "notes"           # start taking notes: buddy records the room until told to stop
 NONE = "none"
-LABELS = (LEAVE, MUTE, UNMUTE, LOOK, NONE)
+LABELS = (LEAVE, MUTE, UNMUTE, LOOK, REMEMBER, NOTES, NONE)
 
 DEFAULT_MODEL = "gpt-5.4-nano"
 MIN_CONFIDENCE = 0.6
@@ -99,6 +101,30 @@ def _core(words: list[str]) -> list[str]:
     return words
 
 
+# "remember that", "don't forget that", "keep that in mind", "note that down".
+# Deliberately narrow: it must be a whole short clause about remembering, so
+# "remember when you said" and "I remember that" do not promote anything.
+_REMEMBER = re.compile(
+    r"^(?:please\s+)?(?:remember|memorize|memorise|note)\s+(?:that|this|it)?$"
+    r"|^(?:please\s+)?(?:do\s*not|don'?t|never)\s+forget\s+(?:that|this|it)?$"
+    r"|^keep\s+(?:that|this|it)\s+in\s+mind$"
+    r"|^(?:write|note)\s+(?:that|this|it)\s+down$"
+    r"|^(?:remember|note)\s+(?:that|this|it)\s+(?:for|forever|always).*$"
+)
+
+
+# "start taking notes", "take notes", "can you take notes", "note this down for me".
+# Narrow on purpose: it starts recording the room, so it must not fire on someone
+# saying the word "notes" in passing.
+_NOTES = re.compile(
+    r"\b(?:start|begin|take|taking)\s+(?:some\s+|the\s+)?not(?:e|es)\b"
+    r"|\bcan you (?:take|start)\s+(?:some\s+)?not(?:e|es)\b"
+    r"|\bnote[- ]?tak(?:e|ing)\b"
+    r"|\bstart\s+(?:record(?:ing)?|transcri\w+)\b",
+    re.IGNORECASE,
+)
+
+
 def fast_intent(text: str) -> Optional[str]:
     """The phrase table. None means "not obvious" — ask the model."""
     t = normalize(text)
@@ -121,6 +147,10 @@ def fast_intent(text: str) -> Optional[str]:
         return LEAVE
     if _is_head_move(core):
         return LOOK
+    if _REMEMBER.match(core) or _REMEMBER.match(tail):
+        return REMEMBER
+    if _NOTES.search(t):
+        return NOTES
     return None
 
 
@@ -134,6 +164,12 @@ sleep, "that's all", "I'm heading out", "you can go now".
 - look: they want buddy to move its head or use its eyes on the room — look somewhere, turn, look around, \
 look at them or at a thing in the room, find something, "what's behind you?", and asking where a physical \
 thing is: "where did I leave my keys?", "where's my mug?".
+- remember: they are telling buddy to keep something permanently — "remember that", "don't forget that", \
+"keep that in mind", "note that down". Only when the whole point of what they said is that buddy should keep \
+it: "I remember that" and "remember when you said that?" are none.
+- notes: they want buddy to start taking notes, recording or transcribing what is said in the room — \
+"take notes", "start taking notes", "can you write this down as we go". Not "remember that", which is \
+remember, and not a request to read notes back.
 - none: anything else. Requests about apps, music, windows, tabs, files or other people are none, even when \
 they use the same words: "leave the tab open" is none, "mute Spotify" is none, "tell Sam goodbye" is none, \
 "look up the weather" is none, "turn the volume down" is none.

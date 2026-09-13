@@ -30,14 +30,15 @@ final class NotesMirror {
 
     private let log = Logger(subsystem: "com.github.cc-buddy-bridge.StackChanNotes", category: "mirror")
     private var dirSource: DispatchSourceFileSystemObject?
+    private var storeSource: DispatchSourceFileSystemObject?
     private var fileSource: DispatchSourceFileSystemObject?
     private var watchedFile: URL?
     private var timer: Timer?
     private var pending: Task<Void, Never>?
-    private var lastNotes: [Note]?
-    private var lastThoughts: [Thought]?
-    private var lastProfile: String?
-    private var lastHighlights: [String]?
+    /// What was last written to the App Group, as content bytes. One value rather
+    /// than a field-by-field comparison, because the field-by-field version
+    /// silently stopped covering the snapshot when it grew (`NoteStore.contentKey`).
+    private var lastWritten: Data?
 
     private init() {
         if let override = ProcessInfo.processInfo.environment[Self.envKey], !override.isEmpty {
@@ -78,6 +79,11 @@ final class NotesMirror {
     }
 
     func sync() {
+        do {
+            if try LearningSnapshot.mirror() { WidgetCenter.shared.reloadAllTimelines() }
+        } catch {
+            log.error("learning mirror failed: \(error.localizedDescription, privacy: .public)")
+        }
         armDirWatcher()
         let (snapshot, newest) = NoteStore.read(notesDir: notesDir)
         armFileWatcher(newest)
@@ -85,17 +91,14 @@ final class NotesMirror {
         count = max(snapshot.notes.count, snapshot.thoughts.filter(\.written).count)
         lastSync = .now
         self.snapshot = snapshot
-        guard snapshot.notes != lastNotes || snapshot.thoughts != lastThoughts || snapshot.profile != lastProfile
-              || snapshot.highlights != lastHighlights else { return }
+        let key = NoteStore.contentKey(snapshot)
+        guard key == nil || key != lastWritten else { return }
 
         do {
             let photos = NoteStore.mirrorPhotos(snapshot.thoughts, notesDir: notesDir)
             if photos > 0 { log.info("mirrored \(photos) new photo(s)") }
             try NoteStore.save(snapshot)
-            lastNotes = snapshot.notes
-            lastThoughts = snapshot.thoughts
-            lastProfile = snapshot.profile
-            lastHighlights = snapshot.highlights
+            lastWritten = key
             lastError = nil
             log.info("mirrored \(snapshot.notes.count) notes, \(snapshot.thoughts.count) thoughts → \(AppGroup.notesFileURL?.path ?? "?", privacy: .public)")
             WidgetCenter.shared.reloadAllTimelines()
@@ -108,9 +111,19 @@ final class NotesMirror {
     // MARK: watchers
 
     private func armDirWatcher() {
-        guard dirSource == nil else { return }
-        dirSource = makeSource(for: notesDir, mask: [.write, .rename, .delete, .attrib, .link])
-        if dirSource != nil { log.debug("dir watcher armed") }
+        if dirSource == nil {
+            dirSource = makeSource(for: notesDir, mask: [.write, .rename, .delete, .attrib, .link])
+            if dirSource != nil { log.debug("dir watcher armed") }
+        }
+        // buddy's spoken memory lives in its own store, so a new conversation
+        // shows up here rather than in the notes directory.
+        if storeSource == nil {
+            let store = NoteStore.defaultDebriefDir()
+            let sessions = store.appendingPathComponent("sessions", isDirectory: true)
+            let target = FileManager.default.fileExists(atPath: sessions.path) ? sessions : store
+            storeSource = makeSource(for: target, mask: [.write, .rename, .delete, .attrib, .link])
+            if storeSource != nil { log.debug("store watcher armed on \(target.lastPathComponent, privacy: .public)") }
+        }
     }
 
     private func armFileWatcher(_ file: URL?) {

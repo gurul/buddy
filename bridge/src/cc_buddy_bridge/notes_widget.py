@@ -41,12 +41,23 @@ from typing import Optional, Sequence
 log = logging.getLogger(__name__)
 
 NOTES_DIR_ENV = "CC_BUDDY_NOTES_DIR"
+DEBRIEF_DIR_ENV = "CC_BUDDY_DEBRIEF_DIR"
 CONFIG_DIR = Path.home() / ".config" / "cc-buddy-bridge"
 DEFAULT_NOTES_DIR = CONFIG_DIR / "notes"
+DEFAULT_DEBRIEF_DIR = CONFIG_DIR / "debrief"
 POSITION_PATH = CONFIG_DIR / "widget.json"
 
-TITLE = "StackChan notes"
-EMPTY_TEXT = "No notes yet — the robot explores after Claude has been idle for 10 min."
+TITLE = "buddy"
+EMPTY_TEXT = ("Nothing yet. buddy writes here after it has looked around, and after you have talked to it.\n\n"
+              "Say \u201chey buddy\u201d to talk. Say \u201cremember that\u201d to keep something for good.")
+# The two provenances, kept apart on purpose: what buddy heard you say is
+# quotable, what it thinks it saw is not. The widget labels them rather than
+# mixing them into one list (see recall.py).
+SAID = "said"
+SEEN = "seen"
+KIND_LABELS = {SAID: "Talking", SEEN: "Looking"}
+STARS_LABEL = "Remembered for good"
+MAX_STARS = 8
 MAX_NOTES = 40
 WIDGET_SIZE = (360.0, 420.0)
 SCREEN_MARGIN = 24.0
@@ -64,6 +75,7 @@ class Note:
     day: date
     time: str
     text: str
+    kind: str = SEEN          # SEEN: an observation. SAID: from a conversation.
 
 
 # ---------------------------------------------------------------------------
@@ -75,6 +87,81 @@ def notes_dir() -> Path:
     """Where the explorer writes. ``CC_BUDDY_NOTES_DIR`` overrides for tests/smoke runs."""
     raw = os.environ.get(NOTES_DIR_ENV)
     return Path(raw).expanduser() if raw else DEFAULT_NOTES_DIR
+
+
+def debrief_dir() -> Path:
+    """Where buddy keeps what was said. ``CC_BUDDY_DEBRIEF_DIR`` overrides."""
+    raw = os.environ.get(DEBRIEF_DIR_ENV)
+    return Path(raw).expanduser() if raw else DEFAULT_DEBRIEF_DIR
+
+
+def stars(store: Path, limit: int = MAX_STARS) -> list[str]:
+    """The claims the owner promoted by saying "remember that". Newest last.
+
+    Read only from buddy's own section of the file. chat_memory._stars_from says
+    why scanning the whole file put a stranger's outage on this widget.
+    """
+    try:
+        from .chat_memory import _stars_from
+
+        return _stars_from((store / "HIGHLIGHTS.md").read_text(encoding="utf-8", errors="replace"), limit)
+    except (OSError, ImportError):
+        return []
+
+
+def parse_conversation(text: str) -> list[str]:
+    """A conversation note as the one or two lines worth showing.
+
+    The title says what it was about; a debt of buddy's own is the line the owner
+    most wants to see, because it is the thing buddy has not done yet.
+    """
+    title = ""
+    owes: list[str] = []
+    for line in text.splitlines():
+        stripped = line.strip()
+        if not title and stripped.startswith("# "):
+            title = stripped[2:].strip()
+        elif stripped.startswith("- ") and stripped[2:].lower().startswith("buddy owes"):
+            owes.append(stripped[2:].strip())
+    out = [title] if title else []
+    out.extend(owes[:2])
+    return out
+
+
+def collect_conversations(store: Path, today: Optional[date] = None,
+                          limit: int = MAX_NOTES) -> list[Note]:
+    """What was said, newest first, from today and yesterday."""
+    today = today or date.today()
+    wanted = {today.isoformat(), (today - timedelta(days=1)).isoformat()}
+    sessions = store / "sessions"
+    if not sessions.is_dir():
+        return []
+    out: list[Note] = []
+    try:
+        days = sorted((d for d in sessions.iterdir() if d.is_dir() and d.name in wanted), reverse=True)
+    except OSError:
+        return []
+    for day_dir in days:
+        try:
+            day = date.fromisoformat(day_dir.name)
+        except ValueError:
+            continue
+        try:
+            files = sorted((f for f in day_dir.iterdir() if f.suffix == ".md"), reverse=True)
+        except OSError:
+            continue
+        for path in files:
+            try:
+                text = path.read_text(encoding="utf-8", errors="replace")
+            except OSError:
+                continue
+            stem = path.stem.split("-")[0]
+            hhmm = f"{stem[:2]}:{stem[2:4]}" if len(stem) >= 4 and stem[:4].isdigit() else "--:--"
+            for line in parse_conversation(text):
+                out.append(Note(day=day, time=hhmm, text=line, kind=SAID))
+                if len(out) >= limit:
+                    return out
+    return out
 
 
 def note_files(directory: Path, today: Optional[date] = None) -> list[Path]:
@@ -137,27 +224,58 @@ def day_label(day: date, today: Optional[date] = None) -> str:
 
 
 def render_sections(notes: Sequence[Note], today: Optional[date] = None) -> list[tuple[str, list[Note]]]:
-    """Group newest-first notes under one header per day, preserving order."""
+    """Group newest-first notes by day, and within a day by provenance.
+
+    A day that holds both kinds gets a sub-header for each, because what buddy
+    heard and what buddy saw are different kinds of claim and the widget must not
+    let them read as one list.
+    """
     sections: list[tuple[str, list[Note]]] = []
+    by_day: list[tuple[str, list[Note]]] = []
     for note in notes:
         label = day_label(note.day, today)
-        if not sections or sections[-1][0] != label:
-            sections.append((label, []))
-        sections[-1][1].append(note)
+        if not by_day or by_day[-1][0] != label:
+            by_day.append((label, []))
+        by_day[-1][1].append(note)
+    for label, group in by_day:
+        kinds = [k for k in (SAID, SEEN) if any(n.kind == k for n in group)]
+        if len(kinds) < 2:
+            sections.append((label, group))
+            continue
+        for i, kind in enumerate(kinds):
+            head = f"{label} · {KIND_LABELS[kind]}" if i == 0 else KIND_LABELS[kind]
+            sections.append((head, [n for n in group if n.kind == kind]))
     return sections
 
 
-def render_text(notes: Sequence[Note], today: Optional[date] = None) -> str:
+def render_text(notes: Sequence[Note], today: Optional[date] = None,
+                starred: Sequence[str] = ()) -> str:
     """Plain-text rendering — what ``--once`` prints and what the panel shows."""
-    if not notes:
+    if not notes and not starred:
         return EMPTY_TEXT
     lines: list[str] = []
+    if starred:
+        lines.append(STARS_LABEL)
+        lines.extend(f"\u2605  {claim}" for claim in reversed(list(starred)))
     for label, group in render_sections(notes, today):
         if lines:
             lines.append("")
         lines.append(label)
         lines.extend(f"{n.time}  {n.text}" for n in group)
     return "\n".join(lines)
+
+
+def collect_everything(notes_directory: Path, store: Path, today: Optional[date] = None,
+                       limit: int = MAX_NOTES) -> tuple[list[Note], list[str]]:
+    """Everything buddy remembers of the last two days, plus the starred layer.
+
+    The widget is the interface for all of it (owner instruction 2026-09-11), so
+    this is the one call that gathers it. Either source being absent is normal.
+    """
+    said = collect_conversations(store, today, limit)
+    seen = collect_notes(notes_directory, today, limit)
+    both = sorted(said + seen, key=lambda n: (n.day, n.time), reverse=True)[:limit]
+    return both, stars(store)
 
 
 def load_position(path: Path = POSITION_PATH) -> Optional[tuple[float, float]]:
@@ -203,7 +321,7 @@ def position_on_screens(pos: Optional[tuple[float, float]], screens: Sequence[Re
 
 
 def run(once: bool = False, directory: Optional[Path] = None,
-        position_path: Path = POSITION_PATH) -> int:
+        position_path: Path = POSITION_PATH, store: Optional[Path] = None) -> int:
     """Show the widget. Blocks in ``NSApp.run()`` unless ``once``.
 
     ``once`` builds the panel, spins the run loop for one second so the window
@@ -224,6 +342,7 @@ def run(once: bool = False, directory: Optional[Path] = None,
         return 2
 
     directory = directory or notes_dir()
+    store = store or debrief_dir()
     directory.mkdir(parents=True, exist_ok=True)
 
     level = Quartz.kCGDesktopIconWindowLevel + 1
@@ -318,10 +437,22 @@ def run(once: bool = False, directory: Optional[Path] = None,
             panel.orderFrontRegardless()
             return self
 
+        def openLearning_(self, sender):  # noqa: N802
+            import webbrowser
+            port = int(os.environ.get("CC_BUDDY_LEARNING_PORT", "48766"))
+            webbrowser.open(f"http://127.0.0.1:{port}/")
+
         def _context_menu(self):
             menu = AppKit.NSMenu.alloc().initWithTitle_(TITLE)
-            open_item = menu.addItemWithTitle_action_keyEquivalent_("Open notes folder", "openNotes:", "")
+            learning_item = menu.addItemWithTitle_action_keyEquivalent_("Open learning dashboard", "openLearning:", "")
+            learning_item.setTarget_(self)
+            open_item = menu.addItemWithTitle_action_keyEquivalent_("Open what it saw", "openNotes:", "")
             open_item.setTarget_(self)
+            said_item = menu.addItemWithTitle_action_keyEquivalent_("Open what was said", "openSaid:", "")
+            said_item.setTarget_(self)
+            star_item = menu.addItemWithTitle_action_keyEquivalent_(
+                "Remembered for good\u2026", "openStars:", "")
+            star_item.setTarget_(self)
             menu.addItem_(AppKit.NSMenuItem.separatorItem())
             quit_item = menu.addItemWithTitle_action_keyEquivalent_("Quit", "quit:", "")
             quit_item.setTarget_(self)
@@ -332,14 +463,27 @@ def run(once: bool = False, directory: Optional[Path] = None,
             AppKit.NSWorkspace.sharedWorkspace().openURL_(
                 Foundation.NSURL.fileURLWithPath_(str(directory)))
 
+        def openSaid_(self, sender):  # noqa: N802 — ObjC selector
+            (store / "sessions").mkdir(parents=True, exist_ok=True)
+            AppKit.NSWorkspace.sharedWorkspace().openURL_(
+                Foundation.NSURL.fileURLWithPath_(str(store)))
+
+        def openStars_(self, sender):  # noqa: N802 — ObjC selector
+            path = store / "HIGHLIGHTS.md"
+            if not path.exists():
+                store.mkdir(parents=True, exist_ok=True)
+                path.write_text("# HIGHLIGHTS\n\n## From talking\n\n", encoding="utf-8")
+            AppKit.NSWorkspace.sharedWorkspace().openURL_(
+                Foundation.NSURL.fileURLWithPath_(str(path)))
+
         def quit_(self, sender):  # noqa: N802 — ObjC selector
             AppKit.NSApp.terminate_(None)
 
         def refresh_(self, sender):  # noqa: N802 — ObjC selector; called on the main thread only
             today = date.today()
-            notes = collect_notes(directory, today)
-            rendered = self._attributed(notes, today)
-            plain = render_text(notes, today)
+            notes, starred = collect_everything(directory, store, today)
+            rendered = self._attributed(notes, today, starred)
+            plain = render_text(notes, today, starred)
             if plain == self.last_render:
                 return
             self.last_render = plain
@@ -348,7 +492,7 @@ def run(once: bool = False, directory: Optional[Path] = None,
             self.text_view.scrollPoint_(Foundation.NSMakePoint(0, 0))
 
         @objc.python_method
-        def _attributed(self, notes, today):
+        def _attributed(self, notes, today, starred=()):
             body = AppKit.NSFont.systemFontOfSize_(FONT_SIZE)
             head = AppKit.NSFont.boldSystemFontOfSize_(FONT_SIZE - 1)
             light = AppKit.NSColor.colorWithCalibratedWhite_alpha_(0.95, 1.0)
@@ -359,10 +503,14 @@ def run(once: bool = False, directory: Optional[Path] = None,
                 out.appendAttributedString_(AppKit.NSAttributedString.alloc().initWithString_attributes_(
                     text, {AppKit.NSFontAttributeName: font, AppKit.NSForegroundColorAttributeName: colour}))
 
-            if not notes:
+            if not notes and not starred:
                 add(EMPTY_TEXT, body, dim)
                 return out
             first = True
+            if starred:
+                add(STARS_LABEL + "\n", head, dim)
+                add("\n".join(f"\u2605  {claim}" for claim in reversed(list(starred))), body, light)
+                first = False
             for label, group in render_sections(notes, today):
                 add(("" if first else "\n\n") + label + "\n", head, dim)
                 first = False
@@ -393,7 +541,8 @@ def run(once: bool = False, directory: Optional[Path] = None,
     def watch() -> None:
         try:
             from watchfiles import watch as wf_watch
-            for _changes in wf_watch(str(directory), stop_event=stop, debounce=300):
+            watched = [str(directory)] + ([str(store)] if store.exists() else [])
+            for _changes in wf_watch(*watched, stop_event=stop, debounce=300):
                 controller.performSelectorOnMainThread_withObject_waitUntilDone_(
                     "refresh:", None, False)
         except Exception as e:  # noqa: BLE001 — a dead watcher degrades to polling

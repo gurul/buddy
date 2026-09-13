@@ -1,0 +1,22 @@
+{
+  "name": "buddy-launch-video",
+  "private": true,
+  "version": "1.0.0",
+  "description": "A Remotion launch film for buddy, the desktop sidekick.",
+  "scripts": {
+    "studio": "remotion studio src/index.tsx",
+    "render": "remotion render src/index.tsx LaunchVideo out/launch-video.mp4",
+    "render:still": "remotion still src/index.tsx LaunchVideo out/launch-video-still.png --frame=1770"
+  },
+  "dependencies": {
+    "@remotion/cli": "4.0.524",
+    "react": "19.1.1",
+    "react-dom": "19.1.1",
+    "remotion": "4.0.524"
+  },
+  "devDependencies": {
+    "@types/react": "19.1.10",
+    "@types/react-dom": "19.1.7",
+    "typescript": "5.9.2"
+  }
+}
