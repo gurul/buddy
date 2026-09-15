@@ -171,7 +171,10 @@ gets them as silent context, and the backend gets them through
   "hey buddy" conversation) is on. Stopping closes the session.
 - No audio is saved.
 - The learner's words are saved only into their lesson's ideas, on this
-  computer. They are not written to logs or to buddy's chat memory.
+  computer. They are not written to logs or to buddy's chat memory. The
+  lesson events buddy publishes on its memory bus (docs/memory-bus.md) carry
+  the action, stage, topic, level and buddy's own feedback, never the
+  learner's words, strokes or images.
 - Logs record the action and whether it worked (for example
   `lesson: listen -> ok=True`, `voice: spoken idea saved ok=True`).
 - Separately, the "hey buddy" wake-word detector runs on this computer all the

@@ -513,10 +513,14 @@ dialog :is(h2, .kicker) { padding-right: 44px; }
 }
 .problem-strip strong {
   display: block;
-  font: 700 26px/1.25 var(--display);
+  font: 700 19px/1.35 var(--display);
   color: var(--ink);
   white-space: pre-wrap;
   overflow-wrap: anywhere;
+}
+/* A long or multi-line problem (a code sample, a word problem) reads better in the body face. */
+.problem-strip strong.long {
+  font: 500 15px/1.5 var(--body);
 }
 
 .input-area {
@@ -736,7 +740,8 @@ p.small.supervise { display: block; margin: 0; }
   .stat:nth-child(1), .stat:nth-child(3) { transform: none; }
   .toolbar-actions button, .board-toolbar button { font-size: 14px; }
   .board-toolbar span { margin-left: 0; flex-basis: 100%; }
-  .problem-strip strong { font-size: 22px; }
+  .problem-strip strong { font-size: 17px; }
+  .problem-strip strong.long { font-size: 14px; }
 }
 
 /* ---------- Think out loud ---------- */

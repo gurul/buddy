@@ -300,6 +300,20 @@ def main(argv: list[str] | None = None) -> int:
     p_lesson.add_argument("--text", default=None, help="ideas: what you are thinking")
     p_lesson.add_argument("--socket", default=None, help="IPC path or host:port override")
 
+    p_memory = sub.add_parser(
+        "memory",
+        help="Watch buddy's memory as it forms, over the daemon's rosbridge (CC_BUDDY_ROSBRIDGE=1)",
+        description="tail: print every event on the memory bus. recall: search the owner's claude-mem "
+                    "for buddy's memories (CC_BUDDY_CLAUDE_MEM=1).")
+    memory_sub = p_memory.add_subparsers(dest="memory_cmd")
+    p_tail = memory_sub.add_parser("tail", help="Print one line per event until Ctrl-C")
+    p_tail.add_argument("--url", default="ws://127.0.0.1:9090", help="rosbridge WebSocket URL")
+    p_tail.add_argument("--topic", default="/buddy/*", help="Topic, or a prefix ending in * (default /buddy/*)")
+    p_recall = memory_sub.add_parser("recall", help="Call /buddy/memory/recall and print the results")
+    p_recall.add_argument("query")
+    p_recall.add_argument("--limit", type=int, default=5)
+    p_recall.add_argument("--url", default="ws://127.0.0.1:9090", help="rosbridge WebSocket URL")
+
     args = parser.parse_args(argv)
     if args.cmd is None:
         parser.print_help()
@@ -319,6 +333,11 @@ def main(argv: list[str] | None = None) -> int:
         return learning_main(options)
     if args.cmd == "lesson":
         return _run_lesson(args)
+    if args.cmd == "memory":
+        if args.memory_cmd is None:
+            p_memory.print_help()
+            return 1
+        return _run_memory(args)
     if args.cmd == "daemon":
         return _run_daemon(args)
     if args.cmd == "install":
@@ -763,6 +782,77 @@ def _run_explore(action: str, socket_path: Optional[str]) -> int:
             print(f"buddy is {state} ({how}: {st.get('reason')}){where}; "
                   f"{st.get('cycles', 0)} cycle(s), {st.get('notes', 0)} note(s) this run")
     return 0
+
+
+NOT_REACHABLE = ("cc-buddy-bridge: the memory bus is not reachable at {url}. Start the daemon with "
+                 "CC_BUDDY_ROSBRIDGE=1 (see docs/memory-bus.md).")
+
+
+def _run_memory(args: Any) -> int:
+    """``cc-buddy-bridge memory tail|recall``: a rosbridge client on the daemon's memory bus."""
+    import json
+    import time as time_mod
+
+    from .memory_bus import TOPICS
+
+    async def tail() -> int:
+        from websockets.asyncio.client import connect
+        topics = ([args.topic] if not args.topic.endswith("*")
+                  else [t for t in TOPICS if t.startswith(args.topic[:-1])] or [args.topic])
+        try:
+            async with connect(args.url, open_timeout=3) as ws:
+                for i, topic in enumerate(topics):
+                    await ws.send(json.dumps({"op": "subscribe", "id": f"tail-{i}", "topic": topic,
+                                              "type": TOPICS.get(topic, "")}))
+                print(f"memory: listening on {', '.join(topics)} (Ctrl-C to stop)", file=sys.stderr)
+                async for raw in ws:
+                    try:
+                        msg = json.loads(raw)
+                    except ValueError:
+                        continue
+                    if msg.get("op") != "publish":
+                        continue
+                    body = msg.get("msg") or {}
+                    stamp = time_mod.strftime("%H:%M:%S", time_mod.localtime(float(body.get("time") or time_mod.time())))
+                    print(f"{stamp} {msg.get('topic')} {json.dumps(body, ensure_ascii=False)}", flush=True)
+        except (OSError, asyncio.TimeoutError, ConnectionError) as e:
+            print(NOT_REACHABLE.format(url=args.url) + f" ({type(e).__name__})", file=sys.stderr)
+            return 2
+        return 0
+
+    async def recall() -> int:
+        from websockets.asyncio.client import connect
+        try:
+            async with connect(args.url, open_timeout=3) as ws:
+                await ws.send(json.dumps({"op": "call_service", "id": "recall-1", "service": "/buddy/memory/recall",
+                                          "args": {"query": args.query, "limit": args.limit}}))
+                async with asyncio.timeout(20):
+                    async for raw in ws:
+                        msg = json.loads(raw)
+                        if msg.get("op") != "service_response" or msg.get("id") != "recall-1":
+                            continue
+                        values = msg.get("values") or {}
+                        if not msg.get("result", True) or values.get("error"):
+                            print(f"recall: {values.get('error') or 'the service refused'}", file=sys.stderr)
+                            return 1
+                        results = values.get("results") or []
+                        if not results:
+                            print("recall: nothing found")
+                        for r in results:
+                            print(f"#{r.get('id', '?')} {r.get('time', '')} {r.get('title', '')}".rstrip())
+                            if r.get("text"):
+                                print(f"    {r['text']}")
+                        return 0
+        except (OSError, asyncio.TimeoutError, ConnectionError) as e:
+            print(NOT_REACHABLE.format(url=args.url) + f" ({type(e).__name__})", file=sys.stderr)
+            return 2
+        print("recall: no answer from the service", file=sys.stderr)
+        return 2
+
+    try:
+        return asyncio.run(tail() if args.memory_cmd == "tail" else recall())
+    except KeyboardInterrupt:
+        return 0
 
 
 def _run_lesson(args: Any) -> int:

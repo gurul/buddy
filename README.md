@@ -214,6 +214,20 @@ weather"*, *"actually use Bing"*, *"stop"*. Leave it for ten minutes and it star
 exploring, and the widget fills up. Or send it off yourself: *"hey buddy, go explore"*
 (or `cc-buddy-bridge explore` from a shell).
 
+## Realtime memory
+
+Everything buddy remembers is published the moment it forms: a diary thought
+it kept, the note it writes after a conversation, a lesson step, a change of
+phase. Set `CC_BUDDY_ROSBRIDGE=1` and the daemon serves those as ROS-style
+topics over the rosbridge protocol on `ws://127.0.0.1:9090`, so roslibjs,
+roslibpy, Foxglove or `cc-buddy-bridge memory tail` can watch buddy's day live.
+Set `CC_BUDDY_CLAUDE_MEM=1` and the same events go into your
+[claude-mem](https://github.com/thedotmack/claude-mem) store as project
+`buddy`, searchable from any Claude Code session, and buddy can recall them
+back through the `/buddy/memory/recall` service. Both are off by default. A
+learner's words in a lesson and conversation transcripts never reach the bus.
+Details, topics and message shapes: [docs/memory-bus.md](docs/memory-bus.md).
+
 ## Under the hood
 
 ```
@@ -232,6 +246,7 @@ camera frames ◀──────────────▶ macOS Vision (fac
 | Taking notes on the room | `bridge/src/cc_buddy_bridge/notes.py` | [voice.md](docs/stackchan/voice.md#taking-notes-on-the-room) |
 | Motion: named rhythms the board runs | `bridge/src/cc_buddy_bridge/motion.py`, `firmware/claude_pet_stackchan/src/motion.h` | [build.md](docs/stackchan/build.md#named-motion) |
 | Memory of conversations, and starring by voice | `bridge/src/cc_buddy_bridge/recall.py`, `chat_memory.py` | [voice.md](docs/stackchan/voice.md#what-buddy-remembers-of-talking-with-you) |
+| Realtime memory: the bus, rosbridge, claude-mem | `bridge/src/cc_buddy_bridge/memory_bus.py`, `rosbridge.py`, `claude_mem.py` | [memory-bus.md](docs/memory-bus.md) |
 | Lessons, whiteboard, tutor, think out loud (hackathon) | `bridge/src/cc_buddy_bridge/learning/` | [learning.md](docs/learning.md) |
 | Widget and diary window | `widget/` | [widget.md](docs/stackchan/widget.md) |
 | The robot itself: build, wire protocol, gaze, bench notes | `firmware/claude_pet_stackchan` | [build.md](docs/stackchan/build.md), [DESIGN.md](DESIGN.md) |
