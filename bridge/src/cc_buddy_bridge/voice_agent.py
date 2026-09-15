@@ -78,7 +78,7 @@ from typing import Any, Awaitable, Callable, Optional
 from . import head as head_mod
 from .caption_pager import CaptionPager, Event, PagerConfig, caption_instructions
 from .computer_agent import AgentConfig, AgentEvent, ComputerAgent
-from .intent import LEAVE, LOOK, MUTE, REMEMBER, UNMUTE, fast_intent, normalize
+from .intent import LEAVE, LESSON, LOOK, MUTE, REMEMBER, UNMUTE, fast_intent, normalize
 from .learning import LESSON_ACTIONS, run_lesson
 from .learning import think_aloud as think_aloud_mod
 
@@ -99,6 +99,7 @@ TURN_GAP_SECS = 1.2            # silence that closes a caption page, absent a tr
 FAREWELL_QUIET_SECS = 0.8      # after buddy's goodbye has been said, this much quiet closes the session
 FAREWELL_MAX_SECS = 6.0        # a goodbye closes the session this long after it, answered or not
 LOOK_ROUTE_DELAY_SECS = 0.6    # a head request waits this long for the voice to delegate it itself
+LESSON_ROUTE_DELAY_SECS = 0.6  # a "teach me" waits this long for the voice to delegate it itself
 MUTED_NOTE = ("[sound] You are muted: nobody hears you. You still move and light up, and your words still "
               "show on your screen, so keep them short.")
 UNMUTED_NOTE = "[sound] Your sound is back on."
@@ -126,12 +127,15 @@ Delegate anything that changes what a running task is doing, ends the conversati
 explore. Chit-chat you answer yourself.
 
 A request to be taught, quizzed, walked through, or helped to understand something, in any subject
-("teach me", "quiz me on", "help me work through", "I want a lesson", "can you tutor me"), delegates to
-the lesson tool. A plain question ("what is X", "what's 17 times 23") is answered, not turned into a lesson.
-Ask whether they want to learn a topic or bring a problem; then ask the topic and level if needed. The
-level is free text: a grade, a course, or "I know Python, new to Rust".
+("teach me", "quiz me on", "help me work through", "I want a lesson", "can you tutor me"), is a job for
+the slower brain, exactly like a computer task: delegate it at once, with their words, and say only
+"Let's do it" until the lesson opens. Never teach it yourself, not even a first sentence. A plain
+question ("what is X", "what's 17 times 23") is answered, not turned into a lesson.
+The slower brain asks whether they want to learn a topic or bring a problem, and the topic and level;
+relay their answers by delegating again. The level is free text: a grade, a course, or "I know Python,
+new to Rust".
 This lesson flow is an exception to the short-answer rule. Never solve ahead of the learner.
-Spoken hints, checks, one-step requests, and learner ideas must use lesson so the whiteboard stays in sync.
+Spoken hints, checks, one-step requests, and learner ideas must be delegated so the whiteboard stays in sync.
 
 You are the receptionist; a slower brain works behind you. Anything that needs today's facts — weather,
 scores, news, prices, opening hours, "what's happening with…" — delegate; it searches the web. Anything
@@ -185,6 +189,14 @@ never started as a task, even if an app could show the answer.
 - A message tagged [look request] is the owner's own words asking buddy to turn its head, look somewhere,
   look around or find something, or to take a picture. Act on it now with move_head, look_around, find,
   look or take_photo — never answer it without one of those tools.
+- A message tagged [lesson request] is the owner's own words asking to be taught, quizzed, tutored, or
+  helped to understand or work through something. The voice answered it without delegating. Act on it now
+  with the lesson tool: action open, or action start when the topic and level are already clear from their
+  words — never answer it without the tool, and never teach it yourself.
+- A message tagged [lesson setup] is the owner choosing their lesson: learn a topic or bring a problem,
+  the topic, the level. Act on it with the lesson tool. Once you know the mode, the topic and the level,
+  action start with them. If something is still missing, ask for it in one short line. Never answer it
+  without the tool, and never start teaching yourself.
 - A message tagged [task question] is a question buddy has just asked the owner out loud for the running
   task. When the owner answers, relay it with answer_question as plain words ("yes", "no", "the second one").
 - Goodbye, thanks-that's-all, "stop listening", "go to sleep", "I want you to leave", or "never mind" with no
@@ -575,12 +587,18 @@ class VoiceSession:
         think_aloud: Optional[dict[str, Any]] = None,       # the lesson, when opened for think out loud
         on_spoken_idea: Optional[Callable[[str, str], Any]] = None,   # LearningApp.append_spoken (blocking)
         on_think_aloud: Optional[Callable[[bool, Optional[str]], None]] = None,   # (listening, lesson id)
+        lesson_wake: bool = False,                          # opened by the "lesson" wake word
     ) -> None:
         self.learning = learning
         # Think out loud: the lesson the learner is talking through, or None. While it is set the
         # session waits through long thinking pauses, saves what the learner says into the lesson's
         # ideas, and never logs or remembers the learner's words.
         self._think_aloud: Optional[dict[str, Any]] = think_aloud
+        self._lesson_wake = lesson_wake
+        # Lesson setup: the lesson window is open and no lesson has started. Until one does, every
+        # owner turn the voice does not delegate goes to the backend as [lesson setup], so "fractions,
+        # grade four" becomes a lesson start and not chit-chat.
+        self._lesson_setup = lesson_wake
         self.on_spoken_idea = on_spoken_idea
         self.on_think_aloud = on_think_aloud
         self._idea_saves: set[asyncio.Future[Any]] = set()
@@ -683,12 +701,18 @@ class VoiceSession:
         await self.conn.session.commentary.append(
             content=("The learner asked you to listen while they think out loud. Say 'I'm listening' in two or "
                      "three words, then stay quiet while they think." if listening else
+                     "The owner just said your lesson word and the lesson window is already open. Say exactly: "
+                     "'Lesson time. Learn a topic, or bring a problem?' and nothing else." if self._lesson_wake else
                      "The owner just said your wake word. Greet them in one or two words, like 'Yeah?'."),
             delegation_id=None)
         if listening:
             self._notify_think_aloud(True)
         if self.muted():
             await self._quiet(MUTED_NOTE)
+        if self._lesson_wake:
+            # The daemon opened the window. The owner's answers reach the backend as [lesson setup].
+            await self._backend_note("[lesson setup] The owner said the lesson word. The lesson window is open "
+                                     "and buddy asked: learn a topic, or bring a problem? Their next words answer that.")
         if self.scene is not None:
             self.scene.start()                      # watches quietly; the look tool reads it on request
         pump = asyncio.create_task(self._pump_mic(), name="voice-mic")
@@ -1212,6 +1236,11 @@ class VoiceSession:
                         # run_lesson validates the model's arguments and maps a missing workspace,
                         # a user error and a stale lesson to a reason the voice can say.
                         result = await asyncio.to_thread(run_lesson, self.learning, args)
+                        action = str(args.get("action") or "").strip().lower() if isinstance(args, dict) else ""
+                        if result.get("ok") and action == "open":
+                            self._lesson_setup = True
+                        elif result.get("ok") and action in ("start", "end"):
+                            self._lesson_setup = False
                 elif name == "look":
                     result = await self._look()
                 elif name == "look_around":
@@ -1315,6 +1344,9 @@ class VoiceSession:
         label = fast_intent(text)
         if label is not None:
             self._apply_intent(label, text, "phrase", said_at)
+        elif self._lesson_setup and self._think_aloud is None:
+            # Choosing the lesson: the answer belongs to the backend, whatever words it uses.
+            self._bg(self._route_lesson(text, self._user_turn_started_at, setup=True))
         elif self.intent is not None and self._think_aloud is None:
             # Not while listening: math talk is not a command, and each classification is one more model call
             # carrying the learner's words. The backend still ends listening when they say they are done.
@@ -1343,6 +1375,8 @@ class VoiceSession:
             self._set_sound(True, how)
         elif label == LOOK:
             self._bg(self._route_look(text, self._user_turn_started_at))
+        elif label == LESSON:
+            self._bg(self._route_lesson(text, self._user_turn_started_at))
         elif label == REMEMBER:
             self._remember(self._last_substantive_turn(text))
 
@@ -1396,6 +1430,23 @@ class VoiceSession:
             return
         log.info("voice: routing a head request the voice did not delegate")
         await self._backend_note(f"[look request] {text}")
+        await self._request_response()
+
+    async def _route_lesson(self, text: str, turn_started_at: float, setup: bool = False) -> None:
+        """Hand a "teach me" (or, in lesson setup, any answer) to the backend unless the voice already
+        delegated this turn.
+
+        11:44 on the bench: "teach me about Rust ownership" got "Sure. What have you done in Rust so
+        far?" and a spoken explanation, and the lesson window never opened."""
+        await asyncio.sleep(LESSON_ROUTE_DELAY_SECS)
+        if self._ended.is_set() or self._think_aloud is not None:
+            return
+        if self._delegated_at >= turn_started_at:
+            log.info("voice: lesson %s already delegated by the voice — not routing it again",
+                     "answer" if setup else "request")
+            return
+        log.info("voice: routing a lesson %s the voice did not delegate", "answer" if setup else "request")
+        await self._backend_note(f"[lesson setup] {text}" if setup else f"[lesson request] {text}")
         await self._request_response()
 
     def _begin_farewell(self, said_at: float) -> None:
@@ -1560,6 +1611,7 @@ async def open_session(
     on_spoken_idea: Optional[Callable[[str, str], Any]] = None,
     on_think_aloud: Optional[Callable[[bool, Optional[str]], None]] = None,
     on_open: Optional[Callable[[VoiceSession], None]] = None,
+    lesson_wake: bool = False,
 ) -> None:
     """Run one full conversation on the real Live API — captions to the robot,
     or the real speaker in audio mode.
@@ -1579,7 +1631,7 @@ async def open_session(
                                    on_explore=on_explore, scene=scene, head=head, intent=intent,
                                    on_sound=on_sound, muted=muted, thinker=thinker, on_photo=on_photo,
                                    memory=memory, on_star=on_star, learning=learning,
-                                   think_aloud=think_aloud, on_spoken_idea=on_spoken_idea,
+                                   think_aloud=think_aloud, lesson_wake=lesson_wake, on_spoken_idea=on_spoken_idea,
                                    on_think_aloud=on_think_aloud)
             if on_open is not None:
                 on_open(session)

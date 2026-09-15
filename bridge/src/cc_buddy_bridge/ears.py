@@ -1,4 +1,4 @@
-"""Ears: the "hey buddy" wake word on the Mac's microphone.
+"""Ears: the "hey buddy" wake word, and the "lesson" word, on the Mac's microphone.
 
 The daemon keeps one microphone stream open while the robot is connected
 (24 kHz mono int16, 100 ms blocks; `CC_BUDDY_MIC_ALWAYS=1` keeps it open from
@@ -40,6 +40,10 @@ from typing import Any, Callable, Optional
 log = logging.getLogger(__name__)
 
 DEFAULT_WAKE_WORD = "hey buddy"
+# A second phrase in the same spotter. Heard on its own it opens a conversation that
+# starts a lesson at once, with no "teach me" to route. CC_BUDDY_LESSON_WORD=off disables it.
+DEFAULT_LESSON_WORD = "lesson"
+DEFAULT_LESSON_THRESHOLD = 0.35
 DEFAULT_MODEL_DIR = "~/.config/cc-buddy-bridge/models/sherpa-onnx-kws-zipformer-gigaspeech-3.3M-2024-01-01"
 MODEL_URL = ("https://github.com/k2-fsa/sherpa-onnx/releases/download/kws-models/"
              "sherpa-onnx-kws-zipformer-gigaspeech-3.3M-2024-01-01.tar.bz2")
@@ -62,8 +66,12 @@ SILENCE_WARN_SECS = 10.0
 class EarsConfig:
     enabled: bool = True
     wake_word: str = DEFAULT_WAKE_WORD
+    lesson_word: str = DEFAULT_LESSON_WORD   # "" = no lesson word
     model_dir: Path = Path(DEFAULT_MODEL_DIR).expanduser()
     threshold: float = DEFAULT_THRESHOLD
+    # The lesson word's own threshold, written per keyword. Bench 2026-09-15, synthesized voices:
+    # at 0.25 "listen" fired 1 in 3, at 0.35 never, and "lesson" alone fired 3 in 3 at both.
+    lesson_threshold: float = DEFAULT_LESSON_THRESHOLD
     boost: float = DEFAULT_BOOST
     cooldown_secs: float = DEFAULT_COOLDOWN_SECS
     device: Optional[str] = None      # sounddevice input name substring; None = default
@@ -75,6 +83,10 @@ def configured(environ: Any = None) -> EarsConfig:
     raw = (env.get("CC_BUDDY_VOICE") or "").strip().lower()
     enabled = raw not in ("0", "false", "no", "off")
     word = (env.get("CC_BUDDY_WAKE_WORD") or DEFAULT_WAKE_WORD).strip() or DEFAULT_WAKE_WORD
+    raw_lesson = env.get("CC_BUDDY_LESSON_WORD")
+    lesson_word = DEFAULT_LESSON_WORD if raw_lesson is None else raw_lesson.strip()
+    if lesson_word.lower() in ("0", "off", "false", "no", "none"):
+        lesson_word = ""
     model_dir = Path((env.get("CC_BUDDY_KWS_MODEL_DIR") or DEFAULT_MODEL_DIR)).expanduser()
     thr = DEFAULT_THRESHOLD
     raw_thr = (env.get("CC_BUDDY_WAKE_THRESHOLD") or "").strip()
@@ -83,10 +95,17 @@ def configured(environ: Any = None) -> EarsConfig:
             thr = float(raw_thr)
         except ValueError:
             log.warning("ears: CC_BUDDY_WAKE_THRESHOLD=%r is not a number; using %s", raw_thr, thr)
+    lesson_thr = DEFAULT_LESSON_THRESHOLD
+    raw_lesson_thr = (env.get("CC_BUDDY_LESSON_THRESHOLD") or "").strip()
+    if raw_lesson_thr:
+        try:
+            lesson_thr = float(raw_lesson_thr)
+        except ValueError:
+            log.warning("ears: CC_BUDDY_LESSON_THRESHOLD=%r is not a number; using %s", raw_lesson_thr, lesson_thr)
     device = (env.get("CC_BUDDY_MIC") or "").strip() or None
     always = (env.get("CC_BUDDY_MIC_ALWAYS") or "").strip().lower() in ("1", "true", "yes", "on")
-    return EarsConfig(enabled=enabled, wake_word=word, model_dir=model_dir, threshold=thr, device=device,
-                      always=always)
+    return EarsConfig(enabled=enabled, wake_word=word, lesson_word=lesson_word, model_dir=model_dir,
+                      threshold=thr, lesson_threshold=lesson_thr, device=device, always=always)
 
 
 # ---- keyword file ---------------------------------------------------------------
@@ -115,6 +134,11 @@ def write_keywords_file(config: EarsConfig, path: Optional[Path] = None) -> Path
         phrases.extend(["okay buddy", "ok buddy"])
     lines = [keyword_line(encode_phrase(phrase, config.model_dir / "bpe.model"),
                           phrase, config.boost, config.threshold) for phrase in phrases]
+    lesson = config.lesson_word.strip()
+    if lesson and keyword_id(lesson) not in {keyword_id(p) for p in phrases}:
+        # Its own threshold: a per-keyword "#threshold" overrides the spotter's global one.
+        lines.append(keyword_line(encode_phrase(lesson, config.model_dir / "bpe.model"),
+                                  lesson, config.boost, config.lesson_threshold))
     out = path or (config.model_dir / f"keywords-{keyword_id(config.wake_word)}.txt")
     out.write_text("\n".join(lines) + "\n", encoding="utf-8")
     return out

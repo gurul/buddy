@@ -211,6 +211,25 @@ def test_the_wake_word_ends_a_manual_explore_before_the_conversation(monkeypatch
     asyncio.run(go())
 
 
+def test_the_lesson_word_opens_a_conversation_flagged_as_a_lesson_wake(monkeypatch) -> None:
+    calls: list[dict] = []
+
+    async def fake_converse(self, think_aloud=None, lesson_wake=False):
+        calls.append({"lesson_wake": lesson_wake})
+
+    monkeypatch.setattr(daemon_mod.Daemon, "_converse", fake_converse)
+
+    async def go():
+        d = _daemon()
+        d._ears_cfg = daemon_mod.ears_configured({})
+        d._on_wake("lesson")
+        await d._conversation
+        d._on_wake("hey_buddy")
+        await d._conversation
+        assert calls == [{"lesson_wake": True}, {"lesson_wake": False}]
+    asyncio.run(go())
+
+
 def test_voice_go_explore_starts_once_the_conversation_has_closed(monkeypatch) -> None:
     order: list[str] = []
 

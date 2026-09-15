@@ -240,8 +240,22 @@ def test_default_wake_word_includes_okay_buddy_aliases(tmp_path, monkeypatch):
     monkeypatch.setattr(ears, "encode_phrase", lambda phrase, _: phrase.upper().split())
     output = ears.write_keywords_file(EarsConfig(model_dir=tmp_path), tmp_path / "keywords.txt")
     lines = output.read_text().splitlines()
-    assert len(lines) == 3
+    assert len(lines) == 4
     assert lines[1].endswith("@okay_buddy")
     assert lines[2].endswith("@ok_buddy")
+    assert lines[3].endswith("#0.35 @lesson")             # the lesson word rides in the same spotter, stricter
+    assert lines[0].endswith("#0.25 @hey_buddy")
     output = ears.write_keywords_file(EarsConfig(model_dir=tmp_path, wake_word="hello robot"), output)
+    assert len(output.read_text().splitlines()) == 2
+    output = ears.write_keywords_file(EarsConfig(model_dir=tmp_path, wake_word="hello robot", lesson_word=""), output)
     assert len(output.read_text().splitlines()) == 1
+
+
+def test_the_lesson_word_is_configured_and_can_be_turned_off() -> None:
+    assert ears.configured({}).lesson_word == "lesson"
+    assert ears.configured({"CC_BUDDY_LESSON_WORD": "buddy lesson"}).lesson_word == "buddy lesson"
+    assert ears.configured({"CC_BUDDY_LESSON_WORD": "off"}).lesson_word == ""
+    assert ears.configured({"CC_BUDDY_LESSON_WORD": ""}).lesson_word == ""
+    assert ears.configured({}).lesson_threshold == 0.35
+    assert ears.configured({"CC_BUDDY_LESSON_THRESHOLD": "0.3"}).lesson_threshold == 0.3
+    assert ears.configured({"CC_BUDDY_LESSON_THRESHOLD": "high"}).lesson_threshold == 0.35

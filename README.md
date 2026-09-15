@@ -118,8 +118,9 @@ buddy sits on the desk, watches the whiteboard, and only ever nudges.
    saved; your words go only into the lesson's ideas on this computer.
 5. **Wrap up.** buddy sums up the method and checks that you understood it.
 
-**Where it shows up.** Start and steer a lesson by voice (*"okay buddy, teach me
-something"*, or *"okay buddy, I want to do a math lesson"*), from the browser at
+**Where it shows up.** Say *"lesson"* and buddy opens one. Start and steer a lesson by
+voice (*"okay buddy, teach me something"*, or *"okay buddy, I want to do a math lesson"*),
+from the browser at
 `http://127.0.0.1:48766/`, or from a terminal:
 
 ```bash
@@ -133,12 +134,6 @@ All three drive the same lesson, so the whiteboard, the saved lesson and the rob
 in sync. While the tutor works the robot shows *thinking*, then one caption with the
 answer. Every lesson and every whiteboard revision is saved to a searchable dashboard,
 with a card on the Mac widget.
-
-**Watch it, then walk it.** The [launch film](https://youtu.be/ZpqSWn3nRLg) is two
-minutes, ten chapters. The [show-and-tell deck](https://claude.ai/code/artifact/9b8eb406-2a54-40f7-a1a3-e77faa8eb820)
-follows it chapter by chapter: the problem, the real robot, how buddy routes what you say,
-the teaching rule, two kinds of help, and the lesson loop on paper. Each slide links to
-its moment in the film.
 
 **Under the hood.** The tutor is `gpt-6-astra` (OpenAI by default, OpenRouter opt-in),
 called with the problem, the board image and the ideas so far, and asked for strict JSON:
