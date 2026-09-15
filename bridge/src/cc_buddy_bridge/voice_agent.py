@@ -125,14 +125,18 @@ When the result arrives, tell them it in one short line.
 Delegate anything that changes what a running task is doing, ends the conversation, or sends you off to
 explore. Chit-chat you answer yourself.
 
-For a math lesson, learning a topic, or help with a written problem, delegate to the math_lesson tool.
-Ask whether they want to learn a topic or bring a problem; then ask the topic and starting level if needed.
+A request to be taught, quizzed, walked through, or helped to understand something, in any subject
+("teach me", "quiz me on", "help me work through", "I want a lesson", "can you tutor me"), delegates to
+the lesson tool. A plain question ("what is X", "what's 17 times 23") is answered, not turned into a lesson.
+Ask whether they want to learn a topic or bring a problem; then ask the topic and level if needed. The
+level is free text: a grade, a course, or "I know Python, new to Rust".
 This lesson flow is an exception to the short-answer rule. Never solve ahead of the learner.
-Spoken hints, checks, one-step requests, and learner ideas must use math_lesson so the whiteboard stays in sync.
+Spoken hints, checks, one-step requests, and learner ideas must use lesson so the whiteboard stays in sync.
 
 You are the receptionist; a slower brain works behind you. Anything that needs today's facts — weather,
 scores, news, prices, opening hours, "what's happening with…" — delegate; it searches the web. Anything
 hard — maths, code, logic, a plan, a comparison — delegate; it thinks it through, which can take a while.
+A request to be taught something is a lesson, not a hard question: it goes to the lesson tool.
 While you wait, say a few words like "Let me check" or "Give me a moment" and keep listening; do not
 guess the answer. When the result arrives, say it.
 
@@ -163,13 +167,17 @@ never started as a task, even if an app could show the answer.
   words plus any app or site they named. Never guess an app or hedge ("likely in a music app"). When
   start_task returns ok, reply with an empty message: buddy has already acknowledged the request, and the
   result reaches buddy on its own when the task finishes.
-- Math lessons are an exception to the computer-task and clarification rules: use math_lesson, never
-  start_task. "I want a math lesson" -> action open, then ask learn-a-topic or help-with-a-problem.
-  Ask for topic and level when learning. Once known, action start with mode learn/help, topic and level.
+- Lessons are an exception to the computer-task and clarification rules: use lesson, never start_task
+  and never think_hard. A request to be taught, quizzed, walked through, or helped to understand
+  something, in any subject ("teach me", "quiz me on", "help me work through", "I want a lesson",
+  "tutor me") -> action open, then ask learn-a-topic or help-with-a-problem. A plain question ("what is
+  X") is answered, not turned into a lesson. Ask for topic and level when learning; the level is free
+  text (a grade, a course, or "I know Python, new to Rust"). Once known, action start with mode
+  learn/help, topic and level.
   In an active lesson, use ideas to save spoken thinking (empty text means stuck), hint for a nudge,
   check to review current work, step to reveal exactly ONE step, status for the latest feedback,
   recap to summarize, end to save and finish. Do not independently solve or reveal future steps.
-- Outside math lessons, never ask the owner a clarifying question. Call start_task with their words as they are; the task can
+- Outside lessons, never ask the owner a clarifying question. Call start_task with their words as they are; the task can
   ask them itself if it truly needs an answer.
 - While a task runs: "stop" / "cancel" / "never mind" → stop_task. A correction or addition ("use Safari
   instead", "also save it") → steer_task with the text. "How's it going?" → task_status, summarised in one
@@ -236,8 +244,8 @@ def memory_block(memory: str) -> str:
 
 
 TOOLS: list[dict[str, Any]] = [
-    {"type": "function", "name": "math_lesson",
-     "description": "Open Buddy's math whiteboard, start learning or help with a problem, save ideas, give a hint, check work, or show exactly one step. Use for math lessons instead of computer control.",
+    {"type": "function", "name": "lesson",
+     "description": "Open buddy's lesson whiteboard, start learning a topic or get help with a problem in any subject, save ideas, give a hint, check work, or show exactly one step. Use for lessons instead of computer control.",
      "parameters": {"type": "object", "properties": {
          "action": {"type": "string", "enum": list(LESSON_ACTIONS)},
          "mode": {"type": "string", "enum": ["learn", "help", ""]},
@@ -1097,7 +1105,7 @@ class VoiceSession:
             self._last_head_tool_at = self._clock()
         result: dict[str, Any]
         if self._think_aloud is not None and name in ("start_task", "go_explore", "think_hard"):
-            # A child is working a problem: buddy does not take over the Mac, wander off, or solve it elsewhere.
+            # A learner is working a problem: buddy does not take over the Mac, wander off, or solve it elsewhere.
             result = {"ok": False, "reason": "not while the learner is thinking out loud; listen and give a hint"}
         elif name == "start_task":
             result = self._start_task(str(args.get("goal", "")).strip())
@@ -1146,7 +1154,7 @@ class VoiceSession:
                 result = {"ok": True, "sound": "on" if on else "off"}
             else:
                 result = {"ok": False, "reason": "on must be true or false"}
-        elif name in ("look", "look_around", "find", "think_hard", "math_lesson", "take_photo"):
+        elif name in ("look", "look_around", "find", "think_hard", "lesson", "take_photo"):
             # Seconds (or a minute, for think_hard) of camera, head or model work:
             # answered from a background task, so Live events (the owner talking,
             # captions) keep flowing meanwhile.
@@ -1180,7 +1188,7 @@ class VoiceSession:
     def _slow_tool(self, name: str, call_id: str, args: dict[str, Any]) -> None:
         async def run() -> None:
             try:
-                if name == "math_lesson":
+                if name == "lesson":
                     action = str(args.get("action") or "").strip().lower()
                     if self._think_aloud is not None:
                         # The check, hint or step must see what the learner just said: close their open
@@ -1321,7 +1329,7 @@ class VoiceSession:
     def _apply_intent(self, label: str, text: str, how: str, said_at: float) -> None:
         if self._think_aloud is not None:
             if label not in LISTENING_INTENTS:
-                # "Look at the left side" is about the problem, and "remember that" must never star a child's
+                # "Look at the left side" is about the problem, and "remember that" must never star a learner's
                 # words into buddy's permanent memory.
                 return
             log.info("voice: a turn means %s (%s)", label, how)     # a learner's words are never logged

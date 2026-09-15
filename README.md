@@ -3,8 +3,8 @@
 </p>
 
 **buddy is a small robot that lives on your desk.** It listens, has moods, keeps a diary,
-uses your Mac when you ask, and helps kids learn math without handing them the answer.
-The math lessons were built for the OpenAI, OpenRouter and CopilotKit *Agents, Everywhere*
+uses your Mac when you ask, and tutors anyone, in any subject, without handing them the answer.
+The lessons were built for the OpenAI, OpenRouter and CopilotKit *Agents, Everywhere*
 global hackathon, by a team of three, and now live here with the rest of buddy.
 Say *"hey buddy"* and it turns to you. Leave it alone and it looks around the room, gets
 curious, gets bored, is glad when you come back, and writes down what it thought.
@@ -75,10 +75,10 @@ it and it raises that terminal.
 ## It teaches
 
 <p align="center">
-  <img src="docs/assets/buddy-lesson.png" alt="A buddy math lesson: the problem Solve 2x + 3 = 11, a whiteboard, buddy's hint and one step, and the Give me a hint, Check my work and Show one step buttons" width="80%">
+  <img src="docs/assets/buddy-lesson.png" alt="A buddy lesson: the problem Solve 2x + 3 = 11, a whiteboard, buddy's hint and one step, and the Give me a hint, Check my work and Show one step buttons" width="80%">
 </p>
 
-buddy has math lessons for kids. The rule is simple: **buddy helps you think, and never
+buddy gives lessons to anyone: a kid on fractions, or you on Rust ownership. The rule is simple: **buddy helps you think, and never
 hands over the whole answer.**
 
 **Where it came from.** The lessons were built in a weekend for the OpenAI, OpenRouter and
@@ -93,15 +93,17 @@ with the launch film and the show-and-tell deck, is
 Calculus I students tested ready or nearly ready in 2018–2020, and 44% in 2021–2023. Her
 office hours turn into lessons on fractions (Zvezdelina Stankova, op-ed in the San
 Francisco Standard, reported by the California Post, Aug 16, 2026). Fraction gaps don't
-fix themselves, and a kid with a tutor that gives away answers learns to wait for them.
+fix themselves, and a learner with a tutor that gives away answers learns to wait for them.
 buddy sits on the desk, watches the whiteboard, and only ever nudges.
 
 **How a lesson goes:**
 
-1. **Pick a way in.** *Learn a topic:* say the topic and your level, and buddy makes a
-   problem to match. *Bring a problem:* paste a screenshot or write it out, and buddy
-   reads it back to check it understood before anything else happens.
-2. **Work on the whiteboard** with a mouse or a pen, or type your ideas underneath.
+1. **Pick a way in.** *Learn a topic:* say the topic and your level, in your own words
+   ("Grade 4", or "I know Python, new to Rust"), and buddy makes a problem to match.
+   *Bring a problem:* paste a screenshot or write it out, and buddy reads it back to
+   check it understood before anything else happens.
+2. **Work on the whiteboard** with a mouse or a pen, place text boxes on it with the **Text** tool, or type your
+   ideas underneath.
    Your writing stays on the board. buddy's steps appear beside it, never on it.
 3. **Ask for the help you need:**
    - **Give me a hint:** a nudge that never finishes a step.
@@ -116,11 +118,13 @@ buddy sits on the desk, watches the whiteboard, and only ever nudges.
    saved; your words go only into the lesson's ideas on this computer.
 5. **Wrap up.** buddy sums up the method and checks that you understood it.
 
-**Where it shows up.** Start and steer a lesson by voice (*"okay buddy, I want to do a
-math lesson"*), from the browser at `http://127.0.0.1:48766/`, or from a terminal:
+**Where it shows up.** Start and steer a lesson by voice (*"okay buddy, teach me
+something"*, or *"okay buddy, I want to do a math lesson"*), from the browser at
+`http://127.0.0.1:48766/`, or from a terminal:
 
 ```bash
 cc-buddy-bridge lesson start --mode learn --topic "adding fractions" --level "Grade 4"
+cc-buddy-bridge lesson start --mode learn --topic "Rust ownership" --level "I know Python, new to Rust"
 cc-buddy-bridge lesson ideas --text "I think I add the tops"
 cc-buddy-bridge lesson hint      # then: check, step, status, recap, end
 ```
@@ -139,19 +143,19 @@ its moment in the film.
 **Under the hood.** The tutor is `gpt-6-astra` (OpenAI by default, OpenRouter opt-in),
 called with the problem, the board image and the ideas so far, and asked for strict JSON:
 one hint, one step, or a check. When `EXA_API_KEY` is set, new lessons draw on practice
-references from Khan Academy, OpenStax, Math Is Fun and similar sources. An offline
+references found on the web, with moderation on. An offline
 browser demo runs with no key at all. Setup, every option and the current limits are in
 [docs/learning.md](docs/learning.md).
 
 ## Get one running
 
-### Math lessons and saved whiteboards
+### Lessons and saved whiteboards
 
 Buddy now has a learning workspace: learn a topic or bring a screenshot/written
 problem, put down your ideas, ask for hints, check your work, or reveal exactly
 one next step at a time. Whiteboard revisions and tutor explanations are saved
 to a searchable dashboard, linked from the macOS widget. The existing voice
-agent launches and controls lessons with `math_lesson`, and
+agent launches and controls lessons with the `lesson` tool, and
 `cc-buddy-bridge lesson <action>` (`open`, `start`, `ideas`, `hint`, `check`,
 `step`, `status`, `recap`, `end`, `listen`, `stop-listening`) drives the same lesson from a terminal while
 the daemon runs.
@@ -233,7 +237,7 @@ camera frames ◀──────────────▶ macOS Vision (fac
 | Taking notes on the room | `bridge/src/cc_buddy_bridge/notes.py` | [voice.md](docs/stackchan/voice.md#taking-notes-on-the-room) |
 | Motion: named rhythms the board runs | `bridge/src/cc_buddy_bridge/motion.py`, `firmware/claude_pet_stackchan/src/motion.h` | [build.md](docs/stackchan/build.md#named-motion) |
 | Memory of conversations, and starring by voice | `bridge/src/cc_buddy_bridge/recall.py`, `chat_memory.py` | [voice.md](docs/stackchan/voice.md#what-buddy-remembers-of-talking-with-you) |
-| Math lessons, whiteboard, tutor, think out loud (hackathon) | `bridge/src/cc_buddy_bridge/learning/` | [learning.md](docs/learning.md) |
+| Lessons, whiteboard, tutor, think out loud (hackathon) | `bridge/src/cc_buddy_bridge/learning/` | [learning.md](docs/learning.md) |
 | Widget and diary window | `widget/` | [widget.md](docs/stackchan/widget.md) |
 | The robot itself: build, wire protocol, gaze, bench notes | `firmware/claude_pet_stackchan` | [build.md](docs/stackchan/build.md), [DESIGN.md](DESIGN.md) |
 | Daemon commands and every knob | `bridge/` | [bridge/README.md](bridge/README.md) |
@@ -246,7 +250,7 @@ camera frames ◀──────────────▶ macOS Vision (fac
 
 ## Credits
 
-The math lessons were built for the OpenAI, OpenRouter and CopilotKit *Agents, Everywhere:
+The lessons were built as math lessons for the OpenAI, OpenRouter and CopilotKit *Agents, Everywhere:
 Bots, Channels & More* global hackathon, in [gurul/buddyTinkerer](https://github.com/gurul/buddyTinkerer),
 with Swetank Griyage and Emaha Tekle. Lessons and the whiteboard began with Swetank's
 `smartboard` work. The cut-paper buddy illustration at the top is from the hackathon.

@@ -11,10 +11,8 @@ def search_problems(topic, level):
     if not key:
         return [], ("Exa search is off. Add EXA_API_KEY to ~/.config/cc-buddy-bridge/env and restart "
                     "to enable practice references.")
-    body = {"query": f"Math practice problems and exercises: {str(topic)[:200]}. Level: {str(level)[:100]}",
+    body = {"query": f"Practice problems and exercises: {str(topic)[:200]}. Level: {str(level)[:100]}",
             "type": "auto", "numResults": 3, "moderation": True,
-            "includeDomains": ["khanacademy.org", "openstax.org", "mathsisfun.com",
-                               "ocw.mit.edu", "tutorial.math.lamar.edu"],
             "contents": {"text": {"maxCharacters": 3000}}}
     req = urllib.request.Request("https://api.exa.ai/search", json.dumps(body).encode(),
                                  {"x-api-key": key, "Content-Type": "application/json"})

@@ -271,7 +271,7 @@ def main(argv: list[str] | None = None) -> int:
     p_audit.add_argument("--ascii", action="store_true", help="ASCII-only output (no colour)")
     p_audit.add_argument("--path", action="store_true", help="Print the audit log path and exit")
 
-    p_learning = sub.add_parser("learning", help="Open the saved math lessons and whiteboard")
+    p_learning = sub.add_parser("learning", help="Open the saved lessons and whiteboard")
     p_learning.add_argument("--demo", action="store_true")
     p_learning.add_argument("--port", type=int, default=48766)
     p_learning.add_argument("--data-dir")
@@ -281,8 +281,8 @@ def main(argv: list[str] | None = None) -> int:
 
     p_lesson = sub.add_parser(
         "lesson",
-        help="Drive buddy's math lesson from the terminal (same path as the voice tool)",
-        description="Drive buddy's math lesson on the running daemon. "
+        help="Drive buddy's lesson from the terminal (same path as the voice tool)",
+        description="Drive buddy's lesson on the running daemon, in any subject. "
                     "Actions: open, start, ideas, hint, check, step, status, recap, end, "
                     "listen, stop-listening.",
     )
@@ -295,8 +295,8 @@ def main(argv: list[str] | None = None) -> int:
                                "stop-listening: buddy stops listening and the microphone closes")
     p_lesson.add_argument("--mode", choices=("learn", "help"), default=None,
                           help="start: learn a topic (default) or get help with your own problem")
-    p_lesson.add_argument("--topic", default=None, help="start: the topic, for example Fractions")
-    p_lesson.add_argument("--level", default=None, help="start: the level, for example \"Grade 4\"")
+    p_lesson.add_argument("--topic", default=None, help="start: the topic, for example Fractions or Rust ownership")
+    p_lesson.add_argument("--level", default=None, help="start: the level, free text, for example \"Grade 4\" or \"second-year physics\"")
     p_lesson.add_argument("--text", default=None, help="ideas: what you are thinking")
     p_lesson.add_argument("--socket", default=None, help="IPC path or host:port override")
 

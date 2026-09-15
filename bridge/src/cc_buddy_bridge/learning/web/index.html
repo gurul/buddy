@@ -16,10 +16,10 @@
     </svg>
     <span>buddy<span class="brand-dot">.</span></span>
   </a>
-  <span class="kicker">your little learning companion</span>
+  <span class="kicker">your learning companion</span>
   <nav>
     <a href="#" id="dashboard-link">Learning dashboard</a>
-    <button id="new-side">＋ New math lesson</button>
+    <button id="new-side">＋ New lesson</button>
   </nav>
   <div class="rail-bottom">
     <span class="status-dot"></span> Work saved on this computer
@@ -45,8 +45,8 @@
       <label><input type="radio" name="mode" value="learn" checked><strong>✦ Learn a topic</strong><span>Buddy gives you a problem to explore.</span></label>
       <label><input type="radio" name="mode" value="help"><strong>▧ Help with my problem</strong><span>Bring a screenshot or write it yourself.</span></label>
     </div>
-    <label class="field">Topic<input id="topic" name="topic" placeholder="Addition, fractions, algebra, differential calculus…" maxlength="200"></label>
-    <label class="field">Starting level<select id="level"><option>Kindergarten–Grade 2</option><option>Grades 3–5</option><option>Grades 6–8</option><option selected>Grades 9–12</option><option>College year 1</option><option>College year 2</option></select></label>
+    <label class="field">Topic<input id="topic" name="topic" placeholder="Fractions, Rust ownership, the French subjunctive, differential calculus…" maxlength="200"></label>
+    <label class="field">Starting level<input id="level" name="level" maxlength="100" placeholder="Grade 4, first-year physics, or “I know Python, new to Rust”"></label>
     <p class="small">Your writing, screenshots, and lesson history are saved on this computer. In live mode, the work you send goes to the AI tutor for feedback.</p>
     <button class="primary wide" type="submit">Let's begin →</button>
   </form>

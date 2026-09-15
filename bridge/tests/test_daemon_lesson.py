@@ -1,4 +1,4 @@
-"""The daemon side of `cc-buddy-bridge lesson <action>`: the IPC handler that runs the math_lesson
+"""The daemon side of `cc-buddy-bridge lesson <action>`: the IPC handler that runs the lesson
 voice tool's path and has the robot act it out, and the CLI that sends it. No board, no mic, no
 network, no browser: the SimpleNamespace + MethodType stub test_daemon_explore.py uses, and a fake
 LearningApp.voice."""

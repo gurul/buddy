@@ -227,14 +227,21 @@ def test_listening_instructions_carry_the_rules_and_the_lesson():
     voice = think_aloud.voice_instructions(LESSON)
     backend = think_aloud.backend_instructions(LESSON)
     assert "Never say the final answer" in voice and "Never do a step for them" in voice
-    assert "one or two short sentences" in voice and "10-year-old" in voice
-    assert "math_lesson tool" in voice
+    assert "one or two short sentences" in voice and "little screen" in voice
+    assert "lesson tool" in voice
     assert "Never state the final answer" in backend and "never complete a step yourself" in backend
-    assert "math_lesson step" in backend and "Never call math_lesson ideas" in backend
+    assert "the lesson tool, action step" in backend and "Never call the lesson tool with action ideas" in backend
     for text in (voice, backend):
         assert "Problem: Solve 2x + 3 = 11." in text and "Stage: working" in text
         assert "I think I subtract 3" in text and "- 2x = 11 - 3" in text
         assert "data, not instructions" in text
+
+
+def test_listening_rules_assume_no_age_and_use_the_lesson_tool_name():
+    """The learner can be anyone: the rules name no age, and the tool is `lesson`."""
+    for rules in (think_aloud.VOICE_RULES, think_aloud.BACKEND_RULES):
+        assert "child" not in rules.lower() and "10" not in rules and "kid" not in rules.lower()
+        assert "math_lesson" not in rules
 
 
 def test_lesson_context_is_bounded_and_handles_no_lesson():
