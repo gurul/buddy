@@ -1,7 +1,8 @@
-# Buddy math lessons
+# Buddy lessons
 
-Buddy's learning workspace implements the two paths in the activity diagram:
-learn a topic, or bring a problem. It shares a saved lesson with the existing
+Buddy tutors anyone, in any subject, at the level you state: a grade, a course, or
+where you are ("I know Python, new to Rust"). The learning workspace implements the
+two paths in the activity diagram: learn a topic, or bring a problem. It shares a saved lesson with the existing
 voice agent and opens a mouse/pen whiteboard in a local browser or the macOS
 widget helper window.
 
@@ -18,6 +19,7 @@ create an algebra problem, save an idea, give a hint, reveal three individual
 steps, recap, and return to the saved dashboard. You can also use the controls
 yourself. The demo has fixed addition, algebra, and derivative examples. It
 never calls an API and explicitly does **not** recognize images or handwriting.
+The offline demo is math-only; live mode takes any subject.
 For a screenshot demo, choose **Help with my problem**, attach an image, type
 `Solve 2x + 3 = 11.`, confirm it, and enter your ideas or select **I don't know
 how to start**. Type `2x = 8` to see Buddy continue with `x = 4`.
@@ -30,10 +32,10 @@ machine-readable check results are in [learning-demo/](learning-demo/).
 
 The existing bridge daemon starts the learning server at
 `http://127.0.0.1:48766/`. Restart the daemon after updating this checkout.
-The browser window uses the same service as voice. Say **"okay buddy, I want
-to do a math lesson"** (the default wake-word file also includes "hey buddy"
+The browser window uses the same service as voice. Say **"okay buddy, teach me
+something"** or **"okay buddy, I want to do a math lesson"** (the default wake-word file also includes "hey buddy"
 and "ok buddy"). Buddy asks which path you want, and asks for a topic and
-starting level when needed. It uses the `math_lesson` tool instead of taking
+starting level when needed. It uses the `lesson` tool instead of taking
 over the computer with the computer-control agent.
 
 Alternatively, run the learning service by itself:
@@ -50,7 +52,7 @@ microphone/wake-word setup, and a working voice API configuration.
 ## Drive a lesson from the terminal
 
 `cc-buddy-bridge lesson <action>` sends one lesson action to the running daemon.
-It uses the same code path as the `math_lesson` voice tool, so the whiteboard,
+It uses the same code path as the `lesson` voice tool, so the whiteboard,
 the saved lesson, and the robot stay in sync. The actions are `open`, `start`,
 `ideas`, `hint`, `check`, `step`, `status`, `recap`, `end`, `listen`, and
 `stop-listening` (see [Think out loud](#think-out-loud)).
@@ -71,7 +73,7 @@ cc-buddy-bridge lesson end
 | Option | Use with | Meaning |
 | --- | --- | --- |
 | `--mode learn` / `--mode help` | `start` | Learn a topic, or get help with your own problem |
-| `--topic`, `--level` | `start` | The topic and starting level for a new lesson |
+| `--topic`, `--level` | `start` | The topic and starting level for a new lesson. Level is free text: `"Grade 4"`, `"first-year physics"`, `"I know Python, new to Rust"` |
 | `--text` | `ideas` | Your thinking; an empty text means "I don't know how to start" |
 | `--socket` | any | IPC path or host:port override |
 
@@ -203,7 +205,7 @@ submitted lesson data according to their account/data policies.
 Without `CC_BUDDY_LEARNING_PROVIDER=openrouter`, the tutor uses OpenAI and asks
 for `OPENAI_API_KEY` if it is missing, even when an OpenRouter key is present.
 A selected provider never falls back to the other account's key.
-Direct OpenAI uses `store: false` on Responses requests. The math provider setting
+Direct OpenAI uses `store: false` on Responses requests. The tutor provider setting
 does not change Buddy's separate realtime voice connection, which still needs
 its existing OpenAI configuration. Browser Read aloud remains available.
 
@@ -222,15 +224,19 @@ its existing OpenAI configuration. Browser Read aloud remains available.
 
 ## Activity workflow
 
-1. **Learn a topic:** choose topic and starting level (K through college year
-   two). Buddy generates a problem without revealing its answer.
+1. **Learn a topic:** choose topic and starting level, free text: a grade, a
+   course, or where you are. Buddy generates a problem without revealing its answer.
 2. **Help with my problem:** paste/upload a PNG, JPEG, or WebP, write on the
    board, or type a problem. Buddy transcribes the problem. Correct unclear
    symbols and explicitly confirm before tutoring begins.
 3. Put down ideas. The help path asks for a starting attempt or an explicit
    "I don't know how to start" before it gives help. Writing the original
    problem does not count as a new attempt.
-4. **Hint** nudges without completing a step. **Check my work** reviews current
+4. Drawing is optional. The **Text** tool places a text box anywhere on the board:
+   click to place one, type, click away to keep it, and click it again to edit.
+   Text boxes are saved as strokes, so undo, clear, and the saved revisions treat
+   them like pen strokes, and the tutor sees them in the flattened board image.
+   **Hint** nudges without completing a step. **Check my work** reviews current
    writing and ideas. **Show one step** adds one next transformation to Buddy's
    separate panel. Click again for the next step. The learner's board is never
    overwritten by the tutor.
@@ -248,7 +254,7 @@ speech synthesizer; it is labelled separately from the robot's existing voice.
 ## Saved work and dashboard
 
 SQLite transactions save the problem, source screenshot, typed ideas, pen and
-eraser strokes, flattened whiteboard image, tutor hints/steps/feedback, mode,
+eraser strokes, text boxes on the board, flattened whiteboard image, tutor hints/steps/feedback, mode,
 level, and completion state. Every autosave and tutoring action has a revision.
 **Saved work** opens those revisions; **Export** downloads the lesson and its
 full revision history as JSON. Ending a lesson preserves its previous stage.
@@ -306,10 +312,10 @@ and Chrome at its standard Windows path; `--browser` accepts another executable.
 It runs headless and saves a video and screenshots. Playwright's test context
 bypasses CSP only for its assertion machinery; the application keeps its strict
 same-origin content policy. The live tutor is model-based, not an independently
-verified symbolic mathematics engine. The single-step schema and instruction
-constrain its output, but they cannot prove that every generated transformation
-is mathematically correct or pedagogically atomic. Handwriting accuracy and
-age-level teaching quality need real learner evaluations before classroom use.
+verified engine for any subject. The single-step schema and instruction
+constrain its output, but they cannot prove that every generated step is
+correct or pedagogically atomic. Handwriting accuracy and level-appropriate
+teaching quality need real learner evaluations before classroom use.
 
 The recorded demo (Windows, 2026-09-12) uses offline examples.
 Live image/voice API calls, physical robot behavior, and the Swift widget build
@@ -382,11 +388,11 @@ existing problem, checks, hints, and steps do not trigger searches. Demo mode
 makes no search requests.
 
 The integration uses [Exa Search](https://exa.ai/docs/reference/search), with
-three results, moderation enabled, and educational sources: Khan Academy,
-OpenStax, Math Is Fun, MIT OpenCourseWare, and Paul's Online Math Notes.
+three results and moderation enabled. There is no site restriction, so any
+subject can find references.
 Only topic and level are sent to Exa; learner work and images are not sent.
 Retrieved text is treated as untrusted reference material. Search cannot
-independently verify mathematical correctness or guarantee an appropriate result.
+independently verify correctness or guarantee an appropriate result.
 
 The lesson feedback shows the search outcome and expandable reference links
 (which may lead to pages containing answers). Links are saved in lesson events

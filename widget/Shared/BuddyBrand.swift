@@ -53,7 +53,7 @@ enum BrandFont {
             : .system(size: size, weight: black ? .black : .bold, design: .rounded)
     }
 
-    /// Andika, for everything a child reads.
+    /// Andika, for everything a learner reads.
     static func body(_ size: CGFloat, bold: Bool = false) -> Font {
         let name = bold ? "Andika-Bold" : "Andika"
         return BrandFonts.available(name)

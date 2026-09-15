@@ -64,7 +64,7 @@ def validate_work(data):
         if not isinstance(strokes, list) or len(strokes) > 10000:
             raise ValueError("Whiteboard is too large. Start another problem.")
         for stroke in strokes:
-            if not isinstance(stroke, dict) or stroke.get("tool") not in ("pen", "eraser"):
+            if not isinstance(stroke, dict) or stroke.get("tool") not in ("pen", "eraser", "text"):
                 raise ValueError("Invalid drawing stroke.")
             points = stroke.get("points")
             if not isinstance(points, list) or len(points) > 10000:
@@ -72,6 +72,15 @@ def validate_work(data):
             for p in points:
                 if not isinstance(p, list) or len(p) != 2 or any(type(v) not in (int, float) or not 0 <= v <= 1 for v in p):
                     raise ValueError("Invalid drawing coordinates.")
+            # A text box is a stroke with one anchor point and its words. Pen and eraser strokes carry no text.
+            if stroke["tool"] == "text":
+                text = stroke.get("text")
+                if not isinstance(text, str) or not text.strip() or len(text) > 500:
+                    raise ValueError("Invalid text box. Keep it under 500 characters.")
+                if len(points) != 1:
+                    raise ValueError("Invalid text box position.")
+            elif "text" in stroke:
+                raise ValueError("Invalid drawing stroke.")
         result["strokes"] = strokes
     return result
 
@@ -392,7 +401,7 @@ def start(directory=None, demo=False, port=DEFAULT_PORT, notify=None, listener=N
 
 
 def main(argv=None):
-    parser = argparse.ArgumentParser(description="Buddy's saved math lessons and whiteboard")
+    parser = argparse.ArgumentParser(description="Buddy's saved lessons and whiteboard")
     parser.add_argument("--demo", action="store_true", help="Offline examples; no API calls or handwriting recognition")
     parser.add_argument("--port", type=int, default=DEFAULT_PORT)
     parser.add_argument("--data-dir", type=Path)

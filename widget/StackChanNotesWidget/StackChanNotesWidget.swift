@@ -9,7 +9,7 @@
 // The diary widget shows buddy's name and current feeling, a debt of buddy's own
 // if it has one, and the newest thoughts as cards whose offset shadow is the
 // colour of the feeling they were written in. Tapping it opens the diary window
-// in the helper app (stackchan://diary). The learning widget shows the saved math
+// in the helper app (stackchan://diary). The learning widget shows the saved
 // lessons and opens the learning dashboard (stackchan://learning).
 
 import SwiftUI
@@ -465,7 +465,7 @@ struct BuddyLearningWidget: Widget {
                 .widgetURL(learningURL)
         }
         .configurationDisplayName("buddy's learning")
-        .description("Your saved math lessons with buddy. Tap to keep learning.")
+        .description("Your saved lessons with buddy. Tap to keep learning.")
         .supportedFamilies([.systemMedium, .systemLarge])
     }
 }
@@ -498,7 +498,7 @@ struct LearningCardView: View {
                 Spacer(minLength: 0)
                 HStack(spacing: 14) {
                     RobotFace(size: isLarge ? 110 : 80, line: "Hey there!")
-                    Text("Big ideas start with little steps. Tap to start a math lesson.")
+                    Text("Big ideas start with little steps. Tap to start a lesson.")
                         .font(BrandFont.body(isLarge ? 15 : 13))
                         .foregroundStyle(BrandStyle.ink)
                         .fixedSize(horizontal: false, vertical: true)
@@ -532,7 +532,7 @@ struct LearningCardView: View {
     }
 }
 
-/// One saved lesson as a card: teal when done, sun while buddy and the kid are on it.
+/// One saved lesson as a card: teal when done, sun while buddy and the learner are on it.
 private struct LessonRow: View {
     let lesson: LearningLesson
     let roomy: Bool

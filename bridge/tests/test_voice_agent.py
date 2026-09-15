@@ -245,7 +245,7 @@ def test_session_config_shape() -> None:
     assert d["type"] == "responses" and d["responses"]["model"] == "gpt-6-astra"
     assert d["responses"]["reasoning"] == {"effort": "low"}
     assert [t.get("name", t["type"]) for t in d["responses"]["tools"]] == [
-        "math_lesson", "start_task", "steer_task", "stop_task", "task_status", "answer_question",
+        "lesson", "start_task", "steer_task", "stop_task", "task_status", "answer_question",
         "go_explore", "end_conversation", "look", "move_head", "look_around", "find",
         "take_photo", "set_sound", "think_hard", "web_search"]
     assert all(t["type"] == "function" for t in TOOLS)
@@ -808,7 +808,7 @@ def test_prompts_do_not_let_a_started_task_read_as_done() -> None:
     # never asks a clarifying question (the "what city?" round trip cost 10.4 s)
     assert "reply with an empty message" in BACKEND_INSTRUCTIONS
     assert "return exactly: On it" not in BACKEND_INSTRUCTIONS
-    assert "Outside math lessons, never ask the owner a clarifying question" in BACKEND_INSTRUCTIONS
+    assert "Outside lessons, never ask the owner a clarifying question" in BACKEND_INSTRUCTIONS
 
 
 def test_idle_timeout_closes_when_the_server_goes_quiet() -> None:
@@ -1326,7 +1326,7 @@ def test_a_muted_session_starts_by_telling_the_voice() -> None:
 
 
 
-def test_math_lesson_dispatch_uses_existing_voice_and_returns_saved_step():
+def test_lesson_dispatch_uses_existing_voice_and_returns_saved_step():
     called = []
     def learning(**args):
         called.append(args)
@@ -1334,71 +1334,83 @@ def test_math_lesson_dispatch_uses_existing_voice_and_returns_saved_step():
     conn = FakeConnection([])
     session, _, _ = _session(conn, [FakeAgent(None, None)], learning=learning)
     async def go():
-        await session._tool("math_lesson", "math1", '{"action":"step"}')
+        await session._tool("lesson", "math1", '{"action":"step"}')
         await asyncio.gather(*session._slow_tasks)
     asyncio.run(go())
     assert called == [{"action": "step"}]
     assert conn.tool_outputs()[0]["ok"] is True
 
 
-def test_math_lesson_without_service_returns_an_actionable_error():
+def test_lesson_without_service_returns_an_actionable_error():
     conn = FakeConnection([])
     session, _, _ = _session(conn, [FakeAgent(None, None)])
     async def go():
-        await session._tool("math_lesson", "math1", '{"action":"open"}')
+        await session._tool("lesson", "math1", '{"action":"open"}')
         await asyncio.gather(*session._slow_tasks)
     asyncio.run(go())
     assert conn.tool_outputs()[0]["ok"] is False
 
 
-def _run_math_lesson(learning, arguments):
+def _run_lesson(learning, arguments):
     conn = FakeConnection([])
     session, _, _ = _session(conn, [FakeAgent(None, None)], learning=learning)
 
     async def go():
-        await session._tool("math_lesson", "math1", arguments)
+        await session._tool("lesson", "math1", arguments)
         await asyncio.gather(*session._slow_tasks)
     asyncio.run(go())
     return conn.tool_outputs()[0]
 
 
-def test_math_lesson_drops_unknown_arguments():
+def test_lesson_drops_unknown_arguments():
     called = []
 
     def learning(**args):
         called.append(args)
         return {"ok": True, "answer": "Try the ones place."}
-    out = _run_math_lesson(learning, '{"action":"step","bogus":1}')
+    out = _run_lesson(learning, '{"action":"step","bogus":1}')
     assert called == [{"action": "step"}]
     assert out["ok"] is True
 
 
-def test_math_lesson_with_unreadable_arguments_does_not_open_the_whiteboard():
+def test_lesson_with_unreadable_arguments_does_not_open_the_whiteboard():
     called = []
 
     def learning(**args):
         called.append(args)
         return {"ok": True}
     for arguments in ("not json", "[1, 2]"):
-        out = _run_math_lesson(learning, arguments)
+        out = _run_lesson(learning, arguments)
         assert out["ok"] is False and "Unknown lesson action" in out["reason"]
     assert called == []
 
 
-def test_math_lesson_stale_lesson_is_actionable():
+def test_lesson_stale_lesson_is_actionable():
     def learning(**args):
         raise KeyError("gone")
-    out = _run_math_lesson(learning, '{"action":"hint"}')
+    out = _run_lesson(learning, '{"action":"hint"}')
     assert out["ok"] is False
-    assert "no longer there" in out["reason"] and "math_lesson failed" not in out["reason"]
+    assert "no longer there" in out["reason"] and "lesson failed" not in out["reason"]
 
 
-def test_math_lesson_schema_uses_the_shared_action_set():
+def test_lesson_schema_uses_the_shared_action_set():
     from cc_buddy_bridge.learning import LESSON_ACTIONS
     from cc_buddy_bridge.voice_agent import TOOLS
-    tool = next(t for t in TOOLS if t["name"] == "math_lesson")
+    tool = next(t for t in TOOLS if t["name"] == "lesson")
     assert tool["parameters"]["properties"]["action"]["enum"] == list(LESSON_ACTIONS)
     assert tool["parameters"]["additionalProperties"] is False
+
+
+def test_the_lesson_tool_is_named_lesson_and_teaches_any_subject():
+    # The voice model routes by tool name, so the name must not narrow the subject.
+    from cc_buddy_bridge.voice_agent import BACKEND_INSTRUCTIONS, INSTRUCTIONS, TOOLS
+    names = [t["name"] for t in TOOLS]
+    assert "lesson" in names and "math_lesson" not in names
+    tool = next(t for t in TOOLS if t["name"] == "lesson")
+    assert "any subject" in tool["description"] and "math" not in tool["description"].lower()
+    for text in (INSTRUCTIONS, BACKEND_INSTRUCTIONS):
+        assert "teach me" in text and "any subject" in text
+        assert "lesson" in text and "math_lesson" not in text
 
 
 # ---- think out loud ------------------------------------------------------------------------------
@@ -1537,7 +1549,7 @@ def test_saying_done_says_goodbye_and_is_not_saved_as_an_idea() -> None:
     assert saved == [] and s.end_reason == "goodbye"
 
 
-def test_while_listening_math_lesson_ideas_never_overwrites_and_stop_listening_says_goodbye() -> None:
+def test_while_listening_lesson_ideas_never_overwrites_and_stop_listening_says_goodbye() -> None:
     called: list = []
 
     def learning(**args):
@@ -1547,8 +1559,8 @@ def test_while_listening_math_lesson_ideas_never_overwrites_and_stop_listening_s
     s, _, _, _ = _listening(conn, {"now": 0.0}, learning=learning)
 
     async def go():
-        await s._tool("math_lesson", "m1", '{"action":"ideas","text":"erase it all"}')
-        await s._tool("math_lesson", "m2", '{"action":"stop-listening"}')
+        await s._tool("lesson", "m1", '{"action":"ideas","text":"erase it all"}')
+        await s._tool("lesson", "m2", '{"action":"stop-listening"}')
         await asyncio.gather(*s._slow_tasks)
         await s._tool("start_task", "t1", '{"goal":"open Safari"}')
         await s._tool("go_explore", "t2", "{}")
@@ -1576,7 +1588,7 @@ def test_a_step_while_listening_waits_for_what_the_learner_just_said() -> None:
 
     async def go():
         s._transcript_delta("user", "can you show me one step")   # the turn is still open when the tool is called
-        await s._tool("math_lesson", "m1", '{"action":"step"}')
+        await s._tool("lesson", "m1", '{"action":"step"}')
         await asyncio.gather(*s._slow_tasks)
     asyncio.run(go())
     assert order == ["saved", "step"]

@@ -111,10 +111,27 @@ def test_failed_tutor_leaves_saved_work_intact(tmp_path):
     {"strokes": [{"tool": "pen", "points": [[float('nan'), .5]]}]},
     {"strokes": [{"tool": "pen", "points": [[1.5, .5]]}]},
     {"strokes": [{"tool": "script", "points": []}]},
+    {"strokes": [{"tool": "text", "points": [[.5, .5]], "text": "   "}]},
+    {"strokes": [{"tool": "text", "points": [[.5, .5]], "text": "x" * 501}]},
+    {"strokes": [{"tool": "text", "points": [[.1, .1], [.2, .2]], "text": "two anchors"}]},
+    {"strokes": [{"tool": "text", "points": [[.5, .5]], "text": 42}]},
+    {"strokes": [{"tool": "text", "points": [[.5, .5]]}]},
+    {"strokes": [{"tool": "pen", "points": [[.5, .5]], "text": "pens carry no text"}]},
 ])
 def test_invalid_work_rejected(work):
     with pytest.raises(ValueError):
         validate_work(work)
+
+
+def test_text_boxes_are_strokes_that_round_trip(tmp_path):
+    app = LearningApp(tmp_path, demo=True)
+    s = create(app)
+    strokes = [{"tool": "text", "points": [[.25, .1], ], "text": "I think 2x = 8\nso x = 4"},
+               {"tool": "pen", "points": [[.1, .2], [.3, .4]]}]
+    assert validate_work({"strokes": strokes})["strokes"] == strokes
+    s = app.dispatch({"action": "save", "revision": s["revision"], "work": {"strokes": strokes}})
+    assert app.store.get(s["id"])["strokes"] == strokes
+    assert any(r["strokes"] == strokes for r in app.store.history(s["id"]))
 
 
 def test_live_requires_key_and_strict_reply(monkeypatch):

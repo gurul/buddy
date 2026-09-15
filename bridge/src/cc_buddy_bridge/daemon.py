@@ -1297,7 +1297,7 @@ class Daemon:
             return {"ok": True, "connected": self.ble.connected, "explore": self._explorer.status()}
 
         if evt == "lesson":
-            # `cc-buddy-bridge lesson <action>`: the math_lesson voice tool's path, from a terminal.
+            # `cc-buddy-bridge lesson <action>`: the lesson voice tool's path, from a terminal.
             return await self._handle_lesson(req)
 
         if evt == "notes":

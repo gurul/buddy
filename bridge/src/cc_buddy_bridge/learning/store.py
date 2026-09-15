@@ -66,7 +66,7 @@ class Store:
     def create(self, mode, topic, level, demo):
         if mode not in ("learn", "help"):
             raise ValueError("Choose learn or help.")
-        return self.save({"id": uuid.uuid4().hex, "mode": mode, "topic": topic or "My math problem",
+        return self.save({"id": uuid.uuid4().hex, "mode": mode, "topic": topic or "My problem",
                           "level": level, "demo": demo, "problem": "", "ideas": "", "stuck": False,
                           "strokes": [], "source_image": "", "board_image": "", "events": [],
                           "stage": "setup" if mode == "learn" else "input", "revision": 0})

@@ -55,6 +55,17 @@ def test_references_and_privacy(monkeypatch, tmp_path):
     assert event["sources"] == [{"title": "Algebra", "url": ref["url"]}]
 
 
+def test_search_is_subject_neutral_and_moderated(monkeypatch):
+    """Any topic at any level: no site allowlist, moderation on, only topic and level sent."""
+    monkeypatch.setenv("EXA_API_KEY", "secret")
+    with patch("urllib.request.urlopen", return_value=response({"results": []})) as call:
+        search_problems("Rust ownership and borrowing", "senior backend engineer, new to Rust")
+    body = json.loads(call.call_args.args[0].data.decode())
+    assert "includeDomains" not in body and body["moderation"] is True and body["numResults"] == 3
+    assert "Rust ownership" in body["query"] and "senior backend engineer" in body["query"]
+    assert "Math" not in body["query"]
+
+
 def test_demo_never_searches(monkeypatch, tmp_path):
     monkeypatch.setenv("EXA_API_KEY", "secret")
     app = LearningApp(tmp_path, demo=True)
