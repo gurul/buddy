@@ -12,6 +12,7 @@ import pytest
 from cc_buddy_bridge.intent import (
     LABELS,
     LEAVE,
+    LESSON,
     LOOK,
     MUTE,
     NONE,
@@ -42,6 +43,16 @@ NOT_MINE = [
     "can you go and check my email", "stop the music",
     "look up the weather", "turn the volume down", "turn it down", "turn off the lights",
     "look at this email", "turn on the TV", "look for the file on the desktop",
+    # Questions and computer jobs that share words with a lesson request.
+    "what is ownership in Rust", "what's 17 times 23", "teach the kids to say hi on Messages",
+    "I learned a lot today", "I want to learn more about this email", "help me understand this file",
+    "walk me through the settings page",
+]
+LESSONS = [
+    "teach me about Rust ownership", "Hey buddy, teach me about Rust ownership.", "quiz me on French verbs",
+    "can you tutor me", "I want a lesson", "I want to learn fractions", "help me work through this proof",
+    "walk me through recursion", "let's do a lesson", "Could you help me understand the chain rule?",
+    "test me on the periodic table", "I'd like to practice long division", "start a lesson",
 ]
 LOOKS = [
     "look to your left", "Look a bit up and to your left.", "look behind you", "turn around",
@@ -53,6 +64,11 @@ LOOKS = [
 @pytest.mark.parametrize("text", LOOKS)
 def test_head_moves(text: str) -> None:
     assert fast_intent(text) == LOOK
+
+
+@pytest.mark.parametrize("text", LESSONS)
+def test_lesson_requests(text: str) -> None:
+    assert fast_intent(text) == LESSON
 
 
 @pytest.mark.parametrize("text", LEAVES)

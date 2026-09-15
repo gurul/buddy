@@ -35,10 +35,11 @@ LEAVE = "leave"
 MUTE = "mute"
 UNMUTE = "unmute"
 LOOK = "look"             # turn the head, look somewhere, look around, find something with its eyes
+LESSON = "lesson"         # teach me, quiz me, tutor me, help me understand: open the lesson
 REMEMBER = "remember"     # the owner is promoting something to the permanent layer, out loud
 NOTES = "notes"           # start taking notes: buddy records the room until told to stop
 NONE = "none"
-LABELS = (LEAVE, MUTE, UNMUTE, LOOK, REMEMBER, NOTES, NONE)
+LABELS = (LEAVE, MUTE, UNMUTE, LOOK, LESSON, REMEMBER, NOTES, NONE)
 
 DEFAULT_MODEL = "gpt-5.4-nano"
 MIN_CONFIDENCE = 0.6
@@ -80,6 +81,25 @@ _LOOK_END = re.compile(
 _NOT_HEAD = re.compile(
     r"\b(?:volume|music|song|sound|it|them|brightness|screen|tab|page|app|light|lights|heat|tv|video|spotify"
     r"|safari|chrome|browser|file|email|mail|weather|off|on)\b")
+
+
+# A lesson: the owner wants to be taught, quizzed, tutored or walked through something, or wants help
+# understanding or working through a problem. The voice model tends to teach it itself instead of
+# delegating, so the session routes these to the backend, which opens the lesson. Anchored at the start
+# and always about the owner ("teach me"): "what is ownership in Rust" is a question, "teach the kids
+# to say hi" is about other people, and both stay none.
+_LESSON = re.compile(
+    r"^(?:(?:can|could|would|will) you |please |now |and |so |maybe )*"
+    r"(?:teach me|tutor me|quiz me|test me on|drill me on|coach me|walk me through"
+    r"|help me (?:understand|learn|study|work through|practi[cs]e|figure out)"
+    r"|(?:i|we)(?: want| wanna| would like|'d like| need) (?:to (?:learn|study|practi[cs]e|understand"
+    r"|do a lesson|have a lesson|start a lesson)|a lesson)"
+    r"|(?:let'?s|can we|could we|shall we) (?:do|have|start) a lesson|(?:let'?s|can we|shall we) (?:learn|study|practi[cs]e)"
+    r"|(?:start|open|begin) (?:a |the |my )?lesson|lesson time)\b")
+# "I want to learn more about this email" is a computer job, not a lesson.
+_NOT_LESSON = re.compile(
+    r"\b(?:email|mail|inbox|file|files|folder|tab|page|app|screen|window|messages?|text|texts|calendar"
+    r"|spotify|safari|chrome|browser|youtube|video|song|playlist)\b")
 
 
 def _is_head_move(core: str) -> bool:
@@ -147,6 +167,8 @@ def fast_intent(text: str) -> Optional[str]:
         return LEAVE
     if _is_head_move(core):
         return LOOK
+    if _LESSON.match(core) and not _NOT_LESSON.search(t):
+        return LESSON
     if _REMEMBER.match(core) or _REMEMBER.match(tail):
         return REMEMBER
     if _NOTES.search(t):
@@ -164,6 +186,10 @@ sleep, "that's all", "I'm heading out", "you can go now".
 - look: they want buddy to move its head or use its eyes on the room — look somewhere, turn, look around, \
 look at them or at a thing in the room, find something, "what's behind you?", and asking where a physical \
 thing is: "where did I leave my keys?", "where's my mug?".
+- lesson: they want buddy to teach, tutor, quiz or coach them, or to help them understand, learn or work \
+through something — "teach me about fractions", "quiz me on French verbs", "help me work through this \
+proof", "I want a lesson", "walk me through recursion". A plain question they want answered — "what is a \
+mutex?", "what's 17 times 23?" — is none.
 - remember: they are telling buddy to keep something permanently — "remember that", "don't forget that", \
 "keep that in mind", "note that down". Only when the whole point of what they said is that buddy should keep \
 it: "I remember that" and "remember when you said that?" are none.

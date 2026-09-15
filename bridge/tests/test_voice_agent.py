@@ -18,6 +18,7 @@ from cc_buddy_bridge.computer_agent import AgentEvent
 from cc_buddy_bridge.voice_agent import (
     FAREWELL_MAX_SECS,
     FAREWELL_QUIET_SECS,
+    LESSON_ROUTE_DELAY_SECS,
     LOOK_ROUTE_DELAY_SECS,
     TOOLS,
     TURN_GAP_SECS,
@@ -1275,6 +1276,92 @@ def test_a_head_request_the_voice_did_not_delegate_is_routed_to_the_backend() ->
         await asyncio.sleep(LOOK_ROUTE_DELAY_SECS + 0.2)
         assert conn.user_messages() == ["[look request] Look a bit up and to your left."]
         assert conn.kinds()[-1] == "response.create"          # the backend is asked to act on it
+        conn.feed(_tool_call("end_conversation", "c9"), None)
+        await task
+    asyncio.run(go())
+
+
+def test_a_lesson_request_the_voice_did_not_delegate_is_routed_to_the_backend() -> None:
+    """11:44 on the bench: "teach me about Rust ownership" got a spoken explanation and no lesson."""
+    conn = FakeConnection()
+    s, _, _ = _session(conn, [FakeAgent(None, None)])
+
+    async def go():
+        task = asyncio.create_task(s.run())
+        await asyncio.sleep(0.01)
+        conn.feed(_heard("Teach me about Rust ownership."), _spoke("Sure. What have you done in Rust so far?"))
+        await asyncio.sleep(LESSON_ROUTE_DELAY_SECS + 0.2)
+        assert conn.user_messages() == ["[lesson request] Teach me about Rust ownership."]
+        assert conn.kinds()[-1] == "response.create"          # the backend is asked to open the lesson
+        conn.feed(_tool_call("end_conversation", "c9"), None)
+        await task
+    asyncio.run(go())
+
+
+def test_a_lesson_request_the_voice_delegated_is_not_routed_twice() -> None:
+    clock = {"now": 0.0}
+    conn = FakeConnection()
+    s, _, _ = _session(conn, [FakeAgent(None, None)], clock=clock)
+
+    async def go():
+        task = asyncio.create_task(s.run())
+        await asyncio.sleep(0.01)
+        clock["now"] = 5.0
+        conn.feed(_heard("quiz me on French verbs"))
+        await asyncio.sleep(0.01)
+        clock["now"] = 5.3
+        conn.feed(_delegated(), _spoke("Let's do it."))      # the voice delegated it itself
+        await asyncio.sleep(LESSON_ROUTE_DELAY_SECS + 0.2)
+        assert conn.user_messages() == []
+        conn.feed(_tool_call("end_conversation", "c9"), None)
+        await task
+    asyncio.run(go())
+
+
+def test_the_backend_is_told_what_a_lesson_request_tag_means() -> None:
+    from cc_buddy_bridge.voice_agent import BACKEND_INSTRUCTIONS
+    assert "[lesson request]" in BACKEND_INSTRUCTIONS
+    assert "never answer it without the tool" in BACKEND_INSTRUCTIONS
+
+
+def test_the_lesson_wake_word_opens_in_lesson_setup_and_routes_the_owner_answer() -> None:
+    """Say "lesson": the daemon opened the window, buddy asks learn-or-bring, and the answer must reach
+    the backend even when the voice just chats back."""
+    conn = FakeConnection()
+    s, states, _ = _session(conn, [FakeAgent(None, None)], lesson_wake=True)
+
+    async def go():
+        task = asyncio.create_task(s.run())
+        await asyncio.sleep(0.05)
+        assert len(conn.user_messages()) == 1 and conn.user_messages()[0].startswith("[lesson setup] The owner said")
+        assert "response.create" not in conn.kinds()          # the greeting asks; no backend turn yet
+        conn.feed(_heard("Learn a topic. Fractions, grade four."), _spoke("Fractions, nice choice!"))
+        await asyncio.sleep(LESSON_ROUTE_DELAY_SECS + 0.2)
+        assert conn.user_messages()[-1] == "[lesson setup] Learn a topic. Fractions, grade four."
+        assert conn.kinds()[-1] == "response.create"
+        conn.feed(_tool_call("end_conversation", "c9"), None)
+        await task
+    asyncio.run(go())
+    assert states[0] == "wake"
+
+
+def test_a_started_lesson_ends_lesson_setup_so_later_turns_are_not_routed() -> None:
+    def learning(**args):
+        return {"ok": True, "answer": "Here is your first problem."}
+    conn = FakeConnection()
+    s, _, _ = _session(conn, [FakeAgent(None, None)], lesson_wake=True, learning=learning)
+
+    async def go():
+        task = asyncio.create_task(s.run())
+        await asyncio.sleep(0.05)
+        conn.feed(_tool_call("lesson", "c2", action="start", mode="learn", topic="Fractions", level="Grade 4"))
+        await asyncio.sleep(0.05)
+        await asyncio.gather(*s._slow_tasks)
+        assert s._lesson_setup is False
+        before = len(conn.user_messages())
+        conn.feed(_heard("I think I add the tops."), _spoke("Hmm, try it."))
+        await asyncio.sleep(LESSON_ROUTE_DELAY_SECS + 0.2)
+        assert len(conn.user_messages()) == before                   # not a setup answer any more
         conn.feed(_tool_call("end_conversation", "c9"), None)
         await task
     asyncio.run(go())

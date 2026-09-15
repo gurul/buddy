@@ -22,7 +22,7 @@ from .chat_memory import star as star_memory
 from .computer_agent import ComputerAgent, log_desktop_grants, make_response_creator
 from .computer_agent import configured as agent_configured
 from .diary import DiaryTaker, Emote, Thought, build_emote_cmd, make_diary_client
-from .ears import Ears
+from .ears import Ears, keyword_id
 from .ears import configured as ears_configured
 from .explore import (
     Action,
@@ -662,7 +662,11 @@ class Daemon:
         # A manual explore ignores activity, so end it here: the board
         # cannot pan the room and hold the conversation pose at once.
         asyncio.create_task(self._dismiss_explore("wake word"))
-        self._conversation = asyncio.create_task(self._converse(), name="voice-conversation")
+        # "lesson" on its own: the conversation opens with the lesson already requested.
+        lesson_word = getattr(getattr(self, "_ears_cfg", None), "lesson_word", "")
+        lesson = bool(lesson_word) and keyword == keyword_id(lesson_word)
+        conversation = self._converse(lesson_wake=True) if lesson else self._converse()
+        self._conversation = asyncio.create_task(conversation, name="voice-conversation")
 
     async def _resync_agent(self) -> None:
         """Tell a (re)connected or rebooted board which conversation phase is live —
@@ -677,11 +681,18 @@ class Daemon:
             await asyncio.sleep(10.0)
             await self._resync_agent()
 
-    async def _converse(self, think_aloud: Optional[dict[str, Any]] = None) -> None:
+    async def _converse(self, think_aloud: Optional[dict[str, Any]] = None, lesson_wake: bool = False) -> None:
         # getattr: the daemon tests stand in a bare object for the ears.
         if self._ears is None or not getattr(self._ears, "listening", True):
             return
         server = getattr(self, "_learning_server", None)
+        if lesson_wake and server is not None:
+            # The word itself is the request: open the lesson window now, with no model in the loop.
+            # The conversation then asks learn-a-topic or bring-a-problem and starts the lesson.
+            try:
+                await asyncio.to_thread(server.app.voice, action="open")
+            except Exception as e:  # noqa: BLE001
+                log.warning("lesson word: could not open the lesson window: %s: %s", type(e).__name__, e)
         mic = self._ears.subscribe()
         keepalive = asyncio.create_task(self._agent_keepalive(), name="agent-keepalive")
         # What buddy remembers of talking with the owner (recall.py). Read here
@@ -702,7 +713,7 @@ class Daemon:
                                            on_closed=self._remember_conversation,
                                            on_star=self._star_by_voice,
                                            learning=server.app.voice if server is not None else None,
-                                           think_aloud=think_aloud,
+                                           think_aloud=think_aloud, lesson_wake=lesson_wake,
                                            on_spoken_idea=server.app.append_spoken if server is not None else None,
                                            on_think_aloud=lambda on, lesson_id: Daemon._on_think_aloud(
                                                self, on, lesson_id),

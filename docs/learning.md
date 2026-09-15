@@ -32,11 +32,23 @@ machine-readable check results are in [learning-demo/](learning-demo/).
 
 The existing bridge daemon starts the learning server at
 `http://127.0.0.1:48766/`. Restart the daemon after updating this checkout.
-The browser window uses the same service as voice. Say **"okay buddy, teach me
-something"** or **"okay buddy, I want to do a math lesson"** (the default wake-word file also includes "hey buddy"
+The browser window uses the same service as voice. Say **"lesson"** on its own: the
+lesson window opens at once, with no model in the loop, and buddy asks "Learn a topic,
+or bring a problem?". Answer in your own words ("learn a topic, fractions, grade four");
+until a lesson starts, every answer goes to the reasoning backend, which starts it.
+The word is a second phrase in the same wake-word spotter, with its own stricter
+threshold (bench, 2026-09-15: at the wake word's 0.25 the word "listen" fired on one of
+three synthesized voices, at 0.35 never). `CC_BUDDY_LESSON_WORD` changes the word,
+`CC_BUDDY_LESSON_WORD=off` removes it. Any sentence with "lesson" in it opens one while
+buddy is idle; inside a conversation the spotter is muted. Or say
+**"okay buddy, teach me something"** or **"okay buddy, I want to do a math lesson"**
+(the default wake-word file also includes "hey buddy"
 and "ok buddy"). Buddy asks which path you want, and asks for a topic and
 starting level when needed. It uses the `lesson` tool instead of taking
 over the computer with the computer-control agent.
+If the voice answers a "teach me" or "quiz me" itself instead of opening the lesson, the
+session notices (the phrase table in `intent.py`, then the intent classifier) and hands the
+words to the backend as a `[lesson request]`, which opens the lesson.
 
 Alternatively, run the learning service by itself:
 
@@ -212,6 +224,8 @@ its existing OpenAI configuration. Browser Read aloud remains available.
 | Setting | Meaning |
 | --- | --- |
 | `CC_BUDDY_LEARNING=0` | Disable the daemon's learning server |
+| `CC_BUDDY_LESSON_WORD` | The spoken word that opens a lesson, default `lesson`; `off` removes it |
+| `CC_BUDDY_LESSON_THRESHOLD` | Spotter threshold for that word alone, default `0.35` (the wake word keeps `0.25`) |
 | `CC_BUDDY_LEARNING_PORT` | Daemon/widget port, default 48766 |
 | `CC_BUDDY_LEARNING_DIR` | Local store, default `~/.config/cc-buddy-bridge/learning` |
 | `CC_BUDDY_LEARNING_PROVIDER` | `openai` (default) or `openrouter` |
