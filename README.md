@@ -17,7 +17,6 @@ daemon on your Mac that gives it ears, hands and a memory.
 - [It teaches](#it-teaches)
 - [Get one running](#get-one-running)
 - [Under the hood](#under-the-hood)
-- [Team](#team)
 - [Credits](#credits)
 
 ## What it does
@@ -251,12 +250,6 @@ camera frames ◀──────────────▶ macOS Vision (fac
 | Widget and diary window | `widget/` | [widget.md](docs/stackchan/widget.md) |
 | The robot itself: build, wire protocol, gaze, bench notes | `firmware/claude_pet_stackchan` | [build.md](docs/stackchan/build.md), [DESIGN.md](DESIGN.md) |
 | Daemon commands and every knob | `bridge/` | [bridge/README.md](bridge/README.md) |
-
-## Team
-
-- Gurucharan Lingamallu
-- Swetank Griyage
-- Emaha Tekle
 
 ## Credits
 
