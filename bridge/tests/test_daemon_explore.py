@@ -6,6 +6,7 @@ no network: the same SimpleNamespace + MethodType stub test_explore.py uses."""
 from __future__ import annotations
 
 import asyncio
+import base64 as _b64
 import logging
 from pathlib import Path
 from types import MethodType, SimpleNamespace
@@ -14,6 +15,7 @@ from cc_buddy_bridge import daemon as daemon_mod
 from cc_buddy_bridge.caption_pager import CaptionPager
 from cc_buddy_bridge.chat_memory import ChatMemory
 from cc_buddy_bridge.daemon import Daemon
+from cc_buddy_bridge.daemon import Daemon as _Daemon
 from cc_buddy_bridge.diary import Thought
 from cc_buddy_bridge.explore import WAYPOINTS, ExploreConfig, Explorer
 from cc_buddy_bridge.recall import RecallConfig
@@ -293,9 +295,6 @@ def test_voice_go_explore_is_dropped_when_the_conversation_is_hushed(monkeypatch
 
 # ---- photos: {"cmd":"snap"} and the one frame line that answers it ----------------------------
 
-import base64 as _b64
-
-from cc_buddy_bridge.daemon import Daemon as _Daemon
 
 _JPEG = b"\xff\xd8\xff\xe0" + b"\x00" * 16 + b"\xff\xd9"
 

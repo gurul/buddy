@@ -869,9 +869,13 @@ class DiaryTaker:
         snapshot: Optional[Callable[[], Awaitable[Optional[Frame]]]] = None,
         photo_config: Optional[photos.PhotoConfig] = None,
         on_thought: Optional[Callable[["Thought"], Any]] = None,
+        on_written: Optional[Callable[["Record"], Any]] = None,
     ) -> None:
         self.client = client
         self.memory = Memory(notes_dir, wall=wall)
+        # Only the records the diary KEPT (written to the day file), the moment they are: the
+        # daemon puts them on its memory bus. Unwritten candidates stay private to the memory.
+        self.on_written = on_written
         self.notes_dir = notes_dir
         self.send_emote = send_emote
         # Asks the board for one full-resolution frame. None (or a None answer)
@@ -948,6 +952,11 @@ class DiaryTaker:
                                extra=photos.photo_line(rec.photo) if rec.photo else None)
             self.written += 1
             log.info("diary: %s (novelty %d, importance %d) -> %s", rec.label, rec.novelty, rec.importance, path)
+            if self.on_written is not None:
+                try:
+                    self.on_written(rec)
+                except Exception:  # noqa: BLE001 — a listener is never worth a diary line
+                    log.exception("diary: on_written failed")
         else:
             log.info("diary: kept in memory, not written (novelty %d, importance %d): %s",
                      rec.novelty, rec.importance, rec.thought)

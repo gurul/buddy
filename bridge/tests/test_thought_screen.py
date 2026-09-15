@@ -149,7 +149,7 @@ def test_ubiquitous_tags_stop_identifying_anything() -> None:
     buddy would fall silent after its first remark."""
     s = _screen(subject_window_secs=10 ** 9)
     t = 0.0
-    for i, (thing, line) in enumerate([("vent", "The vent, aloof as ever, presides."),
+    for _i, (thing, line) in enumerate([("vent", "The vent, aloof as ever, presides."),
                                        ("mug", "A mug appears, steaming quietly."),
                                        ("chair", "The chair has been pushed in neatly."),
                                        ("window", "Rain has started against the glass.")]):
@@ -164,7 +164,7 @@ def test_ubiquitous_tags_stop_identifying_anything() -> None:
 def test_a_thought_whose_tags_are_all_ubiquitous_keeps_them() -> None:
     s = _screen(subject_window_secs=10 ** 9)
     t = 0.0
-    for i, line in enumerate(["The desk is tidy today, unusually.",
+    for _i, line in enumerate(["The desk is tidy today, unusually.",
                               "A pen rolled off the desk edge.",
                               "The desk lamp is warm already.",
                               "Papers cover the desk corner now."]):

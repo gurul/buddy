@@ -202,6 +202,20 @@ def _slug(text: str, fallback: str = "a-conversation") -> str:
     return s or fallback
 
 
+def note_summary(distilled: dict[str, Any], when: datetime, session_id: str) -> dict[str, Any]:
+    """The distilled note as a plain dict for listeners (the memory bus). No transcript."""
+    owes = [o if o.lower().startswith("buddy owes") else f"buddy owes {o}"
+            for o in _lines(distilled.get("owes"), 3)]
+    return {
+        "title": str(distilled.get("title") or "A conversation").strip().rstrip("."),
+        "note": _lines(distilled.get("said"), 4),
+        "open": _lines(distilled.get("open"), 3),
+        "owes": owes,
+        "session_id": session_id,
+        "ended": when.strftime("%Y-%m-%d %H:%M"),
+    }
+
+
 def render_note(distilled: dict[str, Any], when: datetime, session_id: str) -> str:
     """One conversation as a machine draft, in the store's own shape."""
     title = str(distilled.get("title") or "A conversation").strip().rstrip(".")
@@ -433,10 +447,14 @@ class ChatMemory:
         cfg: RecallConfig,
         client: Optional[ChatClient],
         wall: Callable[[], datetime] = datetime.now,
+        on_note: Optional[Callable[[dict[str, Any]], Any]] = None,
     ) -> None:
         self.cfg = cfg
         self.client = client
         self.wall = wall
+        # The distilled note, the moment it is written: title, what was said, open threads, debts.
+        # Never the transcript. The daemon puts it on its memory bus.
+        self.on_note = on_note
         self.stats = ChatMemoryStats()
         self._pool: Optional[concurrent.futures.ThreadPoolExecutor] = None
         self._busy = False
@@ -495,6 +513,11 @@ class ChatMemory:
         if path is not None:
             self.stats.notes += 1
             log.info("chat memory: wrote %s", path.name)
+            if self.on_note is not None:
+                try:
+                    self.on_note(note_summary(distilled, when, session_id or "session"))
+                except Exception:  # noqa: BLE001 — a listener never costs the note
+                    log.exception("chat memory: on_note failed")
         return path
 
     # -- the day pass, automatic --

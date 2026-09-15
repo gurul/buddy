@@ -8,7 +8,16 @@ from datetime import datetime
 from pathlib import Path
 
 from cc_buddy_bridge import photos
-from cc_buddy_bridge.photos import PhotoConfig, configured, photo_line, prune, relative_path, resolve, save, usage
+from cc_buddy_bridge.photos import (
+    PhotoConfig,
+    configured,
+    photo_line,
+    prune,
+    relative_path,
+    resolve,
+    save,
+    usage,
+)
 
 WHEN = datetime(2026, 9, 6, 14, 12, 7)
 JPEG = b"\xff\xd8\xff\xe0" + b"\x00" * 64 + b"\xff\xd9"

@@ -4,26 +4,37 @@ appraisal → emote, and reflection — all against a fake client."""
 from __future__ import annotations
 
 import asyncio
+import base64 as _b64
 import json
 import logging
 from datetime import datetime, timedelta
 from pathlib import Path
 
+from cc_buddy_bridge import photos as photos_mod
 from cc_buddy_bridge.diary import (
+    COOL_THRESHOLD,
     DEFAULT_PROFILE,
     DiaryTaker,
     Emote,
     Memory,
     Record,
+    album,
     build_context,
     build_emote_cmd,
+    cool_factor,
+    cool_threshold,
+    habituation,
     jaccard,
+    novelty_component,
     parse_reply,
+    photo_budget_left,
     pick_thought,
     should_write,
+    taste_bonus,
+    thumb_quality,
     words,
 )
-from cc_buddy_bridge.explore import Note
+from cc_buddy_bridge.explore import THUMB_H, THUMB_W, Note
 from cc_buddy_bridge.vision import Frame
 
 W, H = 160, 120
@@ -314,21 +325,6 @@ def test_stars_are_read_from_highlights_and_fed_to_the_prompt(tmp_path: Path) ->
 
 # ---- the cool factor: what buddy finds worth a photo --------------------------------------------
 
-import base64 as _b64
-
-from cc_buddy_bridge import photos as photos_mod
-from cc_buddy_bridge.diary import (
-    COOL_THRESHOLD,
-    album,
-    cool_factor,
-    cool_threshold,
-    habituation,
-    novelty_component,
-    photo_budget_left,
-    taste_bonus,
-    thumb_quality,
-)
-from cc_buddy_bridge.explore import THUMB_H, THUMB_W
 
 JPEG = b"\xff\xd8\xff\xe0" + b"\x00" * 64 + b"\xff\xd9"
 ORDINARY = [5] * 30

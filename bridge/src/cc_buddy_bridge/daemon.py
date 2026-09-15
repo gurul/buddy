@@ -48,6 +48,8 @@ from .learning.think_aloud import LISTEN_ACTIONS
 from .listen_key import Stopper, start_listen_key
 from .matchers import MatcherConfig, classify_command
 from .matchers import load_config as load_matcher_config
+from .memory_bus import MemoryBus
+from .memory_bus import configured as bus_configured
 from .notes import RoomNotes, make_notes_client
 from .notes import configured as notes_configured
 from .protocol import (
@@ -201,9 +203,19 @@ class Daemon:
         self._think_aloud_state = "off"
         self._think_aloud_lesson_id: Optional[str] = None
         self._recall_cfg = recall_mod.configured()
+        # buddy's memory as it forms (memory_bus.py): every kept diary thought, distilled
+        # conversation note, lesson event and state change is published the moment it
+        # happens. Sinks (a rosbridge WebSocket server, the owner's claude-mem) attach in
+        # run() behind env flags, all off by default. Bound to the loop in run().
+        self.bus = MemoryBus()
+        self._bus_cfg = bus_configured()
+        self._rosbridge: Optional[Any] = None
+        self._claude_mem_sink: Optional[Any] = None
+        self._claude_mem_mirror: Optional[Any] = None
         # buddy's memory of what was SAID: one note per conversation, and its own
         # day pass. Separate from the diary, which remembers what it SAW.
-        self._chat_memory = ChatMemory(self._recall_cfg, make_chat_client())
+        self._chat_memory = ChatMemory(self._recall_cfg, make_chat_client(),
+                                       on_note=lambda note: Daemon._publish_conversation(self, note))
         # Fire-and-forget work that must outlive the call that started it, held so
         # it is not garbage-collected mid-flight.
         self._background: set[asyncio.Task[Any]] = set()
@@ -302,6 +314,8 @@ class Daemon:
                 log.info("learning: %s", self._learning_server.app.url)
             except (OSError, ValueError):
                 log.exception("learning: could not start the local workspace")
+        self.bus.bind_loop(asyncio.get_running_loop())
+        await self._start_memory_sinks()
         self._listen_stop = start_listen_key(self._on_listen_key, asyncio.get_running_loop())
         self._start_ears(asyncio.get_running_loop())
         self._vision.detect = make_detector()
@@ -332,7 +346,8 @@ class Daemon:
         self._explorer.notes_enabled = client is not None
         if client is not None:
             self._notes = DiaryTaker(client, self._explore_cfg.notes_dir, send_emote=self._send_emote,
-                                     snapshot=self._take_snapshot, on_thought=self._show_thought)
+                                     snapshot=self._take_snapshot, on_thought=self._show_thought,
+                                     on_written=lambda rec: Daemon._publish_observation(self, rec))
         tasks.append(asyncio.create_task(self._explore_loop(), name="explore"))
         tasks.append(asyncio.create_task(self._thought_caption_loop(), name="thought-captions"))
         # buddy's own day pass: aggregate yesterday's conversations into a day
@@ -368,6 +383,7 @@ class Daemon:
                 self._listen_stop()
             await self.ble.stop()
             await self.ipc.stop()
+            await self._stop_memory_sinks()
             if self._learning_server is not None:
                 await asyncio.to_thread(self._learning_server.shutdown)
                 self._learning_server.server_close()
@@ -375,6 +391,128 @@ class Daemon:
 
     async def shutdown(self) -> None:
         self._shutdown.set()
+
+    # ---- the memory bus and its sinks ----
+
+    async def _start_memory_sinks(self) -> None:
+        """Attach the opt-in sinks (memory_bus.configured). A sink that cannot start is logged and
+        skipped: the daemon boots the same with the flags on and the modules absent or the port busy."""
+        cfg = self._bus_cfg
+        self.bus.register_service("/buddy/memory/recall", lambda args: Daemon._recall_service(self, args))
+        self.bus.subscribe("/buddy/memory/remember", lambda topic, msg: Daemon._on_remember(self, msg))
+        rosbridge_url, claude_url = "off", "off"
+        if cfg.rosbridge:
+            try:
+                from .rosbridge import RosbridgeServer
+                server = RosbridgeServer(self.bus, host=cfg.rosbridge_host, port=cfg.rosbridge_port)
+                await server.start()
+                self._rosbridge = server
+                rosbridge_url = server.url
+            except (ImportError, OSError) as e:
+                log.warning("memory bus: rosbridge did not start (%s: %s)", type(e).__name__, e)
+        if cfg.claude_mem:
+            try:
+                from .claude_mem import ClaudeMemMirror, ClaudeMemSink
+                sink = ClaudeMemSink(self.bus, project="buddy", url=cfg.claude_mem_url)
+                sink.start()
+                self._claude_mem_sink = sink
+                claude_url = cfg.claude_mem_url or getattr(sink, "url", "on")
+                if cfg.mirror:
+                    mirror = ClaudeMemMirror(self.bus, url=cfg.claude_mem_url)
+                    mirror.start()
+                    self._claude_mem_mirror = mirror
+            except (ImportError, OSError) as e:
+                log.warning("memory bus: claude-mem did not start (%s: %s)", type(e).__name__, e)
+        log.info("memory bus: rosbridge %s, claude-mem %s, mirror %s", rosbridge_url, claude_url,
+                 "on" if self._claude_mem_mirror is not None else "off")
+
+    async def _stop_memory_sinks(self) -> None:
+        mirror, self._claude_mem_mirror = self._claude_mem_mirror, None
+        if mirror is not None:
+            await asyncio.to_thread(mirror.stop)
+        sink, self._claude_mem_sink = self._claude_mem_sink, None
+        if sink is not None:
+            await asyncio.to_thread(sink.stop)
+        server, self._rosbridge = self._rosbridge, None
+        if server is not None:
+            await server.stop()
+
+    def _publish_observation(self, rec: Any) -> None:
+        """A diary thought the diary KEPT. Never an unwritten candidate, never a photo."""
+        self.bus.publish("/buddy/memory/observation", {
+            "thought": str(getattr(rec, "thought", "")),
+            "observations": list(getattr(rec, "observations", []) or []),
+            "changed": list(getattr(rec, "changed", []) or []),
+            "tags": list(getattr(rec, "tags", []) or []),
+            "importance": int(getattr(rec, "importance", 0) or 0),
+            "novelty": int(getattr(rec, "novelty", 0) or 0),
+            "time": float(getattr(rec, "ts", 0.0) or time.time()),
+        })
+
+    def _publish_conversation(self, note: dict[str, Any]) -> None:
+        """The distilled note after a conversation closed. The transcript never gets here."""
+        self.bus.publish("/buddy/memory/conversation", {
+            "title": str(note.get("title") or ""),
+            "note": list(note.get("note") or []),
+            "open": list(note.get("open") or []),
+            "owes": list(note.get("owes") or []),
+            "session_id": str(note.get("session_id") or ""),
+            "ended": str(note.get("ended") or ""),
+            "time": time.time(),
+        })
+
+    def _publish_lesson(self, action: str, stage: str, feedback: str) -> None:
+        """A lesson moved on. Only the action, the stage, the lesson's topic and level, and buddy's OWN
+        feedback: the learner's ideas, strokes, images and spoken words never leave the lesson store."""
+        topic = level = mode = lesson_id = ""
+        server = getattr(self, "_learning_server", None)
+        app = getattr(server, "app", None)
+        try:
+            active = getattr(app, "active", None)
+            store = getattr(app, "store", None)
+            if active and store is not None:
+                summary = store.summary(store.get(active))
+                topic, level = str(summary.get("topic") or ""), str(summary.get("level") or "")
+                mode, lesson_id = str(summary.get("mode") or ""), str(summary.get("id") or "")
+                stage = stage or str(summary.get("stage") or "")
+        except Exception:  # noqa: BLE001 — a missing lesson is not an error worth a caption
+            pass
+        self.bus.publish("/buddy/memory/lesson", {
+            "action": action or "notice", "stage": stage or "", "topic": topic, "level": level,
+            "mode": mode, "lesson_id": lesson_id, "feedback": " ".join(str(feedback or "").split()),
+            "time": time.time(),
+        })
+
+    def _on_remember(self, msg: dict[str, Any]) -> None:
+        """Someone on the bus asked buddy to keep a line. buddy never stars for itself: the line is
+        written as a ★ (candidate) draft in its chat-memory store, for the owner to promote."""
+        text = " ".join(str(msg.get("text") or "").split())[:500]
+        if not text:
+            return
+        title = " ".join(str(msg.get("title") or "Asked to remember").split())[:80]
+        from .chat_memory import CANDIDATE_MARK, write_note
+        when = datetime.now()
+        body = "\n".join([
+            "---", "status: draft", "source: memory-bus", f"session_id: bus-{when:%H%M%S}",
+            f"ended: {when:%Y-%m-%d %H:%M}", "---", "",
+            "> **Unverified.** A line sent to buddy over its memory bus, not something it heard.", "",
+            f"# {title}", "", "## Proposed for the permanent layer", "", f"- {CANDIDATE_MARK} {text}", "",
+        ])
+        path = write_note(self._recall_cfg, body, when, f"bus-{when:%H%M%S}")
+        log.info("memory bus: remember -> %s", path.name if path else "not written")
+
+    async def _recall_service(self, args: dict[str, Any]) -> dict[str, Any]:
+        """/buddy/memory/recall: search the owner's claude-mem for buddy's memories."""
+        if self._claude_mem_sink is None:
+            return {"results": [], "error": "claude-mem is off (CC_BUDDY_CLAUDE_MEM=1)"}
+        from .claude_mem import recall
+        query = " ".join(str(args.get("query") or "").split())[:500]
+        try:
+            limit = max(1, min(int(args.get("limit", 5)), 20))
+        except (TypeError, ValueError):
+            limit = 5
+        results = await asyncio.to_thread(recall, query, limit, self._bus_cfg.claude_mem_url)
+        return {"results": list(results or [])}
 
     # ---- heartbeat loop ----
 
@@ -811,6 +949,8 @@ class Daemon:
         import textwrap
         self._note_activity()
         self._learning_notices = getattr(self, "_learning_notices", 0) + 1
+        if getattr(self, "bus", None) is not None:
+            Daemon._publish_lesson(self, getattr(self, "_lesson_action", "") or "notice", stage, text)
         if self._conversation is not None and not self._conversation.done():
             return  # Live owns captions while the owner is talking.
         state = "error" if stage == "error" else "done" if stage == "complete" else "speaking"
@@ -950,6 +1090,9 @@ class Daemon:
         self._agent_state = state
         self._note_activity()
         log.info("agent: %s", state)
+        bus = getattr(self, "bus", None)
+        if bus is not None:
+            bus.publish("/buddy/state", {"state": state, "time": time.time()})
         if self.ble.connected:
             asyncio.create_task(self.ble.send({"cmd": "agent", "state": state}))
         Daemon._sync_listen_pose(self)   # by class: test stubs bind only the handlers they exercise
@@ -1252,6 +1395,7 @@ class Daemon:
             if voice is not None and not talking and action in TUTOR_ACTIONS:
                 self._on_agent_state("thinking")
         before = getattr(self, "_learning_notices", 0)
+        self._lesson_action = action          # names the action in the lesson event the notice publishes
         try:
             result = await asyncio.to_thread(run_lesson, voice, request)
         except asyncio.CancelledError:
@@ -1268,6 +1412,7 @@ class Daemon:
             reason = result.get("reason") or "That did not work."
             if voice is not None:
                 self._learning_notice(reason, "error")
+            self._lesson_action = ""
             return {**result, "ok": False, "action": action, "reason": reason, "error": reason}
         # dispatch's notify callback is queued on the loop from the worker thread before to_thread's
         # completion, so it has run by now. open, ideas and help-mode start never notify: show those here.
@@ -1276,6 +1421,7 @@ class Daemon:
                 and action not in LISTEN_ACTIONS):
             stage = (result.get("lesson") or {}).get("stage") or ""
             self._learning_notice(result.get("answer") or "", stage)
+        self._lesson_action = ""
         return {**result, "ok": True, "action": action}
 
     async def _handle_ipc(self, req: dict[str, Any]) -> dict[str, Any]:
