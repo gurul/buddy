@@ -102,7 +102,8 @@ buddy sits on the desk, watches the whiteboard, and only ever nudges.
    *Bring a problem:* paste a screenshot or write it out, and buddy reads it back to
    check it understood before anything else happens.
 2. **Work on the whiteboard** (a [tldraw](https://tldraw.dev) canvas) with a mouse or a pen: draw, write, add text and
-   shapes, or type your ideas underneath.
+   shapes, or type your ideas underneath. The lesson board hides the SDK watermark
+   and licence prompt.
    Your writing stays on the board. buddy's steps appear beside it, never on it.
 3. **Ask for the help you need:**
    - **Give me a hint:** a nudge that never finishes a step.
