@@ -81,8 +81,30 @@ try {
 	await page.getByRole('button', { name: "Let's begin" }).click()
 	await page.waitForFunction(() => document.querySelector('.problem-strip strong')?.textContent === 'Solve 2x + 3 = 11.')
 	await page.locator('#board .tl-canvas').waitFor()
-	/* No licence key is configured here, so tldraw shows its watermark. buddy's CSP and stylesheet must leave it alone. */
-	await page.locator('#board [data-testid="tl-watermark-unlicensed"]').waitFor({ state: 'visible' })
+	/* Wait for the actual SDK watermark so absence cannot pass just because the board is still mounting. */
+	const watermark = page.locator('#board [data-testid="tl-watermark-unlicensed"]')
+	await watermark.waitFor({ state: 'attached' })
+	assert.equal(await watermark.isVisible(), false, 'lesson watermark is hidden')
+	/* Positive control: removing only our override must expose the same watermark. */
+	const watermarkRule = await page.evaluate(() => {
+		for (const [sheetIndex, sheet] of Array.from(document.styleSheets).entries()) {
+			for (const [ruleIndex, rule] of Array.from(sheet.cssRules).entries()) {
+				if (rule.selectorText === '#board .tl-watermark_SEE-LICENSE') {
+					const cssText = rule.cssText
+					sheet.deleteRule(ruleIndex)
+					return { sheetIndex, ruleIndex, cssText }
+				}
+			}
+		}
+		throw new Error('watermark override missing from the shipped CSS')
+	})
+	assert.equal(await watermark.isVisible(), true, 'positive control exposes the watermark')
+	await page.evaluate(({ sheetIndex, ruleIndex, cssText }) => document.styleSheets[sheetIndex].insertRule(cssText, ruleIndex), watermarkRule)
+	assert.equal(await watermark.isVisible(), false, 'restoring the override hides the watermark')
+	await page.setViewportSize({ width: 390, height: 844 })
+	await page.waitForFunction(() => document.querySelector('[data-testid="tl-watermark-unlicensed"]')?.dataset.mobile === 'true')
+	assert.equal(await watermark.isVisible(), false, 'mobile watermark is hidden')
+	await page.setViewportSize({ width: 1440, height: 1000 })
 	const id = page.url().split('#lesson/')[1]
 	const opened = (await lessonOf(id)).revision
 	await page.waitForTimeout(1500)
@@ -108,6 +130,8 @@ try {
 	await page.reload()
 	await page.locator('#board .tl-shape').first().waitFor()
 	assert.equal(await page.locator('#board .tl-shape').count(), 1)
+	await watermark.waitFor({ state: 'attached' })
+	assert.equal(await watermark.isVisible(), false, 'watermark stays hidden after reload')
 	await page.waitForTimeout(1500)
 	assert.equal((await lessonOf(id)).revision, drawn.revision, 'reloading must not save a new revision')
 

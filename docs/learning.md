@@ -347,14 +347,13 @@ use, and forbids disabling or interfering with its licence enforcement, which
 includes the "made with tldraw" watermark. A verbatim copy of the licence ships
 next to the bundle, as the licence requires.
 
-buddy is served from `http://127.0.0.1`, which tldraw treats as development, so
-the board works without a key and shows the watermark. buddy does not hide,
-restyle or remove it, and the e2e test asserts it is visible when no key is
-set. To run with a licence, get a key from tldraw (they list non-commercial
-options) and set `CC_BUDDY_TLDRAW_LICENSE_KEY` in
-`~/.config/cc-buddy-bridge/env`; whether the watermark then goes away depends on
-the licence tldraw issues. Whether your use of buddy counts as development or
-production under that licence is your call to make, not the code's.
+The lesson board hides the SDK watermark and licence prompt with a scoped rule
+in `bridge/web-canvas/src/index.css`. The e2e test verifies this on desktop,
+mobile, and after reload; it also removes the rule temporarily to confirm that
+the underlying watermark is present and otherwise visible. This presentation
+change does not grant a licence or change the upstream terms. The licence text
+still ships with the bundle, and `CC_BUDDY_TLDRAW_LICENSE_KEY` in
+`~/.config/cc-buddy-bridge/env` is still passed through to tldraw.
 
 `create-tldraw@5.4.2` itself crashes on start ("it's bad": it calls `main()`
 before its telemetry URL list is assigned), and its `--no-telemetry` flag is
