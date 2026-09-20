@@ -101,8 +101,8 @@ buddy sits on the desk, watches the whiteboard, and only ever nudges.
    ("Grade 4", or "I know Python, new to Rust"), and buddy makes a problem to match.
    *Bring a problem:* paste a screenshot or write it out, and buddy reads it back to
    check it understood before anything else happens.
-2. **Work on the whiteboard** with a mouse or a pen, place text boxes on it with the **Text** tool, or type your
-   ideas underneath.
+2. **Work on the whiteboard** (a [tldraw](https://tldraw.dev) canvas) with a mouse or a pen: draw, write, add text and
+   shapes, or type your ideas underneath.
    Your writing stays on the board. buddy's steps appear beside it, never on it.
 3. **Ask for the help you need:**
    - **Give me a hint:** a nudge that never finishes a step.
@@ -246,7 +246,7 @@ camera frames ◀──────────────▶ macOS Vision (fac
 | Motion: named rhythms the board runs | `bridge/src/cc_buddy_bridge/motion.py`, `firmware/claude_pet_stackchan/src/motion.h` | [build.md](docs/stackchan/build.md#named-motion) |
 | Memory of conversations, and starring by voice | `bridge/src/cc_buddy_bridge/recall.py`, `chat_memory.py` | [voice.md](docs/stackchan/voice.md#what-buddy-remembers-of-talking-with-you) |
 | Realtime memory: the bus, rosbridge, claude-mem | `bridge/src/cc_buddy_bridge/memory_bus.py`, `rosbridge.py`, `claude_mem.py` | [memory-bus.md](docs/memory-bus.md) |
-| Lessons, whiteboard, tutor, think out loud (hackathon) | `bridge/src/cc_buddy_bridge/learning/` | [learning.md](docs/learning.md) |
+| Lessons, whiteboard, tutor, think out loud (hackathon) | `bridge/src/cc_buddy_bridge/learning/`, `bridge/web-canvas/` (the tldraw whiteboard) | [learning.md](docs/learning.md) |
 | Widget and diary window | `widget/` | [widget.md](docs/stackchan/widget.md) |
 | The robot itself: build, wire protocol, gaze, bench notes | `firmware/claude_pet_stackchan` | [build.md](docs/stackchan/build.md), [DESIGN.md](DESIGN.md) |
 | Daemon commands and every knob | `bridge/` | [bridge/README.md](bridge/README.md) |

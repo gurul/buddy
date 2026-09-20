@@ -68,6 +68,8 @@
 }
 
 /* ---------- Base ---------- */
+/* Element rules stop at the whiteboard: tldraw (.tl-container) styles its own buttons, inputs and text.
+   :where() adds no specificity, so every rule keeps the weight it had. */
 * { box-sizing: border-box; }
 body {
   margin: 0;
@@ -75,29 +77,29 @@ body {
   color: var(--ink);
   font: 400 17px/1.5 var(--body);
 }
-h1, h2, h3 {
+:is(h1, h2, h3):where(:not(.tl-container *)) {
   font-family: var(--display);
   color: var(--ink);
   margin-top: 0;
   text-wrap: balance;
 }
-h1 {
+h1:where(:not(.tl-container *)) {
   font-weight: 900;
   font-size: clamp(34px, 4.6vw, 56px);
   line-height: 1.05;
   text-shadow: 4px 4px 0 var(--pink-soft);
   margin-bottom: 14px;
 }
-h2 {
+h2:where(:not(.tl-container *)) {
   font-weight: 900;
   font-size: 30px;
   line-height: 1.1;
   text-shadow: 3px 3px 0 var(--pink-soft);
   margin-bottom: 8px;
 }
-h3 { font-weight: 700; font-size: 20px; line-height: 1.2; }
-p { color: var(--ink-soft); margin: 0 0 12px; }
-a { color: inherit; }
+h3:where(:not(.tl-container *)) { font-weight: 700; font-size: 20px; line-height: 1.2; }
+p:where(:not(.tl-container *)) { color: var(--ink-soft); margin: 0 0 12px; }
+a:where(:not(.tl-container *)) { color: inherit; }
 .small { font-size: 14px; }
 .kicker,
 .eyebrow {
@@ -112,7 +114,7 @@ a { color: inherit; }
 .hidden { display: none !important; }
 
 /* ---------- Buttons ---------- */
-button {
+button:where(:not(.tl-container *)) {
   font: 700 16px/1.15 var(--body);
   color: var(--ink);
   background: var(--sheet);
@@ -124,9 +126,9 @@ button {
   transition: transform .1s ease, box-shadow .1s ease;
   touch-action: manipulation;
 }
-button:hover:not(:disabled) { transform: translate(-1px, -1px); box-shadow: 4px 4px 0 var(--ink); }
-button:active:not(:disabled) { transform: translate(2px, 2px); box-shadow: 1px 1px 0 var(--ink); }
-button:disabled { opacity: .5; cursor: wait; transform: none; }
+button:where(:not(.tl-container *)):hover:not(:disabled) { transform: translate(-1px, -1px); box-shadow: 4px 4px 0 var(--ink); }
+button:where(:not(.tl-container *)):active:not(:disabled) { transform: translate(2px, 2px); box-shadow: 1px 1px 0 var(--ink); }
+button:where(:not(.tl-container *)):disabled { opacity: .5; cursor: wait; transform: none; }
 .primary { background: var(--ink); color: var(--sheet); box-shadow: 3px 3px 0 var(--pink); }
 .primary:hover:not(:disabled) { box-shadow: 4px 4px 0 var(--pink); }
 .primary:active:not(:disabled) { box-shadow: 1px 1px 0 var(--pink); }
@@ -143,19 +145,19 @@ button:disabled { opacity: .5; cursor: wait; transform: none; }
 .wide { width: 100%; }
 
 /* ---------- Focus ---------- */
-:is(button, a, input, select, textarea, summary):focus-visible,
+:is(button, a, input, select, textarea, summary):where(:not(.tl-container *)):focus-visible,
 .mode-options label:has(input:focus-visible) {
   /* Ink, not pink: pink on paper is 2.25:1, under the 3:1 WCAG non-text minimum. */
   outline: 3px solid var(--ink);
   outline-offset: 3px;
 }
-input:focus, select:focus, textarea:focus {
+:is(input, select, textarea):where(:not(.tl-container *)):focus {
   border-color: var(--ink);
   box-shadow: 3px 3px 0 var(--sky);
 }
 
 /* ---------- Form controls ---------- */
-input, select, textarea {
+:is(input, select, textarea):where(:not(.tl-container *)) {
   font: inherit;
   color: var(--ink);
   background: var(--sheet);
@@ -166,11 +168,11 @@ input, select, textarea {
 }
 input[type="radio"], input[type="checkbox"] { accent-color: var(--pink); padding: 0; }
 input[type="radio"]:focus, input[type="checkbox"]:focus { box-shadow: none; }
-input::placeholder, textarea::placeholder { color: #56628F; opacity: 1; }
+:is(input, textarea):where(:not(.tl-container *))::placeholder { color: #56628F; opacity: 1; }
 .field { display: block; font: 700 15px/1.3 var(--body); margin: 16px 0; }
 .field input, .field select { display: block; width: 100%; margin-top: 6px; font-weight: 400; }
 .field textarea { margin-top: 6px; font-weight: 400; }
-textarea { display: block; width: 100%; min-height: 90px; resize: vertical; }
+textarea:where(:not(.tl-container *)) { display: block; width: 100%; min-height: 90px; resize: vertical; }
 .file-input { display: block; width: 100%; margin: 6px 0 4px; padding: 8px; }
 
 /* ---------- Rail (desktop sidebar) ---------- */
@@ -488,22 +490,6 @@ dialog :is(h2, .kicker) { padding-right: 44px; }
   min-width: 0;
 }
 .board-panel { box-shadow: 7px 7px 0 var(--sky); position: relative; }
-/* A text box being typed on the whiteboard: same hand font and ink as the drawn text. */
-.board-text-editor {
-  position: absolute;
-  z-index: 2;
-  min-width: 160px;
-  min-height: 44px;
-  margin: 0;
-  padding: 2px 4px;
-  font: 400 28px/34px var(--hand);
-  color: #1F3A78;
-  background: rgba(255, 253, 248, .85);
-  border: 2px dashed var(--sun);
-  border-radius: 6px;
-  resize: both;
-  overflow: hidden;
-}
 .tutor-panel { box-shadow: 7px 7px 0 var(--pink); }
 
 .problem-strip {
@@ -550,20 +536,24 @@ dialog :is(h2, .kicker) { padding-right: 44px; }
   border-bottom: var(--line);
   background: var(--paper);
 }
-.board-toolbar button { font-size: 15px; padding: 6px 12px; }
-.board-toolbar button.selected { background: var(--ink); color: var(--sheet); box-shadow: 3px 3px 0 var(--sun); }
 .board-toolbar span { margin-left: auto; font: 400 21px/1 var(--hand); color: var(--ink-soft); }
 
-canvas#board {
-  display: block;
+/* The whiteboard is tldraw; it fills this box. isolation keeps its stacked panels under the page's dialogs. */
+.board-host {
+  position: relative;
   width: 100%;
-  height: auto;
-  aspect-ratio: 1200 / 775;
+  height: clamp(440px, 64vh, 760px);
+  isolation: isolate;
   touch-action: none;
-  cursor: crosshair;
-  background-color: #FFFDF8;
-  background-image: radial-gradient(rgba(127, 162, 222, .45) 1.2px, transparent 1.2px);
-  background-size: 24px 24px;
+  background: #FFFDF8;
+}
+.board-host.unavailable {
+  display: grid;
+  place-items: center;
+  height: auto;
+  padding: 28px 22px;
+  text-align: center;
+  color: var(--ink-soft);
 }
 
 .ideas-area { padding: 16px 22px; border-top: var(--line); }
@@ -738,7 +728,7 @@ p.small.supervise { display: block; margin: 0; }
   dialog { padding: 24px 18px; }
   .error { left: 16px; right: 16px; }
   .stat:nth-child(1), .stat:nth-child(3) { transform: none; }
-  .toolbar-actions button, .board-toolbar button { font-size: 14px; }
+  .toolbar-actions button { font-size: 14px; }
   .board-toolbar span { margin-left: 0; flex-basis: 100%; }
   .problem-strip strong { font-size: 17px; }
   .problem-strip strong.long { font-size: 14px; }

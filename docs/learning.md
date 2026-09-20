@@ -4,7 +4,8 @@ Buddy tutors anyone, in any subject, at the level you state: a grade, a course, 
 where you are ("I know Python, new to Rust"). The learning workspace implements the
 two paths in the activity diagram: learn a topic, or bring a problem. It shares a saved lesson with the existing
 voice agent and opens a mouse/pen whiteboard in a local browser or the macOS
-widget helper window.
+widget helper window. The whiteboard is [tldraw](https://tldraw.dev); see
+[The whiteboard](#the-whiteboard-tldraw).
 
 ## Try the working demo
 
@@ -236,6 +237,7 @@ its existing OpenAI configuration. Browser Read aloud remains available.
 | `OPENAI_API_KEY` | Tutor key for the default OpenAI provider |
 | `OPENROUTER_API_KEY` | Tutor key, used only with `CC_BUDDY_LEARNING_PROVIDER=openrouter` |
 | `EXA_API_KEY` | Optional Exa key for practice references |
+| `CC_BUDDY_TLDRAW_LICENSE_KEY` | Optional tldraw licence key, passed to the whiteboard. See [Licence](#licence) |
 | `--demo` | Explicit offline examples; separate default `learning/demo` store |
 | `--data-dir` / `--port` | Standalone and demo overrides |
 
@@ -249,10 +251,11 @@ its existing OpenAI configuration. Browser Read aloud remains available.
 3. Put down ideas. The help path asks for a starting attempt or an explicit
    "I don't know how to start" before it gives help. Writing the original
    problem does not count as a new attempt.
-4. Drawing is optional. The **Text** tool places a text box anywhere on the board:
-   click to place one, type, click away to keep it, and click it again to edit.
-   Text boxes are saved as strokes, so undo, clear, and the saved revisions treat
-   them like pen strokes, and the tutor sees them in the flattened board image.
+4. Drawing is optional. The board is a tldraw canvas: pen, eraser, text, shapes,
+   arrows, select and move, undo and redo, zoom and pan, all from tldraw's own
+   toolbar. The tutor sees a flattened picture of the whole board. The board
+   locks while buddy is answering and when a lesson is ended, then gives the
+   learner's tool back.
    **Hint** nudges without completing a step. **Check my work** reviews current
    writing and ideas. **Show one step** adds one next transformation to Buddy's
    separate panel. Click again for the next step. The learner's board is never
@@ -268,10 +271,100 @@ lesson. The browser polls saved revisions to display voice-originated updates.
 The optional browser **Read aloud** control uses the operating system/browser
 speech synthesizer; it is labelled separately from the robot's existing voice.
 
+## The whiteboard (tldraw)
+
+The board is [tldraw](https://tldraw.dev) 5.4.2, started from the basic starter
+kit (`npm create tldraw@latest`, the `tldraw/vite-template` repository). The rest
+of the page is still plain JavaScript with no build step. tldraw is an island:
+
+| Piece | Where |
+| --- | --- |
+| Source (React, TypeScript, Vite) | `bridge/web-canvas/` |
+| The seam between page and board | `window.BuddyCanvas.mount()` in `bridge/web-canvas/src/main.tsx`, used by `placeBoard()` in `learning/web/app.js` |
+| Built output, committed | `bridge/src/cc_buddy_bridge/learning/web/canvas/` (`canvas.js`, `canvas.css`, `assets/`, `TLDRAW-LICENSE.md`) |
+| Served by | the `/canvas/` route in `learning/server.py` |
+
+The built output is committed so that `python tools/start_learning.py --demo`
+still works from a fresh clone without Node. Rebuild after changing anything in
+`bridge/web-canvas/`, or after moving the tldraw version:
+
+```bash
+cd bridge/web-canvas
+npm install
+npm run build      # typecheck, bundle, copy tldraw's fonts/icons/translations and licence
+node scripts/verify-bundle.mjs
+npm run e2e        # real Chrome, real server, real CSP; needs Google Chrome
+```
+
+If `web/canvas/` is missing, the lesson page says so where the board would be,
+and the ideas box and the tutor keep working.
+
+### What is saved
+
+A save carries `board`: tldraw's document snapshot (`getSnapshot(store).document`),
+and `board_image`: a PNG of everything on the board, at most 1600 px on a side,
+which is what the tutor reads. Both are sent only when the learner changed the
+board. The server checks the envelope (`store` and `schema`, records are
+objects) and the size (4 MB); tldraw validates and migrates its own records when
+it loads them. A pasted image lives inside the document as a data URL, capped
+at 2 MB each.
+
+"How much has the learner put on the board" (`mark_count` in `server.py`) is
+the number of tldraw shapes plus any strokes from before tldraw. The help path
+uses it to tell a new attempt from the problem that was already written down.
+
+### Lessons saved before tldraw
+
+Older lessons have `strokes` (pen, eraser, text boxes) and no `board`. Opening
+one places its saved picture on the tldraw board as a locked image, exactly as
+the learner left it, erased parts included; new work goes on top. Nothing is
+saved until the learner changes something, and the old `strokes` are kept.
+Eraser strokes cannot be turned into tldraw shapes faithfully, which is why the
+picture is used rather than a conversion.
+
+### Content policy
+
+The page stays same-origin only. tldraw needs two allowances, both in
+`content_policy()` in `server.py`:
+
+- `img-src blob:`. tldraw shows and exports pictures through `blob:` URLs. Only
+  a script already running in the page can create one.
+- A nonce in `style-src`, new for every page load. tldraw adds `<style>`
+  elements at run time (its licence watermark, and the fonts it embeds in a
+  board picture) and stamps them with the nonce. There is no `'unsafe-inline'`:
+  the page puts tutor and search text into `innerHTML`, and the policy stands
+  behind that escaping.
+
+tldraw's fonts, icons and translations are served from `/canvas/assets/`, never
+from tldraw's CDN. The e2e test fails on any CSP violation, any request that
+leaves the computer, and any console error.
+
+### Licence
+
+tldraw is not open source. Its [licence](../bridge/web-canvas/TLDRAW-LICENSE.md)
+allows development use without a key, asks for a licence key for production
+use, and forbids disabling or interfering with its licence enforcement, which
+includes the "made with tldraw" watermark. A verbatim copy of the licence ships
+next to the bundle, as the licence requires.
+
+buddy is served from `http://127.0.0.1`, which tldraw treats as development, so
+the board works without a key and shows the watermark. buddy does not hide,
+restyle or remove it, and the e2e test asserts it is visible when no key is
+set. To run with a licence, get a key from tldraw (they list non-commercial
+options) and set `CC_BUDDY_TLDRAW_LICENSE_KEY` in
+`~/.config/cc-buddy-bridge/env`; whether the watermark then goes away depends on
+the licence tldraw issues. Whether your use of buddy counts as development or
+production under that licence is your call to make, not the code's.
+
+`create-tldraw@5.4.2` itself crashes on start ("it's bad": it calls `main()`
+before its telemetry URL list is assigned), and its `--no-telemetry` flag is
+parsed as `telemetry=false`, so it does not opt out. The template was cloned
+from `tldraw/vite-template` instead, which is all the CLI does.
+
 ## Saved work and dashboard
 
-SQLite transactions save the problem, source screenshot, typed ideas, pen and
-eraser strokes, text boxes on the board, flattened whiteboard image, tutor hints/steps/feedback, mode,
+SQLite transactions save the problem, source screenshot, typed ideas, the
+whiteboard (its tldraw document), flattened whiteboard image, tutor hints/steps/feedback, mode,
 level, and completion state. Every autosave and tutoring action has a revision.
 **Saved work** opens those revisions; **Export** downloads the lesson and its
 full revision history as JSON. Ending a lesson preserves its previous stage.
@@ -307,6 +400,8 @@ browser dashboard; WidgetKit is only available on macOS.
 ## Verification and current limits
 
 `bridge/tests/test_learning.py` covers the flow, exactly-one-step demo behavior,
+the tldraw board (validation, mark counting, the `/canvas/` route, the content
+policy and its nonce, the licence key setting),
 current image inputs, API response validation, durable revisions, conflicts,
 failure recovery, lesson lifecycle, voice delegation, and local HTTP request
 boundaries. `bridge/tests/test_learning_search.py` covers Exa search and env-file
@@ -322,6 +417,8 @@ stop, cap, saved and unlogged words) and the daemon (IPC, races, robot pose).
 python -m pytest bridge/tests/test_learning.py bridge/tests/test_learning_search.py bridge/tests/test_voice_agent.py bridge/tests/test_daemon_lesson.py -q
 # With Playwright installed (plus its ffmpeg component for video recording):
 python tools/demo_learning.py
+# The whiteboard itself, in real Chrome under the real CSP:
+cd bridge/web-canvas && npm run e2e
 ```
 
 The demo runner needs `bridge/src` on `PYTHONPATH` (or an editable bridge install)

@@ -1,0 +1,2 @@
+/* tldraw's own stylesheet, bundled so the page loads nothing from another origin. */
+@import url('tldraw/tldraw.css');

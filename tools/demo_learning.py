@@ -8,7 +8,7 @@ import json
 import tempfile
 from pathlib import Path
 
-from cc_buddy_bridge.learning.server import start
+from cc_buddy_bridge.learning.server import mark_count, start
 from playwright.sync_api import sync_playwright
 
 
@@ -30,22 +30,16 @@ def main():
                 errors = []
                 page.on("pageerror", lambda error: errors.append(str(error)))
                 page.goto(server.app.url)
-                page.get_by_role("button", name="Start a math lesson").click()
+                page.locator("#new-main").click()
                 page.locator("#topic").fill("Algebra")
-                page.locator("#level").select_option("Grades 6–8")
+                page.locator("#level").fill("Grades 6–8")
                 page.get_by_role("button", name="Let's begin").click()
                 page.wait_for_function("document.querySelector('.problem-strip strong')?.textContent === 'Solve 2x + 3 = 11.'")
                 page.locator("#ideas").fill("I think I should subtract 3 from both sides.")
-                board = page.locator("#board").bounding_box()
-                # Pen strokes, then undo, then another stroke: tests pointer input and persistence.
-                for offset in (0, 50):
-                    page.mouse.move(board["x"] + 80 + offset, board["y"] + 70)
-                    page.mouse.down()
-                    page.mouse.move(board["x"] + 130 + offset, board["y"] + 100, steps=8)
-                    page.mouse.move(board["x"] + 85 + offset, board["y"] + 150, steps=8)
-                    page.mouse.up()
-                page.locator("#undo").click()
-                page.locator("#clear").click()
+                # The whiteboard is tldraw, with the pen already selected. bridge/web-canvas/e2e covers it in depth
+                # (reload, lock, old lessons, CSP); here the pen writes the problem out for the recording.
+                page.locator("#board .tl-canvas").wait_for()
+                board = page.locator("#board .tl-canvas").bounding_box()
                 glyphs = {
                     "2": [[(0,8),(8,0),(23,0),(30,8),(30,18),(0,45),(32,45)]],
                     "x": [[(0,12),(26,42)],[(26,12),(0,42)]],
@@ -75,7 +69,7 @@ def main():
                 page.reload()
                 page.wait_for_selector("#ideas")
                 assert page.locator("#ideas").input_value() == "I think I should subtract 3 from both sides."
-                assert len(server.app.store.get(first_id)["strokes"]) == count
+                assert mark_count(server.app.store.get(first_id)) == count
                 for expected in (2, 3):
                     page.locator("#step").click()
                     page.wait_for_function(f"document.querySelectorAll('.math-step').length === {expected}")
@@ -125,7 +119,7 @@ def main():
                 page.locator("#new-side").click()
                 page.locator('input[value="learn"]').check()
                 page.locator("#topic").fill("Differential calculus")
-                page.locator("#level").select_option("College year 1")
+                page.locator("#level").fill("College year 1")
                 page.get_by_role("button", name="Let's begin").click()
                 page.wait_for_function("document.querySelector('.problem-strip strong')?.textContent.includes('derivative')")
                 page.locator("#step").click()
@@ -145,7 +139,7 @@ def main():
                 video.save_as(str(args.output / "buddy-learning-demo.webm"))
                 browser.close()
                 (args.output / "results.json").write_text(json.dumps({"passed": True, "browser_errors": errors,
-                    "checks": ["learn topic", "pen drawing and undo", "hint", "exactly one step per click",
+                    "checks": ["learn topic", "pen drawing", "hint", "exactly one step per click",
                                "reload persistence", "completion and recap", "revision history", "screenshot upload",
                                "problem confirmation", "ideas-first gate", "continue from learner step",
                                "end and resume", "calculus", "dashboard", "mobile layout"]}, indent=2))

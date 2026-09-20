@@ -1,8 +1,9 @@
-/* Local learning workspace: no build step, remote scripts, or browser API keys. */
+/* Local learning workspace: no remote scripts or browser API keys. This file has no build step; the whiteboard it mounts
+   (tldraw, window.BuddyCanvas) is built from bridge/web-canvas into web/canvas. */
 'use strict';
 const $ = s => document.querySelector(s);
 const escapeHTML = v => String(v ?? '').replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
-let config, lesson, dirty = false, busy = false, drawing = false, tool = 'pen', stroke, saveTimer, checkTimer;
+let config, lesson, dirty = false, busy = false, saveTimer, draftTimer, checkTimer;
 let speak = false, supervise = false, tour = false, lastRevision = 0, saveInFlight = false;
 /* Think out loud. listening mirrors GET /api/listening; ideasBase is the revision whose ideas text this page last loaded,
    so the server can put back a spoken line that arrived while the learner was typing. */
@@ -17,7 +18,7 @@ async function api(path, data) {
 }
 function status(text) { $('#save-status').textContent = text; }
 /* The Think out loud toggle stays usable while the tutor works: a learner must always be able to stop the microphone. */
-function setBusy(value) { busy = value; document.querySelectorAll('main button, main textarea, main input, #new-side, #dashboard-link').forEach(b => { if ('disabled' in b && b.id !== 'think-aloud') b.disabled=value; }); }
+function setBusy(value) { busy = value; document.querySelectorAll('main button:not(.tl-container *), main textarea:not(.tl-container *), main input:not(.tl-container *), #new-side, #dashboard-link').forEach(b => { if ('disabled' in b && b.id !== 'think-aloud') b.disabled=value; }); syncBoard(); }
 /* Card art: a glyph for the topic. Math topics keep their expressions; any other subject gets the first letters of the topic on the plain sun background. */
 const art = topic => /calculus|derivative/i.test(topic) ? ['calculus','dy / dx'] : /algebra|equation/i.test(topic) ? ['algebra','2x + 3 = 11'] : /\b(add|sum|fraction|arithmetic|count|multipl|divi|number)/i.test(topic) ? ['', '7 + 5 = ?'] : ['', escapeHTML(topic.trim().split(/\s+/).slice(0,2).map(w=>w[0]||'').join('').toUpperCase() || '?')];
 const readableStage = stage => ({setup:'Ready to begin',input:'Add your problem',confirm:'Confirm problem',working:'In progress',complete:'Completed',ended:'Saved for later'}[stage] || stage);
@@ -42,9 +43,9 @@ async function dashboard() {
 }
 function openNew() { if (busy) return; $('#new-dialog').showModal(); $('#topic').focus(); say('Would you like to learn a topic or work on a problem you already have?'); }
 async function openLesson(id) {
-  clearTimeout(checkTimer); await flush(); lesson=await api('/api/action',{action:'select',id}); dirty=false; lastRevision=lesson.revision; ideasBase=lesson.revision; renderLesson();
+  clearTimeout(checkTimer); await flush(); lesson=await api('/api/action',{action:'select',id}); dirty=false; boardDirty=false; boardKey=null; lastRevision=lesson.revision; ideasBase=lesson.revision; renderLesson();
   const draft=localStorage.getItem('buddy-draft-'+id);
-  if (draft) { const parsed=JSON.parse(draft); if (parsed.revision===lesson.revision) { Object.assign(lesson,parsed.work); dirty=true; renderLesson(); status('Recovered unsaved work'); scheduleSave(); } }
+  if (draft) { const parsed=JSON.parse(draft); if (parsed.revision===lesson.revision) { Object.assign(lesson,parsed.work); dirty=true; boardDirty='board' in parsed.work; boardKey=null; renderLesson(); status('Recovered unsaved work'); scheduleSave(); } }
 }
 function renderLesson() {
   const s=lesson; if(!s) return; $('#breadcrumb').textContent=s.topic;
@@ -52,18 +53,15 @@ function renderLesson() {
   main.innerHTML=`<section class="lesson-head"><div><span class="kicker">${s.mode==='learn'?'learn a topic':'work through your problem'}${s.demo?' · offline demo':''}</span><h1>${escapeHTML(s.topic)}</h1><p>${escapeHTML(s.level)} <span class="slash">/</span> ${readableStage(s.stage)}</p></div><div class="toolbar-actions"><button id="history">Saved work</button><button id="export">Export</button><button id="finish">${ended?'Resume lesson':'Save & end'}</button></div></section>
   <div class="workspace"><section class="board-panel"><div class="problem-strip"><span class="kicker">${input?'your problem':'let’s try this'}</span><strong class="${(s.problem||'').length>160||(s.problem||'').includes('\n')?'long':''}">${escapeHTML(s.problem||'Write a problem or add a screenshot below.')}</strong></div>
   ${input?`<div class="input-area"><label for="upload" class="small">Upload a screenshot, or paste an image into this window</label><input id="upload" class="file-input" type="file" accept="image/png,image/jpeg,image/webp">${s.source_image?'<img id="source-preview" class="source-image" alt="Your original problem screenshot">':''}<label class="field">${s.stage==='confirm'?'Did Buddy read this correctly? Edit any unclear symbols.':'Or type the problem'}<textarea id="problem-input" placeholder="Example: Solve 2x + 3 = 11">${escapeHTML(s.problem)}</textarea></label><p>${s.demo?'Demo does not recognize images. Type the problem to continue.':'Buddy will read the problem first and ask you to confirm it.'}</p><button id="recognize">${s.stage==='confirm'?'Read again':'Read my problem'}</button>${s.stage==='confirm'?'<button id="confirm" class="primary">Yes, this is my problem</button>':''}</div>`:''}
-  <div class="board-toolbar"><button id="pen" class="${tool==='pen'?'selected':''}" aria-pressed="${tool==='pen'}">✎ Pen</button><button id="eraser" class="${tool==='eraser'?'selected':''}" aria-pressed="${tool==='eraser'}">Eraser</button><button id="text" class="${tool==='text'?'selected':''}" aria-pressed="${tool==='text'}" title="Click the board to place a text box">T Text</button><button id="undo">Undo</button><button id="clear">Clear board</button><span>Your thinking goes here</span></div><canvas id="board" width="1200" height="775" aria-label="Whiteboard. Draw with a mouse or pen, or use the ideas text box below."></canvas>
+  <div class="board-toolbar"><span>Your thinking goes here</span></div><div id="board-slot"></div>
   <div class="ideas-area"><label for="ideas">${s.mode==='help'?'How would you start? Show your ideas or tell Buddy where you are stuck.':'Your ideas, working, or answer'}</label><textarea id="ideas" placeholder="I think the first thing to do is…">${escapeHTML(s.ideas)}</textarea></div>
   ${done?'<div class="completion"><h3>One more idea figured out. ✦</h3><p class="small">Review how you got here, then try something new.</p><button id="recap">Explain the method</button><button id="another" class="primary">Another problem</button><button id="change">Change topic</button></div>':''}
   ${s.stage==='setup'?'<div class="completion"><button id="generate" class="primary">Give me a problem</button></div>':''}</section>
   <aside class="tutor-panel"><div class="tutor-head">${FACE}<div><h3>Buddy is here.</h3><p>Let's take it one step at a time.</p></div></div><p id="listen-banner" class="listen-banner hidden" aria-hidden="true"><span class="listen-dot"></span>buddy is listening</p><div class="tutor-feed" id="feed"></div><div class="tutor-controls"><div class="listen-box"><button id="think-aloud" class="help help--listen" aria-pressed="false" aria-describedby="listen-note">◉ Think out loud</button><p id="listen-note" class="small listen-note"></p></div><button id="hint" class="help help--hint">✦ Give me a hint</button><button id="check" class="help help--check">✓ Check my work</button><button id="step" class="help help--step">→ Show one step</button><button id="stuck">I don't know how to start</button></div><label class="supervise"><input type="checkbox" id="supervise" ${supervise?'checked':''}>Check after a pause (5 seconds)</label><p class="small supervise">Your writing stays on the board. Buddy's steps appear here.</p></aside></div>`;
   if ($('#source-preview')) $('#source-preview').src=s.source_image;
-  renderFeed(); bindCanvas(); drawBoard();
+  renderFeed(); placeBoard();
   $('#ideas').oninput=()=>{lesson.ideas=$('#ideas').value; markDirty();};
   if ($('#problem-input')) $('#problem-input').oninput=()=>{lesson.problem=$('#problem-input').value;markDirty();};
-  TOOLS.forEach(t=>{$('#'+t).onclick=()=>selectTool(t);});
-  $('#undo').onclick=()=>{closeTextEditor(false);lesson.strokes.pop();drawBoard();markDirty();};
-  $('#clear').onclick=()=>{closeTextEditor(false);lesson.strokes=[];drawBoard();markDirty();};
   ['hint','check','step','recognize','confirm','generate','recap'].forEach(a=>{if($('#'+a)) $('#'+a).onclick=()=>act(a).catch(fail);});
   $('#stuck').onclick=async()=>{lesson.stuck=true;markDirty();await act('hint').catch(fail);};
   $('#finish').onclick=()=>act(ended?'resume':'end').catch(fail);
@@ -74,7 +72,7 @@ function renderLesson() {
   $('#think-aloud').onclick=()=>toggleListen();
   if($('#upload')) $('#upload').onchange=e=>upload(e.target.files[0]).catch(fail);
   if(input || done || ended || s.stage==='setup') ['hint','check','step','stuck'].forEach(id=>$('#'+id).disabled=true);
-  if(ended){$('#ideas').disabled=true;['pen','eraser','text','undo','clear'].forEach(id=>$('#'+id).disabled=true);}
+  if(ended)$('#ideas').disabled=true;
   status('Saved locally');
   renderListen();
 }
@@ -117,36 +115,53 @@ function renderFeed() {
   feed.innerHTML=lesson.events.filter(e=>e.feedback||e.step).map(e=>`<div class="bubble"><span class="kicker">${escapeHTML(FEED_LABEL[e.action] || e.action)}</span>${e.step?`<strong class="math-step">${escapeHTML(e.step)}</strong>`:''}${escapeHTML(e.feedback)}${renderReferences(e)}</div>`).join('') || `<div class="bubble">${lesson.mode==='help'?'First, add your problem. Then write your ideas—even a small start helps.':'Take your time. Try an idea, draw it out, or ask me for a hint.'}</div>`;
   feed.scrollTop=feed.scrollHeight;
 }
-function point(e) { const r=$('#board').getBoundingClientRect();return [Math.max(0,Math.min(1,(e.clientX-r.left)/r.width)),Math.max(0,Math.min(1,(e.clientY-r.top)/r.height))]; }
-const TOOLS=['pen','eraser','text'];
-function selectTool(t){tool=t;TOOLS.forEach(id=>{const b=$('#'+id);if(!b)return;b.classList.toggle('selected',id===t);b.setAttribute('aria-pressed',String(id===t));});const c=$('#board');if(c)c.style.cursor=t==='text'?'text':'crosshair';}
-/* Text boxes are strokes too: {tool:'text', points:[[x,y]], text}. Their drawn bounding boxes live here, keyed by stroke,
-   only for hit-testing; they are never saved. */
-const textBoxes=new WeakMap();
-let textEditor=null;
-function textAt(p){const c=$('#board');for(let i=lesson.strokes.length-1;i>=0;i--){const s=lesson.strokes[i];if(s.tool!=='text')continue;const b=textBoxes.get(s);if(!b)continue;const x=p[0]*c.width,y=p[1]*c.height;if(x>=b.x&&x<=b.x+b.w&&y>=b.y&&y<=b.y+b.h)return s;}return null;}
-function openTextEditor(p,existing){closeTextEditor(true);const c=$('#board');const wrap=c.parentElement;const r=c.getBoundingClientRect(),w=wrap.getBoundingClientRect();const anchor=existing?existing.points[0]:p;const box=document.createElement('textarea');box.className='board-text-editor';box.setAttribute('aria-label','Text box on the whiteboard');box.rows=2;box.value=existing?existing.text:'';box.style.left=(r.left-w.left+anchor[0]*r.width)+'px';box.style.top=(r.top-w.top+anchor[1]*r.height)+'px';box.style.maxWidth=Math.max(160,(1-anchor[0])*r.width)+'px';textEditor={box,existing,anchor};box.onkeydown=e=>{if(e.key==='Escape'){e.preventDefault();closeTextEditor(false);}else if(e.key==='Enter'&&(e.ctrlKey||e.metaKey)){e.preventDefault();closeTextEditor(true);}};box.onblur=()=>closeTextEditor(true);wrap.appendChild(box);if(existing)drawBoard(existing);box.focus();}
-function closeTextEditor(commit){if(!textEditor)return;const {box,existing,anchor}=textEditor;textEditor=null;box.onblur=null;box.remove();if(commit&&!busy&&lesson&&lesson.stage!=='ended'){const text=box.value.replace(/\r\n?/g,'\n').trim().slice(0,500);if(existing){if(text)existing.text=text;else lesson.strokes.splice(lesson.strokes.indexOf(existing),1);markDirty();}else if(text){lesson.strokes.push({tool:'text',points:[anchor],text});markDirty();}}drawBoard();}
-function bindCanvas(){const c=$('#board');c.style.cursor=tool==='text'?'text':'crosshair';c.onpointerdown=e=>{if(busy||lesson.stage==='ended')return;e.preventDefault();if(tool==='text'){const p=point(e);openTextEditor(p,textAt(p));return;}if(textEditor){closeTextEditor(true);}c.setPointerCapture(e.pointerId);drawing=true;stroke={tool,points:[point(e)]};lesson.strokes.push(stroke);drawBoard();};c.onpointermove=e=>{if(!drawing)return;stroke.points.push(point(e));drawBoard();};const end=()=>{if(!drawing)return;drawing=false;markDirty();};c.onpointerup=end;c.onpointercancel=end;}
-const TEXT_FONT='40px "Gochi Hand", "Chalkboard SE", "Comic Sans MS", cursive', TEXT_LINE=48;
-function wrapText(ctx,text,maxWidth){const lines=[];for(const raw of text.split('\n')){let line='';for(const word of raw.split(' ')){const trial=line?line+' '+word:word;if(line&&ctx.measureText(trial).width>maxWidth){lines.push(line);line=word;}else line=trial;}lines.push(line);}return lines;}
-function drawText(ctx,c,s,skip){const x=s.points[0][0]*c.width,y=s.points[0][1]*c.height;ctx.font=TEXT_FONT;ctx.textBaseline='top';ctx.fillStyle='#1F3A78';const lines=wrapText(ctx,s.text,Math.max(120,c.width-x-8));let w=0;lines.forEach((line,i)=>{w=Math.max(w,ctx.measureText(line).width);if(!skip)ctx.fillText(line,x,y+i*TEXT_LINE);});textBoxes.set(s,{x,y,w:Math.max(w,24),h:lines.length*TEXT_LINE});}
-function drawBoard(editing){const c=$('#board');if(!c||!lesson)return;const ctx=c.getContext('2d');ctx.clearRect(0,0,c.width,c.height);for(const s of lesson.strokes){ctx.globalCompositeOperation=s.tool==='eraser'?'destination-out':'source-over';if(s.tool==='text'){drawText(ctx,c,s,s===editing);continue;}ctx.strokeStyle='#1F3A78';ctx.lineWidth=s.tool==='eraser'?28:3.5;ctx.lineCap='round';ctx.lineJoin='round';ctx.beginPath();s.points.forEach((p,i)=>{if(!i)ctx.moveTo(p[0]*c.width,p[1]*c.height);else ctx.lineTo(p[0]*c.width,p[1]*c.height);});if(s.points.length===1){const p=s.points[0];ctx.lineTo(p[0]*c.width+.1,p[1]*c.height+.1);}ctx.stroke();}ctx.globalCompositeOperation='source-over';}
-function boardImage(){const c=$('#board');if(!c)return lesson.board_image;const flat=document.createElement('canvas');flat.width=c.width;flat.height=c.height;const ctx=flat.getContext('2d');ctx.fillStyle='white';ctx.fillRect(0,0,c.width,c.height);ctx.drawImage(c,0,0);return flat.toDataURL('image/png');}
-function savedStrokes(){return lesson.strokes.map(s=>s.tool==='text'?{tool:'text',points:s.points,text:s.text}:{tool:s.tool,points:s.points});}
-function work(){return {ideas:lesson.ideas,problem:lesson.problem,stuck:lesson.stuck,strokes:savedStrokes(),source_image:lesson.source_image,board_image:boardImage()};}
-function markDirty(){dirty=true;status('Saving…');try{localStorage.setItem('buddy-draft-'+lesson.id,JSON.stringify({revision:lesson.revision,work:work()}));}catch{/* Server persistence remains primary when browser quota is full. */}scheduleSave();clearTimeout(checkTimer);if(supervise&&lesson.stage==='working')checkTimer=setTimeout(()=>{if(!busy&&!drawing)act('check').catch(fail);},5000);}
+/* The whiteboard is tldraw. One editor lives as long as the page: every renderLesson() rebuilds main, so the editor's host node
+   is kept here and moved back into each fresh render. boardKey is the lesson whose board the editor holds; null means "load it". */
+const boardHost=document.createElement('div');boardHost.id='board';boardHost.className='board-host';
+boardHost.setAttribute('aria-label','Whiteboard. Draw, write or type on it, or use the ideas text box below.');
+/* The server puts a fresh nonce on this script tag for every page load; tldraw stamps it on the <style> elements it adds. */
+const PAGE_NONCE=document.querySelector('script[src="/app.js"]')?.nonce||'';
+let board=null, boardMount=null, boardKey=null, boardDirty=false;
+const LEGACY_BOARD={width:1200,height:775};
+function placeBoard(){
+  const slot=$('#board-slot');if(!slot)return;
+  if(!window.BuddyCanvas){slot.className='board-host unavailable';slot.textContent='The whiteboard is not built yet. In bridge/web-canvas run “npm install”, then “npm run build”, and reload. Your ideas box and buddy’s help still work.';return;}
+  slot.replaceWith(boardHost);
+  boardMount??=window.BuddyCanvas.mount(boardHost,{licenseKey:config.tldraw_license_key,nonce:PAGE_NONCE,onChange:()=>{if(!lesson||boardKey!==lesson.id)return;boardDirty=true;markDirty();}}).then(handle=>{board=handle;});
+  boardMount.then(syncBoard).catch(fail);
+}
+/* A lesson saved before tldraw has pen strokes and their flattened picture. The picture goes on the board, locked, exactly as the
+   learner left it (erased parts stay erased); new work goes on top. */
+function syncBoard(){
+  if(!board||!lesson)return;
+  if(boardKey!==lesson.id){boardKey=lesson.id;const old=!lesson.board&&lesson.strokes?.length&&lesson.board_image;board.load(lesson.board||null,old?{image:lesson.board_image,...LEGACY_BOARD}:null);}
+  board.setReadOnly(busy||lesson.stage==='ended');
+}
+const interacting=()=>!!board&&board.isInteracting();
+const marks=r=>Object.values(r.board?.store||{}).filter(x=>x.typeName==='shape').length+(r.strokes||[]).length;
+/* What a save sends. The board and its picture for the tutor are sent only when the learner changed the board, so a lesson whose
+   board was never touched here (or whose whiteboard could not load) keeps what it has. */
+async function work(withBoard){
+  if(withBoard&&boardMount){await boardMount.catch(()=>{});syncBoard();}/* A recovered draft can be saved before the editor is up. */
+  if(withBoard&&board&&boardKey===lesson.id){lesson.board=board.snapshot();lesson.board_image=await board.image();}
+  const w={ideas:lesson.ideas,problem:lesson.problem,stuck:lesson.stuck,source_image:lesson.source_image};
+  if(withBoard){w.board=lesson.board??null;w.board_image=lesson.board_image||'';}
+  return w;
+}
+/* The recovery draft holds the board itself, not its picture: the picture is made again at the next save. */
+function saveDraft(){if(!lesson)return;const w={ideas:lesson.ideas,problem:lesson.problem,stuck:lesson.stuck,source_image:lesson.source_image};if(boardDirty&&board&&boardKey===lesson.id)w.board=board.snapshot();try{localStorage.setItem('buddy-draft-'+lesson.id,JSON.stringify({revision:lesson.revision,work:w}));}catch{/* Server persistence remains primary when browser quota is full. */}}
+function markDirty(){dirty=true;status('Saving…');clearTimeout(draftTimer);draftTimer=setTimeout(saveDraft,250);scheduleSave();clearTimeout(checkTimer);if(supervise&&lesson.stage==='working')checkTimer=setTimeout(()=>{if(!busy&&!interacting())act('check').catch(fail);},5000);}
 function scheduleSave(){clearTimeout(saveTimer);saveTimer=setTimeout(()=>flush().catch(fail),650);}
 let saving=Promise.resolve();
 /* A save can come back with more ideas than it sent: lines buddy heard while the learner typed. Show them unless the learner
    typed again meanwhile; then keep ideasBase old, so the next save asks the server to put them back again. */
-function flush(){clearTimeout(saveTimer);saving=saving.catch(()=>{}).then(async()=>{if(!dirty||!lesson)return;const current=lesson;const payload=work();dirty=false;saveInFlight=true;try{const saved=await api('/api/action',{action:'save',id:current.id,revision:current.revision,ideas_base:ideasBase,work:payload});if(lesson===current){lesson.revision=saved.revision;lastRevision=saved.revision;const box=$('#ideas');if(saved.ideas===payload.ideas){ideasBase=saved.revision;}else if(!dirty&&(!box||box.value===payload.ideas)){lesson.ideas=saved.ideas;if(box)box.value=saved.ideas;ideasBase=saved.revision;}if(!dirty){localStorage.removeItem('buddy-draft-'+current.id);status('Saved locally');}else scheduleSave();}}catch(e){dirty=true;status('Not saved — retry needed');throw e;}finally{saveInFlight=false;}});return saving;}
+function flush(){clearTimeout(saveTimer);saving=saving.catch(()=>{}).then(async()=>{if(!dirty||!lesson)return;const current=lesson;const withBoard=boardDirty;dirty=false;boardDirty=false;saveInFlight=true;let payload;try{payload=await work(withBoard);const saved=await api('/api/action',{action:'save',id:current.id,revision:current.revision,ideas_base:ideasBase,work:payload});if(lesson===current){lesson.revision=saved.revision;lastRevision=saved.revision;const box=$('#ideas');if(saved.ideas===payload.ideas){ideasBase=saved.revision;}else if(!dirty&&(!box||box.value===payload.ideas)){lesson.ideas=saved.ideas;if(box)box.value=saved.ideas;ideasBase=saved.revision;}if(!dirty){clearTimeout(draftTimer);localStorage.removeItem('buddy-draft-'+current.id);status('Saved locally');}else scheduleSave();}}catch(e){dirty=true;boardDirty=boardDirty||withBoard;status('Not saved — retry needed');throw e;}finally{saveInFlight=false;}});return saving;}
 async function act(action){if(busy||!lesson)return;clearError();clearTimeout(checkTimer);setBusy(true);try{await flush();status(action==='step'?'Buddy is working on one step…':'Buddy is thinking…');lesson=await api('/api/action',{action,id:lesson.id,revision:lesson.revision});lastRevision=lesson.revision;ideasBase=lesson.revision;renderLesson();const last=lesson.events.at(-1);if(last)say([last.step,last.feedback].filter(Boolean).join('. '));}finally{setBusy(false);if(lesson)renderLesson();}}
-async function createLesson(data){clearTimeout(checkTimer);await flush();setBusy(true);try{lesson=await api('/api/action',{action:'create',...data});dirty=false;ideasBase=lesson.revision;historyReplace(lesson.id);renderLesson();}finally{setBusy(false);if(lesson)renderLesson();}if(lesson.mode==='learn')await act('generate');}
+async function createLesson(data){clearTimeout(checkTimer);await flush();setBusy(true);try{lesson=await api('/api/action',{action:'create',...data});dirty=false;boardDirty=false;boardKey=null;ideasBase=lesson.revision;historyReplace(lesson.id);renderLesson();}finally{setBusy(false);if(lesson)renderLesson();}if(lesson.mode==='learn')await act('generate');}
 function historyReplace(id){window.history.replaceState(null,'','#lesson/'+id);}
 async function upload(file){if(!file||!lesson||!['input','confirm'].includes(lesson.stage))return;if(!/^image\/(png|jpeg|webp)$/.test(file.type)||file.size>10*1024*1024)throw new Error('Choose a PNG, JPEG or WebP smaller than 10 MB.');const image=await createImageBitmap(file);const c=document.createElement('canvas');const scale=Math.min(1,1600/Math.max(image.width,image.height));c.width=image.width*scale;c.height=image.height*scale;c.getContext('2d').drawImage(image,0,0,c.width,c.height);image.close();lesson.source_image=c.toDataURL('image/jpeg',.9);markDirty();await flush();renderLesson();}
-document.addEventListener('paste',e=>{const file=[...(e.clipboardData?.items||[])].find(x=>x.type.startsWith('image/'))?.getAsFile();if(file&&lesson&&['input','confirm'].includes(lesson.stage)){e.preventDefault();upload(file).catch(fail);}});
-async function showHistory(){await flush();const rows=await api('/api/lessons/'+lesson.id+'/history');$('#history-list').innerHTML=rows.slice().reverse().map(r=>`<details class="history-row"><summary>Revision ${r.revision} · ${new Date(r.updated*1000).toLocaleTimeString()} · ${readableStage(r.stage)}</summary><p>${escapeHTML(r.problem)}</p><pre>${escapeHTML(r.ideas||'No typed ideas in this revision.')}</pre>${r.source_image?`<img src="${r.source_image}" alt="Original screenshot">`:''}${r.board_image?`<img src="${r.board_image}" alt="Saved whiteboard revision ${r.revision}">`:''}<p>${r.strokes.filter(s=>s.tool!=='text').length} pen / eraser strokes · ${r.strokes.filter(s=>s.tool==='text').length} text boxes · ${r.events.length} tutor events</p></details>`).join('');$('#history-dialog').showModal();}
+document.addEventListener('paste',e=>{if(boardHost.contains(document.activeElement))return;/* The whiteboard takes its own pastes. */const file=[...(e.clipboardData?.items||[])].find(x=>x.type.startsWith('image/'))?.getAsFile();if(file&&lesson&&['input','confirm'].includes(lesson.stage)){e.preventDefault();upload(file).catch(fail);}});
+async function showHistory(){await flush();const rows=await api('/api/lessons/'+lesson.id+'/history');$('#history-list').innerHTML=rows.slice().reverse().map(r=>`<details class="history-row"><summary>Revision ${r.revision} · ${new Date(r.updated*1000).toLocaleTimeString()} · ${readableStage(r.stage)}</summary><p>${escapeHTML(r.problem)}</p><pre>${escapeHTML(r.ideas||'No typed ideas in this revision.')}</pre>${r.source_image?`<img src="${r.source_image}" alt="Original screenshot">`:''}${r.board_image?`<img src="${r.board_image}" alt="Saved whiteboard revision ${r.revision}">`:''}<p>${marks(r)} marks on the board · ${r.events.length} tutor events</p></details>`).join('');$('#history-dialog').showModal();}
 async function download(){await flush();const revisions=await api('/api/lessons/'+lesson.id+'/history');const url=URL.createObjectURL(new Blob([JSON.stringify({lesson,revisions},null,2)],{type:'application/json'}));const a=document.createElement('a');a.href=url;a.download='buddy-lesson-'+lesson.id+'.json';a.click();setTimeout(()=>URL.revokeObjectURL(url),1000);}
 const pause=ms=>new Promise(r=>setTimeout(r,ms));
 async function walkthrough(){if(!config.demo||tour)return;tour=true;try{await createLesson({mode:'learn',topic:'Algebra — balancing equations',level:'Grades 6–8'});await pause(1500);lesson.ideas='I think I should subtract 3 from both sides.';$('#ideas').value=lesson.ideas;markDirty();await flush();await act('hint');await pause(1600);for(let i=0;i<3;i++){await act('step');await pause(1700);}await act('recap');await pause(1500);location.hash='';}finally{tour=false;}}
@@ -158,5 +173,5 @@ async function route(){clearError();if(busy)return;const id=location.hash.starts
 window.addEventListener('hashchange',()=>route().catch(fail));
 /* A spoken idea lands as a new revision. While the learner's cursor is in the ideas box, update the text in place instead of
    redrawing the page, so the caret and focus stay where they are. */
-function applyFresh(fresh){const box=$('#ideas');const focused=box&&document.activeElement===box&&fresh.stage===lesson.stage&&fresh.events.length===lesson.events.length;lesson=fresh;lastRevision=fresh.revision;ideasBase=fresh.revision;if(focused){const end=box.selectionStart===box.value.length;const at=box.selectionStart;box.value=fresh.ideas;if(end)box.selectionStart=box.selectionEnd=box.value.length;else box.selectionStart=box.selectionEnd=Math.min(at,box.value.length);renderListen();}else renderLesson();}
-(async()=>{config=await api('/api/config');$('#mode-label').textContent=config.demo?'OFFLINE DEMO':`${config.provider.toUpperCase()} · ${config.model}`;listening.available=!!config.listen_available;await pollListen();await route();setInterval(pollListen,1500);setInterval(async()=>{if(!lesson||busy||dirty||drawing||saveInFlight||textEditor)return;try{const fresh=await api('/api/lessons/'+lesson.id);if(fresh.revision>lastRevision&&!dirty&&lesson.id===fresh.id)applyFresh(fresh);}catch{/* Keep work visible during transient disconnects. */}},3000);})().catch(fail);
+function applyFresh(fresh){if(JSON.stringify(fresh.board??null)!==JSON.stringify(lesson.board??null))boardKey=null;const box=$('#ideas');const focused=box&&document.activeElement===box&&fresh.stage===lesson.stage&&fresh.events.length===lesson.events.length;lesson=fresh;lastRevision=fresh.revision;ideasBase=fresh.revision;if(focused){syncBoard();const end=box.selectionStart===box.value.length;const at=box.selectionStart;box.value=fresh.ideas;if(end)box.selectionStart=box.selectionEnd=box.value.length;else box.selectionStart=box.selectionEnd=Math.min(at,box.value.length);renderListen();}else renderLesson();}
+(async()=>{config=await api('/api/config');$('#mode-label').textContent=config.demo?'OFFLINE DEMO':`${config.provider.toUpperCase()} · ${config.model}`;listening.available=!!config.listen_available;await pollListen();await route();setInterval(pollListen,1500);setInterval(async()=>{if(!lesson||busy||dirty||interacting()||saveInFlight)return;try{const fresh=await api('/api/lessons/'+lesson.id);if(fresh.revision>lastRevision&&!dirty&&lesson.id===fresh.id)applyFresh(fresh);}catch{/* Keep work visible during transient disconnects. */}},3000);})().catch(fail);

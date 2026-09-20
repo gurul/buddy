@@ -4,6 +4,7 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
 <title>Buddy · Learning studio</title>
+<link rel="stylesheet" href="/canvas/canvas.css">
 <link rel="stylesheet" href="/style.css">
 </head>
 <body>
@@ -58,6 +59,7 @@
   <p>Every saved version, with the original screenshot and pen strokes.</p>
   <div id="history-list"></div>
 </dialog>
-<script src="/app.js" defer></script>
+<script type="module" src="/canvas/canvas.js"></script>
+<script src="/app.js" defer nonce="__BUDDY_NONCE__"></script>
 </body>
 </html>
