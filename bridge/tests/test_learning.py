@@ -8,7 +8,7 @@ from unittest.mock import patch
 
 import pytest
 
-from cc_buddy_bridge.learning.server import LearningApp, start, validate_work
+from cc_buddy_bridge.learning.server import MAX_BOARD, LearningApp, mark_count, start, validate_work
 from cc_buddy_bridge.learning.store import Store
 from cc_buddy_bridge.learning.tutor import LiveTutor, live_settings, validate
 
@@ -132,6 +132,135 @@ def test_text_boxes_are_strokes_that_round_trip(tmp_path):
     s = app.dispatch({"action": "save", "revision": s["revision"], "work": {"strokes": strokes}})
     assert app.store.get(s["id"])["strokes"] == strokes
     assert any(r["strokes"] == strokes for r in app.store.history(s["id"]))
+
+
+def board(*shape_ids):
+    """A tldraw document the way the whiteboard saves it: a store of records and its schema."""
+    store = {"document:document": {"typeName": "document", "id": "document:document"},
+             "page:page": {"typeName": "page", "id": "page:page"}}
+    store.update({f"shape:{i}": {"typeName": "shape", "id": f"shape:{i}", "type": "draw"} for i in shape_ids})
+    return {"store": store, "schema": {"schemaVersion": 2, "sequences": {}}}
+
+
+def test_tldraw_board_round_trips_and_keeps_every_revision(tmp_path):
+    app = LearningApp(tmp_path, demo=True)
+    s = create(app)
+    assert s["board"] is None
+    s = app.dispatch({"action": "save", "revision": s["revision"], "work": {"board": board("a", "b")}})
+    assert app.store.get(s["id"])["board"] == board("a", "b")
+    s = app.dispatch({"action": "save", "revision": s["revision"], "work": {"board": board("a")}})
+    assert [r.get("board") for r in app.store.history(s["id"])][-2:] == [board("a", "b"), board("a")]
+    # A save that does not mention the board (typed ideas only) leaves it alone; an explicit null clears it.
+    s = app.dispatch({"action": "save", "revision": s["revision"], "work": {"ideas": "still thinking"}})
+    assert s["board"] == board("a")
+    s = app.dispatch({"action": "save", "revision": s["revision"], "work": {"board": None}})
+    assert s["board"] is None
+
+
+@pytest.mark.parametrize("bad", [
+    [], "board", 7, {}, {"store": {}}, {"schema": {}}, {"store": [], "schema": {}}, {"store": {}, "schema": []},
+    {"store": {"shape:a": "not a record"}, "schema": {}},
+    {"store": {"shape:a": {"typeName": "shape", "pad": "x" * MAX_BOARD}}, "schema": {}},
+])
+def test_invalid_board_rejected(bad):
+    with pytest.raises(ValueError, match="hiteboard"):
+        validate_work({"board": bad})
+
+
+def test_marks_count_tldraw_shapes_and_strokes_from_before_tldraw():
+    assert mark_count({}) == 0
+    assert mark_count({"board": None, "strokes": []}) == 0
+    assert mark_count({"board": board()}) == 0  # the document and page records are not marks
+    assert mark_count({"board": board("a", "b")}) == 2
+    old = [{"tool": "pen", "points": [[.1, .2]]}]
+    assert mark_count({"strokes": old}) == 1
+    assert mark_count({"board": board("a"), "strokes": old}) == 2
+
+
+def test_help_path_counts_a_new_mark_on_the_board_as_an_attempt(tmp_path):
+    app = LearningApp(tmp_path, demo=True)
+    s = create(app, "help")
+    with pytest.raises(ValueError, match="Write a problem"):
+        app.dispatch({"action": "recognize"})
+    # The problem written on the board is enough for buddy to try reading it, and is not yet an attempt.
+    s = app.dispatch({"action": "save", "revision": s["revision"], "work": {"board": board("problem")}})
+    assert app.dispatch({"action": "recognize"})["stage"] == "confirm"
+    # The offline demo cannot read a board, so the learner types what it says before confirming.
+    app.dispatch({"action": "save", "work": {"problem": "Solve 2x + 3 = 11."}})
+    s = app.dispatch({"action": "confirm"})
+    assert s["problem_stroke_count"] == 1
+    with pytest.raises(ValueError, match="ideas first"):
+        app.dispatch({"action": "hint"})
+    app.dispatch({"action": "save", "work": {"board": board("problem", "attempt")}})
+    assert app.dispatch({"action": "hint"})["events"][-1]["action"] == "hint"
+
+
+def test_page_policy_is_same_origin_with_a_fresh_style_nonce_and_never_unsafe_inline(tmp_path):
+    server = start(tmp_path, demo=True, port=0)
+    url = server.app.url
+    try:
+        seen = set()
+        for _ in range(2):
+            with urllib.request.urlopen(url) as r:
+                csp, html = r.headers.get("Content-Security-Policy", ""), r.read().decode()
+            policy = dict(part.strip().split(" ", 1) for part in csp.split(";"))
+            assert policy["default-src"] == "'self'" and policy["script-src"] == "'self'"
+            assert policy["img-src"] == "'self' data: blob:"
+            assert "unsafe" not in csp and "http" not in csp and "*" not in csp
+            sources = policy["style-src"].split()
+            assert sources[0] == "'self'" and len(sources) == 2 and sources[1].startswith("'nonce-")
+            nonce = sources[1][len("'nonce-"):-1]
+            assert len(nonce) >= 16 and f'nonce="{nonce}"' in html and "__BUDDY_NONCE__" not in html
+            seen.add(nonce)
+        assert len(seen) == 2, "the nonce must change with every page load"
+        with urllib.request.urlopen(url + "app.js") as r:
+            assert "nonce" not in r.headers.get("Content-Security-Policy", "")
+    finally:
+        server.shutdown()
+        server.server_close()
+
+
+def test_whiteboard_bundle_is_served_same_origin_and_traversal_is_rejected(tmp_path):
+    server = start(tmp_path, demo=True, port=0)
+    url = server.app.url
+    try:
+        with urllib.request.urlopen(url) as r:
+            html = r.read().decode()
+        assert 'src="/canvas/canvas.js"' in html and 'href="/canvas/canvas.css"' in html
+        for path, mime in (("canvas/canvas.js", "text/javascript"), ("canvas/canvas.css", "text/css"),
+                           ("canvas/assets/translations/fr.json", "application/json"),
+                           ("canvas/assets/icons/icon/0_merged.svg", "image/svg+xml"),
+                           ("canvas/assets/fonts/IBMPlexSans-Medium.woff2", "font/woff2"),
+                           ("canvas/TLDRAW-LICENSE.md", "text/plain")):
+            with urllib.request.urlopen(url + path) as r:
+                assert r.status == 200 and r.headers.get_content_type() == mime, path
+                body = r.read()
+                assert len(body) > 1000, path
+            if path.endswith(".json"):
+                assert isinstance(json.loads(body), dict)  # the file itself, not a JSON string wrapped around it
+        for bad in ("canvas/../server.py", "canvas/%2e%2e%2fserver.py", "canvas/..%2fserver.py", "canvas/assets/../../app.js",
+                    "canvas/.hidden.js", "canvas/nope.js", "canvas/assets", "canvas/canvas.js.map", "canvas/"):
+            with pytest.raises(urllib.error.HTTPError) as exc:
+                urllib.request.urlopen(url + bad)
+            assert exc.value.code == 404, bad
+    finally:
+        server.shutdown()
+        server.server_close()
+
+
+def test_tldraw_licence_key_reaches_the_page_only_when_set(monkeypatch, tmp_path):
+    server = start(tmp_path, demo=True, port=0)
+    try:
+        def key():
+            with urllib.request.urlopen(server.app.url + "api/config") as r:
+                return json.load(r)["tldraw_license_key"]
+        monkeypatch.delenv("CC_BUDDY_TLDRAW_LICENSE_KEY", raising=False)
+        assert key() == ""
+        monkeypatch.setenv("CC_BUDDY_TLDRAW_LICENSE_KEY", "  tldraw-test-key  ")
+        assert key() == "tldraw-test-key"
+    finally:
+        server.shutdown()
+        server.server_close()
 
 
 def test_live_requires_key_and_strict_reply(monkeypatch):

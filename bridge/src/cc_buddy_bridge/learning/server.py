@@ -6,6 +6,7 @@ import base64
 import errno
 import json
 import logging
+import os
 import re
 import secrets
 import sys
@@ -28,7 +29,29 @@ ASSETS = Path(__file__).parent / "web"
 # Fonts are bundled (SIL OFL, see web/fonts/OFL.txt) because the page CSP is same-origin only.
 FONTS = ASSETS / "fonts"
 FONT_FILE = re.compile(r"[a-z0-9-]+\.woff2")
-CSP = "default-src 'self'; img-src 'self' data:; style-src 'self'; script-src 'self'; font-src 'self'; frame-ancestors 'none'"
+# The whiteboard is tldraw, built from bridge/web-canvas into web/canvas (see docs/learning.md). Its fonts, icons and
+# translations are served from here too, for the same reason as the fonts above.
+CANVAS = ASSETS / "canvas"
+CANVAS_FILE = re.compile(r"(?:[A-Za-z0-9_-]+/)*[A-Za-z0-9_-]+(?:\.[A-Za-z0-9_-]+)*")
+CANVAS_MIME = {".js": "text/javascript; charset=utf-8", ".css": "text/css; charset=utf-8", ".svg": "image/svg+xml",
+               ".woff2": "font/woff2", ".png": "image/png",
+               # Not the bare "application/json": reply() encodes that one itself, and these are files.
+               ".json": "application/json; charset=utf-8",
+               ".md": "text/plain; charset=utf-8"}
+MAX_BOARD = 4 * 1024 * 1024
+# Same-origin only. Two allowances exist for the tldraw whiteboard, both as narrow as they can be:
+#  - img-src blob: tldraw shows and exports pictures through blob: URLs. Only a script already running in this page
+#    can mint one, so it opens nothing to another origin.
+#  - a per-page-load nonce in style-src: tldraw adds <style> elements at run time (its licence watermark, and the fonts
+#    it embeds in a board picture) and stamps them with the nonce it is given. No 'unsafe-inline': this page puts tutor
+#    and search text into innerHTML, and the policy is what stands behind that escaping.
+def content_policy(nonce=""):
+    style = f"style-src 'self' 'nonce-{nonce}'" if nonce else "style-src 'self'"
+    return f"default-src 'self'; img-src 'self' data: blob:; {style}; script-src 'self'; font-src 'self'; frame-ancestors 'none'"
+
+
+CSP = content_policy()
+NONCE_SLOT = b"__BUDDY_NONCE__"
 # Spoken lines kept per lesson so a browser save that missed them can put them back.
 SPOKEN_KEEP = 50
 LISTEN_OFF = {"available": False, "state": "off", "lesson_id": None}
@@ -82,7 +105,26 @@ def validate_work(data):
             elif "text" in stroke:
                 raise ValueError("Invalid drawing stroke.")
         result["strokes"] = strokes
+    if "board" in data:
+        # The tldraw document. tldraw validates and migrates its own records when it loads one; the server keeps the
+        # shape of the envelope and the size honest.
+        board = data["board"]
+        if board is not None:
+            if (not isinstance(board, dict) or not isinstance(board.get("store"), dict)
+                    or not isinstance(board.get("schema"), dict)
+                    or any(not isinstance(r, dict) for r in board["store"].values())):
+                raise ValueError("Invalid whiteboard.")
+            if len(json.dumps(board, ensure_ascii=False)) > MAX_BOARD:
+                raise ValueError("Whiteboard is too large. Remove a pasted image, or start another problem.")
+        result["board"] = board
     return result
+
+
+def mark_count(lesson):
+    """How much the learner has put on the board: tldraw shapes, plus pen strokes from a lesson saved before tldraw."""
+    board = lesson.get("board") or {}
+    shapes = sum(1 for r in board.get("store", {}).values() if r.get("typeName") == "shape")
+    return shapes + len(lesson.get("strokes", []))
 
 
 def merge_spoken(ideas, lesson, base):
@@ -166,7 +208,7 @@ class LearningApp:
             elif action == "recognize":
                 if s["stage"] not in ("input", "confirm"):
                     raise ValueError("Start a new lesson to change the problem.")
-                if not (s["problem"].strip() or s["source_image"] or s["strokes"]):
+                if not (s["problem"].strip() or s["source_image"] or mark_count(s)):
                     raise ValueError("Write a problem or add a screenshot first.")
                 result = self.tutor(action, s)
                 s.update(problem=result["problem"], stage="confirm")
@@ -175,14 +217,14 @@ class LearningApp:
                 if s["stage"] != "confirm" or not s["problem"].strip():
                     raise ValueError("Confirm the problem text first.")
                 s["stage"] = "working"
-                s["problem_stroke_count"] = len(s["strokes"])
+                s["problem_stroke_count"] = mark_count(s)
                 self.event(s, action, {"feedback": "Write your ideas or show where you are stuck. If you don't know how to start, tell me."})
             elif action in ("hint", "step", "check", "recap"):
                 if s["stage"] not in ("working", "complete"):
                     raise ValueError("Confirm your problem before asking for help.")
                 if s["stage"] == "complete" and action != "recap":
                     raise ValueError("This problem is complete. Try another problem or review the recap.")
-                if s["mode"] == "help" and not (s["ideas"].strip() or s["stuck"] or len(s["strokes"]) > s.get("problem_stroke_count", 0)):
+                if s["mode"] == "help" and not (s["ideas"].strip() or s["stuck"] or mark_count(s) > s.get("problem_stroke_count", 0)):
                     raise ValueError("Put down your ideas first, or select I don't know how to start.")
                 result = self.tutor(action, s)
                 self.event(s, action, result)
@@ -302,14 +344,14 @@ class Handler(BaseHTTPRequestHandler):
     def log_message(self, *args):
         pass
 
-    def reply(self, status, data, mime="application/json"):
+    def reply(self, status, data, mime="application/json", nonce=""):
         encoded = json.dumps(data).encode() if mime == "application/json" else data
         self.send_response(status)
         self.send_header("Content-Type", mime)
         self.send_header("Content-Length", str(len(encoded)))
         self.send_header("Cache-Control", "no-store")
         self.send_header("X-Content-Type-Options", "nosniff")
-        self.send_header("Content-Security-Policy", CSP)
+        self.send_header("Content-Security-Policy", content_policy(nonce) if nonce else CSP)
         self.end_headers()
         self.wfile.write(encoded)
 
@@ -326,7 +368,9 @@ class Handler(BaseHTTPRequestHandler):
             if path == "/api/config":
                 settings = {"provider": "demo", "model": "offline examples", "ready": True, "key_name": ""} if app.demo else live_settings()
                 return self.reply(200, {**settings, "token": self.server.token, "demo": app.demo, "active": app.active,
-                                        "listen_available": app.listener is not None})
+                                        "listen_available": app.listener is not None,
+                                        # A tldraw licence key is shipped to the browser by design; it is not a secret.
+                                        "tldraw_license_key": os.environ.get("CC_BUDDY_TLDRAW_LICENSE_KEY", "").strip()})
             if path == "/api/listening":
                 return self.reply(200, app.listen_status())
             if path == "/api/lessons":
@@ -348,11 +392,24 @@ class Handler(BaseHTTPRequestHandler):
                 if target.resolve().parent != FONTS.resolve() or not target.is_file():
                     return self.reply(404, {"error": "Not found"})
                 return self.reply(200, target.read_bytes(), mime)
+            if path.startswith("/canvas/"):
+                name = path[len("/canvas/"):]
+                mime = CANVAS_MIME.get(Path(name).suffix)
+                if not mime or not CANVAS_FILE.fullmatch(name):
+                    return self.reply(404, {"error": "Not found"})
+                target = (CANVAS / name).resolve()
+                if not target.is_relative_to(CANVAS.resolve()) or not target.is_file():
+                    return self.reply(404, {"error": "Not found"})
+                return self.reply(200, target.read_bytes(), mime)
             files = {"/":("index.html", "text/html; charset=utf-8"), "/app.js": ("app.js", "text/javascript; charset=utf-8"),
                      "/style.css": ("style.css", "text/css; charset=utf-8")}
             if path in files:
                 name, mime = files[path]
-                return self.reply(200, (ASSETS / name).read_bytes(), mime)
+                body = (ASSETS / name).read_bytes()
+                if path == "/":
+                    nonce = secrets.token_urlsafe(16)
+                    return self.reply(200, body.replace(NONCE_SLOT, nonce.encode()), mime, nonce=nonce)
+                return self.reply(200, body, mime)
             return self.reply(404, {"error": "Not found"})
         except KeyError:
             return self.reply(404, {"error": "Lesson not found"})
