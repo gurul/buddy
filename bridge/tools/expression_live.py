@@ -59,6 +59,8 @@ def check():
         assert result["expressions"]["last"]["label"] == expected
         if expected == "wink":
             assert sum(bool(b.get("wink")) for b in rows) == 1
+            assert any(b.get("wink_closed") for b in rows)
+            assert any(b["active"] and not b.get("wink_closed") for b in rows)
         assert result["expressions"]["last"]["chirp_requested"] is False
         assert all(not b["chirp"] and b["muted"] == muted for b in rows)
         assert any(b["applied"] for b in rows) == applied

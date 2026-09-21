@@ -16,6 +16,13 @@ int main() {
           || a.mood != b.mood || a.curious != b.curious);
     }
   }
+  WinkHold wink;
+  wink.start(100);
+  assert(wink.active(99) && wink.active(749) && !wink.active(750));
+  wink.start(0xffffff00);
+  assert(wink.active(100) && !wink.active(500));
+  assert(winkCurveY(0, 80) == 0 && winkCurveY(80, 80) == 0 && winkCurveY(40, 80) == -12);
+  for (int x=0; x<=80; ++x) assert(winkCurveY(x,80) == winkCurveY(80-x,80));
   State s;
   assert(s.accept({1, Happy, 4000}, 100));
   assert(s.active(99) && s.active(4099) && !s.active(4100));

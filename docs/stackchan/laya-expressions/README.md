@@ -4,7 +4,7 @@ Laya controls **eyes only**. Buddy's original chirps, caption babble, sound sett
 
 The model runs in the Mac bridge; the ESP32 renders its temporary expression overlay during speech and idle/explore. Spoken user turns, stable clauses in Buddy's streamed replies, and diary thoughts selected for the screen feed one dedicated worker. One pending event replaces older work; inference stays off the daemon event loop. Events are sent at most every 1.2 seconds, discarded after four seconds, and independently expired by the board.
 
-Laya chooses eleven expressions: calm, happy, curious, affection, surprised, sad, worried, skeptical, frustrated, excited, and wink. Each has a distinct combination of eyelid shape, size, symmetry, rounding and blink tempo. A wink briefly closes the left eye once per event, then returns to an open playful expression. Listening, permission prompts, error phases, screen-off and clock display retain priority. The firmware expression handler has no sound or motor control. Caption sounds follow their original behavior even while a Laya eye overlay is active.
+Laya chooses eleven expressions: calm, happy, curious, affection, surprised, sad, worried, skeptical, frustrated, excited, and wink. Each has a distinct combination of eyelid shape, size, symmetry, rounding and blink tempo. A wink fully replaces the left eye with a thick curved line for 650 ms, once per event, while the other eye stays open; it then reopens. Listening, permission prompts, error phases, screen-off and clock display retain priority. The firmware expression handler has no sound or motor control. Caption sounds follow their original behavior even while a Laya eye overlay is active.
 
 ## Model and evidence
 

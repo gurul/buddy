@@ -927,14 +927,16 @@ void loop() {
   }
   // Eye-only ACK after the render path ran. Laya never changes sound.
   static uint32_t expressionReportedId = 0;
-  static bool expressionReportedActive = false, expressionReportedApplied = false;
+  static bool expressionReportedActive = false, expressionReportedApplied = false, reportedWinkClosed = false;
+  bool winkClosed = expressionApplied && eyesWinkClosed();
   bool expressionActive = semanticExpression.active(now);
   if (semanticExpression.request.id && (expressionReportedId != semanticExpression.request.id
-      || expressionReportedActive != expressionActive || expressionReportedApplied != expressionApplied || expressionWinked)) {
-    Serial.printf("{\"expression\":{\"id\":%lu,\"label\":\"%s\",\"active\":%s,\"applied\":%s,\"chirp\":%s,\"wink\":%s,\"muted\":%s,\"phase\":%u,\"fw\":\"%s\"}}\n",
+      || expressionReportedActive != expressionActive || expressionReportedApplied != expressionApplied || expressionWinked || reportedWinkClosed != winkClosed)) {
+    Serial.printf("{\"expression\":{\"id\":%lu,\"label\":\"%s\",\"active\":%s,\"applied\":%s,\"chirp\":%s,\"wink\":%s,\"wink_closed\":%s,\"muted\":%s,\"phase\":%u,\"fw\":\"%s\"}}\n",
       (unsigned long)semanticExpression.request.id, expression::name(semanticExpression.request.kind),
-      expressionActive ? "true" : "false", expressionApplied ? "true" : "false", "false", expressionWinked ? "true" : "false",
+      expressionActive ? "true" : "false", expressionApplied ? "true" : "false", "false", expressionWinked ? "true" : "false", winkClosed ? "true" : "false",
       settings().sound ? "false" : "true", (unsigned)tama.agentState, CLAUDE_PET_GIT_SHA);
+    reportedWinkClosed = winkClosed;
     expressionReportedId = semanticExpression.request.id;
     expressionReportedActive = expressionActive; expressionReportedApplied = expressionApplied;
   }
