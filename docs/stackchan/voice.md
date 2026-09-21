@@ -190,6 +190,17 @@ any transcribed speech resets the idle timer and counts as a barge-in, a TV kept
 ten-minute cap and a stranger's sentence wiped buddy's caption mid-reply. Isolation has to happen on the Mac,
 before the append. `voice_gate.py` does it, behind `CC_BUDDY_VOICE_GATE`:
 
+**Would the Realtime API do it instead?** No. It has what Live lacks for *noise and turns* — input noise
+reduction (`near_field` for a headset, `far_field` for a laptop or room microphone), `server_vad` with a
+threshold, `semantic_vad` with an eagerness, and turn detection that can be switched off so the client drives
+turns — and its input transcription can use `gpt-4o-transcribe-diarize` for speaker *labels*. None of that
+restricts the model to one person: a label on a transcript does not stop the model hearing and answering whoever
+spoke, and a second person or a television at conversational level passes any noise gate. Checked 2026-09-21
+against the installed SDK's types (`openai` 3.13.0: `types/live/` has no turn, noise or speaker field;
+`types/realtime/` has all of the above and no speaker verification) and the
+[Realtime VAD guide](https://developers.openai.com/api/docs/guides/realtime-vad). So the gate is client-side on
+either API, and moving to Realtime would mean rewriting the voice session to gain noise handling only.
+
 ```
 wake         ears.py keeps the last 3 s of microphone audio in RAM; on "hey buddy" that snapshot is the seed
 provisional  until 3 s of voice are enrolled NOTHING is rejected. The speech that starts within 10 s of the
