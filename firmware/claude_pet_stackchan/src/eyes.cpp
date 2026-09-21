@@ -39,6 +39,7 @@ struct EyesKey {
 };
 static EyesKey  cur;
 static expression::WinkHold winkHold;
+static bool winkLineVisible = false;
 static uint8_t  lastPos      = 0xFF;
 static uint32_t peekAt       = 0;    // sleep: next brief eye-open
 static uint32_t peekCloseAt  = 0;
@@ -315,15 +316,18 @@ void eyesTick(uint32_t now) {
     }
   }
   eyes.update();                       // redraws at most every 20 ms
-  if (winking) {
+  // Let the original rounded-square eye collapse first. Its own geometry leads
+  // into the matching lid, rather than replacing a wide-open eye with a symbol.
+  winkLineVisible = winking && eyes.eyeRheightCurrent <= 12;
+  if (winkLineVisible) {
     // Reference-inspired wink: normal rounded-square eye at viewer left, curved closed lid at right.
     int left = eyes.eyeRx, width = eyes.eyeRwidthCurrent;
     int centreY = eyes.eyeRy + eyes.eyeRheightCurrent / 2;
     canvas.fillRect(left - 8, 0, width + 16, EYES_H, 0);
-    int span = width + 4;
+    int span = width > 5 ? width - 5 : 1;
     int startX = left + (width - span) / 2;
     for (int x = 0; x <= span; ++x)
-      canvas.fillCircle(startX + x, centreY + expression::winkCurveY(x, span), 3, 1);
+      canvas.fillCircle(startX + x, centreY + expression::winkCurveY(x, span), 2, 1);
     // A lifted brow over the open eye, only as part of the wink.
     int browWidth = eyes.eyeLwidthCurrent * 3 / 4;
     int browX = eyes.eyeLx + (eyes.eyeLwidthCurrent - browWidth) / 2;
@@ -363,4 +367,4 @@ const char* eyesStatusText(PersonaState s, bool listening, bool explore, uint8_t
 }
 
 void eyesWink() { winkHold.start(millis()); }
-bool eyesWinkClosed() { return winkHold.running; }
+bool eyesWinkClosed() { return winkLineVisible; }

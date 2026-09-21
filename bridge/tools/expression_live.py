@@ -60,7 +60,8 @@ def check():
         if expected == "wink":
             assert sum(bool(b.get("wink")) for b in rows) == 1
             assert any(b.get("wink_closed") for b in rows)
-            assert any(b["active"] and not b.get("wink_closed") for b in rows)
+            closed_at = next(i for i, b in enumerate(rows) if b.get("wink_closed"))
+            assert any(b["active"] and not b.get("wink_closed") for b in rows[closed_at + 1:])
         assert result["expressions"]["last"]["chirp_requested"] is False
         assert all(not b["chirp"] and b["muted"] == muted for b in rows)
         assert any(b["applied"] for b in rows) == applied
