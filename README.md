@@ -241,6 +241,11 @@ capabilities and data flows; they are not required for the default setup.
 See [routing](docs/stackchan/routing.md) for the switches and measured evaluations,
 and [voice and computer control](docs/stackchan/voice.md) for worker details.
 
+A [local Laya expression-tuning study](docs/stackchan/laya-emotion/README.md)
+tests context-sensitive eyes and chirps. It includes trained experimental weights,
+reproducible evaluations, and research references. It remains offline: tuning did
+not improve fresh-scenario accuracy, and its confidence gate abstains.
+
 ## Data and controls
 
 Wake-word detection runs locally. Live voice, tutoring, reasoning and scene
