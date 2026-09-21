@@ -107,6 +107,8 @@ void eyesSetBackground(uint16_t bgRgb565) {
 // Full re-apply for a state; every knob is set so no previous state leaks.
 static void applyState(const EyesKey& k, uint32_t now) {
   bool sleepy = false;
+  eyes.setWidth(EYE_W, EYE_W);
+  eyes.setBorderradius(EYE_R, EYE_R);
   eyes.setHeight(EYE_H, EYE_H);
   eyes.setSweat(OFF);
   eyes.setHFlicker(OFF, 0);
@@ -220,13 +222,14 @@ static void applyState(const EyesKey& k, uint32_t now) {
     sleepy = false;
     peekCloseAt = 0;
     eyes.open();
-    eyes.setMood(kind == expression::Happy || kind == expression::Affection ? HAPPY : DEFAULT);
-    eyes.setCuriosity(kind == expression::Curious || kind == expression::Affection ? ON : OFF);
-    int h = kind == expression::Surprised ? 110 : kind == expression::Happy ? 86
-          : kind == expression::Affection ? 88 : EYE_H;
-    eyes.setHeight(h, h);
+    auto style = expression::style(kind);
+    eyes.setMood(style.mood == 1 ? HAPPY : style.mood == 2 ? TIRED : style.mood == 3 ? ANGRY : DEFAULT);
+    eyes.setWidth(style.width, style.width);
+    eyes.setBorderradius(style.radius, style.radius);
+    eyes.setCuriosity(style.curious ? ON : OFF);
+    eyes.setHeight(style.left, style.right);
     eyes.setHFlicker(OFF, 0);
-    eyes.setAutoblinker(ON, 3, 1);
+    eyes.setAutoblinker(ON, style.blink, 1);
   }
   if (!sleepy) peekAt = 0;
   lastPos = 0xFF;                      // force a position re-apply next eyesLookAt
@@ -323,3 +326,5 @@ const char* eyesStatusText(PersonaState s, bool listening, bool explore, uint8_t
     default:          return "";
   }
 }
+
+void eyesWink() { eyes.blink(true, false); }

@@ -16,8 +16,10 @@ import time
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
+from .eye_model import LABELS, ConversationContext, LiveEyeModel
+
 log = logging.getLogger(__name__)
-LABELS = ("calm", "happy", "curious", "affection", "surprised", "startled")
+
 DEFAULT_MODEL = Path("~/.config/cc-buddy-bridge/models/laya-multilingual-mlx").expanduser()
 
 
@@ -52,6 +54,7 @@ class LiveExpressions:
         self.seq = max(1, int(time.time() * 1000) & 0xFFFFFFFF)  # survives host restarts
         self.generation = 0
         self.last_text = None
+        self.context = ConversationContext()
         self.last_sent_at = -math.inf
         self.last = None
         self.board = None
@@ -62,9 +65,7 @@ class LiveExpressions:
         self.closed = False
 
     def _load(self):
-        from .emotion_policy import LayaExpressionModel
-
-        model = LayaExpressionModel(self.model_path)
+        model = LiveEyeModel(self.model_path)
         model.predict("The room is quiet and nothing has changed.")
         return model
 
@@ -88,7 +89,13 @@ class LiveExpressions:
             self.dropped += 1
         event = self._next_id()
         self.generation += 1
-        self.pending = (event, who, text, self.clock(), self.generation)
+        self.pending = (
+            event,
+            who,
+            self.context.state(who, text, self.clock()),
+            self.clock(),
+            self.generation,
+        )
         self.wake.set()
         return event
 
@@ -97,6 +104,7 @@ class LiveExpressions:
         self.generation += 1
         self.pending = None
         self.last_text = None
+        self.context = ConversationContext()
         self.path.parent.mkdir(parents=True, exist_ok=True)
         tmp = self.path.with_suffix(".tmp")
         tmp.write_text(json.dumps({"enabled": self.enabled}) + "\n")
@@ -144,8 +152,7 @@ class LiveExpressions:
         ):
             raise ValueError("invalid expression probabilities")
         selected = LABELS[max(range(len(values)), key=values.__getitem__)]
-        # Text about a physical disturbance is not itself a fresh physical observation.
-        return ("calm" if selected == "startled" else selected), max(values)
+        return selected, max(values)
 
     async def run(self):
         loop = asyncio.get_running_loop()
@@ -174,11 +181,7 @@ class LiveExpressions:
                 if self.clock() - offered > 4 or not self.connected():
                     self.dropped += 1
                     continue
-                state = (
-                    text
-                    if who in ("user", "demo")
-                    else f"Buddy {'is saying' if who == 'assistant' else 'just noticed'}: {text}"
-                )
+                state = text
                 try:
                     answer = await loop.run_in_executor(self.executor, self.model.predict, state)
                     label, p_top = self.label(answer)
