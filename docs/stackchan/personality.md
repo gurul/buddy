@@ -7,6 +7,10 @@ what it writes is specific and its own. A third layer — **agent phases** — m
 the robot act out the voice conversation and the computer-use task the daemon is
 really running (see [voice.md](voice.md)).
 
+For the research and measured limits of using a local model to select expressions,
+see the [Laya tuning study](laya-emotion/README.md). Its experimental controller is
+not connected to the robot; conversation phases still own the face as described below.
+
 ## 1. The affect engine (`firmware/claude_pet_stackchan/src/mood.cpp`)
 
 The model is the lightweight one most social robots use — a point in the
@@ -317,7 +321,8 @@ them, `photos open` opens the newest.
   as interest measures).
 - **Expression**: Rogel et al. 2026 (arXiv:2605.12786, design for V/A legibility
   before naming emotions), Mishra et al. 2024 (arXiv:2410.14337, eyes alone are
-  weaker than eyes + head + colour), Casso et al. 2022 (arXiv:2209.00983, idle
+  cropped eye-region expressions were recognized less accurately than full faces
+  on Furhat; the study did not test adding head motion or colour), Casso et al. 2022 (arXiv:2209.00983, idle
   tempo must track arousal), Ribeiro & Paiva 2019 (arXiv:1904.02898, layer and
   blend animation channels), Wilms & Oberfeld 2018 (colour: arousal rises with
   saturation and brightness; valence best at medium saturation, green/blue > red).
