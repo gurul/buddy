@@ -600,8 +600,10 @@ class VoiceSession:
         head_pose: Optional[Callable[[str], Awaitable[str]]] = None,   # typed_ask: utterance -> a pose label, or "none"
         gate: Any = None,              # voice_gate.SpeakerGate for this conversation, or None (today's behaviour)
         on_expression: Optional[Callable[[str, str], None]] = None,
+        mac_busy: Callable[[], bool] = lambda: False,       # a task from another door (telegram.py) has the Mac
     ) -> None:
         self.on_expression = on_expression
+        self.mac_busy = mac_busy
         self._expression_chars = 0
         self.head_pose = head_pose
         self.gate = gate
@@ -1246,6 +1248,10 @@ class VoiceSession:
             return {"ok": False, "reason": "computer control is disabled (CC_BUDDY_COMPUTER_CONTROL=0)"}
         if self.task_running:
             return {"ok": False, "reason": "a task is already running; steer or stop it first"}
+        if self.mac_busy():
+            # Two agents on one mouse is not a race worth having: the texted task keeps the Mac.
+            return {"ok": False, "reason": "a task the owner texted is using the Mac right now; it has to finish "
+                                           "or be stopped from the chat first"}
         self.agent = self.agent_factory(self._on_agent_event, self._ask_user)
         self._agent_task = asyncio.create_task(self._run_agent(goal), name="voice-agent")
         # Started, not done. The voice gets that as silent context, and the face goes to
@@ -1697,6 +1703,7 @@ async def open_session(
     head_pose: Optional[Callable[[str], Awaitable[str]]] = None,
     gate: Any = None,
     on_expression: Optional[Callable[[str, str], None]] = None,
+    mac_busy: Callable[[], bool] = lambda: False,
 ) -> None:
     """Run one full conversation on the real Live API — captions to the robot,
     or the real speaker in audio mode.
@@ -1723,7 +1730,7 @@ async def open_session(
                                    memory=memory, on_star=on_star, learning=learning,
                                    think_aloud=think_aloud, lesson_wake=lesson_wake, on_spoken_idea=on_spoken_idea,
                                    on_think_aloud=on_think_aloud, head_pose=head_pose, gate=gate,
-                                   on_expression=on_expression)
+                                   on_expression=on_expression, mac_busy=mac_busy)
             if on_open is not None:
                 on_open(session)
             try:

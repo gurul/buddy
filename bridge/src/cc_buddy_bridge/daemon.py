@@ -16,6 +16,7 @@ if TYPE_CHECKING:
 from . import follow as follow_mod
 from . import photos, voice_agent
 from . import recall as recall_mod
+from . import telegram as telegram_mod
 from .audit import AuditLog
 from .ble import BuddyBLE
 from .caption_pager import CaptionPager, PagerConfig
@@ -250,6 +251,8 @@ class Daemon:
         self._conversation: Optional[asyncio.Task[None]] = None
         self._agent_state = "idle"
         self._active_agent: Optional[ComputerAgent] = None
+        # The text door (telegram.py). None unless CC_BUDDY_TELEGRAM is on with a token and an owner id.
+        self._telegram: Optional[telegram_mod.TelegramInlet] = None
         # "hey buddy, go explore": the voice tool sets this; the explore
         # starts when the conversation has closed, so the board is never
         # asked to hold a conversation pose and pan the room at once.
@@ -377,6 +380,9 @@ class Daemon:
         # record without waiting for a human to run anything.
         tasks.append(asyncio.create_task(self._chat_memory.curate_loop(self._shutdown),
                                          name="chat-memory-curate"))
+        self._telegram = self._make_telegram()
+        if self._telegram is not None:
+            tasks.append(asyncio.create_task(self._telegram.run(), name="telegram"))
         if not self._explore_cfg.enabled:
             log.info("explore: idle start disabled (CC_BUDDY_EXPLORE=0); "
                      "`cc-buddy-bridge explore` and \"go explore\" still work")
@@ -933,7 +939,8 @@ class Daemon:
                                            on_spoken_idea=server.app.append_spoken if server is not None else None,
                                            on_think_aloud=lambda on, lesson_id: Daemon._on_think_aloud(
                                                self, on, lesson_id),
-                                           on_open=lambda session: Daemon._on_voice_session(self, session))
+                                           on_open=lambda session: Daemon._on_voice_session(self, session),
+                                           mac_busy=lambda: Daemon._texted_task_running(self))
         except asyncio.CancelledError:
             self._explore_after_conversation = None      # hushed: stay put
             self._think_aloud_wish = None                # a hush or a stop cancels a pending listen too
@@ -1006,6 +1013,30 @@ class Daemon:
         """The voice tool go_explore: remember the wish; it is granted in
         _converse once the conversation has closed."""
         self._explore_after_conversation = "requested by voice"
+
+    def _texted_task_running(self) -> bool:
+        inlet = getattr(self, "_telegram", None)
+        return inlet is not None and inlet.task_running
+
+    def _desk_has_the_mac(self) -> bool:
+        """For the text door: a spoken conversation is open, or a task it started is still running. One
+        agent on the mouse at a time, and the person at the desk wins."""
+        conversation = getattr(self, "_conversation", None)
+        agent = getattr(self, "_active_agent", None)
+        inlet = getattr(self, "_telegram", None)
+        spoken_task = agent is not None and agent.running and not (inlet is not None and inlet.task_running)
+        return (conversation is not None and not conversation.done()) or spoken_task
+
+    def _make_telegram(self) -> Optional["telegram_mod.TelegramInlet"]:
+        """CC_BUDDY_TELEGRAM=1 with a token and an owner id: the inlet, lent the same agent factory, camera,
+        slow brain and conversation memory the voice session gets. None — today's behaviour — otherwise."""
+        return telegram_mod.make_inlet(
+            telegram_mod.configured(),
+            agent_factory=self._make_agent, agent_enabled=self._agent_cfg.enabled,
+            busy=lambda: Daemon._desk_has_the_mac(self),
+            memory=lambda: recall_mod.opening_brief(self._recall_cfg),
+            on_photo=self._photo_for_owner, thinker=self._thinker,
+            on_state=self._on_agent_state, on_closed=self._remember_conversation)
 
     def _make_agent(self, on_event: Any, ask_user: Any) -> ComputerAgent:
         agent = ComputerAgent(make_response_creator(), config=self._agent_cfg, on_event=on_event, ask_user=ask_user)

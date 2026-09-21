@@ -298,6 +298,21 @@ def test_audio_events_drive_speaker_and_states() -> None:
     assert s.speaker.stops >= 1          # speech_started stops playback (barge-in)
 
 
+def test_start_task_is_refused_while_a_texted_task_has_the_mac() -> None:
+    """telegram.py can own a running task too: two agents never share the mouse (mac_busy)."""
+    busy = {"on": True}
+    s, _, _ = _session(FakeConnection([]), [FakeAgent(None, None)], mac_busy=lambda: busy["on"])
+
+    async def go():
+        refused = s._start_task("open mail")
+        assert refused["ok"] is False and "texted" in refused["reason"] and not s.task_running
+        busy["on"] = False                               # the control: the same call starts once it is free
+        assert s._start_task("open mail")["ok"] is True and s.task_running
+        s._agent_task.cancel()
+        await asyncio.gather(s._agent_task, *s._slow_tasks, return_exceptions=True)
+    asyncio.run(go())
+
+
 def test_start_task_runs_agent_and_reports_result() -> None:
     agent = FakeAgent(None, None, final="Your mail is open.")
     clock = {"now": 0.0}

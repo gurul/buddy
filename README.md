@@ -241,6 +241,12 @@ capabilities and data flows; they are not required for the default setup.
 See [routing](docs/stackchan/routing.md) for the switches and measured evaluations,
 and [voice and computer control](docs/stackchan/voice.md) for worker details.
 
+Away from the desk, the same agent can be reached by text: `telegram.py` long-polls
+the Telegram Bot API (outbound HTTPS only, no open port) and lets one allowlisted
+numeric Telegram id chat with buddy, start and stop a Mac task, answer a task's
+question and receive a photo from the robot. It is **off by default** and needs a
+switch, a bot token and an owner id together. See [text buddy through Telegram](docs/stackchan/telegram.md).
+
 A [local Laya expression-tuning study](docs/stackchan/laya-emotion/README.md)
 tests context-sensitive eyes and chirps. It includes trained experimental weights,
 reproducible evaluations, and research references. It remains offline: tuning did
@@ -251,7 +257,8 @@ not improve fresh-scenario accuracy, and its confidence gate abstains.
 Wake-word detection runs locally. Live voice, tutoring, reasoning and scene
 analysis use configured model providers; relevant audio, text, board images or
 camera frames are sent for those requests. The desktop planner receives screenshots.
-Local storage does not make those features offline.
+Local storage does not make those features offline. With the Telegram door on, what
+you text and what buddy replies also pass through Telegram's servers.
 
 Default persistent data lives under `~/.config/cc-buddy-bridge/`:
 
@@ -280,7 +287,7 @@ for topics, recall, delivery limits and configuration.
 | Path | What is here | Documentation |
 |---|---|---|
 | `firmware/claude_pet_stackchan/` | Active StackChan firmware and C++ host tests | [Build and protocol](docs/stackchan/build.md), [design](DESIGN.md) |
-| `bridge/src/cc_buddy_bridge/` | Daemon, CLI, voice, desktop control, vision and memory | [Bridge reference](bridge/README.md), [voice](docs/stackchan/voice.md), [routing](docs/stackchan/routing.md) |
+| `bridge/src/cc_buddy_bridge/` | Daemon, CLI, voice, desktop control, vision and memory | [Bridge reference](bridge/README.md), [voice](docs/stackchan/voice.md), [routing](docs/stackchan/routing.md), [Telegram](docs/stackchan/telegram.md) |
 | `bridge/src/cc_buddy_bridge/learning/` | Lesson service, tutor, SQLite store and served web assets | [Learning guide](docs/learning.md) |
 | `bridge/web-canvas/` | React/TypeScript whiteboard source and browser checks | [Whiteboard details](docs/learning.md#the-whiteboard-tldraw) |
 | `bridge/tests/`, `bridge/tools/` | Python tests, fixtures and routing/desktop evaluation tools | [Routing evaluations](docs/stackchan/routing.md) |
