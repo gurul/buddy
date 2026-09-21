@@ -1,4 +1,4 @@
-"""Owner-enabled experimental Laya cues. One worker, one pending event, no motion.
+"""Owner-enabled experimental Laya eye cues. One worker, one pending event, no sound or motion.
 
 Uses the original checkpoint: the trained heads did worse on fresh scenarios.
 Top-choice selection here is an explicit experimental policy, NOT a claim that
@@ -72,7 +72,7 @@ class LiveExpressions:
         self.seq = (self.seq + 1) & 0xFFFFFFFF or 1
         return self.seq
 
-    def offer(self, who: str, text: str, *, sound: bool = True) -> int | None:
+    def offer(self, who: str, text: str) -> int | None:
         if (
             not self.enabled
             or self.closed
@@ -88,7 +88,7 @@ class LiveExpressions:
             self.dropped += 1
         event = self._next_id()
         self.generation += 1
-        self.pending = (event, who, text, self.clock(), bool(sound), self.generation)
+        self.pending = (event, who, text, self.clock(), self.generation)
         self.wake.set()
         return event
 
@@ -170,7 +170,7 @@ class LiveExpressions:
                     await asyncio.sleep(delay)
                     continue  # take the newest pending event after the delay
                 item, self.pending = self.pending, None
-                event, who, text, offered, sound, generation = item
+                event, who, text, offered, generation = item
                 if self.clock() - offered > 4 or not self.connected():
                     self.dropped += 1
                     continue
@@ -186,11 +186,8 @@ class LiveExpressions:
                     if not self.enabled or generation != self.generation or age > 4 or not self.connected():
                         self.dropped += 1
                         continue
-                    chirp = (
-                        sound and not self.muted() and self.phase() not in ("listening", "asking", "error")
-                    )
                     ttl = max(500, min(4000, int((4 - age) * 1000)))
-                    cmd = {"cmd": "expression", "id": event, "label": label, "ttl_ms": ttl, "chirp": chirp}
+                    cmd = {"cmd": "expression", "id": event, "label": label, "ttl_ms": ttl, "chirp": False}
                     if await self.send(cmd) is False:
                         raise RuntimeError("board send failed")
                     self.last_sent_at = self.clock()
@@ -202,7 +199,7 @@ class LiveExpressions:
                         "p_top": p_top,
                         "model_ms": answer.get("ms"),
                         "event_to_send_ms": (self.clock() - offered) * 1000,
-                        "chirp_requested": chirp,
+                        "chirp_requested": False,
                     }
                     self.error = ""
                     log.info(

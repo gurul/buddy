@@ -843,7 +843,7 @@ void loop() {
   bool expressionAllowed = expression::allowed(napping || screenOff || clocking,
       baseState == P_ATTENTION || activeState == P_ATTENTION, listenNow || tama.agentState == AG_LISTENING,
       tama.agentState == AG_ASKING, tama.agentState == AG_ERROR);
-  bool expressionApplied = false, expressionChirped = false;
+  bool expressionApplied = false;
   if (napping || screenOff || landscapeClock) {
     // skip sprite render — face-down, powered off, or landscape clock
   } else {
@@ -877,15 +877,10 @@ void loop() {
     }
     eyesTick(now);
     expressionApplied = expressionAllowed && semanticExpression.active(now);
-    if (semanticExpression.wantsChirp(now, expressionApplied, !settings().sound, chirpPlaying())) {
-      auto kind = semanticExpression.request.kind;
-      chirpPlay(kind == expression::Curious ? CHIRP_CURIOUS : kind == expression::Surprised ? CHIRP_SURPRISE : CHIRP_WARBLE);
-      if (chirpPlaying()) { semanticExpression.played(now); expressionChirped = true; }
-    }
     static uint32_t captionSeenAt = 0;
     if (captionUp && tama.captionAtMs != captionSeenAt) {
       captionSeenAt = tama.captionAtMs;
-      if (tama.captionChirp && !expressionApplied) chirpPlay(CHIRP_TALK);            // one babble per page, host decides
+      if (tama.captionChirp) chirpPlay(CHIRP_TALK);            // one babble per page, host decides
       diagLog("caption p%u/%u %u lines hold %u", (unsigned)tama.captionPage, (unsigned)tama.captionOf,
               (unsigned)tama.captionNLines, (unsigned)tama.captionHoldMs);
     }
@@ -923,16 +918,15 @@ void loop() {
       spr.printf("installing %luK / %luK", done/1024, total/1024);
     }
   }
-  // ACK only after the eye render path ran; sound ACK requires speaker activity.
+  // Eye-only ACK after the render path ran. Laya never changes sound.
   static uint32_t expressionReportedId = 0;
   static bool expressionReportedActive = false, expressionReportedApplied = false;
   bool expressionActive = semanticExpression.active(now);
-  if (!expressionAllowed) semanticExpression.pending = false;
   if (semanticExpression.request.id && (expressionReportedId != semanticExpression.request.id
-      || expressionReportedActive != expressionActive || expressionReportedApplied != expressionApplied || expressionChirped)) {
+      || expressionReportedActive != expressionActive || expressionReportedApplied != expressionApplied)) {
     Serial.printf("{\"expression\":{\"id\":%lu,\"label\":\"%s\",\"active\":%s,\"applied\":%s,\"chirp\":%s,\"muted\":%s,\"phase\":%u,\"fw\":\"%s\"}}\n",
       (unsigned long)semanticExpression.request.id, expression::name(semanticExpression.request.kind),
-      expressionActive ? "true" : "false", expressionApplied ? "true" : "false", expressionChirped ? "true" : "false",
+      expressionActive ? "true" : "false", expressionApplied ? "true" : "false", "false",
       settings().sound ? "false" : "true", (unsigned)tama.agentState, CLAUDE_PET_GIT_SHA);
     expressionReportedId = semanticExpression.request.id;
     expressionReportedActive = expressionActive; expressionReportedApplied = expressionApplied;
