@@ -104,8 +104,28 @@ max(300 ms, 6 ms/deg)). While awake and not gliding, a two-sine micro-drift
 depend on the servo zero (NVS `servo/zero_pos_2`): bench-tune them.
 
 Chirps (`src/chirp.cpp`) are synthesized to 8-bit PCM at 16 kHz into two 32 KB
-PSRAM buffers and played through `M5.Speaker.playRaw()`; nothing blocks. Top
-touch is armed 3 s after boot: the Si12T baseline is stale while the servo
+PSRAM buffers and played asynchronously through `M5.Speaker.playRaw()`. The
+CoreS3 amplifier is disabled during setup and between sounds to prevent idle
+hiss/whine. `chirpUpdate()` allows 150 ms after the mixer goes idle for the I2S
+DMA tail to drain, then calls `M5.Speaker.end()` (logged as
+`[chirp] speaker off (idle)`). The next sound restarts the speaker. Muting
+immediately stops playback and disables the amplifier; unmuting alone leaves
+it off. Startup/shutdown can briefly wait for the driver, but the drain timer
+does not delay the main loop. To verify the lifecycle without hardware:
+
+```bash
+c++ -std=c++17 -Wall -Wextra -Werror \
+  -Ifirmware/claude_pet_stackchan/host/chirp_stubs \
+  firmware/claude_pet_stackchan/host/chirp_test.cpp \
+  firmware/claude_pet_stackchan/src/chirp.cpp -o /tmp/buddy-chirp-test
+/tmp/buddy-chirp-test
+```
+
+After flashing, listen through a chirp and the following idle interval, and
+check that mute stops an active chirp and unmute allows the next one. If noise
+continues with the amplifier off, the source needs separate hardware diagnosis.
+
+Top touch is armed 3 s after boot: the Si12T baseline is stale while the servo
 rail comes up (the middle zone read pressed at boot, a phantom hold).
 
 ## Controls

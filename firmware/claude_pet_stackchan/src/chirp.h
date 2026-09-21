@@ -7,7 +7,8 @@
 //   beeps   = 70..170 ms at 2000 + (-1700..2000) Hz with 0..30 ms gaps
 // Each phrase is synthesised into a PCM buffer (16 kHz, 8-bit unsigned,
 // square wave through a phase accumulator, 2 ms attack/release per segment)
-// and handed to M5.Speaker.playRaw() non-blocking. Never delays.
+// and handed to M5.Speaker.playRaw() asynchronously. Speaker startup/shutdown
+// may briefly wait for the driver; the idle drain timer never delays the loop.
 // Plain header: no M5 types, safe for board_compat.cpp and body.cpp.
 #include <stdint.h>
 
@@ -32,13 +33,14 @@ enum ChirpKind : uint8_t {
 // Allocates two 32 KB PSRAM buffers (double-buffered so a forced phrase never
 // rewrites the buffer the speaker task is still reading).
 void chirpBegin();
-// Mute switch (settings().sound). Muted requests are dropped silently.
+// Mute switch (settings().sound). Mute stops playback and disables the amp;
+// muted requests are dropped silently. Unmute waits for a sound to start it.
 void chirpSetEnabled(bool on);
 // Synthesise + start a phrase. Dropped while another phrase plays unless
 // `force`, which stops the current one first. Random base per call.
 void chirpPlay(ChirpKind kind, bool force = false);
 // Plain note (replaces BeepCompat::tone): freq Hz for ms, same drop rule.
 void chirpBeep(uint16_t freq, uint16_t ms);
-// Call once per loop(): bookkeeping when the speaker goes idle.
+// Call once per loop(): disable the amp after the idle DMA tail has drained.
 void chirpUpdate();
 bool chirpPlaying();

@@ -19,6 +19,9 @@ void halBegin() {
   // touch, speaker, RTC, power), then brings up the PY32 expander (servo
   // rail on, 12 LEDs), the Feetech bus + Motion task, and the INA226.
   M5StackChan.begin();
+  // begin() enables the CoreS3 amplifier. Keep it off through setup and
+  // between chirps; playRaw() starts the speaker again on demand.
+  M5.Speaker.end();
   // The pet renders a 320x240 landscape frame. M5GFX picks the panel's
   // native orientation for CoreS3; only correct it if that came up portrait.
   if (M5.Display.width() < M5.Display.height()) {

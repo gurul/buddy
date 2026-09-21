@@ -177,6 +177,9 @@ bridge/.venv/bin/cc-buddy-bridge ears-check
 tail -f ~/Library/Logs/cc-buddy-bridge.log
 ```
 
+The speaker amplifier stays off between chirps to prevent idle hiss or whine.
+If an older build makes noise between beeps, reflash with the command above.
+
 Try “hey buddy, what time is it?”, “hey buddy, open Safari”, or “hey buddy, go
 explore.” For the desktop widget and diary app, follow the separate
 [widget build and signing instructions](docs/stackchan/widget.md) (macOS 14+).
