@@ -1,6 +1,7 @@
 #pragma once
 #include <stdint.h>
 #include <string.h>
+#include <math.h>
 #include "ticks.h"
 
 // Transient semantic eyes only. No pose or actuator fields.
@@ -32,11 +33,18 @@ inline Style style(Kind kind) {
     default:        return {96, 96, 96, 22, 0, 3, false};
   }
 }
-// A visible closed-eye hold; the arch peaks 12 px above its endpoints.
+// Same rounded-square lid: flat middle, 22 px corner zones, shallow 8 px rise.
 constexpr uint32_t winkHoldMs = 650;
 inline int winkCurveY(int x, int width) {
-  return width > 0 ? -48 * x * (width - x) / (width * width) : 0;
+  if (width <= 0) return 0;
+  int radius = width / 2 < 22 ? width / 2 : 22;
+  if (radius <= 0) return 0;
+  int edge = x < width - x ? x : width - x;
+  if (edge >= radius) return -8;
+  float t = (float)(radius - edge) / radius;
+  return -(int)lroundf(8.0f * sqrtf(1.0f - t * t));
 }
+
 struct WinkHold {
   uint32_t at = 0;
   bool running = false;
