@@ -255,6 +255,12 @@ class Ears:
         self._stream: Any = None
         self._silent_since: Optional[float] = None
         self._silence_warned = False
+        # The seconds before a wake word, in RAM only: the wake utterance is what voice_gate.py enrols a
+        # conversation's speaker from. Cleared once taken; never written anywhere.
+        from .voice_gate import WakeRing
+
+        self._ring = WakeRing()
+        self.last_wake_audio = b""
         self.blocks = 0
         self.last_rms = 0.0
 
@@ -288,9 +294,12 @@ class Ears:
             return None            # muted: never wake on our own voice
         if self._spotter is None:
             return None
+        self._ring.add(np.asarray(block_int16, dtype=np.int16).tobytes())
         samples = np.asarray(block_int16, dtype=np.float32) / 32768.0
         hit = self.gate.consider(self._spotter.feed(samples, SAMPLE_RATE), now)
         if hit:
+            self.last_wake_audio = self._ring.snapshot()
+            self._ring.clear()
             self.loop.call_soon_threadsafe(self.on_wake, hit)
         return hit
 

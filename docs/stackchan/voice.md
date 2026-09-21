@@ -180,6 +180,66 @@ The two it caught on its first day (2026-09-21), both now off the loop:
   791 MB here) on the loop; the board sat unsynced and the microphone stayed closed
   until it finished. The sweep and the history seed now run in a thread.
 
+## The voice gate: only the person who woke buddy
+
+buddy's live voice is OpenAI's **Live API** (`gpt-live-1`), not the Realtime API: it has no turn detection, no
+noise reduction and no speaker setting a client can touch — only `input_audio.append`, `mute` and `unmute`
+([live conversations](https://developers.openai.com/api/docs/guides/live-conversations), fetched 2026-09-21).
+The model hears whatever is appended. So a television, a call or a second person were answered; and because
+any transcribed speech resets the idle timer and counts as a barge-in, a TV kept a conversation open to its
+ten-minute cap and a stranger's sentence wiped buddy's caption mid-reply. Isolation has to happen on the Mac,
+before the append. `voice_gate.py` does it, behind `CC_BUDDY_VOICE_GATE`:
+
+```
+wake         ears.py keeps the last 3 s of microphone audio in RAM; on "hey buddy" that snapshot is the seed
+provisional  until 3 s of voice are enrolled NOTHING is rejected. The speech that starts within 10 s of the
+             wake — the query itself — is forwarded and enrolled, whatever it scores
+locked       speech is cut into segments by energy. The first 0.6 s of a segment is held back and embedded
+             (sherpa-onnx TitaNet-small, already a dependency, ~10 ms). A match is forwarded — the held audio
+             in one burst, then live. No match yet: hold on to 1.5 s and judge again; nothing is rejected on
+             0.6 s. Still no match: SILENCE of the same length goes to the model, which wants a continuous
+             stream and needs quiet to close a turn. A going-on segment is re-scored every 0.5 s: two low
+             scores cut it (someone took over), one good score opens it (the owner spoke up)
+adapt        only speech close to the enrolled voice AND to the seed moves it: a TV cannot walk it
+reset        at the end of the conversation the voice is dropped. Nothing about a voice touches the disk
+```
+
+**It is for queries, not for notes.** In a think-aloud lesson buddy is a listener taking notes on whoever is
+speaking, so nothing is judged there; a conversation opened without a wake word (the lesson toggle) has no
+seed and is ungated too. While a yes/no is awaited or a task is running, a short answer is never held back:
+"stop" must not depend on sounding like yourself.
+
+**It fails open, except where it is sure.** No model file, an embedder that raised, a wake snapshot with no
+voice in it, a segment too short to judge, or nothing accepted at all since the wake (the enrolment is what is
+wrong): all of those forward the audio as before. It closes only on a confident mismatch — the long, plainly
+different segments, which are the TV and the other person. Once it has heard its owner, a TV that talks for a
+minute is rejected for a minute; the conversation then idles out as it should, and the next "hey buddy"
+enrols afresh.
+
+**What was measured, and what was not.** `tools/voice_gate_eval.py` replays recordings through the real gate
+and the real model. On sherpa-onnx's three sample speakers (clean, read, Mandarin), each in turn the owner with
+a 0.8 s wake:
+
+| owner | owner speech silenced (bar ≤ 5 %) | other speech forwarded (bar ≤ 20 %; gate off = 100 %) |
+|---|---|---|
+| speaker 1 | 0.0 % | 9.8 % |
+| speaker 2 (halting; his own speech scored 0.26–0.39) | 4.7 % | 0.0 % |
+| speaker 3 | 0.0 % | 13.6 % |
+
+The replay is what shaped the design — the first version judged on the 0.7 s wake seed and silenced 54 % of
+speaker 2, which is why the seed is never evidence and nothing is rejected on 0.6 s — and **the cut-offs were
+set on this same replay, so these are tuning-set numbers**, from three voices that are not yours, in no room
+at all. That is why it ships `off`. Run `shadow` for a few days: the daemon log carries every decision's score
+(`voice gate[shadow]: locked 1.4 s silence score=0.12 …`, never words, never audio), and the line at the end of
+each conversation says how many seconds `on` would have silenced. Then score your own recordings — you at 0.5,
+1.5 and 3 m, one-word answers, another person, the TV, buddy's own voice from the Mac speaker — with
+`voice_gate_eval.py --check` before switching it `on`.
+
+**Limits.** Overlapping speech is not separated: you talking over the TV is forwarded whole or silenced whole.
+The first sentence after the wake is always heard, whoever says it. One-word turns pass on context, not on
+identity. And the gate changes what reaches the model, not what the model does with it, so the prompt also
+tells buddy that other voices are background.
+
 ## Knobs
 
 | Variable | Default | Purpose |
@@ -225,6 +285,8 @@ The two it caught on its first day (2026-09-21), both now off the loop:
 | `CC_BUDDY_ROUTER_MODEL` | `off` | `jev`: ask Jev, in its own idiom, about a request the rules did not recognise; it may only add a bare launch. The request's words leave the Mac ([routing.md](routing.md#ask-each-one-in-its-own-idiom)) |
 | `CC_BUDDY_LANE_FIRST` | `1` | the router: before the planner's first turn, the lane tries to finish a request whose every word one labelled control accounts for; the default is the router eval's decision (see [Lane first](#lane-first-the-router-before-the-planner)) |
 | `CC_BUDDY_FAST_LANE_DECIDE` | `keyword` | who picks a lane step: `keyword` (the code gate alone, no model loaded or asked), `model` (the gate first, the decider on the rest) or `jev` (the gate proposes, hosted Jev can refuse — [routing.md](routing.md#plan-once-execute-with-jev)) |
+| `CC_BUDDY_VOICE_GATE` | `off` | `shadow` or `on`: only the person who said the wake word reaches the model ([below](#the-voice-gate-only-the-person-who-woke-buddy)). `shadow` judges and logs every decision and changes no audio. Needs `~/.config/cc-buddy-bridge/models/nemo_en_titanet_small.onnx` (40 MB); without it buddy hears as it always has |
+| `CC_BUDDY_VOICE_GATE_MODEL` | that path | another sherpa-onnx speaker-embedding model |
 | `CC_BUDDY_PLAN_EXEC` | `0` | `1`: plan once, execute with no planner turn between steps ([routing.md](routing.md#plan-once-execute-with-jev)) |
 | `CC_BUDDY_DECIDER` | `laya` | the decider behind `model`: `laya` (local, nothing leaves the Mac) or `jev` (TypeSafe's hosted model, `jev.py`; it is sent the window title and the menu's labels, and is never loaded in `keyword` mode) |
 | `CC_BUDDY_FAST_LANE_STYLE` | `hinted` | how the lane words its question to the local model: `jev`, `compact` or `hinted` (the eval's winner) |

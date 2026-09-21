@@ -823,6 +823,32 @@ class Daemon:
         conversation = self._converse(lesson_wake=True) if lesson else self._converse()
         self._conversation = asyncio.create_task(conversation, name="voice-conversation")
 
+    async def _voice_gate_for(self, think_aloud: Optional[dict[str, Any]]) -> Optional[Any]:
+        """CC_BUDDY_VOICE_GATE=shadow|on: this conversation's speaker gate, enrolled from the audio that woke
+        buddy (voice_gate.py). None — today's behaviour — when it is off, when the conversation was opened
+        without a wake word, or for a think-aloud lesson, where buddy takes notes on whoever speaks. The model
+        loads once, off the loop; anything wrong with it is simply "no gate"."""
+        from . import voice_gate
+
+        ears = getattr(self, "_ears", None)
+        wake = getattr(ears, "last_wake_audio", b"") or b""
+        if ears is not None and wake:
+            ears.last_wake_audio = b""                   # one conversation's enrolment, then gone
+        cfg = voice_gate.configured()
+        if cfg.mode == "off" or think_aloud is not None or not wake:
+            return None
+
+        def make() -> Optional[Any]:
+            if getattr(self, "_voice_embedder", None) is None:
+                self._voice_embedder = voice_gate.SherpaEmbedder(cfg.model)
+            return voice_gate.build(cfg, wake, embedder=self._voice_embedder)
+
+        try:
+            return await asyncio.to_thread(make)
+        except Exception as e:  # noqa: BLE001 — no model file, a bad one: buddy hears as it always has
+            log.warning("voice gate: off for this conversation (%s: %s)", type(e).__name__, e)
+            return None
+
     def _head_pose_asker(self) -> Optional[Any]:
         """CC_BUDDY_HEAD_MODEL=jev: "look left" is decided by Jev, asked in its own idiom (typed_ask.py), in a
         quarter of a second instead of ~3.2 s through the backend. Off by default: the words of a turn that
@@ -880,6 +906,7 @@ class Daemon:
         memory = recall_mod.opening_brief(self._recall_cfg)
         if memory:
             log.info("recall: %s", memory)
+        gate = await Daemon._voice_gate_for(self, think_aloud)
         try:
             await voice_agent.open_session(mic, self._on_agent_state, self._make_agent,
                                            config=self._voice_cfg, agent_enabled=self._agent_cfg.enabled,
@@ -892,7 +919,7 @@ class Daemon:
                                            on_star=self._star_by_voice,
                                            learning=server.app.voice if server is not None else None,
                                            think_aloud=think_aloud, lesson_wake=lesson_wake,
-                                           head_pose=Daemon._head_pose_asker(self),
+                                           head_pose=Daemon._head_pose_asker(self), gate=gate,
                                            on_spoken_idea=server.app.append_spoken if server is not None else None,
                                            on_think_aloud=lambda on, lesson_id: Daemon._on_think_aloud(
                                                self, on, lesson_id),
@@ -908,6 +935,9 @@ class Daemon:
             keepalive.cancel()
             await asyncio.gather(keepalive, return_exceptions=True)
             self._ears.unsubscribe(mic)                  # the microphone stops reaching the session here
+            if gate is not None:
+                log.info("voice gate: %s", gate.summary())   # counts and seconds only: never words, never audio
+                gate.reset()                             # the enrolled voice does not outlive the conversation
             self._voice_session = None
             if getattr(self, "_think_aloud_state", "off") != "off":
                 Daemon._on_think_aloud(self, False, None)
