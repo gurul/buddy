@@ -224,7 +224,8 @@ The two it caught on its first day (2026-09-21), both now off the loop:
 | `CC_BUDDY_REFLEXES` | `1` | before the planner: launch an installed app or open a web search in code, about 2 s instead of 9–32 s; the default is `tools/route_eval.py`'s decision on an unseen holdout ([routing.md](routing.md)) |
 | `CC_BUDDY_ROUTER_MODEL` | `off` | `jev`: ask Jev, in its own idiom, about a request the rules did not recognise; it may only add a bare launch. The request's words leave the Mac ([routing.md](routing.md#ask-each-one-in-its-own-idiom)) |
 | `CC_BUDDY_LANE_FIRST` | `1` | the router: before the planner's first turn, the lane tries to finish a request whose every word one labelled control accounts for; the default is the router eval's decision (see [Lane first](#lane-first-the-router-before-the-planner)) |
-| `CC_BUDDY_FAST_LANE_DECIDE` | `keyword` | who picks a lane step: `keyword` (the code gate alone, no model loaded or asked) or `model` (the gate first, the decider on the rest) |
+| `CC_BUDDY_FAST_LANE_DECIDE` | `keyword` | who picks a lane step: `keyword` (the code gate alone, no model loaded or asked), `model` (the gate first, the decider on the rest) or `jev` (the gate proposes, hosted Jev can refuse — [routing.md](routing.md#plan-once-execute-with-jev)) |
+| `CC_BUDDY_PLAN_EXEC` | `0` | `1`: plan once, execute with no planner turn between steps ([routing.md](routing.md#plan-once-execute-with-jev)) |
 | `CC_BUDDY_DECIDER` | `laya` | the decider behind `model`: `laya` (local, nothing leaves the Mac) or `jev` (TypeSafe's hosted model, `jev.py`; it is sent the window title and the menu's labels, and is never loaded in `keyword` mode) |
 | `CC_BUDDY_FAST_LANE_STYLE` | `hinted` | how the lane words its question to the local model: `jev`, `compact` or `hinted` (the eval's winner) |
 | `CC_BUDDY_LAYA_MODEL` | `~/.config/cc-buddy-bridge/models/laya-multilingual-mlx` | the Laya MLX checkpoint directory the worker loads |

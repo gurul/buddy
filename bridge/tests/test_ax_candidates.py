@@ -90,10 +90,17 @@ POSITIVES = ["Delete Event", "Don't Save", "Don’t Save", "Replace", "OK", "Rem
              "Send", "Pay now", "Sign in", "Log Out", "Move to Trash", "Close Window", "Share…", "Continue",
              "Apply", "Yes", "Empty Trash", "System Settings…", "Install now", "Discard changes",
              "Allow", "Upload", "Report", "Block sender", "Accept", "Agree", "Quit Calendar", "Restart",
-             LONG_LABEL]
+             LONG_LABEL,
+             # 2026-09-21: every one of these read as harmless before the plan executor's audit
+             "Place Order", "Place your order", "Order Now", "Confirm", "Book now", "Publish", "Transfer",
+             "Clear History", "Cancel Subscription", "Merge pull request", "Format Disk", "Turn Off",
+             "Turn On FileVault", "Approve", "Kill", "Add to Cart", "Mark as Spam", "Revert", "Sign Up",
+             "Create Account"]
 NEGATIVES = ["Postcode", "Composer", "Dispatcher", "Week", "Accent color", "Reading List", "Sidebar",
              "Downloads", "Today", "Month", "Search Wikipedia", "Notes", "Calls", "Applications",
-             "Blocked", "Replay", "Recents", "Sender", "Payments history", "Trashcan icon", "Continuous"]
+             "Blocked", "Replay", "Recents", "Sender", "Payments history", "Trashcan icon", "Continuous",
+             "Bookmarks", "Books", "Orderly", "Sort Order", "Forward", "Format", "Formatting", "Transfers",
+             "Confirmation", "Skills", "Turntable", "Publisher", "Merge All Windows"]
 
 
 def test_sensitive_label_table_positives() -> None:

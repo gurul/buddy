@@ -78,6 +78,14 @@ LOCAL_VERIFY_MODES = ("off", "shadow")     # "on" (short-circuiting the model's 
 DEFAULT_LOCAL_VERIFY = "shadow"
 VERIFY_WORKER_TIMEOUT_SECS = 5.0
 LANE_FIRST_TIMEOUT_SECS = 12.0             # ≤ 4 clicks × (snapshot 0.4 + click 0.2 + settle 1.0 + snapshot 0.4) + slack
+OUTLINE_TIMEOUT_SECS = 4.0                 # one AX snapshot (0.04–0.43 s measured) plus slack
+RUN_PLAN_TIMEOUT_SECS = 45.0               # plan_executor.MAX_WALL_SECS (30) + an app launch's wait
+# Plan once, then execute with no planner turn between steps (plan_contract.py, plan_executor.py). OFF until
+# tools/plan_ab.py has measured it against the turn-by-turn loop on tasks with a code oracle; the owner's
+# switch is CC_BUDDY_PLAN_EXEC=1.
+PLAN_EXEC_DEFAULT: bool = False
+DEFAULT_PLAN_EXEC_EFFORT = "low"           # the plan is short and typed; "high" is the recovery loop's
+MAX_PLAN_CONFIRMS = 3                      # human yes/no questions one plan may ask
 
 INSTRUCTIONS_TEMPLATE = """You are buddy, a small desk robot, operating the human's own Mac for them by voice request.
 
@@ -282,6 +290,8 @@ class AgentConfig:
     lane_first: bool = LANE_FIRST_DEFAULT          # the router runs before the planner's first turn (lane_router.py)
     reflexes: bool = task_router.REFLEX_DEFAULT    # task_router.py: launch an app / open a search with no model at all
     router_model: str = task_router.ROUTER_MODEL_DEFAULT   # off | jev: asked only for wording the rules do not know
+    plan_exec: bool = PLAN_EXEC_DEFAULT            # the planner plans once; plan_executor.py walks it
+    plan_exec_effort: str = DEFAULT_PLAN_EXEC_EFFORT
 
 
 def _effort(env: Any, key: str, default: str) -> str:
@@ -335,9 +345,12 @@ def configured(environ: Any = None) -> AgentConfig:
     router_model = (env.get("CC_BUDDY_ROUTER_MODEL") or "").strip().lower()
     if router_model not in task_router.ROUTER_MODELS:
         router_model = task_router.ROUTER_MODEL_DEFAULT
+    raw_plan = (env.get("CC_BUDDY_PLAN_EXEC") or "").strip().lower()
+    plan_exec = PLAN_EXEC_DEFAULT if not raw_plan else raw_plan in ("1", "true", "yes", "on")
     return AgentConfig(
         local_verify=local_verify, fast_lane=fast_lane, lane_decide=lane_decide, lane_first=lane_first,
-        reflexes=reflexes, router_model=router_model,
+        reflexes=reflexes, router_model=router_model, plan_exec=plan_exec,
+        plan_exec_effort=_effort(env, "CC_BUDDY_PLAN_EXEC_REASONING", DEFAULT_PLAN_EXEC_EFFORT),
         enabled=enabled, model=model, max_turns=turns, runs_dir=runs,
         reasoning_effort=_effort(env, "CC_BUDDY_AGENT_REASONING", DEFAULT_REASONING_EFFORT),
         plan_reasoning_effort=_effort(env, "CC_BUDDY_AGENT_PLAN_REASONING", DEFAULT_PLAN_REASONING_EFFORT),
@@ -460,6 +473,34 @@ class WorkerClient:
         if not isinstance(route, dict):
             return {"status": "unavailable", "reason": "no route in the worker reply"}
         return route
+
+    async def outline(self, timeout: float = OUTLINE_TIMEOUT_SECS) -> dict[str, Any]:
+        """The front window's controls as the planner is shown them: {"app", "lines"}. Never restarts the
+        worker: no outline means the planner plans from the request alone."""
+        return await self._soft({"operation": "outline"}, "outline", timeout, {"app": "", "lines": []})
+
+    async def run_plan(self, plan: dict[str, Any], request: str, start: int = 0,
+                       approved: Optional[dict[str, str]] = None,
+                       timeout: float = RUN_PLAN_TIMEOUT_SECS) -> dict[str, Any]:
+        """Walk a plan in the worker (desktop_worker.run_plan): PlanResult.to_dict(). A timeout or a dead
+        pipe reads as `partial` with an unknown ledger — the turn-by-turn loop then looks for itself."""
+        body = {"operation": "run_plan", "plan": plan, "request": request, "start": int(start),
+                "approved": dict(approved or {})}
+        return await self._soft(body, "run_plan", timeout, {"status": "partial", "next_index": int(start),
+                                                           "ledger": [], "reason": "worker"})
+
+    async def _soft(self, body: dict[str, Any], key: str, timeout: float, fallback: dict[str, Any]) -> dict[str, Any]:
+        if self.proc is None or self.proc.stdin is None or self.proc.stdout is None:
+            return {**fallback, "reason": "desktop worker is not running"}
+        try:
+            msg = await self._exchange(body, timeout)
+        except asyncio.TimeoutError:
+            self._grace = timeout
+            return {**fallback, "reason": "timeout"}
+        except (OSError, ValueError) as e:
+            return {**fallback, "reason": f"{type(e).__name__}: {e}"[:200]}
+        value = msg.get(key) if isinstance(msg, dict) else None
+        return value if isinstance(value, dict) else {**fallback, "reason": "no reply"}
 
     async def _exchange(self, body: dict[str, Any], timeout: float) -> Optional[dict[str, Any]]:
         """One request, the reply with the matching id (stale replies from a timed-out
@@ -806,6 +847,7 @@ class ComputerAgent:
         cfg = self.config
         previous: Optional[str] = None
         lane_note = ""
+        lane_clicked = False
         plan = None
         if cfg.reflexes:
             # In a thread: the rules are microseconds, but a hosted model is a network call, and the
@@ -827,11 +869,20 @@ class ComputerAgent:
                 return answer
             clicked = [str(c) for c in routed.get("clicked") or []]
             if clicked:
+                lane_clicked = True
                 self._acted = True                  # the lane clicked: the planner's final answer gets checked
                 why = routed.get("reason") or "unverified"
                 lane_note = ("\n\n[note] Before you started, the fast lane already clicked, in order: "
                              + ", ".join(f'"{c}"' for c in clicked) + f". It stopped there ({why}). "
                              "Start from the screenshot; do not repeat those clicks.")
+        # A launch reflex before this point is what the plan wants: the outline is then the right app's
+        # window. Lane clicks are not — the screen has moved under a request that is half done.
+        if cfg.plan_exec and not lane_clicked and not task_router.TELL_ME.search(goal):
+            answer, plan_note = await self._plan_once(goal, worker)
+            if answer:
+                self._emit("final", answer, 0)
+                return answer
+            lane_note = plan_note or lane_note
         items = await self._interruptible(worker.observe())
         texts = [o["text"] for o in items if o.get("type") == "input_text"]
         context = texts[0] if texts else ""          # the context line; the worker's [after] line is noise here
@@ -1032,6 +1083,80 @@ class ComputerAgent:
         for line in (routed.get("log") or [])[-2:]:
             self._emit("progress", str(line), 0)
         return routed
+
+    async def _plan_once(self, goal: str, worker: Any) -> tuple[str, str]:
+        """Plan once, execute without a planner turn between steps or at the end.
+
+        Returns (what to say, "") when the plan ran to a code-checked finish or the human said no, and
+        ("", a [note] for the turn-by-turn loop) otherwise — that loop is the floor: a plan that cannot be
+        made, parsed or finished costs one short call and then today's behaviour, from the screen as the
+        executor left it. A consequential step asks the human directly (`_ask`), with no planner turn;
+        nothing in a plan can pre-approve one."""
+        from . import plan_contract as pc
+
+        t0 = self._clock()
+        outline = await self._interruptible(worker.outline())
+        named = task_router.find_app_mention(goal, task_router.installed_apps())
+        if named and named.casefold() != str(outline.get("app") or "").casefold():
+            # The request names an app that is not in front: the planner would plan blind (live, 2026-09-21: a
+            # checkpoint instead of a click). Open it first, in the worker, and read ITS window.
+            try:
+                await self._interruptible(worker.execute(f"open_app({named!r})"))
+                self._acted = True
+                outline = await self._interruptible(worker.outline())
+            except (Cancelled, FailSafe):
+                raise
+            except Exception as e:  # noqa: BLE001 — the plan's own open_app step is the fallback
+                log.info("agent: could not open %s before planning (%s)", named, type(e).__name__)
+        req = pc.plan_request(self.config.model, goal, app=str(outline.get("app") or ""),
+                              outline=[str(x) for x in outline.get("lines") or []],
+                              apps=task_router.installed_apps(), effort=self.config.plan_exec_effort,
+                              timeout=self.config.api_timeout_secs)
+        try:
+            response = await self._interruptible(self._create(req, 0))
+            plan = pc.parse_plan(json.loads(classify_response(response).text), goal)
+        except (Cancelled, FailSafe):
+            raise
+        except Exception as e:  # noqa: BLE001 — no plan is "the planner does it turn by turn", never a failed task
+            self._log({"turn": 0, "plan": {"error": f"{type(e).__name__}: {e}"[:200],
+                                           "secs": round(self._clock() - t0, 2)}})
+            return "", ""
+        plan_dict = {**pc.plan_to_dict(plan), "app": str(outline.get("app") or "")}
+        self._log({"turn": 0, "plan": {**plan_dict, "secs": round(self._clock() - t0, 2),
+                                       "outline_lines": len(outline.get("lines") or [])}})
+        if plan.needs_eyes:
+            return "", ""
+        approved: dict[str, str] = {}
+        start, result = 0, {}
+        for _ in range(MAX_PLAN_CONFIRMS + 1):
+            result = await self._interruptible(worker.run_plan(plan_dict, goal, start=start, approved=approved))
+            self._log({"turn": 0, "ledger": result})
+            for entry in result.get("ledger") or []:
+                if entry.get("effect") != "refused":
+                    self._acted = True
+                    self._emit("progress", str(entry.get("step") or ""), 0)
+            if result.get("status") != "needs_human":
+                break
+            start = int(result.get("next_index") or 0)
+            what = str(result.get("confirm") or "this step")
+            if len(approved) >= MAX_PLAN_CONFIRMS:
+                break
+            question = f"Should I go ahead: {what}?"
+            self._emit("ask", question, 0)
+            said = await self._ask(question)
+            self._log({"turn": 0, "ask": question, "answer": said})
+            if not said.strip().lower().startswith(("yes", "yeah", "yep", "sure", "ok", "go", "do it")):
+                return f"Okay, I stopped before that: {what}.", ""
+            approved[str(start)] = what
+        if result.get("status") == "complete" and result.get("sentence"):
+            log.info("agent: plan ran in %.2f s with one planner call", self._clock() - t0)
+            return str(result["sentence"]), ""
+        done = [str(e.get("step")) for e in result.get("ledger") or [] if e.get("effect") != "refused"]
+        if not done:
+            return "", ""
+        return "", ("\n\n[note] Before you started, a plan already did, in order: " + "; ".join(done)
+                    + f". It stopped there ({result.get('reason') or result.get('status')}). Start from the "
+                    "screenshot; do not repeat those steps.")
 
     async def _checked_final(self, goal: str, claim: str, turn: int, worker: Any) -> Optional[str]:
         """The answer to speak, or None to send the agent back once to look again.

@@ -501,3 +501,47 @@ def test_decider_backend_selects_jev_only_on_the_model_path(monkeypatch) -> None
     # and the shadow verifier never hands a hosted model the screen's text
     assert h2.local_verify("goal", "claim") == {
         "error": "the decider is remote; the shadow verifier only runs on a local model"}
+
+
+# ---- the outline and run_plan operations (plan once, execute: plan_executor.py) -----------------------
+
+
+def test_outline_and_run_plan_run_through_the_real_helpers(monkeypatch) -> None:
+    from test_fast_lane import calendar
+
+    h, ns = _lane_bench(monkeypatch, [calendar(), calendar(), calendar(True)])
+    # No switch set: no hosted model is configured, and the executor falls back to the keyword gate alone.
+    assert dw.start_jev_asker(h, {}) == "off" and h.step_asker is None
+    plan = {"steps": [{"kind": "click", "target": "the week view", "label_hint": "Week"}], "final_say": "Week it is."}
+    out: list[dict] = []
+    monkeypatch.setattr(dw, "emit", out.append)
+    dw.serve(ns, iter([json.dumps({"id": 1, "operation": "outline"}) + "\n",
+                       json.dumps({"id": 2, "operation": "run_plan", "plan": plan, "request": "week view"}) + "\n",
+                       json.dumps({"id": 3, "operation": "run_plan"}) + "\n",
+                       json.dumps({"id": 4, "operation": "run_plan", "plan": {"steps": [{"kind": "drag"}]}}) + "\n",
+                       json.dumps({"id": 5, "operation": "execute", "code": "log('still serving')"}) + "\n"]), h)
+    shown = out[0]["outline"]
+    assert shown["app"] == "Calendar" and "Week (radio button)" in shown["lines"]
+    assert any(line.startswith("Delete Event") and "asks the human first" in line for line in shown["lines"])
+    assert not any("September 2026" in line for line in shown["lines"])            # never the window title
+    ran = out[1]["run_plan"]
+    assert ran["status"] == "complete" and ran["sentence"] == "Week it is." and h.gui.clicks == [(270, 115)], ran
+    assert ran["ledger"][0]["effect"] == "confirmed" and ran["ledger"][0]["how"] == "keyword" and "ax" in out[1]["timing"]
+    assert out[2]["run_plan"]["status"] == "unavailable"
+    assert out[3]["run_plan"]["status"] == "unavailable" and "bad plan" in out[3]["run_plan"]["reason"]
+    assert out[4]["output"][0] == {"type": "input_text", "text": "still serving"}     # never terminal
+
+
+def test_the_jev_asker_is_configured_only_by_the_owners_switches() -> None:
+    from cc_buddy_bridge.desktop_helpers import Helpers
+
+    h = Helpers(FakeAutoGUI())
+    assert dw.start_jev_asker(h, {"OPENROUTER_API_KEY": "k", "CC_BUDDY_JEV_ROUTE": "openrouter"}) == "off"
+    assert dw.start_jev_asker(h, {"CC_BUDDY_PLAN_EXEC": "1"}).startswith("off (TYPESAFE_API_KEY is not set")
+    assert h.step_asker is None and h._lane_decide() == "keyword"
+    h.lane_decide = "jev"
+    assert h._lane_decide() == "keyword"                     # jev asked for, none configured: the gate decides alone
+    status = dw.start_jev_asker(h, {"CC_BUDDY_PLAN_EXEC": "1", "OPENROUTER_API_KEY": "k",
+                                    "CC_BUDDY_JEV_ROUTE": "openrouter"})
+    assert status == "ready (typesafe/jev-1.13)" and callable(h.step_asker) and h._lane_decide() == "jev"
+    assert h._script_decide() == "keyword"                   # exact labels are the keyword gate's case

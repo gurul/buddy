@@ -42,6 +42,22 @@ enum BuddyPower {
     /// How long the card waits for the helper before saying it is not there.
     static let helperTimeout: TimeInterval = 20
 
+    /// How long the button's intent waits for the helper's answer before returning. WidgetKit redraws
+    /// the card when the intent returns, and that redraw is part of the press: it is never rationed.
+    /// The helper's own `reloadAllTimelines()` is — it is a background menu-bar app — so a card that
+    /// relied on it could sit on "stopping…" with nothing to press (2026-09-21: an off press was
+    /// served in a second, and no on press was ever written). The helper answers in about a second.
+    static let answerWait: TimeInterval = 8
+
+    /// A request older than this is not served: the helper was not running when it was pressed, and
+    /// turning buddy off minutes later, whenever the helper next starts, is not what the press meant.
+    static let requestMaxAge: TimeInterval = 120
+
+    /// Has the helper written a state stamped after `request`?
+    static func answered(_ request: Request) -> Bool {
+        (readState()?.at ?? .distantPast) >= request.at
+    }
+
     /// What the card should draw.
     enum Face: Equatable, Sendable {
         /// No helper has written a state yet (or this Mac has no service): no button.
@@ -51,13 +67,14 @@ enum BuddyPower {
         case turningOn
         case turningOff
         /// A request sat unanswered past `helperTimeout`: the helper is not running.
-        case waiting
+        /// Carries what was asked, so the card can offer the same press again.
+        case waiting(on: Bool)
     }
 
     static func face(now: Date = .now) -> Face {
         let state = readState()
         if let request = readRequest(), request.at > (state?.at ?? .distantPast) {
-            if now.timeIntervalSince(request.at) > helperTimeout { return .waiting }
+            if now.timeIntervalSince(request.at) > helperTimeout { return .waiting(on: request.on) }
             return request.on ? .turningOn : .turningOff
         }
         guard let state, state.switchable else { return .unknown }
@@ -83,8 +100,17 @@ enum BuddyPower {
     static func readState() -> State? { read(stateURL) }
 
     /// The card's button: ask the helper to turn buddy on or off.
-    static func writeRequest(on: Bool, at: Date = .now) throws {
-        try write(Request(on: on, at: at), to: requestURL)
+    @discardableResult
+    static func writeRequest(on: Bool, at: Date = .now) throws -> Request {
+        // Whole seconds, like the ISO-8601 the file carries: the request read back must equal this one,
+        // or "answered" compares a fractional stamp with a truncated one and never settles. And strictly
+        // after the state on file: the helper serves a request only when it is newer than its last
+        // state, so a press in the same second as that state was dropped without a trace.
+        let floor = Date(timeIntervalSince1970: at.timeIntervalSince1970.rounded(.down))
+        let after = (readState()?.at).map { $0.addingTimeInterval(1) } ?? .distantPast
+        let request = Request(on: on, at: max(floor, after))
+        try write(request, to: requestURL)
+        return request
     }
 
     static func writeState(_ state: State) throws {

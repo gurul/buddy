@@ -10,6 +10,7 @@ measured, and how a request finds its way to the cheapest one that can do it saf
 - [The tiers a request passes through](#the-tiers-a-request-passes-through)
 - [What was measured](#what-was-measured)
 - [Head moves](#head-moves)
+- [Plan once, execute with Jev](#plan-once-execute-with-jev)
 - [Knobs](#knobs)
 - [How the evidence was kept honest](#how-the-evidence-was-kept-honest)
 - [Borrowed, and from where](#borrowed-and-from-where)
@@ -142,6 +143,77 @@ exactly as before. laya is not ready, zero-shot: it ranks
 directions well and sizes badly ("a bit" against "all the way" is an ordinal judgement), and it cannot
 gate. The labelled utterances are the seed of the fine-tuning set its authors say it needs.
 
+## Plan once, execute with Jev
+
+The lane lost its A/B to turn overhead, not to its clicks: the planner spent a ~3.4 s turn to call
+`delegate` and another to say it was done ([voice.md](voice.md#the-fast-lane)). So with
+`CC_BUDDY_PLAN_EXEC=1` a request that reaches the planner is **planned once and then executed without it**:
+
+```
+astra, one call     the request + the front window's outline (labels and roles; no title, no field
+                    contents, no screenshot) → a typed plan: plan_contract.py, strict JSON schema
+executor            plan_executor.py walks the steps. A click is fast_lane.run_delegate, one step, on a
+                    FRESH snapshot: the exact label first when the planner read one in the outline, then
+                    its description. open_app/open_url are the helpers' own calls; type goes into the one
+                    editable field, or Jev's pick among several; press_key is one key.
+no closing turn     done is code: every step applied, none a suspected no-op, every `expect` held.
+                    The sentence is the plan's `final_say`, or a local one that says what could not be
+                    confirmed.
+the floor           no plan, a bad plan, a checkpoint or a step that finds no control → today's
+                    turn-by-turn loop, with a [note] of what was already applied
+```
+
+A plan is descriptions, never coordinates or element ids, so a plan written for a screen that has moved on
+fails closed: the step finds no control. If the request names an app that is not in front, it is opened
+before the outline is read (a planner shown nothing answers with a `checkpoint`); and because planning
+takes seconds while the human keeps using the Mac, the executor brings the planned app back to the front
+before its first step.
+
+**Who decides a click.** `typed_ask.ask_jev_step` asks Jev the way this page says Jev must be asked: one
+request carrying the `target` choice over the lane's own menu **plus an explicit `none`**, and beside it three
+absolute nouls — `present`, `already_done`, `risky`. Two things were learned the hard way and are asserted
+by tests: the nouls are answered against the *state*, so the control list has to be in the state too (with it
+only in the choice's criteria, `present` read 0.33 for a right control and 0.37 for a missing one); and the
+window title buys nothing (top-1 58/69 without it, 57/69 with it), so it is never sent.
+
+In the lane's `jev` decide mode the keyword gate **proposes and Jev can refuse**: a gate pick is pressed only
+when Jev's own top control is the same one; otherwise the step is Jev's, under cut-offs fitted with zero wrong
+presses allowed. `tools/jev_step_eval.py`, on the Accessibility fixtures (menu of 25):
+
+| holdout, 82 cases — **read before, so a tuning-set number** | pressed | right | wrong | coverage |
+|---|---|---|---|---|
+| the keyword gate alone (the click path until now) | 45 | 40 | 5 | 55.6 % |
+| Jev alone, under the fitted cut-offs | 42 | 42 | 0 | 58.3 % |
+| **the gate's pick only if Jev agrees, else Jev** (`jev` mode) | 52 | 51 | 1 | 70.8 % |
+
+Jev's raw top-1 when the right control is on the menu: 57 of 60 on select (laya: 29.7 % on the cases it was
+asked). Requests: 234 ms p50, 289 ms p90 over OpenRouter. **This is not a ship decision**: both fixture sets
+had been read during the laya work, and `--check-default` refuses to enable `JEV_STEP_DEFAULT` without
+`--fresh DIR`, a set nobody has read. Until one exists both switches ship off.
+
+**What only you can approve.** A plan's `consequential` flag can only add a stop. So can everything else:
+`ax_candidates.is_sensitive` (which gained the verbs the request-level gates already knew — Place Order,
+Confirm, Publish, Transfer, Clear History, Format Disk, Turn Off, Add to Cart, Kill … — because a plan
+executor presses controls nobody named aloud), Jev's `risky` noul (unfitted: 0.91 for "put the file in the
+trash", 0.42 for the highest harmless step on select; cut at 0.5), a Return outside a search you dictated, and
+composed text headed for a shell, which asks before the first key. The human is asked directly, with no planner
+turn, and their yes lets exactly that control through once. Text the planner wrote is typed but never submitted
+without that yes; whether text was yours or composed is checked against the request, not taken from the plan.
+
+**Live, 2026-09-21** (`tools/plan_live.py --act`, Calendar, one planner call each):
+
+| task | plan call | executor | total | before |
+|---|---|---|---|---|
+| "put the calendar on the year view, then go to next year" (2 clicks, both `confirmed`) | 3.72 s | 2.60 s | **6.64 s** | 13.1 s turn by turn, 16.9 s with `delegate` |
+| "switch the calendar to the month view" (Calendar in front; label read from the outline) | 4.07 s | 0.86 s | 5.24 s | — |
+| "open Calendar and switch it to the year view" (planned blind from a terminal) | 6.80 s | 2.25 s | 9.29 s | — |
+| a three-step plan written by hand (`--plan`), no planner call | — | 2.88 s | 2.88 s | — |
+
+Three runs on one app are a demonstration, not a measurement: the A/B with a code oracle per task, against the
+turn-by-turn loop **and** against plan-once with the keyword gate alone (`plan_live.py --keyword-only` is that
+arm), is what may flip `PLAN_EXEC_DEFAULT`. The plan call is now the whole cost, and `low` is the lowest
+reasoning effort `gpt-6-astra` accepts.
+
 ## Knobs
 
 | Variable | Default | What it does |
@@ -150,7 +222,9 @@ gate. The labelled utterances are the seed of the fine-tuning set its authors sa
 | `CC_BUDDY_HEAD_MODEL` | `off` | `jev`: a spoken head pose ("look left", "a bit lower") is chosen by Jev in about a quarter of a second instead of ~3.2 s through the backend, which remains the fallback. The words of a turn that mentions a direction go to TypeSafe / OpenRouter |
 | `CC_BUDDY_ROUTER_MODEL` | `off` | `jev`: ask Jev, natively, about a request the rules did not recognise; it may only add a bare launch. The request's words go to TypeSafe / OpenRouter, so it is your switch |
 | `CC_BUDDY_LANE_FIRST` | `1` | the lane's router ([voice.md](voice.md#lane-first-the-router-before-the-planner)) |
-| `CC_BUDDY_FAST_LANE_DECIDE` | `keyword` | who picks a lane step under the planner: `keyword`, or `model` |
+| `CC_BUDDY_FAST_LANE_DECIDE` | `keyword` | who picks a lane step under the planner: `keyword`, `model`, or `jev` (the gate proposes, Jev can refuse; the step's words and the window's control labels go to `CC_BUDDY_JEV_ROUTE`, never the title) |
+| `CC_BUDDY_PLAN_EXEC` | `0` | `1`: the planner plans once and `plan_executor.py` walks the plan with no planner turn between steps or at the end ([above](#plan-once-execute-with-jev)). Uses Jev for grounding when a route is configured, the keyword gate alone otherwise |
+| `CC_BUDDY_PLAN_EXEC_REASONING` | `low` | the plan call's reasoning effort |
 | `CC_BUDDY_DECIDER` | `laya` | the lane's model in `model` mode: `laya` or `jev` |
 
 Every routing decision is in the task's run log (`{"route": …}`, `{"reflex": …}`, `{"lane_first": …}`),
@@ -178,7 +252,20 @@ so a wrong route can be read after the fact.
 - **Thresholds by consequence; a noul beside every choice** — TypeSafe's intent-routing and
   confidence-routing recipes.
 - **The typed model picks only from options code built, and never writes text** —
-  [browser-use/jev-ultrafast](https://github.com/browser-use/jev-ultrafast).
+  [browser-use/jev-ultrafast](https://github.com/browser-use/jev-ultrafast). Its 7.07 s figure is one whole
+  11-action task (about 0.64 s an action), not a step. It clicks the argmax at any probability and has no
+  notion of a consequential action, so none of its gating was taken.
+- **Plan once, then ground each step: a closed step vocabulary, `target` as "how it would be labelled on
+  screen", a `none` option on the grounding choice** — [savka777/jev-use](https://github.com/savka777/jev-use)
+  (MIT), its dormant `Planner.swift` path. Assessed as the right shape with no evidence: one commit, no eval,
+  every threshold a literal, and on that path a planned click gets no destructive check at all. The shape was
+  taken; the thresholds and the safety model were not.
+- **What an action did is one word from a closed set, and "unverifiable" is never success** —
+  [trycua/cua](https://github.com/trycua/cua)'s action-result contract (MIT). Its own Jev recipe offers one
+  executable candidate a step, so it proves plumbing and says nothing about choosing.
+- **Nothing was taken from** [awlevin/typesafe-computer-use](https://github.com/awlevin/typesafe-computer-use):
+  a fixed 2.0 s sleep after every action that its headline step time leaves out, one uncalibrated 0.4 threshold,
+  no confirm path, and an OCR change-detector that misses text-sized changes (a toast, "Cart (7)" → "Cart (8)").
 - **Reflexes under everything, a slow planner that never blocks action** —
   [rmalde/minecraft-agent](https://github.com/rmalde/minecraft-agent), assessed as *thin but real*: the three
   tiers are implemented and its async-planner test passes, but it is one commit by one author, and every

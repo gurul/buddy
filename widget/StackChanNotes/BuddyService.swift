@@ -78,7 +78,9 @@ enum BuddyService {
             let dis = launchctl("disable", target)
             log.info("disable: \(dis.status) \(dis.text, privacy: .public)")
         }
-        return await settle { !$0.loaded }
+        // Not loaded AND no longer answering: a daemon still shutting down reads as "running from a
+        // terminal", which has no button — the card would lose its switch until the next 30 s tick.
+        return await settle { !$0.loaded && !$0.reachable }
     }
 
     /// Bring buddy back: `launchctl enable` clears the override, `launchctl

@@ -14,10 +14,11 @@ set of assertions `_parse_choice` makes, so an answer that passes there passes h
 TWO ROUTES, one envelope:
   "typesafe"   POST https://api.typesafe.ai/v1/systemone      Bearer TYPESAFE_API_KEY
   "openrouter" POST https://openrouter.ai/api/alpha/decisions Bearer OPENROUTER_API_KEY
-The first is the one jev-ultrafast exercises and the default here. The second is alpha
-and was confirmed to exist (401 without credentials, against a 404 control, 2026-09-21)
-but its body has not been exercised from this machine — if it answers in a different
-envelope the lane sees `error`, never a wrong click.
+The first is the one jev-ultrafast exercises and the default here. The second is alpha;
+it answers in the same envelope and is the route this Mac runs (2026-09-21: the head
+classifier, the request router, and tools/jev_step_eval.py's 155 four-question requests
+with 26 options each, 234 ms p50). A different envelope would read as `error`, never a
+wrong click.
 
 WHAT THIS CHANGES ABOUT THE BUDGET: laya's head holds 256 tokens and cuts every option
 once they overflow it, so `Decider` trims the tail of the option list before predict.
@@ -26,7 +27,8 @@ drops an option and `overflow` never fires — the two numbers fast_lane.py gate
 about the model, not about the wrapper.
 
 WHAT IT COSTS: laya decides in 11.6 ms p50 on this Mac. Jev is a network call; TypeSafe
-publish 70-500 ms and jev-ultrafast measures whole browser steps at ~7 s. Against
+publish 70-500 ms, this Mac measures 234 ms p50, and jev-ultrafast's 7.07 s is one whole
+11-action browser task (about 0.64 s an action), not a step. Against
 fast_lane's own cost model (+3.5 s a right click, -4.55 s a wrong one) half a second of
 latency is small and accuracy is the whole question, which is why `timeout_s` is short
 and every failure escalates to the planner rather than waiting.
@@ -124,8 +126,8 @@ def normalize(payload: dict[str, Any], questions: Mapping[str, Any]) -> dict[str
     """The body as `Decider` reads it: `{"answers": {qid: answer}, "usage": {...}}`.
 
     TypeSafe's own service already answers in that envelope (jev_ultrafast/model.py reads
-    `result["answers"][qid]`), so the common path returns `payload` untouched. OpenRouter's
-    /api/alpha/decisions has not been exercised from here, and the one shape worth accepting
+    `result["answers"][qid]`), and so does OpenRouter's /api/alpha/decisions (the route this
+    Mac runs), so the common path returns `payload` untouched. The one shape worth accepting
     beside it is the answers keyed at the top level. Anything else is passed through unchanged
     and fails in `_parse_choice` as "predict returned no answer", which the lane reads as
     unavailable — a wrong envelope must never become a click.

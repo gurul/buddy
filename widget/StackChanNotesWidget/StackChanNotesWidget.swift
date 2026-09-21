@@ -49,7 +49,13 @@ struct SetBuddyPowerIntent: AppIntent {
     init(on: Bool) { self.on = on }
 
     func perform() async throws -> some IntentResult {
-        try BuddyPower.writeRequest(on: on)
+        let request = try BuddyPower.writeRequest(on: on)
+        // Stay until the helper has answered (about a second) or is plainly not there. The card is
+        // redrawn when this returns, so it shows the result of the press rather than "stopping…".
+        let deadline = Date.now.addingTimeInterval(BuddyPower.answerWait)
+        while !BuddyPower.answered(request), Date.now < deadline {
+            try? await Task.sleep(for: .milliseconds(200))
+        }
         return .result()
     }
 }
@@ -385,8 +391,12 @@ private struct PowerPill: View {
             label("stopping…", symbol: "hourglass", fill: .brandSheet)
         case .turningOn:
             label("starting…", symbol: "hourglass", fill: .brandSun)
-        case .waiting:
-            label("waiting", symbol: "hourglass", fill: .brandSheet)
+        case .waiting(let on):
+            // The helper never answered. Pressing again sends the same request with a fresh stamp,
+            // which a helper that has started since will serve.
+            Button(intent: SetBuddyPowerIntent(on: on)) { label("try again", symbol: "arrow.clockwise", fill: .brandSheet) }
+                .buttonStyle(.plain)
+                .accessibilityLabel(on ? "try turning buddy on again" : "try turning buddy off again")
         }
     }
 

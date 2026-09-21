@@ -221,13 +221,20 @@ Claude Code hooks / CLI ── local IPC ──→ Python daemon
 
 ### How a computer request is routed
 
-1. **Code shortcuts** handle recognized app launches and web searches.
-2. **Accessibility routing** handles requests fully described by a labelled UI control.
-3. **The planner** handles remaining work using screenshots and Python desktop helpers.
-   Requests involving consequential actions or content creation go to this tier.
+1. **Code shortcuts** handle recognized app launches and web searches (`task_router.py`).
+2. **Accessibility routing** handles requests fully described by a labelled UI control
+   (`lane_router.py` over `fast_lane.py` and `ax_candidates.py`).
+3. **Plan once, execute with Jev** (optional, `CC_BUDDY_PLAN_EXEC=1`): the planner is asked
+   once for a typed plan (`plan_contract.py`), and `plan_executor.py` walks it with no planner
+   turn between steps or at the end. Each click is grounded on a fresh Accessibility snapshot
+   by the keyword gate and hosted Jev (`typed_ask.ask_jev_step`). Consequential steps stop and
+   ask you; a plan cannot approve them.
+4. **The planner** handles remaining work turn by turn using screenshots and Python desktop
+   helpers. It is also the floor under tier 3: a plan that cannot be made or finished falls
+   back to it with a note of what was already done.
 
-The first two routes are enabled by default. The separate planner-delegated fast
-lane is **off by default**. Optional typed-decision backends include **local Laya
+The first two routes are enabled by default. Tier 3 and the separate planner-delegated fast
+lane (`decider.py`, the `[fast]` extra) are **off by default**. Optional typed-decision backends include **local Laya
 via MLX** on Apple silicon and **hosted Jev**. Jev can also be enabled for narrowly
 scoped launch routing and spoken head movements. These options have different
 capabilities and data flows; they are not required for the default setup.

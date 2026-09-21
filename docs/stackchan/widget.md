@@ -175,6 +175,28 @@ in `widget/StackChanNotesWidget/StackChanNotesWidget.swift`.
 
 ## Add the widget to the desktop (manual)
 
+**What went wrong on 2026-09-21, and what the card does now.** An off press was served in a second, and
+then no on press ever reached the helper: the daemon sat disabled and the robot showed "No Claude
+connected". The helper was fine in both directions when handed the same request files. The card was the
+weak half, in three ways, all fixed:
+
+- *The pill had nothing to press while it waited.* `perform()` wrote the request and returned at once, so the
+  card was redrawn as "stopping…", and the redraw that replaces that with **TURN ON** depended on the helper's
+  `reloadAllTimelines()` — which WidgetKit rations for a background menu-bar app. The intent now waits for the
+  helper's answer (`BuddyPower.answerWait`, 8 s; the helper takes about one). The redraw that follows an
+  intent is part of the press and is never rationed, so the card shows the result of the press.
+- *"waiting" was a dead end.* A request unanswered after 20 s drew a plain "waiting" pill for ever. It is now
+  a **try again** button that sends the same request with a fresh stamp.
+- *A press could vanish.* Stamps are whole seconds, and the helper serves a request only when it is newer than
+  its last state, so a press in the same second as that state was dropped without a trace (reproduced by
+  writing such a file: buddy stayed on). A request is now stamped at least a second past the state on file, and
+  the helper never stamps its answer before the request it answers.
+
+The helper also ignores a request older than two minutes (`requestMaxAge`): pressed while the helper was not
+running, it would otherwise turn buddy off whenever the helper next started. And after a turn-off it waits
+until the daemon has stopped answering as well as left launchd, so it never reports "running from a terminal"
+— a state with no button — for a daemon that is merely shutting down.
+
 WidgetKit does not let an app place its own widget. Once the helper has been
 launched from `~/Applications`:
 

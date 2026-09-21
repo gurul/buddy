@@ -348,3 +348,150 @@ def fit_request_gates(answers: list[RequestAnswer], truths: list[str], planner_o
                 if best is None or key > best:
                     best, chosen = key, g
     return chosen
+
+
+# ---- jev on one step of a task: which control, and whether any control at all ---------------------------
+#
+# The click path's question. Asked laya's way — one relative choice over the menu, a reserved "abstain"
+# among the options — a model can always prefer a bad control to abstaining: abstain is one more rival in
+# the same softmax. So the step is asked the way the request is: the target is a CHOICE over the controls
+# code built (rendered by decider.render_option, plus an explicit "none"), and beside it, in the same
+# request, three absolute nouls — is a control that does exactly this on the list at all, is the step's
+# result already in effect, does the step do something consequential. Code reads all four; the choice
+# alone never clicks.
+
+STEP_NONE = "none"
+STEP_ABOUT = ("One step of a task a desk robot is doing on the owner's Mac. The controls are the buttons, tabs, "
+              "rows, checkboxes and menu items the front window really has. 'selected' after a control means it "
+              "is the one currently on.")
+
+
+def jev_step_questions(options: Mapping[str, str]) -> dict[str, Any]:
+    """The one request for one step. `options` is {candidate id: rendered control}; "none" is added here."""
+    criteria = dict(options)
+    criteria[STEP_NONE] = "none of these controls does this step"
+    return {
+        "target": {"type": "choice", "instructions": (
+            "Which control should be pressed to do the step? Pick the control whose own name says it does what the "
+            "step asks. A control that only shares a word with the step, or that leads somewhere related, is not it."),
+            "criteria": criteria},
+        # Wording chosen on select (2026-09-21, menu 25, zero wrong presses allowed): this one pressed 47 of 69,
+        # "…whose name says it does exactly what the step asks" 43, "is at least one a sensible thing to press" 43.
+        "present": {"type": "noul", "instructions": (
+            "Would pressing one of the listed controls carry out the step, or take the first action the step needs? "
+            "Answer no if no listed control is for this step.")},
+        "already_done": {"type": "noul", "instructions": (
+            "Is the result the step asks for already in effect, because the control that does it is already marked "
+            "selected, checked or on? Answer no when nothing in the list is marked that way for this step.")},
+        "risky": {"type": "noul", "instructions": (
+            "Would doing the step send, post, submit, buy, pay, book, delete, remove, empty, discard, quit, close "
+            "without saving, sign out, install, share, allow access, reset or turn off something? A step that only "
+            "changes the view, opens a pane, selects a tab or navigates is not risky.")},
+    }
+
+
+@dataclass(frozen=True)
+class StepAnswer:
+    target: str                     # a candidate id, "none", or "" when the answer was unusable
+    p_target: float
+    margin: float                   # p(target) minus the runner-up's
+    present: float
+    already_done: float
+    risky: float
+    ms: float = 0.0
+    k: int = 0                      # options offered, "none" included
+    error: str = ""
+
+
+@dataclass(frozen=True)
+class StepGates:
+    present: float = 0.5
+    p_target: float = 0.5
+    margin: float = 0.1
+    already_done: float = 0.7
+    risky_max: float = 0.3
+
+    def decide(self, a: StepAnswer) -> str:
+        """A candidate id to press, or one of: confirm | done | none. Risk outranks everything, and a
+        control is pressed only when the absolute gate AND the relative pick both clear."""
+        if a.error or not a.target:
+            return STEP_NONE
+        if a.risky >= self.risky_max:
+            return "confirm"
+        if a.already_done >= self.already_done:
+            return "done"
+        if a.target == STEP_NONE or a.present < self.present:
+            return STEP_NONE
+        if a.p_target < self.p_target or a.margin < self.margin:
+            return STEP_NONE
+        return a.target
+
+
+def ask_jev_step(predict: Predict, step: str, *, app: str, context: str, options: Mapping[str, str],
+                 recent: tuple[str, ...] = (), clock: Callable[[], float]) -> StepAnswer:
+    """One request: the target choice and its three nouls. Never raises — an error abstains."""
+    t0 = clock()
+    questions = jev_step_questions(options)
+    k = len(questions["target"]["criteria"])
+    # The nouls are answered against the STATE, not against another question's criteria: with the controls
+    # only in the target's criteria, `present` read 0.33 for a right control and 0.37 for a missing one
+    # (select, 2026-09-21) — it could not see the list. So the list is in the state too, labels only.
+    state = {"about": STEP_ABOUT, "step": " ".join(step.split()), "app": app, "window": context,
+             "controls": list(options.values()), "done_so_far": list(recent)}
+    try:
+        result = predict(state, questions)
+        answers = result.get("answers") or {}
+    except Exception as e:  # noqa: BLE001 — a model that fails abstains: the step escalates, nothing is pressed
+        return StepAnswer("", 0.0, 0.0, 0.0, 0.0, 1.0, (clock() - t0) * 1000.0, k, f"{type(e).__name__}: {e}"[:160])
+    key, p, probs = _choice(answers.get("target"))
+    if key not in questions["target"]["criteria"]:
+        return StepAnswer("", 0.0, 0.0, 0.0, 0.0, 1.0, (clock() - t0) * 1000.0, k, f"target {key!r} is not an option")
+    others = sorted((v for name, v in probs.items() if name != key), reverse=True)
+    return StepAnswer(target=key, p_target=p, margin=max(0.0, p - (others[0] if others else 0.0)),
+                      present=_noul(answers.get("present")), already_done=_noul(answers.get("already_done")),
+                      risky=_noul(answers.get("risky")), ms=(clock() - t0) * 1000.0, k=k)
+
+
+STEP_GRID = (0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8, 0.9)
+STEP_MARGIN_GRID = (0.0, 0.05, 0.1, 0.2, 0.3)
+
+
+def fit_step_gates(answers: list[StepAnswer], expected: list[str], max_wrong: int = 0) -> StepGates:
+    """Cut-offs that press the most right controls on a tuning set with at most `max_wrong` wrong presses.
+    `expected` holds a candidate id, or "abstain" where no control should be pressed. `already_done` and
+    `risky_max` are not fitted here: the click fixtures carry no label for either, so they keep their defaults
+    until a set that labels them exists. Ties go to the stricter setting."""
+    best: Optional[tuple[int, float, float, float]] = None
+    chosen = StepGates(present=0.9, p_target=0.9, margin=0.3)
+    for present in STEP_GRID:
+        for p_target in STEP_GRID:
+            for margin in STEP_MARGIN_GRID:
+                g = StepGates(present=present, p_target=p_target, margin=margin,
+                              already_done=2.0, risky_max=2.0)       # both off: see the docstring
+                said = [g.decide(a) for a in answers]
+                wrong = sum(1 for s, e in zip(said, expected, strict=True) if s != STEP_NONE and s != e)
+                if wrong > max_wrong:
+                    continue
+                right = sum(1 for s, e in zip(said, expected, strict=True) if s != STEP_NONE and s == e)
+                key = (right, present, p_target, margin)
+                if best is None or key > best:
+                    best, chosen = key, StepGates(present=present, p_target=p_target, margin=margin)
+    return chosen
+
+
+# Fitted 2026-09-21 by fit_step_gates on select (73 cases, menu 25, zero wrong presses allowed, the window title
+# withheld): present, p_target and margin. Scored on holdout (82 cases, READ BEFORE, so a tuning-set number):
+#   the keyword gate alone                              45 pressed, 40 right, 5 wrong   coverage 55.6%
+#   Jev alone under these cut-offs                      42 pressed, 42 right, 0 wrong   coverage 58.3%
+#   the gate's pick only if Jev's top control agrees,
+#   else Jev under these cut-offs (the lane's "jev")    52 pressed, 51 right, 1 wrong   coverage 70.8%
+# Requests 234 ms p50, 289 ms p90 over OpenRouter. On select the third path pressed 52 right and 2 wrong against
+# Jev alone's 46 and 0; at +3.5 s a right press and -4.55 s a wrong one that is 172.9 against 161, so it is the
+# lane's path, and a wrong press there is never a sensitive control (code withholds those before Jev is asked).
+# `risky_max` is NOT fitted (the fixtures label no risk): on select "put the file in the trash" read 0.91 and
+# "share this page" 0.86, and the highest harmless step 0.42 ("put today's plan on the calendar"). It can only
+# add a confirm. `already_done` is unused by the lane: an AX value of "selected" is the oracle for that.
+JEV_STEP_GATES = StepGates(present=0.7, p_target=0.9, margin=0.3, already_done=0.7, risky_max=0.5)
+# The ship decision is tools/jev_step_eval.py --fresh DIR --check-default, on fixtures nobody has read. Until
+# one exists this stays False, and CC_BUDDY_FAST_LANE_DECIDE=jev is the owner's switch.
+JEV_STEP_DEFAULT: bool = False
