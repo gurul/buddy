@@ -1,8 +1,9 @@
 // R2D2 chirp synthesiser on M5.Speaker. Includes M5Unified (global ::M5);
-// must never include board_compat.h — see hal_m5.h. Nothing here blocks:
+// must never include board_compat.h — see hal_m5.h. Playback is asynchronous:
 // a phrase is rendered into PSRAM in one pass (~1-2 ms) and the speaker task
 // plays it back.
 #include "chirp.h"
+#include "ticks.h"
 #include <M5Unified.hpp>
 #include <esp_heap_caps.h>
 #include <math.h>
@@ -23,6 +24,12 @@ static uint32_t phase   = 0;        // phase accumulator, 2^32 = one cycle
 static float    amp     = 0.65f;    // 0..1 of full scale
 static bool     enabled = true;
 static bool     ready   = false;
+// isPlaying() clears when the mixer consumes the PCM, before the I2S DMA
+// tail reaches the speaker. Allow 150 ms for the default 8 x 256 buffers
+// at 48 kHz to drain before disabling the amplifier (no delay in loop()).
+static constexpr uint32_t IDLE_DRAIN_MS = 150;
+static uint32_t idleSince = 0;
+static bool draining = false;
 
 // ---- synthesis primitives ----
 static inline uint8_t square(uint32_t ph, float env) {
@@ -165,6 +172,13 @@ static void build(ChirpKind kind) {
 // ---- playback ----
 static bool start(bool force) {
   if (len == 0) return false;
+  draining = false;
+  // Check begin explicitly: some M5Unified versions return true from
+  // playRaw even when the lazy speaker startup fails.
+  if (!M5.Speaker.begin()) {
+    M5.Speaker.end();
+    return false;
+  }
   bool ok = M5.Speaker.playRaw(wbuf, len, RATE, false, 1, -1, force);
   if (ok) wIdx ^= 1;                            // next write goes to the other buffer
   return ok;
@@ -187,9 +201,32 @@ void chirpBegin() {
                 ready ? "ready" : "FAILED", (unsigned)MAX_SAMPLES, (int)psramFound());
 }
 
-void chirpSetEnabled(bool on) { enabled = on; }
+void chirpSetEnabled(bool on) {
+  enabled = on;
+  if (!on && M5.Speaker.isRunning()) {
+    M5.Speaker.end();   // cancel current sound AND disable the amplifier
+    draining = false;
+  }
+}
 bool chirpPlaying() { return M5.Speaker.isPlaying(); }
-void chirpUpdate() {}   // buffers are static and double-buffered: nothing to free
+void chirpUpdate() {
+  if (!M5.Speaker.isRunning() || M5.Speaker.isPlaying()) {
+    draining = false;
+    return;
+  }
+  const uint32_t now = millis();
+  if (!draining) {
+    idleSince = now;
+    draining = true;
+  }
+  if (ticks::elapsedMs(now, idleSince) >= IDLE_DRAIN_MS) {
+    // stop() or volume zero leaves the CoreS3 amp enabled and can hiss.
+    // end() invokes M5Unified's board-specific amplifier disable callback.
+    M5.Speaker.end();
+    draining = false;
+    Serial.println("[chirp] speaker off (idle)");
+  }
+}
 
 void chirpPlay(ChirpKind kind, bool force) {
   if (!canStart(force)) return;
