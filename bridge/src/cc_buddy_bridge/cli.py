@@ -314,6 +314,12 @@ def main(argv: list[str] | None = None) -> int:
     p_recall.add_argument("--limit", type=int, default=5)
     p_recall.add_argument("--url", default="ws://127.0.0.1:9090", help="rosbridge WebSocket URL")
 
+    sub.add_parser(
+        "telegram-check",
+        help="Text door: check CC_BUDDY_TELEGRAM_TOKEN and print the numeric id of whoever messaged the bot",
+        description="Run with the daemon's text door off (one poller per bot). Prints ids and first names "
+                    "only, never message text. See docs/stackchan/telegram.md.")
+
     args = parser.parse_args(argv)
     if args.cmd is None:
         parser.print_help()
@@ -394,6 +400,9 @@ def main(argv: list[str] | None = None) -> int:
     if args.cmd == "key-check":
         from .key_tap import KeyTapper
         return KeyTapper().diagnose()
+    if args.cmd == "telegram-check":
+        from .telegram import diagnose as telegram_diagnose
+        return telegram_diagnose()
     if args.cmd == "ears-check":
         from .ears import diagnose as ears_diagnose
         return ears_diagnose(args.seconds)

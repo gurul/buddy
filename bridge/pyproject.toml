@@ -48,6 +48,11 @@ dependencies = [
     # needs the [realtime] extra's websockets). 3.8.0 current per PyPI,
     # 2026-09-06. Imported lazily, only when OPENAI_API_KEY is set.
     "openai[realtime]>=3.13",
+    # The Telegram text door (telegram.py) calls the Bot API with httpx directly.
+    # The openai SDK already brings it in; declared because it is imported by
+    # name. 0.28.1 current per PyPI, 2026-09-21. No Telegram library: four Bot
+    # API methods over long polling do not need one.
+    "httpx>=0.28",
     # "hey buddy" (ears.py): sherpa-onnx keyword spotting (1.13.7, 2026-09-01)
     # with sentencepiece to tokenise the phrase; sounddevice (0.5.6,
     # 2026-08-17, bundles PortAudio) for the mic and the speaker; numpy for
