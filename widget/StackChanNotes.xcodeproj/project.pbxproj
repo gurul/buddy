@@ -27,6 +27,7 @@
 		7EFAB9F7E653253C2DD5878F /* OFL-andika.txt in Resources */ = {isa = PBXBuildFile; fileRef = 130B9D4D7A7A5186D880DECF /* OFL-andika.txt */; };
 		7F505FC43B317BECFBCF1ED1 /* NotesMirror.swift in Sources */ = {isa = PBXBuildFile; fileRef = 8D991EA2CD7ADE334CFD65C9 /* NotesMirror.swift */; };
 		7FE9748D34775E716FC96487 /* Grandstander-Bold.ttf in Resources */ = {isa = PBXBuildFile; fileRef = F3A6DCDD52C01951B686501D /* Grandstander-Bold.ttf */; };
+		85E0095C45F238556BAE6518 /* BuddyService.swift in Sources */ = {isa = PBXBuildFile; fileRef = 387A8B1402D0F827CEDD1038 /* BuddyService.swift */; };
 		9EF02456919C3BEC7798D42E /* VT323-Regular.ttf in Resources */ = {isa = PBXBuildFile; fileRef = DC9EE994781EFA1409635389 /* VT323-Regular.ttf */; };
 		B541AE383A4596C48E291DA5 /* OFL-andika.txt in Resources */ = {isa = PBXBuildFile; fileRef = 130B9D4D7A7A5186D880DECF /* OFL-andika.txt */; };
 		C5E75211933FE3BC9561E881 /* OFL-grandstander.txt in Resources */ = {isa = PBXBuildFile; fileRef = AE8E1E7CB4B022226B3E252A /* OFL-grandstander.txt */; };
@@ -66,6 +67,7 @@
 /* Begin PBXFileReference section */
 		130B9D4D7A7A5186D880DECF /* OFL-andika.txt */ = {isa = PBXFileReference; lastKnownFileType = text; path = "OFL-andika.txt"; sourceTree = "<group>"; };
 		2FE44DF443242C51DA997F4B /* GochiHand-Regular.ttf */ = {isa = PBXFileReference; lastKnownFileType = file; path = "GochiHand-Regular.ttf"; sourceTree = "<group>"; };
+		387A8B1402D0F827CEDD1038 /* BuddyService.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = BuddyService.swift; sourceTree = "<group>"; };
 		3AD72D4FED4488570BCA96ED /* NoteStore.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = NoteStore.swift; sourceTree = "<group>"; };
 		3B6DC1423A552A4697862DF9 /* OFL-vt323.txt */ = {isa = PBXFileReference; lastKnownFileType = text; path = "OFL-vt323.txt"; sourceTree = "<group>"; };
 		57D43F8C648A32C3F67687C1 /* OFL-gochihand.txt */ = {isa = PBXFileReference; lastKnownFileType = text; path = "OFL-gochihand.txt"; sourceTree = "<group>"; };
@@ -150,6 +152,7 @@
 			isa = PBXGroup;
 			children = (
 				FF97E4D3AD70892D4607419A /* BuddyDaemon.swift */,
+				387A8B1402D0F827CEDD1038 /* BuddyService.swift */,
 				F62C19E6D654259E691D6474 /* DiaryView.swift */,
 				7D9ED287F21568518C44885F /* Info.plist */,
 				8D991EA2CD7ADE334CFD65C9 /* NotesMirror.swift */,
@@ -293,6 +296,7 @@
 			files = (
 				35DF1F3E0A641A9204BC459C /* BuddyBrand.swift in Sources */,
 				16A8EA1C124984DBD1E9E49B /* BuddyDaemon.swift in Sources */,
+				85E0095C45F238556BAE6518 /* BuddyService.swift in Sources */,
 				1AFEE56DD21647A645159D29 /* DiaryView.swift in Sources */,
 				61576D5572BCCEA5587116ED /* NoteStore.swift in Sources */,
 				7F505FC43B317BECFBCF1ED1 /* NotesMirror.swift in Sources */,
