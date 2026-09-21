@@ -506,11 +506,19 @@ def _run_daemon(args: argparse.Namespace) -> int:
         except NotImplementedError:
             pass
 
+    # A stalled loop cannot log why it stalled; this thread does it from outside
+    # (loop_watchdog.py), and SIGUSR1 dumps every thread for the cases it cannot see.
+    from .loop_watchdog import LoopWatchdog, register_dump_signal
+
+    watchdog = LoopWatchdog(loop).start()
+    register_dump_signal()
+
     try:
         loop.run_until_complete(daemon.run())
     except KeyboardInterrupt:
         pass
     finally:
+        watchdog.stop()
         loop.close()
     return 0
 

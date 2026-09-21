@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import os
+import threading
 import time
 from datetime import datetime
 from typing import TYPE_CHECKING, Any, Optional
@@ -12,6 +13,7 @@ from typing import TYPE_CHECKING, Any, Optional
 if TYPE_CHECKING:
     from .key_tap import KeyTapper
 
+from . import follow as follow_mod
 from . import photos, voice_agent
 from . import recall as recall_mod
 from .audit import AuditLog
@@ -166,6 +168,17 @@ class Daemon:
         # Head control for the voice (head.py). The board echoes its real
         # pose on every camera frame; relative moves start from that.
         self._head = Head(self.ble.send, connected=lambda: self.ble.connected)
+        # In a conversation buddy keeps its eyes on whoever is talking (follow.py): every face of every
+        # frame goes to the follower, which stands down for an asked-for pose, an explore, the dictation
+        # key and the lesson's listening pose.
+        self._follower = follow_mod.SpeakerFollower(
+            self.ble.send, enabled=follow_mod.configured(),
+            presence=follow_mod.PresenceMap(follow_mod.presence_path()).load(),
+            publish=lambda topic, msg: self.bus.publish(topic, msg),      # /buddy/presence: seen, lost, found and how
+            blocked=lambda: ("explore" if self._explorer.active else "dictation" if self._listen_down
+                             else "lesson listening pose" if self._think_aloud_state == "on" else ""))
+        self._head.on_move = self._follower.owner_moved
+        self._vision.on_faces = self._follower.on_faces
         # The owner's mute choice (sound.py): persisted, re-sent on every connect.
         self._sound = SoundSetting()
         self._sound.load()
@@ -301,6 +314,10 @@ class Daemon:
 
     async def run(self) -> None:
         _log_permission_config_summary(self.matchers)
+        # The voice SDK's resources package imports in 12–20 s inside this process
+        # (GIL contention with vision and the keyword spotter). Pay it now, off the
+        # loop, so the first "hey buddy" does not (voice_agent.warm_live_import).
+        threading.Thread(target=voice_agent.warm_live_import, name="warm-voice-sdk", daemon=True).start()
         await self.ipc.start()
         if os.environ.get("CC_BUDDY_LEARNING", "1").lower() not in ("0", "false", "off"):
             from .learning.server import start as start_learning
@@ -806,6 +823,29 @@ class Daemon:
         conversation = self._converse(lesson_wake=True) if lesson else self._converse()
         self._conversation = asyncio.create_task(conversation, name="voice-conversation")
 
+    def _head_pose_asker(self) -> Optional[Any]:
+        """CC_BUDDY_HEAD_MODEL=jev: "look left" is decided by Jev, asked in its own idiom (typed_ask.py), in a
+        quarter of a second instead of ~3.2 s through the backend. Off by default: the words of a turn that
+        mentions a direction leave the Mac. Built once; anything wrong with it is simply "off"."""
+        if getattr(self, "_head_asker", None) is None:
+            self._head_asker = False
+            if (os.environ.get("CC_BUDDY_HEAD_MODEL") or "").strip().lower() == "jev":
+                try:
+                    from . import jev, typed_ask
+
+                    url, key, model = jev.route_config(os.environ)
+                    sync = typed_ask.make_jev_head_asker(jev.make_predict(url, key, model, timeout_s=1.5),
+                                                         time.perf_counter)
+
+                    async def ask(text: str) -> str:          # a network call: never on the loop
+                        return await asyncio.to_thread(sync, text)
+
+                    self._head_asker = ask
+                    log.info("head: poses are chosen by Jev (CC_BUDDY_HEAD_MODEL); the backend remains the fallback")
+                except Exception as e:  # noqa: BLE001
+                    log.warning("head: the pose model is off (%s: %s)", type(e).__name__, e)
+        return self._head_asker or None
+
     async def _resync_agent(self) -> None:
         """Tell a (re)connected or rebooted board which conversation phase is live —
         idle when none. The board drops a phase that goes 30 s without a word from
@@ -852,6 +892,7 @@ class Daemon:
                                            on_star=self._star_by_voice,
                                            learning=server.app.voice if server is not None else None,
                                            think_aloud=think_aloud, lesson_wake=lesson_wake,
+                                           head_pose=Daemon._head_pose_asker(self),
                                            on_spoken_idea=server.app.append_spoken if server is not None else None,
                                            on_think_aloud=lambda on, lesson_id: Daemon._on_think_aloud(
                                                self, on, lesson_id),
@@ -1095,6 +1136,9 @@ class Daemon:
             bus.publish("/buddy/state", {"state": state, "time": time.time()})
         if self.ble.connected:
             asyncio.create_task(self.ble.send({"cmd": "agent", "state": state}))
+        follower = getattr(self, "_follower", None)
+        if follower is not None:
+            asyncio.create_task(follower.on_phase(state))
         Daemon._sync_listen_pose(self)   # by class: test stubs bind only the handlers they exercise
 
     def _sync_listen_pose(self) -> None:

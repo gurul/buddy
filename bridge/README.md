@@ -72,6 +72,9 @@ python3.12 -m venv .venv
 **Optional, Apple silicon only — the computer-use fast lane.** `.venv/bin/pip install -e ".[fast]"`
 adds `laya-mlx`, then copy the Laya checkpoint to `~/.config/cc-buddy-bridge/models/laya-multilingual-mlx`
 and start the daemon with `CC_BUDDY_FAST_LANE=1` (it ships off; the daemon runs without any of this).
+The lane's **router** needs none of that and ships on (`CC_BUDDY_LANE_FIRST`, `lane_router.py`): a request
+one labelled control fully accounts for ("switch to week view") is clicked before the planner's first turn,
+in about a second instead of thirteen.
 `cc-buddy-bridge update` installs the `[fast]` extra automatically on Apple silicon. Details and the
 measured numbers: [docs/stackchan/voice.md](../docs/stackchan/voice.md#the-fast-lane-local-decider-under-the-planner).
 

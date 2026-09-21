@@ -44,6 +44,19 @@ SWEEP: tuple[tuple[int, int], ...] = ((-100, 50), (-50, 50), (0, 50), (50, 50), 
 
 Sender = Callable[[dict[str, Any]], Awaitable[bool]]
 
+# A named pose → the move it means, in the robot's frame (negative yaw is its own left). The numbers are
+# the ones the backend's prompt already uses ("a bit" ≈ 15°, "left" ≈ 70°, "all the way" 120), so a pose
+# chosen by the fast path (typed_ask.py) lands where the backend would have put it.
+POSE_MOVES: dict[str, dict[str, Any]] = {
+    "left": {"yaw": -70, "relative": False}, "right": {"yaw": 70, "relative": False},
+    "up": {"pitch": 70, "relative": False}, "down": {"pitch": 25, "relative": False},
+    "center": {"yaw": 0, "pitch": PITCH_LEVEL, "relative": False},
+    "far_left": {"yaw": -YAW_MAX, "relative": False}, "far_right": {"yaw": YAW_MAX, "relative": False},
+    "bit_left": {"yaw": -15, "relative": True}, "bit_right": {"yaw": 15, "relative": True},
+    "bit_up": {"pitch": 12, "relative": True}, "bit_down": {"pitch": -12, "relative": True},
+    "desk": {"pitch": 10, "relative": False}, "ceiling": {"pitch": PITCH_MAX, "relative": False},
+}
+
 
 def clamp_pose(yaw: float, pitch: float) -> tuple[int, int, bool]:
     y = max(-YAW_MAX, min(YAW_MAX, int(round(yaw))))
@@ -97,6 +110,9 @@ class Head:
         self.pitch: float = float(PITCH_LEVEL)
         self.pose_at = float("-inf")     # when the board last echoed its pose
         self.moves: list[dict[str, Any]] = []
+        # Told of every pose this class commands, with its hold: an asked-for pose (move_head, look_around,
+        # find) owns the head, and the conversation's follower (follow.py) stands down for that long.
+        self.on_move: Optional[Callable[[float], None]] = None
 
     def observe(self, yaw: Any, pitch: Any) -> None:
         """The pose echoed on a camera frame. Ignores anything that is not a number."""
@@ -123,6 +139,8 @@ class Head:
             return {"ok": False, "reason": "the move did not reach the robot"}
         self.moves.append(cmd)
         self.yaw, self.pitch = float(y), float(p)
+        if self.on_move is not None:
+            self.on_move(hold)
         out: dict[str, Any] = {"ok": True, "yaw": y, "pitch": p, "facing": direction_word(y), "hold_secs": hold}
         if clamped:
             out["note"] = (f"that is as far as the head goes (yaw ±{YAW_MAX}, pitch {PITCH_MIN}..{PITCH_MAX}); "

@@ -485,6 +485,7 @@ def test_install_binds_delegate_only_with_the_fast_lane() -> None:
 
 def test_delegate_without_a_decider_is_unavailable_and_moves_nothing() -> None:
     b = Bench()
+    b.h.lane_decide = "model"                            # the path that needs the model; keyword mode does not
     line = b.h.delegate("switch to week view")
     assert line.startswith("unavailable:") and b.gui.clicks == [] and b.h.acted is False
     assert b.logs[-1].startswith("delegate unavailable:")
@@ -543,8 +544,15 @@ def test_lane_senses_read_the_screen_and_the_snapshot() -> None:
     assert ad.text_visible("week") is True and ad.text_visible("year") is False and ad.text_visible("") is False
     assert ad.screen_changed() is None                                       # no baseline before a snapshot
     ad._thumb0 = Frame.from_pil(a).thumb()
-    assert ad.screen_changed() is False
+    assert ad.screen_changed() is False                                      # one snapshot: against a fresh capture
     assert ad.screen_changed() is True
+    # The lane asks AFTER its post-click snapshot. The step began at the snapshot before that, so the
+    # two snapshots' frames are compared — not the settled screen with itself, which can never differ.
+    ad._thumb_before = Frame.from_pil(a).thumb()
+    ad._thumb0 = Frame.from_pil(with_block(a, 0.3)).thumb()
+    assert ad.screen_changed() is True
+    ad._thumb0 = Frame.from_pil(a).thumb()
+    assert ad.screen_changed() is False
     assert ad.press("return") == "pressed return" and b.gui.presses == ["return"] and b.h.acted
     assert ad.settle(0.5) >= 0.0
 

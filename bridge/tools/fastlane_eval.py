@@ -83,6 +83,17 @@ MIN_COVERAGE = 0.70
 SHIP_TOP1 = 0.80
 SHIP_COVERAGE = 0.70
 SHIP_KEYWORD_LEAD = 0.10
+# The router (lane_router.py) acts on the human's own words with no planner behind it, so its bar
+# is precision, not coverage: a request it declines costs one AX snapshot and the planner runs as
+# before. Fixed here before any router number was read (2026-09-21): at +3.5 s a right click and
+# −4.55 s a wrong one the break-even precision is 56.5%; the bar is 0.90, on at least 10 engaged
+# holdout cases so the figure means something, with zero sensitive clicks.
+ROUTER_MIN_PRECISION = 0.90
+ROUTER_MIN_ENGAGED = 10
+# A fixed list, so the "names another app" rule scores the same on every machine.
+ROUTER_APPS = frozenset({"calendar", "system settings", "safari", "finder", "notes", "music", "reminders", "mail",
+                         "photos", "messages", "maps", "contacts", "preview", "terminal", "textedit", "podcasts",
+                         "books", "news", "stocks", "weather", "clock", "calculator", "shortcuts", "facetime"})
 # §0: saved seconds per correct delegated step, cost per wrong click (step + recovery turn), cost of an
 # escalation (the lane's own step, astra acts anyway). Replace with measured ones once live timings exist.
 COST_CORRECT = 3.5
@@ -597,6 +608,151 @@ def shipped_settings() -> tuple[float, float, str, bool]:
             bool(fast_lane.FAST_LANE_DEFAULT))
 
 
+# ---- the router (lane_router.py) on the fixtures ------------------------------------------------
+
+class _FixtureSenses:
+    """One fixture snapshot, forever: the router decides on it, and the click "changes the screen"."""
+
+    def __init__(self, snapshot: Snapshot) -> None:
+        self._snapshot = snapshot
+
+    def snapshot(self) -> Snapshot:
+        return self._snapshot
+
+    def text_visible(self, _s: str) -> bool:
+        return False
+
+    def focused(self) -> Optional[Candidate]:
+        return None
+
+    def frontmost_pid(self) -> int:
+        return int(self._snapshot.pid or 0)
+
+    def screen_changed(self) -> Optional[bool]:
+        return True
+
+
+class _RecordingEffectors:
+    def __init__(self) -> None:
+        self.clicked: list[Candidate] = []
+
+    def click_candidate(self, c: Candidate) -> str:
+        self.clicked.append(c)
+        return f"clicked {c.role} {c.label!r}"
+
+    def focus_and_type(self, c: Candidate, text: str) -> str:
+        return "refused: the router never types"
+
+    def press(self, key: str) -> str:
+        return "refused: the router never presses a key"
+
+    def settle(self, secs: float) -> float:
+        return 0.0
+
+
+@dataclass
+class RouterCase:
+    fixture: str
+    set_name: str
+    app: str
+    goal: str
+    expected: str                # a candidate id, or "abstain"
+    overlap: bool
+    distractor: bool
+    status: str                  # the RouteResult status
+    reason: str
+    clicked: list[str]           # candidate ids, in click order
+    engaged: bool
+    correct: bool                # engaged and the clicks are exactly [expected]
+    sensitive: bool              # a clicked label is in the sensitive table — must never happen
+
+
+def route_case(fixture: Fixture, case: dict[str, Any]) -> RouterCase:
+    """The REAL router on one fixture case: every gate, the cover rule, the clause split, the
+    System Settings doors — with effectors that record the click instead of making it."""
+    from cc_buddy_bridge.lane_router import route
+
+    goal = str(case["goal"])
+    expected = "abstain" if case.get("expected") == "abstain" else str(case.get("expected_id"))
+    effectors = _RecordingEffectors()
+    result = route(goal, senses=_FixtureSenses(fixture.snapshot), effectors=effectors,
+                   frontmost_app=fixture.snapshot.app, apps=ROUTER_APPS)
+    ids = [c.id for c in effectors.clicked]
+    engaged = bool(ids)
+    return RouterCase(fixture=fixture.name, set_name=fixture.set_name, app=fixture.app, goal=goal,
+                      expected=expected, overlap=bool(case.get("overlap", True)),
+                      distractor=bool(case.get("distractor")), status=result.status, reason=result.reason,
+                      clicked=ids, engaged=engaged, correct=engaged and ids == [expected],
+                      sensitive=any(is_sensitive(c.label) for c in effectors.clicked))
+
+
+def router_summary(results: list[RouterCase]) -> dict[str, Any]:
+    engaged = [r for r in results if r.engaged]
+    right = sum(1 for r in engaged if r.correct)
+    clicks_expected = [r for r in results if r.expected != "abstain"]
+    lo, hi = wilson(right, len(engaged)) if engaged else (0.0, 0.0)
+    reasons: dict[str, int] = {}
+    for r in results:
+        if not r.engaged:
+            # complete with no click: the control was already selected, and the router says so
+            key = r.reason.split(":", 1)[0] or ("already_selected" if r.status == "complete" else r.status)
+            reasons[key] = reasons.get(key, 0) + 1
+    return {"n": len(results), "engaged": len(engaged), "right": right,
+            "precision": right / len(engaged) if engaged else 0.0, "wilson": [lo, hi],
+            "wrong": [f"{r.fixture}: {r.goal!r} clicked {r.clicked} expected {r.expected}" for r in engaged
+                      if not r.correct],
+            "engaged_on_abstain": sum(1 for r in engaged if r.expected == "abstain"),
+            "coverage": (sum(1 for r in engaged if r.expected != "abstain") / len(clicks_expected)
+                         if clicks_expected else 0.0),
+            "sensitive": sum(1 for r in results if r.sensitive), "declined": dict(sorted(reasons.items())),
+            "cost_per_case": ((right * COST_CORRECT - (len(engaged) - right) * COST_WRONG) / len(results)
+                              if results else 0.0)}
+
+
+def router_ship_decision(holdout: list[RouterCase]) -> tuple[bool, dict[str, Any]]:
+    s = router_summary(holdout)
+    ok = (s["engaged"] >= ROUTER_MIN_ENGAGED and s["precision"] >= ROUTER_MIN_PRECISION and s["sensitive"] == 0)
+    return ok, s
+
+
+def print_router(title: str, s: dict[str, Any], out: Callable[[str], None] = print) -> None:
+    out(f"== router / {title}: n={s['n']}")
+    out(f"   engaged {s['engaged']} ({_pct(s['coverage'])} of the click-expected cases), right {s['right']}: "
+        f"precision {_pct(s['precision'])} (Wilson 95% {_pct(s['wilson'][0])}–{_pct(s['wilson'][1])})")
+    out(f"   engaged on an abstain-expected case {s['engaged_on_abstain']}, sensitive clicks {s['sensitive']}, "
+        f"cost-weighted {s['cost_per_case']:+.2f} s/case")
+    out(f"   declined: {s['declined']}")
+    for line in s["wrong"]:
+        out(f"   WRONG {line}")
+
+
+def cmd_router(args: argparse.Namespace) -> int:
+    sets = load_sets(Path(args.fixtures))
+    if not sets["holdout"]:
+        print(f"ROUTER_EVAL_FAILED: no holdout fixtures under {args.fixtures}")
+        return 1
+    by_set = {name: [route_case(f, c) for f in fixtures for c in f.cases] for name, fixtures in sets.items()}
+    for name in ("select", "holdout"):
+        print_router(name, router_summary(by_set[name]))
+    ok, s = router_ship_decision(by_set["holdout"])
+    print(f"holdout: precision {_pct(s['precision'])} (need ≥ {_pct(ROUTER_MIN_PRECISION)}) on {s['engaged']} engaged "
+          f"(need ≥ {ROUTER_MIN_ENGAGED}), sensitive clicks {s['sensitive']} (need 0)")
+    print(f"ROUTER SHIP DECISION: {'enabled' if ok else 'disabled'} (CC_BUDDY_LANE_FIRST default {'1' if ok else '0'})")
+    if args.results_out:
+        Path(args.results_out).write_text(json.dumps({
+            "router": {name: [asdict(r) for r in rows] for name, rows in by_set.items()}, "ship": ok,
+            "numbers": s}, ensure_ascii=False, indent=1), encoding="utf-8")
+    print("ROUTER_EVAL_COMPLETE")
+    return 0
+
+
+def shipped_router() -> bool:
+    """fast_lane.LANE_FIRST_DEFAULT, imported lazily (and replaceable in tests, like shipped_settings)."""
+    from cc_buddy_bridge import fast_lane
+
+    return bool(fast_lane.LANE_FIRST_DEFAULT)
+
+
 # ---- subcommands --------------------------------------------------------------------------------
 
 def cmd_fixtures(args: argparse.Namespace) -> int:
@@ -664,6 +820,15 @@ def cmd_check_default(args: argparse.Namespace) -> int:
     print(f"  decision: {'enabled' if ok else 'disabled'}; shipped FAST_LANE_DEFAULT={shipped}")
     if ok != shipped:
         print(f"DEFAULT_MISMATCH: eval says {'enabled' if ok else 'disabled'}, FAST_LANE_DEFAULT is {shipped}")
+        return 1
+    router_ok, r = router_ship_decision([route_case(f, c) for f in sets["holdout"] for c in f.cases])
+    router_shipped = shipped_router()
+    print(f"router on holdout: precision {_pct(r['precision'])} on {r['engaged']} engaged (need ≥ "
+          f"{_pct(ROUTER_MIN_PRECISION)} on ≥ {ROUTER_MIN_ENGAGED}), sensitive clicks {r['sensitive']} (need 0)")
+    print(f"  decision: {'enabled' if router_ok else 'disabled'}; shipped LANE_FIRST_DEFAULT={router_shipped}")
+    if router_ok != router_shipped:
+        print(f"DEFAULT_MISMATCH: the router eval says {'enabled' if router_ok else 'disabled'}, "
+              f"LANE_FIRST_DEFAULT is {router_shipped}")
         return 1
     print("DEFAULT_CONSISTENT")
     return 0
@@ -886,6 +1051,90 @@ def cmd_live_delegate(args: argparse.Namespace) -> int:
     return 0
 
 
+def _front_app() -> str:
+    from cc_buddy_bridge.desktop_helpers import ax_frontmost
+
+    try:
+        return str(ax_frontmost().get("app") or "")
+    except Exception:  # noqa: BLE001 — unknown is "not in front yet"
+        return ""
+
+
+def _selected(app: str, label: str) -> Optional[bool]:
+    """Is the control labelled `label` selected in `app` right now? None when there is no such control."""
+    pid = ax.pid_for_app(app)
+    if not pid:
+        return None
+    found = _find_label(ax.ax_snapshot(pid, screen=ax.main_screen_points()), label)
+    return None if found is None else found.value == "selected"
+
+
+def _route_once(goal: str) -> tuple[str, float, int, Optional[Path]]:
+    """One task through the real ComputerAgent and a real desktop worker, with the router on and a
+    planner that records every call and refuses: (what it said, wall seconds, planner calls, run log)."""
+    import asyncio
+    import tempfile
+
+    from cc_buddy_bridge.computer_agent import AgentConfig, ComputerAgent
+
+    calls: list[dict[str, Any]] = []
+
+    async def planner(request: dict[str, Any]) -> dict[str, Any]:
+        calls.append(request)
+        raise RuntimeError("the planner was called")
+
+    cfg = AgentConfig(runs_dir=Path(tempfile.mkdtemp(prefix="lane-route-")), lane_first=True, verify=False)
+    agent = ComputerAgent(planner, config=cfg)
+    t0 = time.perf_counter()
+    said = asyncio.run(agent.run(goal))
+    return said, time.perf_counter() - t0, len(calls), agent.run_log
+
+
+def cmd_live_route(args: argparse.Namespace) -> int:
+    """A real lane-first task, end to end: worker start, the router, the click, the sentence."""
+    import subprocess
+
+    app, goal = args.live_route
+    expect, restore = args.expect_selected, args.restore
+    if not expect:
+        print("LIVE_ROUTE_FAILED: --live-route needs --expect-selected LABEL")
+        return 1
+    os.environ["CC_BUDDY_LANE_FIRST"] = "1"            # the worker child reads it
+    subprocess.run(["open", "-a", app], check=False)
+    deadline = time.time() + 8.0
+    while time.time() < deadline and _norm(_front_app()) != _norm(app):
+        time.sleep(0.2)
+    if _norm(_front_app()) != _norm(app):
+        print(f"PRECONDITION_NOT_MET: {app} did not come to the front")
+        return 1
+    state = _selected(app, expect)
+    if state is None:
+        print(f"PRECONDITION_NOT_MET: no control labelled {expect!r} in {app}")
+        return 1
+    if state and restore:
+        said, secs, calls, _log = _route_once(restore)
+        print(f"-- precondition: {expect!r} was already selected; routed {restore!r} first: {said!r} ({secs:.2f} s)")
+        state = _selected(app, expect)
+    if state:
+        print(f"PRECONDITION_NOT_MET: {expect!r} is already selected in {app}")
+        return 1
+    said, secs, calls, run_log = _route_once(goal)
+    print(f"-- {goal!r} in {app}: said {said!r}; wall {secs:.2f} s (worker start included); planner calls {calls}")
+    if run_log is not None and run_log.exists():
+        for line in run_log.read_text(encoding="utf-8").splitlines():
+            if '"lane_first"' in line:
+                print(f"   run log: {line}")
+    ok = calls == 0 and said.startswith("Done.") and _selected(app, expect) is True
+    if restore:
+        back, back_secs, back_calls, _log = _route_once(restore)
+        print(f"-- restored with {restore!r}: said {back!r}; wall {back_secs:.2f} s; planner calls {back_calls}")
+    if not ok:
+        print(f"LIVE_ROUTE_FAILED: planner calls {calls}, said {said!r}, {expect!r} selected: {_selected(app, expect)}")
+        return 1
+    print(f"LIVE_ROUTE_DONE wall={secs:.2f}s planner_calls=0")
+    return 0
+
+
 def shadow_entries(lines: list[str]) -> list[dict[str, Any]]:
     """Verify entries with both the model's verdict and the local p_true, from run-log lines."""
     out = []
@@ -988,6 +1237,11 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--fixtures", metavar="DIR", help="the offline eval over DIR/select and DIR/holdout "
                    "(with --check-default: the ship decision over DIR/holdout)")
     p.add_argument("--check-default", action="store_true", help="the ship decision vs FAST_LANE_DEFAULT")
+    p.add_argument("--router", action="store_true", help="with --fixtures: measure the lane-first router instead")
+    p.add_argument("--live-route", nargs=2, metavar=("APP", "GOAL"),
+                   help="one real lane-first task through ComputerAgent; the planner must never be called")
+    p.add_argument("--expect-selected", default=None, metavar="LABEL", help="--live-route: the control that ends selected")
+    p.add_argument("--restore", default=None, metavar="GOAL", help="--live-route: a goal that puts the app back")
     p.add_argument("--live-snapshot", metavar="APP", help="one real accessibility snapshot of a running app")
     p.add_argument("--live-delegate", nargs=2, metavar=("APP", "OBJECTIVE"), help="one real delegate run")
     p.add_argument("--shadow-report", action="store_true", help="local-vs-model verdict agreement from run logs")
@@ -1023,7 +1277,8 @@ def build_parser() -> argparse.ArgumentParser:
 def main(argv: Optional[list[str]] = None) -> int:
     parser = build_parser()
     args = parser.parse_args(argv)
-    modes = [m for m in ("live_snapshot", "live_delegate", "shadow_report", "make_fixture", "redact") if getattr(args, m)]
+    modes = [m for m in ("live_snapshot", "live_delegate", "live_route", "shadow_report", "make_fixture", "redact")
+             if getattr(args, m)]
     if len(modes) > 1 or (modes and (args.check_default or args.fixtures)):
         parser.error("one mode at a time")
     if args.live_snapshot:
@@ -1032,6 +1287,8 @@ def main(argv: Optional[list[str]] = None) -> int:
         if not args.done_when:
             parser.error("--live-delegate needs --done-when")
         return cmd_live_delegate(args)
+    if args.live_route:
+        return cmd_live_route(args)
     if args.shadow_report:
         return cmd_shadow_report(args)
     if args.make_fixture:
@@ -1044,7 +1301,7 @@ def main(argv: Optional[list[str]] = None) -> int:
         args.fixtures = args.fixtures or "tests/fixtures/ax"
         return cmd_check_default(args)
     if args.fixtures:
-        return cmd_fixtures(args)
+        return cmd_router(args) if args.router else cmd_fixtures(args)
     parser.error("choose a mode: --fixtures, --check-default, --live-snapshot, --live-delegate, --shadow-report, "
                  "--make-fixture or --redact")
     return 2

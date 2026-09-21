@@ -165,6 +165,9 @@ class Clock:
 def run(objective: str, senses: Senses, decider: Decider, effectors: Effectors | None = None, **kw) -> tuple[
         DelegateResult, Effectors]:
     eff = effectors or Effectors()
+    # These tests pin the lane's gates on the path where a model answers; the keyword-only
+    # default (fast_lane.DEFAULT_DECIDE) has its own file, tests/test_lane_first.py.
+    kw.setdefault("decide", "model")
     result = run_delegate(objective, senses=senses, effectors=eff, decider=decider, clock=Clock(), **kw)
     return result, eff
 

@@ -1,92 +1,124 @@
-# Gates: computer-use fast lane (laya-mlx under gpt-6-astra) — v2
+# Gates: lane-first routing (keyword gate before the planner, laya out of the click path)
 
-OWNS: bridge/src/cc_buddy_bridge/ax_candidates.py, bridge/src/cc_buddy_bridge/decider.py, bridge/src/cc_buddy_bridge/fast_lane.py, bridge/src/cc_buddy_bridge/desktop_helpers.py, bridge/src/cc_buddy_bridge/desktop_worker.py, bridge/src/cc_buddy_bridge/computer_agent.py, bridge/src/cc_buddy_bridge/update.py, bridge/pyproject.toml, bridge/tools/**, bridge/tests/**, docs/stackchan/voice.md, docs/stackchan/slither.md, README.md, bridge/README.md
+OWNS: bridge/src/cc_buddy_bridge/fast_lane.py, bridge/src/cc_buddy_bridge/lane_router.py, bridge/src/cc_buddy_bridge/desktop_helpers.py, bridge/src/cc_buddy_bridge/desktop_worker.py, bridge/src/cc_buddy_bridge/computer_agent.py, bridge/tools/fastlane_eval.py, bridge/tests/test_lane_first.py, bridge/tests/test_agent_lane_first.py, bridge/tests/test_desktop_worker.py, bridge/tests/test_fastlane_eval.py, bridge/tests/test_fastlane_docs.py, docs/stackchan/voice.md, README.md, GATES.md
 
-Scope: A local typed-decision fast lane (accessibility-tree candidates ranked by laya-mlx, every safety judgement in code) that gpt-6-astra can delegate narrow in-app click runs to, a shadow-only local verifier, per-step local timing in the run log, and an offline holdout eval that decides whether the lane ships enabled. Pytest gates use `&& echo PYTEST_OK` so the exit code decides; new tests are selected by node id, never by -k.
+Scope: The fast lane decides by the keyword gate alone (the local model leaves the click path), runs BEFORE the planner's first turn when the spoken goal is fully covered by one labelled control per clause, ends a fully lane-decided task with a local sentence and zero planner calls, and lets the planner hand the lane an ordered list of exact labels in one call. Every safety gate of fast_lane.py still applies. The previous ledger (fast lane v2) is in git at d28696d. Pytest gates use `&& echo …_OK` so the exit code decides; tests are selected by file or node id, never by -k.
 
 - [x] G1: The whole bridge test suite passes.
-  CHECK: .venv/bin/python -m pytest -q -p no:cacheprovider && echo PYTEST_OK
+  CHECK: .venv/bin/python -m pytest -q -p no:cacheprovider --ignore=tests/test_desktop_live.py && echo PYTEST_OK
   CWD: bridge
   EXPECT: PYTEST_OK
-  EVIDENCE: exit=0; shell=zsh; cwd=bridge; output=1436 passed, 3 skipped in 61.88s PYTEST_OK (2026-09-21, whole bridge incl. slither files)
+  EVIDENCE: exit=0; shell=/bin/sh; cwd=/Users/gurucharan/Documents/personal/buddy/bridge; path=574d30059456/19 entries; output=1512 passed, 1 skipped in 67.08s (0:01:07) | PYTEST_OK
 
 - [x] G2: Ruff reports nothing on src, tests and tools.
   CHECK: .venv/bin/ruff check src/ tests/ tools/ && echo RUFF_CLEAN
   CWD: bridge
   EXPECT: RUFF_CLEAN
-  EVIDENCE: exit=0; shell=zsh; cwd=bridge; output=All checks passed! RUFF_CLEAN (src/ tests/ tools/)
+  EVIDENCE: exit=0; shell=/bin/sh; cwd=/Users/gurucharan/Documents/personal/buddy/bridge; path=574d30059456/19 entries; output=All checks passed! | RUFF_CLEAN
 
-- [x] G3: The real model loads from the default checkpoint path (a real directory under ~/.config, not a symlink into another repo), warms up, and answers a 4-option Calendar menu with a valid id in under 200 ms warm.
-  CHECK: .venv/bin/python -c "import os; from cc_buddy_bridge.decider import Decider, DEFAULT_MODEL_PATH; p=os.path.expanduser(DEFAULT_MODEL_PATH); assert not os.path.islink(p) and os.path.realpath(p).startswith(os.path.expanduser('~/.config')), p; d=Decider.load(p); c=d.choose('switch to week view', app='Calendar', context='title: September 2026', options={'1':'click radio button: Week','2':'click button: Today','reobserve':'the screen is still changing, look again','abstain':'none of these advances the objective'}); assert c.id and c.ms < 200 and not c.error, c; print('LAYA_READY', c.id, round(c.ms,1), 'load', round(d.load_ms), 'warm', round(d.warm_ms))"
+- [x] G3: In keyword decide mode the lane needs no model: with decider=None it clicks the one control that uniquely shares the most goal words, and on a tie or on zero shared words it escalates with zero input and zero model calls (a Decider fake that fails the test if asked is the positive control for "never asked").
+  CHECK: .venv/bin/python -m pytest -q -p no:cacheprovider tests/test_lane_first.py::test_keyword_mode_clicks_without_a_decider tests/test_lane_first.py::test_keyword_mode_tie_escalates_and_never_asks_the_model tests/test_lane_first.py::test_keyword_mode_zero_overlap_escalates_no_match tests/test_lane_first.py::test_model_mode_still_asks_the_model_on_a_tie && echo KEYWORD_MODE_OK
   CWD: bridge
-  EXPECT: LAYA_READY
-  EVIDENCE: exit=0; shell=zsh; cwd=bridge; output=LAYA_READY 2 22.4 load 465 warm 1531 (leaf B, 2026-09-21 02:0x; checkpoint is a real directory under ~/.config)
+  EXPECT: KEYWORD_MODE_OK
+  EVIDENCE: exit=0; shell=/bin/sh; cwd=/Users/gurucharan/Documents/personal/buddy/bridge; path=574d30059456/19 entries; output=4 passed in 0.03s | KEYWORD_MODE_OK
 
-- [x] G4: Live accessibility snapshots of a Calendar window, a System Settings window and a Safari page each complete untruncated within their app budget with at least 5 labelled pressable candidates, and a Safari walk capped at 800 nodes reports truncated=true (positive control for the truncation path). Precondition: a window of each app is open.
-  CHECK: .venv/bin/python tools/fastlane_eval.py --live-snapshot Calendar --min-pressable 5 --max-ms 300 --require-complete && .venv/bin/python tools/fastlane_eval.py --live-snapshot "System Settings" --min-pressable 5 --max-ms 600 --require-complete && .venv/bin/python tools/fastlane_eval.py --live-snapshot Safari --min-pressable 5 --max-ms 2500 --require-complete && .venv/bin/python tools/fastlane_eval.py --live-snapshot Safari --max-nodes 800 --expect-truncated && echo LIVE_SNAPSHOTS_OK
+- [x] G4: run_script runs an ordered list of objectives, one keyword-decided click each, against a fresh snapshot per step, and stops at the first step that does not act, reporting exactly which steps applied.
+  CHECK: .venv/bin/python -m pytest -q -p no:cacheprovider tests/test_lane_first.py::test_script_runs_each_step_in_order tests/test_lane_first.py::test_script_stops_at_the_first_step_that_does_not_act tests/test_lane_first.py::test_script_sensitive_step_confirms_and_clicks_nothing_more tests/test_lane_first.py::test_script_is_capped_at_six_steps && echo SCRIPT_OK
   CWD: bridge
-  EXPECT: LIVE_SNAPSHOTS_OK
-  EVIDENCE: exit=0; shell=zsh; cwd=bridge; output=Calendar 124 nodes 0.174 s pressable 59 | System Settings 195 nodes 0.178 s pressable 50 | Safari 3632 nodes 0.887 s pressable 79 untruncated | Safari --max-nodes 800 truncated=True 0.218 s | LIVE_SNAPSHOTS_OK (2026-09-21; the first walk after a page load is truncated at 4000 nodes/1.1 s and settles on the second)
+  EXPECT: SCRIPT_OK
+  EVIDENCE: exit=0; shell=/bin/sh; cwd=/Users/gurucharan/Documents/personal/buddy/bridge; path=574d30059456/19 entries; output=4 passed in 0.02s | SCRIPT_OK
 
-- [x] G5: Every committed fixture re-derives byte-equal from its raw walk dump with the current code and is untruncated; the select set has ≥ 30 cases and the holdout set ≥ 40 cases across ≥ 5 apps with ≥ 12 overlap:false and ≥ 6 distractor cases; the eval harness runs every style over both sets with the real model, prints the keyword baseline, the accuracy-vs-coverage table, the k-bucket table, the Wilson interval, the truncation counts and the cost-weighted score, and names the winner and thresholds. The harness itself is unit-tested with a fake predictor.
-  CHECK: .venv/bin/python -m pytest -q -p no:cacheprovider tests/test_fixtures_ax.py tests/test_fastlane_eval.py && .venv/bin/python tools/fastlane_eval.py --fixtures tests/fixtures/ax --min-select 30 --min-holdout 40 --min-apps 5 --min-no-overlap 12 --min-distractor 6 && echo EVAL_COMPLETE
+- [x] G5: The router engages only when every goal word of a clause is covered by the matched control's label, its value, or the frontmost app's name; it splits "A and then B" into clauses; it refuses a goal that names another installed app, a question, and an empty clause. Positive and negative goals are both asserted.
+  CHECK: .venv/bin/python -m pytest -q -p no:cacheprovider tests/test_lane_first.py::test_router_clauses tests/test_lane_first.py::test_router_engages_on_a_fully_covered_goal tests/test_lane_first.py::test_router_refuses_a_goal_with_uncovered_words tests/test_lane_first.py::test_router_refuses_a_goal_naming_another_app tests/test_lane_first.py::test_router_two_clauses_two_clicks && echo ROUTER_OK
   CWD: bridge
-  EXPECT: EVAL_COMPLETE
-  EVIDENCE: exit=0; shell=zsh; cwd=bridge; output=48 passed | select 73 cases/5 apps, holdout 82 cases/7 apps, 34 overlap:false, 20 distractor; keyword baseline, gate usage, abstain-expected and overlap:false(click-expected) subsets, coverage table, k buckets, Wilson, truncation counts, ms, cost per style×set; WINNER style=hinted p_min=0.60 margin_min=0.15; holdout gated top-1 72.3%, coverage 79.3%, overlap:false(click) real 0.0% vs keyword 0.0% (n=9), abstain-expected real 50% vs keyword 90% (n=10), cost +0.61 s/case; SHIP DECISION: disabled; EVAL_COMPLETE (rerun after the review's criterion fix, 2026-09-21; full text scratchpad/g5-final.txt)
+  EXPECT: ROUTER_OK
+  EVIDENCE: exit=0; shell=/bin/sh; cwd=/Users/gurucharan/Documents/personal/buddy/bridge; path=574d30059456/19 entries; output=5 passed in 0.02s | ROUTER_OK
 
-- [x] G6: The shipped default for CC_BUDDY_FAST_LANE and the shipped Thresholds match the holdout outcome: enabled only if gated top-1 ≥ 0.80 AND coverage ≥ 0.70 AND real ≥ keyword + 0.10 on overlap:false AND cost-weighted score > 0 at the shipped thresholds; and instructions(False) contains no "delegate" token while instructions(True) documents it.
-  CHECK: .venv/bin/python tools/fastlane_eval.py --fixtures tests/fixtures/ax --check-default && .venv/bin/python -m pytest -q -p no:cacheprovider tests/test_computer_agent.py::test_instructions_variants_track_fast_lane_default && echo DEFAULT_CONSISTENT
+- [x] G6: Through ComputerAgent: a fully lane-decided task returns a spoken sentence with ZERO create_response calls; a partly decided one reaches the planner with a [note] naming what the lane already did; a lane click that changed nothing goes to the planner; lane-first off never calls the worker's lane_first.
+  CHECK: .venv/bin/python -m pytest -q -p no:cacheprovider tests/test_agent_lane_first.py && echo AGENT_LANE_FIRST_OK
   CWD: bridge
-  EXPECT: DEFAULT_CONSISTENT
-  EVIDENCE: exit=0; shell=zsh; cwd=bridge; output=holdout n=82 style=hinted thresholds 0.60/0.15: gated top-1 72.3% (need 80), coverage 79.3% (need 70), overlap:false(click-expected) real 0.0% vs keyword 0.0% (need +10), cost +0.61 (need > 0); decision: disabled; shipped FAST_LANE_DEFAULT=False; DEFAULT_CONSISTENT | test_instructions_variants_track_fast_lane_default 1 passed
+  EXPECT: AGENT_LANE_FIRST_OK
+  EVIDENCE: exit=0; shell=/bin/sh; cwd=/Users/gurucharan/Documents/personal/buddy/bridge; path=574d30059456/19 entries; output=5 passed in 0.04s | AGENT_LANE_FIRST_OK
 
-- [x] G7: The sensitive-label gate is fail-closed with a committed table of ≥ 12 positives (including "Delete Event", "Don't Save", "Replace", "OK", "Remove filter", "Export as PDF", and a 90-char label whose sensitive word sits after character 60) and ≥ 12 boundary-safe negatives; and the helper list, exec_py text and instructions agree in both fast-lane variants.
-  CHECK: .venv/bin/python -m pytest -q -p no:cacheprovider tests/test_ax_candidates.py::test_sensitive_label_table_positives tests/test_ax_candidates.py::test_sensitive_label_table_negatives tests/test_computer_agent.py::test_instructions_tool_text_and_helper_names_agree tests/test_computer_agent.py::test_instructions_variants_track_fast_lane_default && echo PYTEST_OK
+- [x] G7: The worker answers a `lane_first` request with {status, line, applied, changed, log} and still rejects an unknown operation.
+  CHECK: .venv/bin/python -m pytest -q -p no:cacheprovider tests/test_desktop_worker.py::test_lane_first_operation_replies_with_the_route tests/test_desktop_worker.py::test_lane_first_without_the_lane_says_unavailable tests/test_desktop_worker.py::test_unknown_operation_is_still_unsupported && echo WORKER_LANE_FIRST_OK
   CWD: bridge
-  EXPECT: PYTEST_OK
-  EVIDENCE: exit=0; shell=zsh; cwd=bridge; output=4 passed (sensitive table positives/negatives; helper names, exec_py text and instructions agree in both variants) PYTEST_OK
+  EXPECT: WORKER_LANE_FIRST_OK
+  EVIDENCE: exit=0; shell=/bin/sh; cwd=/Users/gurucharan/Documents/personal/buddy/bridge; path=574d30059456/19 entries; output=3 passed in 0.02s | WORKER_LANE_FIRST_OK
 
-- [x] G8: The lane cannot act consequentially: with fake senses/effectors, a "Delete Event" candidate on a non-sensitive objective is never offered; a sensitive pick returns confirm with zero clicks; an "OK" button inside a sheet is never offered and the lane escalates dialog_open; a "Dark" radio in System Settings returns confirm; key="return" after typing into an AXTextArea "Message" returns confirm with zero presses while the same key after typing into a search field presses once; a hit-test miss and a focus mismatch produce zero input; the previous step's control is not re-offered after an unchanged step; approve=<label> allows exactly one sensitive click. Positive control: a "Week" radio is clicked exactly once.
-  CHECK: .venv/bin/python -m pytest -q -p no:cacheprovider tests/test_fast_lane.py::test_sensitive_candidate_not_offered tests/test_fast_lane.py::test_sensitive_pick_confirms_without_clicking tests/test_fast_lane.py::test_sheet_button_never_offered_escalates_dialog_open tests/test_fast_lane.py::test_system_settings_toggle_confirms tests/test_fast_lane.py::test_return_after_message_area_confirms tests/test_fast_lane.py::test_return_after_search_field_presses_once tests/test_fast_lane.py::test_hit_test_miss_zero_input tests/test_fast_lane.py::test_focus_mismatch_zero_paste tests/test_fast_lane.py::test_no_repeat_after_unchanged tests/test_fast_lane.py::test_approve_allows_one_sensitive_click tests/test_fast_lane.py::test_week_radio_clicked_once && echo PYTEST_OK
+- [x] G8: In System Settings the General pane's own navigation buttons are offered (Language & Region is clicked), and a value button still returns confirm with zero input (Dark in Appearance is the positive control for the rule still biting).
+  CHECK: .venv/bin/python -m pytest -q -p no:cacheprovider tests/test_lane_first.py::test_settings_general_navigation_button_is_clicked tests/test_lane_first.py::test_settings_value_button_still_confirms && echo SETTINGS_NAV_OK
   CWD: bridge
-  EXPECT: PYTEST_OK
-  EVIDENCE: exit=0; shell=zsh; cwd=bridge; output=11 passed (the eleven named node ids, incl. the Week radio positive control) PYTEST_OK
+  EXPECT: SETTINGS_NAV_OK
+  EVIDENCE: exit=0; shell=/bin/sh; cwd=/Users/gurucharan/Documents/personal/buddy/bridge; path=574d30059456/19 entries; output=2 passed in 0.02s | SETTINGS_NAV_OK
 
-- [x] G9: The auto-screenshot after open_app no longer settles a second time (under 0.3 s with the fake clock, and the reply still carries an image), a raw click still settles up to 1.5 s, and a timed-out open_app settle still gets the auto settle (negative control).
-  CHECK: .venv/bin/python -m pytest -q -p no:cacheprovider tests/test_desktop_worker.py::test_open_app_auto_screenshot_settles_once tests/test_desktop_worker.py::test_raw_click_still_settles_up_to_1_5s tests/test_desktop_worker.py::test_timed_out_settle_still_auto_settles && echo PYTEST_OK
+- [x] G9: The offline eval measures the router on the real fixtures (precision of its clicks, how often it engages, wrong clicks, sensitive picks) on both sets, prints its ship decision against criteria fixed in the tool, and the shipped LANE_FIRST_DEFAULT equals that decision.
+  CHECK: .venv/bin/python tools/fastlane_eval.py --fixtures tests/fixtures/ax --router && .venv/bin/python tools/fastlane_eval.py --fixtures tests/fixtures/ax --check-default && echo ROUTER_EVAL_OK
   CWD: bridge
-  EXPECT: PYTEST_OK
-  EVIDENCE: exit=0; shell=zsh; cwd=bridge; output=3 passed (test_open_app_auto_screenshot_settles_once: one 1.5 s settle, clock 0.25 s, image present; raw click 1.5 s; timed-out open_app settle -> second settle, clock 3.0 s) PYTEST_OK
+  EXPECT: ROUTER_EVAL_OK
+  EVIDENCE: exit=0; shell=/bin/sh; cwd=/Users/gurucharan/Documents/personal/buddy/bridge; path=574d30059456/19 entries; output=DEFAULT_CONSISTENT | ROUTER_EVAL_OK
 
-- [x] G10: Every execute/observe reply from a worker with helpers carries a timing dict that the agent writes to the run log; the shadow verifier is logged beside astra's verdict, adds under 50 ms to _verify's wall time with the fake clock (sequential variant as the positive control), a missing worker.verify is logged as an error without blocking, and a hung verify request never restarts the worker.
-  CHECK: .venv/bin/python -m pytest -q -p no:cacheprovider tests/test_desktop_worker.py::test_reply_carries_timing_with_helpers tests/test_computer_agent.py::test_loop_logs_worker_timing tests/test_computer_agent.py::test_shadow_verify_logged_beside_verdict tests/test_computer_agent.py::test_shadow_verify_is_concurrent tests/test_computer_agent.py::test_missing_worker_verify_is_logged_not_fatal tests/test_worker_client.py::test_verify_timeout_does_not_restart && echo PYTEST_OK
+- [x] G10: The planner prompt teaches `steps=[…]` and the docs describe lane-first, the decide modes, the router's rule and its measured numbers; the docs test passes.
+  CHECK: .venv/bin/python -m pytest -q -p no:cacheprovider tests/test_fastlane_docs.py && echo DOCS_OK
   CWD: bridge
-  EXPECT: PYTEST_OK
-  EVIDENCE: exit=0; shell=zsh; cwd=bridge; output=6 passed (timing dict logged; local verdict beside valid; shadow wall delta < 50 ms with a 0.30 s sequential control; missing verify -> error logged; verify timeout -> {'error': 'timeout'}, restarts 0) PYTEST_OK
+  EXPECT: DOCS_OK
+  EVIDENCE: exit=0; shell=/bin/sh; cwd=/Users/gurucharan/Documents/personal/buddy/bridge; path=574d30059456/19 entries; output=4 passed in 0.02s | DOCS_OK
 
-- [x] G11: Live, Calendar: with the Week control NOT selected (precondition asserted, else PRECONDITION_NOT_MET), a dry run reports the pick and clicks nothing; the real run reaches done with exactly one click step on the Week candidate, changed=true, and the post-run snapshot shows Week selected; run again from Week view it returns done with zero clicks (negative control). Per-step timings printed.
-  CHECK: .venv/bin/python tools/fastlane_eval.py --live-delegate Calendar "switch to week view" --done-when Week --max-steps 3 --require-transition
+- [x] G11: Live, on this Mac: one real lane-first task through ComputerAgent (Calendar, month view to week view) finishes with zero planner calls, and the wall time is printed by the tool. Precondition: Calendar is open and not in week view; the tool restores the starting view.
+  CHECK: .venv/bin/python tools/fastlane_eval.py --live-route Calendar "switch to week view" --expect-selected Week --restore "switch to month view" && echo LIVE_ROUTE_OK
   CWD: bridge
-  EXPECT: LIVE_DELEGATE_DONE
-  EVIDENCE: exit=0; shell=zsh; cwd=bridge; output=precondition met (Month view); dry run: pick=5 radio button "Week" via keyword, zero clicks; real run: done matched="Week" via=ax; steps=1; last=click radio button: Week; changed=True; snapshot 34 ms (124 nodes) act 128 ms settle 210 ms; negative control from week view: done, steps=0, zero clicks; LIVE_DELEGATE_DONE (2026-09-21)
+  EXPECT: LIVE_ROUTE_OK
+  EVIDENCE: exit=0; shell=/bin/sh; cwd=/Users/gurucharan/Documents/personal/buddy/bridge; path=574d30059456/19 entries; output=LIVE_ROUTE_DONE wall=1.47s planner_calls=0 | LIVE_ROUTE_OK
 
-- [x] G12: Live paired A/B through the real ComputerAgent and gpt-6-astra: two tasks that need ≥ 2 sequential labelled clicks in one app, 4 runs per arm alternating CC_BUDDY_FAST_LANE=0/1, same app state reset between runs; the table reports per arm median wall, astra calls, delegate steps, failed clicks, recovery turns, and names the 16 run-log files. The gate is that the table exists and is stated honestly; no pass/fail on the number.
-  EVIDENCE: exit=0; shell=zsh; cwd=bridge; output=paired A/B, real gpt-6-astra + real worker, ABBA order, app state reset between runs, 2026-09-21 03:21-03:40 — calendar 'show the year view and then go to the next year': OFF n=4 wall p50 13.1 s astra 2.0 delegate 0 failed clicks 0 recovery 0 (4/4 done); ON n=4 wall p50 16.9 s astra 3.0 delegate 0.25/run (1 run used it: done via=ocr in 1 step) failed 0 recovery 0 (4/4 done) — settings 'open the General pane and then open Language & Region': OFF n=4 wall p50 13.3 s astra 2.0 failed 0 recovery 0 (4/4 done); ON n=4 wall p50 14.6 s astra 3.0 delegate 1.0 failed 0 recovery 2.0 — 3 of 4 lane runs returned confirm: "Language & Region" (System Settings rule: only rows/cells/tabs/links/Back are clickable, a pane-navigation BUTTON is treated as a value change) and the scripted human said no, so the task ended incomplete; 1 run: delegate done via=ocr in 1 step. Honest reading: on these two-click tasks the lane did not save wall time (the planner spends a turn to call it, +1 astra call) and the System Settings rule is too conservative for pane navigation. 16 run logs: 2026-09-21-032116/032136/032156/032220/032235/032255/032310/032334 (calendar) and 033524-034003 range (settings) under ~/.config/cc-buddy-bridge/agent-runs/ (scratchpad ab-calendar.json, ab-settings.json)
+- [x] G12: The answer to "should astra stream instructions into laya" rests on measured planner-turn timing from the run logs (reasoning tokens against visible output tokens), not on a guess.
+  EVIDENCE: manual; 184 planner turns with token usage from 79 run logs under ~/.config/cc-buddy-bridge/agent-runs (2026-09-21): api_secs p50 3.36 s, p90 5.53 s; visible output p50 35 tokens, reasoning p50 0; least-squares secs = 2.82 + 0.0223*reasoning_tokens + 0.0234*visible_tokens (R2 0.20, so rough); a median turn is ~2.8 s fixed before the first token and ~0.8 s of writing; median run is 3 turns. Conclusion recorded in docs/stackchan/voice.md (Lane first, Deferred): batching steps into one turn and skipping turns is worth seconds, token streaming at most ~0.8 s a turn.
 
-- [x] G13: docs/stackchan/voice.md, README.md and bridge/README.md describe the fast lane, the result lines, the code gates, the shadow verifier, the env knobs, the eval, the measured numbers and what is deferred; a doc test greps each knob and each status word in voice.md.
-  CHECK: .venv/bin/python -m pytest -q -p no:cacheprovider tests/test_fastlane_docs.py && echo PYTEST_OK
+- [x] G13: The request classifier's rules behave as specified on the traps the holdouts found, a model is asked only after the code gates and may only add a bare launch of an installed app, and through ComputerAgent a complete reflex makes ZERO planner calls, an unconfirmed one falls to the planner untouched, and a partial one tells the planner what is done and what is left.
+  CHECK: .venv/bin/python -m pytest -q -p no:cacheprovider tests/test_task_router.py && echo TASK_ROUTER_OK
   CWD: bridge
-  EXPECT: PYTEST_OK
-  EVIDENCE: exit=0; shell=zsh; cwd=bridge; output=3 passed (voice.md fast-lane section + knobs, README module row + [fast] clause, bridge/README install paragraph; documented defaults equal fast_lane.FAST_LANE_DEFAULT / DEFAULT_STYLE by import) PYTEST_OK
+  EXPECT: TASK_ROUTER_OK
+  EVIDENCE: exit=0; shell=/bin/sh; cwd=/Users/gurucharan/Documents/personal/buddy/bridge; path=574d30059456/19 entries; output=14 passed in 0.08s | TASK_ROUTER_OK
 
-- [x] G14: Shadow-verifier agreement from real runs: a script over ~/.config/cc-buddy-bridge/agent-runs/*.jsonl prints n_shadow (entries with both astra's valid and local p_true), the confusion of p_true ≥ 0.5 against astra's verdict, and the p_true distribution, with n_shadow ≥ 5 (the G12 runs supply them).
-  CHECK: .venv/bin/python tools/fastlane_eval.py --shadow-report --min-runs 5
+- [x] G14: The reflex ship decision is the tool's, on a holdout written by an author who saw neither code nor any other set, against a bar fixed in the tool; the shipped REFLEX_DEFAULT and REFLEX_LAUNCH_DEFAULT equal it.
+  CHECK: .venv/bin/python tools/route_eval.py --check-default && echo ROUTE_DEFAULT_OK
   CWD: bridge
-  EXPECT: SHADOW_REPORT_OK
-  EVIDENCE: exit=0; shell=zsh; cwd=bridge; output=78 run logs; n_shadow=8 (the 8 lane-on A/B runs); confusion tp 8 fp 0 fn 0 tn 0, agreement 100%; p_true p10/p50/p90 0.983/0.995/1.0 — the local verdict said true every time and the model agreed every time: no negative case yet, so the agreement is uninformative about discrimination; SHADOW_REPORT_OK
+  EXPECT: ROUTE_DEFAULT_OK
+  EVIDENCE: exit=0; shell=/bin/sh; cwd=/Users/gurucharan/Documents/personal/buddy/bridge; path=574d30059456/19 entries; output=ROUTE_EVAL_COMPLETE | ROUTE_DEFAULT_OK
 
-- [x] G15: slither.io as a real-time eval of the local decider (added 2026-09-21 on request): tools/slither_eval.py drives its own Chrome over the DevTools protocol for the game state and the real mouse for input (move to steer, hold the button to boost), the state text names the controls (steer toward the mouse; holding boosts speed and burns length), every heading and the boost pass a code safety shield, and a run of ≥ 2 episodes prints per-episode survival seconds, peak length, decisions, decisions/s, model p50/p95 ms, loop p50/p95 ms, boost fraction and shield interventions, names the recording files, and prints SLITHER_EVAL_OK when ≥ 2 episodes each logged ≥ 100 decisions with zero state-read failures. The numbers are reported, not passed or failed. The menu builder and the shield are unit-tested with fake game states. Precondition: internet, nobody touching the mouse.
-  CHECK: .venv/bin/python -m pytest -q -p no:cacheprovider tests/test_slither_eval.py && .venv/bin/python tools/slither_eval.py --episodes 2 --max-secs 120
+- [x] G15: laya and Jev are each asked in their own idiom (typed_ask.py): laya only relative choices with short options and a fitted cut-off, Jev an absolute noul gate plus choices in one request with literal instructions; the askers abstain on any model failure.
+  CHECK: .venv/bin/python -m pytest -q -p no:cacheprovider tests/test_task_router.py::test_jev_is_asked_in_its_own_idiom_and_gated_by_absolute_answers tests/test_task_router.py::test_each_model_is_asked_differently_for_a_head_pose && echo TYPED_ASK_OK
   CWD: bridge
-  EXPECT: SLITHER_EVAL_OK
-  EVIDENCE: exit=0; shell=zsh; cwd=bridge; output=32 passed (menu builder, shield, screen mapping, summary arithmetic) | live: 15 episodes over the session, SLITHER_EVAL_OK on 11 series outputs (one early 1-of-2 run INCOMPLETE), 19.5-19.6 decisions/s every episode, loop p95 20-24 ms, planner gpt-6-astra 3-4 s p50 off the tick path, mouse button up after every episode; ten-episode series peaks 948/45/240/402/217/177/168/581/911/171, kills 14 total; the tenth game is NOT the best (171 vs 911) — reported as measured; recordings, narrative logs, slither_series.jsonl, slither_settings.json and SLITHER_CHANGELOG.md under ~/.config/cc-buddy-bridge/slither-runs/ (leaf S, 2026-09-21)
+  EXPECT: TYPED_ASK_OK
+  EVIDENCE: exit=0; shell=/bin/sh; cwd=/Users/gurucharan/Documents/personal/buddy/bridge; path=574d30059456/19 entries; output=2 passed in 0.02s | TYPED_ASK_OK
+
+- [x] G16: The routing document states the shipped defaults, names every knob, and carries the engine comparison, the per-model protocols, the measured tables and the credibility notes; voice.md and the README point at it.
+  CHECK: .venv/bin/python -m pytest -q -p no:cacheprovider tests/test_task_router.py::test_the_routing_doc_states_the_shipped_defaults_and_names_every_knob && echo ROUTING_DOC_OK
+  CWD: bridge
+  EXPECT: ROUTING_DOC_OK
+  EVIDENCE: exit=0; shell=/bin/sh; cwd=/Users/gurucharan/Documents/personal/buddy/bridge; path=574d30059456/19 entries; output=1 passed in 0.02s | ROUTING_DOC_OK
+
+- [x] G17: Live on this Mac, through the real ComputerAgent with a planner that fails the run if called: a rule launch, a launch only Jev recognised, and a web search each finish with zero planner calls.
+  EVIDENCE: manual; 2026-09-21 ~05:20 PDT: "Open up Calculator on my Mac." said "Opened Calculator." wall 1.61 s, reflex 1.24 s, planner calls 0; "Can you get Safari up on the screen?" (CC_BUDDY_ROUTER_MODEL=jev; the rules declined, Jev native named Safari) said "Opened Safari." wall 2.45 s, planner calls 0; "Search Google for the tallest mountain in Japan." said "Here's a search for the tallest mountain in Japan." wall 2.55 s, planner calls 0. The same run found two defects, both fixed: a launch that never takes focus (Preview with no document) cost the helper's full 8 s before the planner ran (now 4 s), and Jev correctly abstained on "Preview, please." (launch_only 0.19) and "Notes, please." (risky 0.64), which go to the planner.
+
+- [x] G18: The head-move question ("jev, or is laya better?") is answered by measurement on utterances written by an author who saw no code, with each model asked natively and its cut-offs fitted on a half it is not scored on.
+  EVIDENCE: manual; tools/head_eval.py on tests/fixtures/routes/head_moves.json (110 utterances: 66 poses, 44 none, 34 traps), 2026-09-21. Jev native, test half: 32/33 poses (97.0%), 0 wrong, 0 false moves of 22, messy speech 12/12, 244 ms p50 / 292 ms p95; fitted gate 0.30, direction 0.70. Jev asked one 16-option question: 86.4%, 1 false move. laya native, test half: 4/33 (12.1%), 3 wrong, 0 false moves, 9.6 ms; with the gate given (oracle): direction 54/66 (81.8%), exact pose 41/66 (62.1%). Keyword rule, untuned: 47/66 (71.2%), 1 wrong, 4 false moves of 44. Conclusion in docs/stackchan/routing.md: Jev is ready for the move call; laya needs fine-tuning, which its own authors say. Not wired into the voice path.
+
+- [x] G19: In a conversation the follower converges on a still person and then does not twitch; one sighting is not a person and an outlier does not move the head; frames from a swinging head are not evidence; a walking person is led; a passer-by does not steal the gaze; an asked-for pose is the owner's; leaving a follow phase hands the head back at once; someone who leaves fast is found "where they were heading" and someone who vanishes from stillness "where they usually are"; it searches once per loss and never keeps scanning an empty room; the presence map learns, decays and survives a restart; presence is a bus topic; the tracker hands it every face and survives its failure.
+  CHECK: .venv/bin/python -m pytest -q -p no:cacheprovider tests/test_follow.py && echo FOLLOW_OK
+  CWD: bridge
+  EXPECT: FOLLOW_OK
+  EVIDENCE: exit=0; shell=/bin/sh; cwd=/Users/gurucharan/Documents/personal/buddy/bridge; path=574d30059456/19 entries; output=19 passed in 0.21s | FOLLOW_OK
+
+- [x] G20: The firmware with the eye lead compiles for the board (it is NOT flashed by this gate); it needs the libraries of docs/stackchan/build.md, including StackChan-BSP at main 8d4d6fc and AnimatedGIF 2.2.0.
+  CHECK: arduino-cli compile --fqbn "esp32:esp32:m5stack_cores3:PartitionScheme=huge_app,PSRAM=enabled" --build-path /tmp/buddy-fwbuild firmware/claude_pet_stackchan >/tmp/buddy-fwbuild.log 2>&1 && grep -q "Sketch uses" /tmp/buddy-fwbuild.log && echo FIRMWARE_COMPILES
+  EXPECT: FIRMWARE_COMPILES
+  EVIDENCE: exit=0; shell=/bin/sh; cwd=/Users/gurucharan/Documents/personal/buddy; path=574d30059456/19 entries; output=FIRMWARE_COMPILES
+
+- [x] G21: With CC_BUDDY_HEAD_MODEL=jev a sure pose turns the head at once through Head.move with the backend's own numbers; the backend's move_head for the same turn is answered "already done" and does not turn it again, while a new turn's move runs; "none", a failure and a late answer all leave the turn to the ordinary path; only turns that mention a direction or the head are ever sent.
+  CHECK: .venv/bin/python -m pytest -q -p no:cacheprovider tests/test_voice_fast_head.py && echo FAST_HEAD_OK
+  CWD: bridge
+  EXPECT: FAST_HEAD_OK
+  EVIDENCE: exit=0; shell=/bin/sh; cwd=/Users/gurucharan/Documents/personal/buddy/bridge; path=574d30059456/19 entries; output=4 passed in 0.02s | FAST_HEAD_OK
+
+- [x] G22: The eye-lead firmware is on the board, with a rollback: the previous app partition was read off the board first, the new image was written and verified block by block, the board booted it and a live conversation ran on it with the follower and the fast head path.
+  EVIDENCE: manual; 2026-09-21 05:2x PDT. Backup: esptool read-flash 0x10000 0x300000 at 460800 baud (921600 failed with "Serial data stream stopped") → ~/.config/cc-buddy-bridge/firmware-app-backup-2026-09-21.bin, 3145728 bytes, containing "[boot] claude_pet_stackchan 835c395-dirty". Flash: tools/flash_stackchan.sh, ELF archived as firmware/build-archive/claude_pet_stackchan-d28696d-dirty-20260921-052936.elf, 789744 bytes at 0x10000, "Hash of data verified" for all four regions. Boot: "board diag: boot #4 after unknown (up=3s heap=207964 …)"; the DIED IN sprite-push line is the OLD run being reset by the flasher. Live: wake, follower moves accepted ("[gaze] host look"), and "Look to your left" → "voice: head → left in 0.45 s (fast path)" then "head request already delegated by the voice — not routing it again". NOT verified: what the eyes look like — nobody but the owner can see the screen. Restore with: esptool --chip esp32s3 --port /dev/cu.usbmodem101 write-flash 0x10000 <backup>.

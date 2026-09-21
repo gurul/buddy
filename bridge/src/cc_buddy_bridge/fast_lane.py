@@ -47,14 +47,32 @@ none | pending | applied and a step applies its payload at most once):
     done: matched="{done_when}" via={ax|ocr|title}; steps={n}; last={action}; text={state}; key={state}
     stopped: reason={one_step|dry_run}; steps={n}; last={action}; pick={id role "label"}; text=…; key=…
     escalate: app="{app}"; reason={no_window|no_candidate|dialog_open|truncated|model_invalid|abstain|
-              stalled|stalled_2|ambiguous_target|hit_test_failed|focus_changed|step_cap}; top=[…≤3];
-              steps={n}; last={action}; text=…; key=…
+              stalled|stalled_2|ambiguous_target|no_match|uncovered|hit_test_failed|focus_changed|
+              step_cap}; top=[…≤3]; steps={n}; last={action}; text=…; key=…
     confirm: "{label}" needs the human's yes; app="{app}"; action={click|type|press}; steps={n};
              last={action}; text=…; key=…
     unavailable: {reason}
 
 `last` is the last APPLIED input or none; `steps` counts steps that applied input; a
 confirm guarantees the blocked action did not run; unavailable guarantees zero input.
+
+Who decides is `decide` (DECIDE_MODES, default "keyword"): the keyword gate alone, where a tie
+escalates `ambiguous_target` and zero shared words escalates `no_match`, and no model is loaded
+or asked; or "model", the gate first and the model on the rest. Keyword mode clicks only: a
+call with `text` or `key` answers unavailable, because the gate has never been measured on
+which field to type into.
+
+`run_script(objectives, …)` is the unit both callers above the lane use: an ordered list of
+objectives, one keyword-decided click each, a fresh snapshot per step, stopping at the first
+step that does not act. The planner sends exact labels in order (`delegate(steps=[…])`), so
+each step's objective is its own label and the gate cannot confuse step 2's control with step
+1's; the router (lane_router.py) sends the human's own clauses, with `require_cover`. Its line:
+
+    script: {complete|partial|none}; applied=[{action}, …]; step {i}/{n} {that step's own line}
+
+`complete` means every step either applied input that the Accessibility tree or the screen
+diff saw change something, or found its control already selected. Anything less is partial
+(something was applied) or none (nothing was), and the caller hands the rest to the planner.
 """
 
 from __future__ import annotations
@@ -83,9 +101,42 @@ from .decider import RESERVED, Choice, render_option
 # conditions fail, so the lane ships off. The keyword gate alone decided 54.9% of holdout at
 # 88.9%; the model alone got 25.7% of the rest.
 FAST_LANE_DEFAULT: bool = False
+# Who decides a step. "keyword": the keyword gate alone — a tie or zero shared words escalates,
+# the local model is never asked and need not be loaded. "model": the gate first, the model on
+# the rest (the path the numbers above measured). Sliced by decision path on holdout
+# (2026-09-21, tools/fastlane_eval.py --results-out): keyword picks 88.9% right (n=45), model
+# picks 29.7% (n=37), model picks above the thresholds 26.7% (n=15), no app or case class at or
+# above 80%. At +3.5 s a right click and −4.55 s a wrong one that is about +2.6 s per
+# keyword-decided step and −2.5 s per model-decided step, so the model is out of the click path
+# until a checkpoint beats the gate where it abstains.
+DECIDE_MODES = ("keyword", "model")
+DEFAULT_DECIDE = "keyword"
+# The shipped default for CC_BUDDY_LANE_FIRST (lane_router.py: the lane runs before the planner's
+# first turn). tools/fastlane_eval.py --router runs the real router over the fixtures and
+# --check-default asserts this constant equals its decision. The bar was fixed before the first
+# run: precision ≥ 0.90 on ≥ 10 engaged holdout cases, zero sensitive clicks. Measured 2026-09-21:
+# holdout 23 engaged of 82, 23 right (Wilson 95% 85.7–100%), select 26 of 73, 26 right; no click on
+# any abstain-expected case, no sensitive click; it engages on about a third of the click cases and
+# declines the rest (no match, a tie, uncovered words, a confirm) for one AX snapshot each.
+# Two cautions the numbers do not remove: the holdout had been sliced by overlap and distractor
+# before the cover rule was written, and the fixture goals were authored as lane objectives, not
+# transcribed from speech. tools/fastlane_eval.py --live-route is the check on a real desktop.
+LANE_FIRST_DEFAULT: bool = True
+MAX_SCRIPT_STEPS = 6
 DEFAULT_STYLE = "hinted"           # the eval's winner on select (cost-weighted +1.41 vs compact +1.37)
 SYSTEM_SETTINGS_BUNDLE = "com.apple.systempreferences"
 SYSTEM_SETTINGS_NAV_ROLES = frozenset({"row", "cell", "tab", "link"})
+# In System Settings every `button` looks alike to the Accessibility tree: "Dark" (a value) and
+# "Language & Region" (a door to another pane) are both role button, no value, no actions. The
+# paired A/B of 2026-09-21 lost three lane runs of four to that: the lane answered confirm for a
+# pane it was only asked to open. So the doors are named here, a closed set: the sub-panes of
+# General. Opening one changes no setting; every control inside it is still a value and still
+# confirms. "Transfer or Reset" and "Device Management" are left out on purpose, and "Login Items &
+# Extensions" would be pointless here: the sensitive-label table catches "login" first, as it
+# catches the "Privacy & Security" row. This set never outranks that table.
+SYSTEM_SETTINGS_PANE_BUTTONS = frozenset(name.casefold() for name in (
+    "About", "Software Update", "Storage", "AppleCare & Warranty", "AirDrop & Continuity",
+    "AutoFill & Passwords", "Date & Time", "Language & Region", "Sharing", "Startup Disk", "Time Machine"))
 SEARCH_FIELD_WORDS = re.compile(r"\b(search|address|url|go to)\b", re.IGNORECASE)
 RETURN_KEYS = frozenset({"return", "enter"})
 REOBSERVE_TEXT = "the screen is still changing, look again"
@@ -134,6 +185,7 @@ class Step:
     via: str = "model"              # keyword | model: which oracle picked (see the module docstring)
     kind: str = ""                  # click | type | press, "" for a reserved answer
     offered: tuple[str, ...] = ()   # the option texts the menu carried, in menu order
+    label: str = ""                 # the picked control's full label, "" for a press or a reserved answer
 
 
 @dataclass
@@ -280,13 +332,15 @@ def _overlap(c: Candidate, tokens: set[str]) -> int:
     return len(tokens & set(objective_tokens(f"{c.label} {c.value}")))
 
 
-def keyword_pick(items: Sequence[MenuItem], objective: str) -> Optional[MenuItem]:
-    """The keyword gate: the one click option sharing the most objective tokens with its label
-    and value (ax_candidates.objective_tokens on both sides), when that count is above zero and
-    no other click option ties it. None on a tie or on zero overlap — the model decides then."""
+def keyword_verdict(items: Sequence[MenuItem], objective: str) -> tuple[Optional[MenuItem], str]:
+    """The keyword gate, with its reason: (the pick, "") or (None, "tie" | "no_match").
+
+    The pick is the one click option sharing the most objective tokens with its label and value
+    (ax_candidates.objective_tokens on both sides), when that count is above zero and no other
+    click option ties it."""
     tokens = set(objective_tokens(objective))
     if not tokens:
-        return None
+        return None, "no_match"
     best: Optional[MenuItem] = None
     best_score = 0
     tied = False
@@ -298,7 +352,28 @@ def keyword_pick(items: Sequence[MenuItem], objective: str) -> Optional[MenuItem
             best, best_score, tied = it, score, False
         elif score == best_score and score > 0:
             tied = True
-    return None if tied or best_score == 0 else best
+    if best_score == 0:
+        return None, "no_match"
+    if tied:
+        return None, "tie"
+    return best, ""
+
+
+def keyword_pick(items: Sequence[MenuItem], objective: str) -> Optional[MenuItem]:
+    """The keyword gate's pick, or None on a tie or on zero overlap (see keyword_verdict)."""
+    return keyword_verdict(items, objective)[0]
+
+
+def uncovered_tokens(objective: str, c: Candidate, app: str = "", extra: Sequence[str] = ()) -> list[str]:
+    """The objective's words that the picked control does not account for.
+
+    A word is accounted for by the control's label, by its role ("the week button"), by the
+    frontmost app's name ("in calendar …") or by `extra` (the caller's generic words). The value
+    is left out on purpose: "is week selected" must not read as covered by a selected Week.
+    An empty list is what lets the router act on a human's own words without a planner: the
+    request says nothing the click does not do."""
+    have = set(objective_tokens(f"{c.label} {c.role} {app}")) | {str(w).casefold() for w in extra}
+    return [t for t in objective_tokens(objective) if t not in have]
 
 
 def _ax_changed(before: Snapshot, after: Snapshot, chosen: Optional[Candidate]) -> Optional[bool]:
@@ -450,7 +525,8 @@ def _build_menu(run: _Run, snapshot: Snapshot, *, allow_page_links: bool) -> tup
         if is_sensitive(c.label) and not approved:
             blocked.append(c)
             continue
-        if settings and c.role not in SYSTEM_SETTINGS_NAV_ROLES and c.label.casefold() != "back":
+        if settings and c.role not in SYSTEM_SETTINGS_NAV_ROLES and c.label.casefold() != "back" and not (
+                c.role == "button" and " ".join(c.label.split()).casefold() in SYSTEM_SETTINGS_PANE_BUTTONS):
             blocked.append(c)
             continue
         offered.append(c)
@@ -472,9 +548,16 @@ def run_delegate(objective: str, *, senses: Any, effectors: Any, decider: Any, t
                  key: Optional[str] = None, done_when: Optional[str] = None, approve: Optional[str] = None,
                  allow_page_links: bool = False, max_steps: int = 4, dry_run: bool = False,
                  thresholds: Thresholds = Thresholds(), clock: Callable[[], float] = time.perf_counter,
-                 ) -> DelegateResult:
+                 decide: str = DEFAULT_DECIDE, require_cover: bool = False, cover_extra: Sequence[str] = (),
+                 skip_if_selected: bool = False) -> DelegateResult:
     """The loop of the module docstring. Never raises for a model or sense failure: the status
-    says what happened, and every path that could act consequentially returns confirm first."""
+    says what happened, and every path that could act consequentially returns confirm first.
+
+    `decide` is who picks (DECIDE_MODES): in "keyword" mode the decider may be None. `require_cover`
+    is the router's rule (lane_router.py): act only on a keyword pick that accounts for every word
+    of the objective (uncovered_tokens), else escalate `uncovered` with zero input.
+    `skip_if_selected` answers done with zero input when the keyword pick is already selected — a
+    script step that asks for the view the window is in."""
     objective = " ".join(str(objective or "").split())
     text = text if isinstance(text, str) and text != "" else None
     done_when = " ".join(str(done_when).split()) if isinstance(done_when, str) and done_when.strip() else None
@@ -485,8 +568,13 @@ def run_delegate(objective: str, *, senses: Any, effectors: Any, decider: Any, t
         return run.finish("unavailable", format_line("unavailable", reason=key_error))
     if not objective:
         return run.finish("unavailable", format_line("unavailable", reason="an objective is required"))
-    if decider is None or not getattr(decider, "available", False):
+    if decide not in DECIDE_MODES:
+        return run.finish("unavailable", format_line("unavailable", reason=f"decide must be one of {DECIDE_MODES}"))
+    if decide == "model" and (decider is None or not getattr(decider, "available", False)):
         return run.finish("unavailable", format_line("unavailable", reason="the local decider is not loaded"))
+    if decide == "keyword" and (text is not None or key is not None):
+        return run.finish("unavailable", format_line(
+            "unavailable", reason="the keyword lane only clicks; type with type_text and press keys yourself"))
     max_steps = max(1, min(6, int(max_steps)))
 
     # step 0: the baseline the ocr and title oracles compare against
@@ -546,11 +634,25 @@ def run_delegate(objective: str, *, senses: Any, effectors: Any, decider: Any, t
         options["reobserve"] = REOBSERVE_TEXT
         options["abstain"] = ABSTAIN_TEXT
         t0 = run.clock()
-        keyword = keyword_pick(items, objective)
+        keyword, why_not = keyword_verdict(items, objective)
+        if keyword is not None and keyword.candidate is not None:
+            if require_cover:
+                missing = uncovered_tokens(objective, keyword.candidate, snapshot.app, cover_extra)
+                if missing:
+                    run.log_lines.append(_clip(f"delegate route: {describe_pick(keyword.candidate)} leaves "
+                                               f"{', '.join(missing)} unexplained"))
+                    return run.escalate("uncovered")
+            if skip_if_selected and keyword.candidate.value == "selected":
+                run.done_when = keyword.candidate.label
+                return run.done("ax")
         if keyword is not None:
             via = "keyword"
             choice = Choice(keyword.key, p_top=1.0, margin=1.0, confidence=1.0,
                             probabilities={k: (1.0 if k == keyword.key else 0.0) for k in options}, k=len(options))
+        elif decide == "keyword" or require_cover:
+            # The gate abstained and nobody else is asked: a tie is ambiguous, zero shared words
+            # is no match. Zero input either way; the planner takes it from here.
+            return run.escalate("ambiguous_target" if why_not == "tie" else "no_match")
         else:
             via = "model"
             try:
@@ -570,7 +672,8 @@ def run_delegate(objective: str, *, senses: Any, effectors: Any, decider: Any, t
                     confidence=choice.confidence, verdict=verdict, reason=reason, changed=None,
                     snapshot_ms=round(snapshot_ms, 2), node_count=snapshot.node_count, truncated=snapshot.truncated,
                     decide_ms=round(decide_ms, 2), act_ms=0.0, settle_ms=0.0, via=via,
-                    kind=item.kind if item is not None else "", offered=tuple(it.text for it in items))
+                    kind=item.kind if item is not None else "", offered=tuple(it.text for it in items),
+                    label=item.candidate.label if item is not None and item.candidate is not None else "")
         run.steps.append(step)
         how = "keyword" if via == "keyword" else f"p {choice.p_top:.2f}"
         run.log_lines.append(_clip(f"delegate step {n}: {step.description} ({how}) {verdict}"
@@ -658,3 +761,77 @@ def run_delegate(objective: str, *, senses: Any, effectors: Any, decider: Any, t
         if run.unchanged_streak >= 2:
             return run.escalate("stalled_2")
     return run.escalate("step_cap")
+
+
+# ---- scripts: an ordered list of objectives ----------------------------------------------
+
+@dataclass
+class ScriptResult:
+    status: str                    # complete | partial | none (see the module docstring)
+    line: str
+    applied: list[str] = field(default_factory=list)      # the `last=` text of every applied input, in order
+    labels: list[str] = field(default_factory=list)       # the label of every control clicked, in order
+    already: list[str] = field(default_factory=list)      # the label of every control found already selected
+    results: list[DelegateResult] = field(default_factory=list)
+    log_lines: list[str] = field(default_factory=list)
+
+    @property
+    def complete(self) -> bool:
+        return self.status == "complete"
+
+
+def _script_line(status: str, applied: Sequence[str], index: int, total: int, last_line: str) -> str:
+    done = ", ".join(applied) if applied else ""
+    return f"script: {status}; applied=[{done}]; step {index}/{total} {last_line}"
+
+
+def run_script(objectives: Sequence[str], *, senses: Any, effectors: Any, decider: Any = None,
+               decide: str = DEFAULT_DECIDE, require_cover: bool = False, cover_extra: Sequence[str] = (),
+               approve: Optional[str] = None, dry_run: bool = False, thresholds: Thresholds = Thresholds(),
+               clock: Callable[[], float] = time.perf_counter) -> ScriptResult:
+    """Run `objectives` in order, one step each (the module docstring has the contract).
+
+    Each step is its own run_delegate call with max_steps=1, so it gets a fresh snapshot and every
+    gate; a step whose control is already selected counts as satisfied with zero input. The script
+    stops at the first step that does not act or whose click changed nothing anyone could see."""
+    steps = [" ".join(str(o or "").split()) for o in objectives]
+    steps = [s for s in steps if s]
+    total = len(steps)
+    if total == 0:
+        line = _script_line("none", (), 0, 0, format_line("unavailable", reason="a script needs at least one step"))
+        return ScriptResult("none", line, log_lines=[_clip(f"delegate {line}")])
+    if total > MAX_SCRIPT_STEPS:
+        line = _script_line("none", (), 0, total,
+                            format_line("unavailable", reason=f"a script is at most {MAX_SCRIPT_STEPS} steps"))
+        return ScriptResult("none", line, log_lines=[_clip(f"delegate {line}")])
+    out = ScriptResult("none", "")
+    verified = True
+    for i, objective in enumerate(steps, start=1):
+        result = run_delegate(objective, senses=senses, effectors=effectors, decider=decider, decide=decide,
+                              require_cover=require_cover, cover_extra=cover_extra, approve=approve,
+                              max_steps=1, dry_run=dry_run, thresholds=thresholds, clock=clock,
+                              skip_if_selected=True)
+        out.results.append(result)
+        out.log_lines.extend(result.log_lines)
+        acted = result.status == "stopped" and bool(result.steps) and result.steps[-1].verdict == "act"
+        satisfied = result.status == "done"
+        if acted:
+            step = result.steps[-1]
+            out.applied.append(step.description)
+            out.labels.append(step.label or step.description)
+            if step.changed is not True:          # None is unknown, not proof: the planner looks
+                verified = False
+        elif satisfied:
+            out.already.append(result.line.split('matched="', 1)[-1].split('"', 1)[0])
+        if not (acted or satisfied) or (acted and result.steps[-1].changed is False):
+            status = "partial" if out.applied else "none"
+            out.status, out.line = status, _script_line(status, out.applied, i, total, result.line)
+            out.log_lines.append(_clip(f"delegate {out.line}", 160))
+            return out
+    status = "complete" if verified else "partial"
+    if not out.applied and status == "partial":
+        status = "none"
+    out.status = status
+    out.line = _script_line(status, out.applied, total, total, out.results[-1].line)
+    out.log_lines.append(_clip(f"delegate {out.line}", 160))
+    return out

@@ -10,6 +10,7 @@ the stick's `entries` list.
 
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
 import os
@@ -90,8 +91,9 @@ class JSONLTailer:
         await self._initial_sweep()
         self._initial_sweep_done = True
         # Seed the "already emitted" set from history so that the first live
-        # event on each file doesn't fire unless it's genuinely new.
-        self._seed_emitted_from_history()
+        # event on each file doesn't fire unless it's genuinely new. A full read
+        # of every transcript, so off the loop like the sweep.
+        await asyncio.to_thread(self._seed_emitted_from_history)
         await self._emit()
 
         # Watch for changes. watchfiles yields sets of (Change, path).
@@ -140,6 +142,14 @@ class JSONLTailer:
                         seen.add(uuid)
 
     async def _initial_sweep(self) -> None:
+        """Every transcript under the roots, read from its start. On a Mac with a
+        year of sessions that is hundreds of files and hundreds of megabytes, and
+        done on the loop it held the daemon for 41 s at start (the loop watchdog
+        named it, 2026-09-21): the board sat at "--:--" and the wake word waited.
+        So the walk runs in a thread; nothing else touches the offsets until it returns."""
+        await asyncio.to_thread(self._sweep_all)
+
+    def _sweep_all(self) -> None:
         for p in (p for r in self.roots for p in r.rglob("*.jsonl")):
             try:
                 self._process_file(str(p))

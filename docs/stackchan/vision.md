@@ -96,6 +96,76 @@ table for "look to your left", "turn around", "look at me"; the classifier's `lo
 "where did I leave my keys?"), and 0.6 s later the owner's words go to the backend as a
 `[look request]` — unless the voice already delegated that turn, so a relative move never runs twice.
 
+## Following whoever is talking
+
+In a conversation buddy keeps its eyes on the person it is talking with, and works out where they
+went when it loses them (`follow.py`). Before 2026-09-21 it did neither: the board live-tracks only
+the **owner**, only in its attention and dictation states, and in a conversation it went to one
+fixed "facing you" pose. Lean back, stand up or walk round the desk and it kept addressing the
+chair; a guest was never followed at all.
+
+Nothing new is sensed. The Mac already finds every face in every camera frame; the follower is the
+policy for a conversation, on the host, and needs no reflash, because the board accepts a host pose
+in any state while a conversation is open and that pose owns the head until its hold runs out
+(`src/hostlook.h`).
+
+**It follows a person, not a sighting.** The first version turned toward every face box, and on a real
+face it swung ±20° around someone sitting still. The offsets logged with each move showed why: a frame
+reaches the Mac about half a second after it was taken (JPEG on the board, 115200 baud, a Vision
+request), so a frame "0.6 s after the move" was still a picture from mid-swing. So there is a track: a
+position and a velocity in absolute head angles; nothing counts as evidence for 1.2 s after a move; a
+sighting must agree (within 14°) with where the track expects the person, and one that does not is an
+outlier until a second says the same; moves are at most 20°, aimed 0.35 s ahead along the velocity,
+inside a 6° / 5° deadband, with a 4 s hold renewed every 2.5 s while the face sits still.
+
+**When a conversation opens on an empty frame** it does not wait at the board's fixed pose hoping. The
+owner sits 23° to buddy's left and a little below level, and from the fixed pose his face was in a
+quarter of the frames, mostly at the edge. After 1.5 s with no confirmed face it looks, once, at the
+place the map says people most often are, and follows from there. That look is not a search and is
+never spent once someone has been followed.
+
+**When it loses them it reasons, likeliest first:**
+
+| It looks | Because |
+|---|---|
+| where they were heading, one field-of-view step and then another | the last sightings were moving (≥ 10°/s) or the face left by a frame edge; someone who leaves fast is followed after 0.8 s, not the ordinary 2.5 s |
+| where they usually are | a decayed map of the angles at which faces have been followed (`~/.config/cc-buddy-bridge/presence.json`, 10° cells, a 14-day half-life, angles only), learned across conversations and restarts: at a desk, "the chair" and "standing" |
+| either side of where they were | a sideways shift is the commonest way to leave a frame, and this is what works before the map has learned anything |
+| up, then down, at the same heading | they stood up, or sat back |
+
+Then it gives the head back, and it does not search again until it has really *seen* someone again:
+one search per loss, at most six looks (about 10 s), at most three searches a conversation. The first
+live run searched three times back to back at an empty chair, which is how an anxious robot behaves.
+
+**What else it uses:** the conversation's phase (it follows in `wake`, `listening`, `asking`,
+`speaking`, and hands the head back at once for `thinking`'s glance aside and `working`'s head-down,
+so buddy keeps its own expressions); every face in the frame, not just the largest (it stays with the
+one nearest its track, so a passer-by does not steal the gaze); and who else owns the head — "look
+left", `look_around` and `find` for as long as they hold it, an explore, the dictation key, a lesson's
+listening pose.
+
+**It tells the memory bus.** Every change is one event on `/buddy/presence` — `seen`, `lost` (and
+whether they were leaving), `found` and `how` ("where they were heading", "where they usually are",
+"either side", "up and down"), with the angles and the speed — so Foxglove, roslibjs or
+`cc-buddy-bridge memory tail` can watch buddy's sense of where its person is
+([memory-bus.md](../memory-bus.md)). The control loop reads the local map, never the bus or
+claude-mem: a head cannot wait on an HTTP recall. The topic is not stored in claude-mem; it is a
+live signal, not a memory.
+
+The log says what it did: `follow: → yaw -20 pitch 39 (face bx=-57 by=12; track -23/38 moving 2°/s)`,
+`follow: lost them 0.9 s ago (moving 31°/s) — looking: where they were heading, then …`,
+`follow: found them again (where they were heading) at yaw 64 pitch 47`, `follow: let go (phase thinking)`.
+
+### The eyes lead the head (needs a reflash)
+
+The neck acts about a second after you move; eyes need not. The board already receives the face's
+offset in every frame, so `gazeEyeLeadYawDeg()` / `gazeEyeLeadPitchDeg()` (`src/gaze.cpp`) add twice
+that offset to the head's own angles when the eyes are aimed (`main.cpp`): someone 10° off-centre
+already crosses the eyes' ±20° band and gets a glance at once, the neck follows, and the lead falls
+back to zero as the face comes to the centre. Any face, owner or guest; nothing for 700 ms with no
+report. The eyes have compass positions (N, NE, E, W, NW and the default), not a continuous gaze, so
+this is a glance to a side, not a pupil that tracks.
+
 ## Goodbye in any words
 
 The voice model often answered "Goodbye, pal." without ending anything, and the session sat
@@ -142,6 +212,9 @@ does the same from a shell.
 | `CC_BUDDY_SCENE_MODEL` | `gpt-5.4-nano` | the image model that describes and locates |
 | `CC_BUDDY_SCENE_INTERVAL_SECS` | `3` | minimum gap between two describes (1-60) |
 | `CC_BUDDY_SCENE_STALE_SECS` | `15` | a view older than this is reported as stale (3-300) |
+| `CC_BUDDY_HEAD_MODEL` | `off` | `jev`: spoken head poses are chosen by Jev in ~0.25 s, the backend remains the fallback ([routing.md](routing.md#head-moves)) |
+| `CC_BUDDY_FOLLOW_SPEAKER` | on | `0`: in a conversation the head stays at the board's fixed pose instead of following the speaker's face |
+| `CC_BUDDY_PRESENCE_FILE` | `~/.config/cc-buddy-bridge/presence.json` | where the follower keeps its map of where people usually are (angles only) |
 | `CC_BUDDY_INTENT` | on | `0`: the phrase table only, no classifier call |
 | `CC_BUDDY_INTENT_MODEL` | `gpt-5.4-nano` | the goodbye / mute classifier |
 | `CC_BUDDY_SOUND_FILE` | `~/.config/cc-buddy-bridge/sound.json` | where the mute choice is kept |

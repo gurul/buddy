@@ -290,9 +290,13 @@ class FaceTracker:
         save_dir: Optional[Path] = None,
         clock: Callable[[], float] = time.monotonic,
         identity: Optional[Identity] = None,
+        on_faces: Optional[Callable[[list[FaceResult], Optional[float], Optional[float]], Awaitable[None]]] = None,
     ) -> None:
         self.detect = detect
         self.send = send
+        # Every face of every processed frame, with the pose the frame was taken at — for the
+        # conversation's follower (follow.py). The board still gets only the largest, as the wire says.
+        self.on_faces = on_faces
         self.save_dir = save_dir
         self.clock = clock
         self.identity = identity
@@ -359,6 +363,12 @@ class FaceTracker:
             if result is not None:
                 self.faces += 1
             await self.send(build_face_cmd(cur.seq, result, cur.yaw, cur.pitch, who=who))
+            if self.on_faces is not None:
+                try:
+                    each = [f for f in (pick_face([r], cur.w, cur.h) for r in rects) if f is not None]
+                    await self.on_faces(each, cur.yaw, cur.pitch)
+                except Exception:  # noqa: BLE001 — a follower that fails must never stop the tracker
+                    log.exception("vision: on_faces failed on frame %d", cur.seq)
             nxt = self.governor.done()
 
     def _work(self, frame: Frame) -> tuple[list[Rect], str]:
