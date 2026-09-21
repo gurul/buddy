@@ -44,6 +44,7 @@ from pathlib import Path
 from typing import Any, Awaitable, Callable, Optional
 
 from .computer_agent import AgentEvent
+from .records import MEMORY_TOOLS
 
 log = logging.getLogger(__name__)
 
@@ -132,7 +133,12 @@ TOOLS: list[dict[str, Any]] = [
     },
     {"type": "web_search"},
 ]
-TOOL_NAMES = ("start_task", "steer_task", "stop_task", "take_photo", "think_hard")
+TOOL_NAMES = ("start_task", "steer_task", "stop_task", "take_photo", "think_hard", "memory_search", "memory_get")
+
+PROFILE_HEADER = """
+
+What you know about your owner — reconciled from earlier conversations, read it before answering anything
+about their life, taste or plans, and search your records for anything not on this page:"""
 
 
 # ---- config -----------------------------------------------------------------------------------
@@ -264,17 +270,22 @@ def chunks(text: str, limit: int = MAX_MESSAGE_CHARS) -> list[str]:
 
 # ---- the text brain ---------------------------------------------------------------------------
 
-def request(config: TelegramConfig, items: list[dict[str, Any]], memory: str = "") -> dict[str, Any]:
+def request(config: TelegramConfig, items: list[dict[str, Any]], memory: str = "",
+            profile: str = "") -> dict[str, Any]:
     """The exact Responses body. Stateless: ``store=False`` and the turn's own items sent back each round
     (with the model's reasoning as ``encrypted_content``), so nothing the owner texted is kept on OpenAI's
-    side and no ``previous_response_id`` is needed."""
+    side and no ``previous_response_id`` is needed. With a ``profile`` (records.py) the one-pager is in the
+    instructions and the memory tools are offered."""
     from .voice_agent import memory_block
 
+    instructions = INSTRUCTIONS + memory_block(memory)
+    if profile:
+        instructions += PROFILE_HEADER + "\n" + profile
     return {
         "model": config.model,
-        "instructions": INSTRUCTIONS + memory_block(memory),
+        "instructions": instructions,
         "input": items,
-        "tools": TOOLS,
+        "tools": TOOLS + MEMORY_TOOLS if profile else TOOLS,
         "tool_choice": "auto",
         "parallel_tool_calls": False,
         "reasoning": {"effort": config.effort},
@@ -460,6 +471,7 @@ class TelegramInlet:
     * ``thinker``       — question -> {"ok", "answer"} (think.make_thinker), or None
     * ``on_state``      — the board's phase, for a texted task
     * ``on_closed``     — turns -> None: the quiet chat goes to conversation memory
+    * ``records``       — records.RecordsReader: the profile and the two read-only memory tools, or None
     """
 
     def __init__(self, config: TelegramConfig, api: Any, create: Create, *,
@@ -469,6 +481,7 @@ class TelegramInlet:
                  thinker: Optional[Callable[[str], Awaitable[dict[str, Any]]]] = None,
                  on_state: Callable[[str], None] = lambda state: None,
                  on_closed: Optional[Callable[[list[tuple[str, str]]], None]] = None,
+                 records: Any = None,
                  clock: Callable[[], float] = time.monotonic, wall: Callable[[], float] = time.time,
                  sleep: Callable[[float], Awaitable[None]] = asyncio.sleep) -> None:
         self.config = config
@@ -482,6 +495,7 @@ class TelegramInlet:
         self._thinker = thinker
         self._on_state = on_state
         self._on_closed = on_closed
+        self._records = records
         self._clock, self._wall, self._sleep = clock, wall, sleep
         self.turns: list[tuple[str, str]] = []           # ("user" | "buddy", text): this chat, until it goes quiet
         self._last_turn_at: Optional[float] = None
@@ -645,9 +659,11 @@ class TelegramInlet:
 
     async def _think(self, items: list[dict[str, Any]], chat_id: int) -> tuple[str, int]:
         memory = self._memory()
+        # The profile is a file the owner may edit between two texts: read per turn, never cached.
+        prof = self._records.profile() if self._records is not None else ""
         text = ""
         for round_no in range(1, MAX_TOOL_ROUNDS + 1):
-            response = await self._create(request(self.config, items, memory))
+            response = await self._create(request(self.config, items, memory, profile=prof))
             calls, text, carry = parse_response(response)
             if not calls:
                 return text, round_no
@@ -679,6 +695,12 @@ class TelegramInlet:
                 return {"ok": False, "reason": "no task is running"}
             if name == "take_photo":
                 return await self._take_photo(str(args.get("note") or ""), chat_id)
+            if name in ("memory_search", "memory_get"):
+                if self._records is None:
+                    return {"ok": False, "reason": "no memory records on this computer"}
+                if name == "memory_search":
+                    return await asyncio.to_thread(self._records.search, str(args.get("query") or ""))
+                return await asyncio.to_thread(self._records.get, str(args.get("id") or ""))
             return await self._think_hard(str(args.get("question") or "").strip())
         except asyncio.CancelledError:
             raise

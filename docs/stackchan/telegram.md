@@ -87,6 +87,74 @@ After ten quiet minutes the chat's turns are handed to the same conversation
 memory a spoken conversation feeds (`chat_memory.py`), so tomorrow's "hey buddy"
 knows what you texted about.
 
+## The memory layer: records
+
+A spoken conversation opens with one clause of memory (`recall.opening_brief`),
+which is right at the desk. A text chat needs more: "what was that restaurant"
+is a lookup, not a greeting. `records.py` is that layer, and it follows the shape
+Instinct (the iMessage assistant) was found to use — reverse-engineered by
+Dhravya Shah, 2026-09-20 — for one property: **the agent never writes its own
+memory.**
+
+```
+~/.config/cc-buddy-bridge/debrief/          the store chat_memory.py already keeps, now a git repository
+├── sessions/<day>/…                        distilled notes, one per conversation (spoken or texted)
+├── <day>-<slug>.md                         the curated day
+└── records/
+    ├── profile.md                          the one-pager every text turn starts with
+    ├── dining.md  cafe-nero.md  sam.md …   one typed record per thing
+    └── .reconciled                         which days have been read
+```
+
+A record is a markdown file the owner can open and edit:
+
+```
+---
+id: dining
+type: preference
+aliases: [food, lunch, restaurants, takeout]
+updated: 2026-09-20
+---
+- Now prefers ramen for lunch (changed 2026-09-20; was pasta).
+- Usual lunch spot is [[cafe-nero]] (said 2026-09-18).
+```
+
+Types are `preference`, `person`, `organization`, `project`, `place`, `routine`,
+`conversation`. Facts carry their date; a wrong fact becomes a dated correction,
+never a silent edit. `[[id]]` links records to each other. **Aliases are the
+index**: search is keyword matching over ids, aliases and fact lines — no
+vectors — so every record carries the words you might use for it.
+
+What the text brain gets, all read-only:
+
+- **The profile** in its instructions, every turn: three sections (life context,
+  acting on your behalf, how you like to talk) and an index of the records with
+  their aliases, so it knows what it can look up before it looks. Re-read from
+  disk per turn, so a hand edit counts at once. Capped at 6,000 characters.
+- **`memory_search(query)`** — the matching fact lines with their record ids.
+- **`memory_get(id)`** — one whole record.
+
+The only writer is the **nightly reconcile**: once a day's curated file exists
+(`chat_memory.py` writes it the next day), the model is shown every current
+record and that day's notes and returns the records that change, whole — it
+merges examples into traits, drops incidental detail, adds dated corrections —
+plus the profile. Before the result is written, whatever is on disk (your hand
+edits included) is committed as its own git commit; the reconcile is a second
+commit. So an old fact is one `git log` away, a wrong reconcile is one revert,
+and the model's diff is exactly what it changed. "Forget the cafe" removes the
+file from the working tree; history keeps it. The first live run on this Mac's
+real notes (2026-09-21, gpt-5.4-nano, two days) produced eight typed records
+and a three-section profile.
+
+| Variable | Default | What it does |
+|---|---|---|
+| `CC_BUDDY_RECORDS` | `0` | The switch: reconcile each curated day into records, and give the text brain the profile and the two memory tools. |
+| `CC_BUDDY_RECORDS_MODEL` | `gpt-5.4-nano` | The reconciling model (one call per day, `store=False`). |
+
+Off, nothing changes: no records directory, no git repository, the text brain
+gets the one-clause brief only. On, the store becomes a git repository (`git`
+must be installed; without it records are still written, without history).
+
 ## The rules, and why they are code
 
 This door reaches a Mac with full computer control. None of these is a prompt

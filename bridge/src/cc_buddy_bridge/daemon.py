@@ -16,6 +16,7 @@ if TYPE_CHECKING:
 from . import follow as follow_mod
 from . import photos, voice_agent
 from . import recall as recall_mod
+from . import records as records_mod
 from . import telegram as telegram_mod
 from .audit import AuditLog
 from .ble import BuddyBLE
@@ -383,6 +384,11 @@ class Daemon:
         self._telegram = self._make_telegram()
         if self._telegram is not None:
             tasks.append(asyncio.create_task(self._telegram.run(), name="telegram"))
+        # The records layer (records.py): CC_BUDDY_RECORDS=1 reconciles each curated day into typed,
+        # git-tracked records and the profile the text brain reads. The agent never writes them.
+        self._reconciler = records_mod.make_reconciler(records_mod.configured(), self._recall_cfg)
+        if self._reconciler is not None:
+            tasks.append(asyncio.create_task(self._reconciler.loop(self._shutdown), name="records-reconcile"))
         if not self._explore_cfg.enabled:
             log.info("explore: idle start disabled (CC_BUDDY_EXPLORE=0); "
                      "`cc-buddy-bridge explore` and \"go explore\" still work")
@@ -1036,7 +1042,8 @@ class Daemon:
             busy=lambda: Daemon._desk_has_the_mac(self),
             memory=lambda: recall_mod.opening_brief(self._recall_cfg),
             on_photo=self._photo_for_owner, thinker=self._thinker,
-            on_state=self._on_agent_state, on_closed=self._remember_conversation)
+            on_state=self._on_agent_state, on_closed=self._remember_conversation,
+            records=records_mod.RecordsReader(self._recall_cfg) if records_mod.configured().enabled else None)
 
     def _make_agent(self, on_event: Any, ask_user: Any) -> ComputerAgent:
         agent = ComputerAgent(make_response_creator(), config=self._agent_cfg, on_event=on_event, ask_user=ask_user)
