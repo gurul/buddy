@@ -118,7 +118,8 @@ pluginkit -m -v -p com.apple.widgetkit-extension | grep -i stackchan   # widget 
 ```
 
 The helper shows a small `note.text` icon in the menu bar with the note count,
-last sync time, a *Microphone* line and switch, *Refresh now*, *Open notes
+last sync time, a *Microphone* line and switch, a *buddy* line and its
+*Turn buddy off* / *Turn buddy on* button, *Refresh now*, *Open notes
 folder*, a *Launch at login* toggle, and *Quit*.
 
 The *Microphone* line says what the Mac mic is doing (listening, closed because
@@ -127,6 +128,26 @@ switch is the owner's mic switch: off closes the mic until you turn it back on,
 across restarts, the same as `cc-buddy-bridge mic off`. It talks to the daemon
 over its IPC socket (`/tmp/cc-buddy-bridge.sock`), so it needs the daemon
 running; the WidgetKit widget itself is sandboxed and only shows notes.
+
+The *buddy* line is the power switch for the whole thing: the bridge daemon
+that runs in the background on your Mac. It says where buddy is (`on (pid …)`,
+`off (your choice)`, running from a terminal, or not installed as a service),
+and the button under it goes the other way. **Turn buddy off** stops the
+daemon and keeps it stopped: the robot goes quiet, the mic closes, no
+exploring, no diary, and it stays off across logins until you press **Turn
+buddy on**. That is the difference from quitting the process: the daemon is
+a launchd agent with `KeepAlive` on (`cc-buddy-bridge install --service`), so
+a plain kill only respawns it. The button runs `launchctl bootout` then
+`launchctl disable` on `gui/<uid>/com.github.cc-buddy-bridge.daemon`, and
+`launchctl enable` then `launchctl bootstrap` to bring it back (the same
+override `cc-buddy-bridge install --service` clears with `load -w`). The
+helper can do this because it is not sandboxed; the desktop widget cannot.
+Both lines are re-read every five seconds while the menu is alive, and after
+a flip the helper waits for launchd to settle (the agent still prints as
+running, without a pid, for a moment after a bootout) before it shows the
+result. A daemon you started by hand from a terminal (`cc-buddy-bridge
+daemon`) is not launchd's to stop, so the button hides and the line says to
+stop it there. Implementation: `widget/StackChanNotes/BuddyService.swift`.
 
 ## Add the widget to the desktop (manual)
 

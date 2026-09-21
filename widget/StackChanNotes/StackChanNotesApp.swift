@@ -82,6 +82,9 @@ private struct MenuContent: View {
     @State private var mic: MicState?
     @State private var micAsked = false
     @State private var micOn = true
+    /// launchd's word on buddy's agent; nil until asked.
+    @State private var service: ServiceState?
+    @State private var switching = false
 
     var body: some View {
         Text(status)
@@ -104,7 +107,28 @@ private struct MenuContent: View {
                 guard let current = mic, current.switchOn != on else { return }
                 Task { await flipMic(on) }
             }
-        .task { await refreshMic() }
+        Divider()
+        // The power switch: buddy is the bridge daemon, a launchd agent that
+        // restarts itself when killed. Off takes it out of launchd and keeps it
+        // out across logins; on brings it back. See BuddyService.swift.
+        Text(serviceLine)
+            // A menu's `.task` runs once, not on every open, so keep both lines
+            // fresh: launchd and the daemon are asked again every few seconds
+            // while the view lives (the mic line too: a daemon just turned on
+            // opens its socket a beat after it has a pid).
+            .task {
+                while !Task.isCancelled {
+                    if !switching {
+                        await refreshService()
+                        await refreshMic()
+                    }
+                    try? await Task.sleep(for: .seconds(5))
+                }
+            }
+        if let title = service?.buttonTitle {
+            Button(title) { Task { await flipService() } }
+                .disabled(switching)
+        }
         Divider()
         Button("Open diary") {
             NSApp.activate(ignoringOtherApps: true)
@@ -137,7 +161,29 @@ private struct MenuContent: View {
 
     private var micLine: String {
         if let mic { return mic.line }
+        if let service, service.installed, !service.on, !service.reachable {
+            return "Microphone: closed (buddy is off)"
+        }
         return micAsked ? "Microphone: daemon not reachable" : "Microphone: asking the daemon…"
+    }
+
+    private var serviceLine: String {
+        if switching { return service?.on == true ? "buddy: stopping…" : "buddy: starting…" }
+        return service?.line ?? "buddy: asking launchd…"
+    }
+
+    private func refreshService() async {
+        service = await BuddyService.status()
+    }
+
+    /// Off then on is the same button: it reads where buddy is and goes the other way.
+    private func flipService() async {
+        guard let current = service, !switching else { return }
+        switching = true
+        service = current.on ? await BuddyService.turnOff() : await BuddyService.turnOn()
+        switching = false
+        // The mic line follows the daemon: gone when buddy is off, back when it is on.
+        await refreshMic()
     }
 
     private func refreshMic() async {
