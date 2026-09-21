@@ -63,8 +63,9 @@ void eyesCardUp(bool up);
 // canvas is pushed into the main sprite at (0, EYES_Y).
 void eyesTick(uint32_t now);
 
-// One brief left-eye blink; caller debounces the semantic event id.
+// Hold the left eye as a curved closed line for 650 ms; caller debounces event id.
 void eyesWink();
+bool eyesWinkClosed();
 
 // One short word for the status row: "zzz", "working...", "needs you!",
 // "listening...", "done!", "<3", "@_@". Empty for idle-without-daemon.

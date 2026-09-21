@@ -38,6 +38,7 @@ struct EyesKey {
   }
 };
 static EyesKey  cur;
+static expression::WinkHold winkHold;
 static uint8_t  lastPos      = 0xFF;
 static uint32_t peekAt       = 0;    // sleep: next brief eye-open
 static uint32_t peekCloseAt  = 0;
@@ -296,7 +297,34 @@ void eyesTick(uint32_t now) {
     eyes.close();
     peekCloseAt = 0;
   }
+  bool winking = winkHold.active(now) && cur.expressionKind == expression::Wink
+      && !cur.listen && !cur.attn && cur.state != P_ATTENTION
+      && cur.agent != AG_LISTENING && cur.agent != AG_ASKING && cur.agent != AG_ERROR;
+  if (winking) {
+    eyes.setAutoblinker(OFF);
+    eyes.setCuriosity(OFF);
+    eyes.close(true, false);
+    eyes.open(false, true);
+  } else if (winkHold.running) {
+    winkHold.running = false;
+    // A priority/state change already set the correct base face in applyState().
+    if (cur.expressionKind == expression::Wink && !cur.listen && !cur.attn
+        && cur.agent != AG_LISTENING && cur.agent != AG_ASKING && cur.agent != AG_ERROR) {
+      eyes.open(true, false);
+      eyes.setAutoblinker(ON, 4, 1);
+    }
+  }
   eyes.update();                       // redraws at most every 20 ms
+  if (winking) {
+    // Erase the entire left-eye column: absolutely no open slit remains.
+    int left = eyes.eyeLx, width = eyes.eyeLwidthCurrent;
+    int centreY = eyes.eyeLy + eyes.eyeLheightCurrent / 2;
+    canvas.fillRect(left - 3, 0, width + 6, EYES_H, 0);
+    int span = width * 4 / 5;
+    int startX = left + (width - span) / 2;
+    for (int x = 0; x <= span; ++x)
+      canvas.fillCircle(startX + x, centreY + expression::winkCurveY(x, span), 2, 1);
+  }
   canvas.pushSprite(&spr, 0, EYES_Y);  // palette → RGB565 into the frame
 }
 
@@ -327,4 +355,5 @@ const char* eyesStatusText(PersonaState s, bool listening, bool explore, uint8_t
   }
 }
 
-void eyesWink() { eyes.blink(true, false); }
+void eyesWink() { winkHold.start(millis()); }
+bool eyesWinkClosed() { return winkHold.running; }

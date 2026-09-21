@@ -32,6 +32,17 @@ inline Style style(Kind kind) {
     default:        return {96, 96, 96, 22, 0, 3, false};
   }
 }
+// A visible closed-eye hold; the arch peaks 12 px above its endpoints.
+constexpr uint32_t winkHoldMs = 650;
+inline int winkCurveY(int x, int width) {
+  return width > 0 ? -48 * x * (width - x) / (width * width) : 0;
+}
+struct WinkHold {
+  uint32_t at = 0;
+  bool running = false;
+  void start(uint32_t now) { at = now; running = true; }
+  bool active(uint32_t now) const { return running && ticks::elapsedMs(now, at) < winkHoldMs; }
+};
 struct Request { uint32_t id = 0; Kind kind = None; uint32_t ttl = 4000; };
 struct State {
   Request request;
