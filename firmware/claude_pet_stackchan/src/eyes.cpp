@@ -316,7 +316,7 @@ void eyesTick(uint32_t now) {
   }
   eyes.update();                       // redraws at most every 20 ms
   if (winking) {
-    // Reference-inspired wink: open oval at viewer left, curved closed lid at right.
+    // Reference-inspired wink: normal rounded-square eye at viewer left, curved closed lid at right.
     int left = eyes.eyeRx, width = eyes.eyeRwidthCurrent;
     int centreY = eyes.eyeRy + eyes.eyeRheightCurrent / 2;
     canvas.fillRect(left - 8, 0, width + 16, EYES_H, 0);

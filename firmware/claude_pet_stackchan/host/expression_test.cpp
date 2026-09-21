@@ -10,12 +10,16 @@ int main() {
     assert(parse(name(k)) == k);
     auto a = style(k);
     assert(a.left >= 24 && a.left <= 110 && a.right >= 24 && a.right <= 110);
-    for (auto other : live) if (other != k) {
+    // Wink uses the normal rounded-square geometry; its closed curved lid is the distinct feature.
+    for (auto other : live) if (other != k && k != Wink && other != Wink) {
       auto b = style(other);
       assert(a.left != b.left || a.right != b.right || a.width != b.width || a.radius != b.radius
           || a.mood != b.mood || a.curious != b.curious);
     }
   }
+  auto winkStyle = style(Wink), normalStyle = style(Calm);
+  assert(winkStyle.width == normalStyle.width && winkStyle.left == normalStyle.left
+      && winkStyle.right == normalStyle.right && winkStyle.radius == normalStyle.radius);
   WinkHold wink;
   wink.start(100);
   assert(wink.active(99) && wink.active(749) && !wink.active(750));
