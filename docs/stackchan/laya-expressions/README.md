@@ -32,3 +32,7 @@ bridge/.venv/bin/python bridge/tools/expression_live.py off
 `--check` exercises the actual local model and board with happy, sad, skeptical, excited and wink cues during speaking and a suppressed affection cue during listening. It verifies eye application, expiry, one wink animation for the wink event, no Laya sound request, and an unchanged sound setting. It does not mute or unmute Buddy. Board telemetry confirms the eye-render path ran; it is not a camera measurement of the screen.
 
 Verification is recorded in [GATES.md](GATES.md) and `device-results.json`. Earlier tests of the superseded sound-enabled build are historical only. The final gate run targets eyes-only behavior and includes regression tests that normal caption chirps are preserved while Laya is enabled.
+
+## Final device verification — 2026-09-21
+
+Firmware `d8af526` was flashed over USB with hashes verified. Six real-model cases passed on Buddy: happy, sad, skeptical, excited, wink, and a listening-suppressed affection cue. The wink emitted exactly one animation event, reported its closed curved-line hold, then reopening before expiry. Original sound remained `on` throughout. Event-to-command latency across these six samples was 81.5–203.6 ms; this is a small bench sample, not a latency distribution. The host suite passed 116 tests, the firmware shape/timer/priority checks passed, and all six acceptance gates are met. See `device-results.json` for board acknowledgments.

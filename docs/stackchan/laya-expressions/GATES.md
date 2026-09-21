@@ -12,16 +12,16 @@ Scope: Run local Laya on live conversation/diary events and render temporary eye
   EXPECT: EXPRESSION_FIRMWARE_OK
   EVIDENCE: exit=0; shell=/bin/sh; cwd=/Users/gurucharan/Documents/personal/buddy; path=07a05fc4f0d2/21 entries; output=EXPRESSION_FIRMWARE_OK
 
-- [ ] G3: Changed Python files pass lint, firmware builds and uploads, and the bridge reconnects to the flashed revision.
-  EVIDENCE: pending
+- [x] G3: Changed Python files pass lint, firmware builds and uploads, and the bridge reconnects to the flashed revision.
+  EVIDENCE: Python lint passed; firmware d8af526 built (792723 bytes flash, 142648 bytes static RAM), USB upload verified every hash, and the restarted bridge received d8af526 eye/wink telemetry from Buddy. Device results are retained in device-results.json.
 
 - [x] G4: With the actual local model enabled, a fresh event reaches the board; telemetry confirms eye-overlay application, expiry, suppression while listening, no Laya chirps, and an unchanged mute setting. The wink reports one closed curved-line hold followed by reopening.
   CHECK: bridge/.venv/bin/python bridge/tools/expression_live.py --check
   EXPECT: LIVE_LAYA_DEVICE_OK
   EVIDENCE: exit=0; shell=/bin/sh; cwd=/Users/gurucharan/Documents/personal/buddy; path=07a05fc4f0d2/21 entries; output=] | LIVE_LAYA_DEVICE_OK
 
-- [ ] G5: README and docs describe live behavior, controls, model location, known accuracy limits and measured verification. Authorized changes are pushed to main.
-  EVIDENCE: pending
+- [x] G5: README and docs describe live behavior, controls, model location, known accuracy limits and measured verification. Authorized changes are pushed to main.
+  EVIDENCE: README and docs cover eleven expressions, binary Laya selection, chronological speaker context, the reference-inspired 650 ms curved wink, unchanged original chirps, all failed prompt trials, and the 34/39 reused-development result. Implementation through d8af526 was pushed to origin/main; verification evidence is committed with this ledger.
 
 - [x] G6: Expanded eleven-label eye vocabulary has distinct visual profiles and uses speaker-labelled conversational context. A real local model evaluation measures label correspondence on authored user/reply scenarios; at least 28 of 36 explicit benchmark labels match, and every added expression is exercised, including three wink cases. This is a development check reused for prompt selection, not a held-out accuracy estimate. Results remain synthetic, not human validation.
   CHECK: bridge/.venv/bin/python bridge/tools/eye_context_eval.py && echo EYE_CONTEXT_OK
