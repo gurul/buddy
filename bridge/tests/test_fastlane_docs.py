@@ -6,11 +6,18 @@ from __future__ import annotations
 import re
 from pathlib import Path
 
-from cc_buddy_bridge.fast_lane import DEFAULT_STYLE, FAST_LANE_DEFAULT, STATUSES
+from cc_buddy_bridge.fast_lane import (
+    DEFAULT_DECIDE,
+    DEFAULT_STYLE,
+    FAST_LANE_DEFAULT,
+    LANE_FIRST_DEFAULT,
+    STATUSES,
+)
 
 ROOT = Path(__file__).resolve().parents[2]
 VOICE = ROOT / "docs" / "stackchan" / "voice.md"
-KNOBS = ("CC_BUDDY_FAST_LANE", "CC_BUDDY_FAST_LANE_STYLE", "CC_BUDDY_LAYA_MODEL", "CC_BUDDY_LOCAL_VERIFY")
+KNOBS = ("CC_BUDDY_FAST_LANE", "CC_BUDDY_FAST_LANE_STYLE", "CC_BUDDY_LAYA_MODEL", "CC_BUDDY_LOCAL_VERIFY",
+         "CC_BUDDY_LANE_FIRST", "CC_BUDDY_FAST_LANE_DECIDE", "CC_BUDDY_DECIDER")
 
 
 def _knob_row(text: str, knob: str) -> str:
@@ -37,7 +44,30 @@ def test_documented_defaults_match_the_shipped_constants() -> None:
     assert _knob_row(text, "CC_BUDDY_FAST_LANE") == ("1" if FAST_LANE_DEFAULT else "0")
     assert _knob_row(text, "CC_BUDDY_FAST_LANE_STYLE") == DEFAULT_STYLE
     assert _knob_row(text, "CC_BUDDY_LOCAL_VERIFY") == "shadow"
+    assert _knob_row(text, "CC_BUDDY_LANE_FIRST") == ("1" if LANE_FIRST_DEFAULT else "0")
+    assert _knob_row(text, "CC_BUDDY_FAST_LANE_DECIDE") == DEFAULT_DECIDE
+    assert _knob_row(text, "CC_BUDDY_DECIDER") == "laya"
     assert "laya-multilingual-mlx" in _knob_row(text, "CC_BUDDY_LAYA_MODEL")
+
+
+def test_voice_doc_describes_the_router_the_script_form_and_the_prompt_teaches_it() -> None:
+    from cc_buddy_bridge import computer_agent as ca
+    from cc_buddy_bridge import lane_router as lr
+
+    text = VOICE.read_text(encoding="utf-8")
+    section = text[text.index("### Lane first: the router before the planner"):text.index("### The gates in code")]
+    for word in ("complete", "partial", "refused", "lane_router.py", "--router", "--live-route", "no planner call",
+                 "delegate(steps=[", "script: {complete|partial|none}", "keyword", "uncovered"):
+        assert word in section, word
+    for reason in ("no_match", "uncovered", "ambiguous_target"):
+        assert reason in text, reason
+    # every route status the code can return is in the doc's table, and the prompt names the script form
+    for status in lr.STATUSES:
+        assert f"`{status}`" in section, status
+    prompt = ca.instructions(True)
+    assert "delegate(steps=[" in prompt and "script: complete" in prompt and "approve=" in prompt
+    assert "lane_router.py" in (ROOT / "README.md").read_text(encoding="utf-8")
+    assert "CC_BUDDY_LANE_FIRST" in (ROOT / "bridge" / "README.md").read_text(encoding="utf-8")
 
 
 def test_readmes_point_at_the_lane() -> None:

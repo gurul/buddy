@@ -150,6 +150,36 @@ Say 'hey buddy' within 8 s ...
 HEARD IT at 1.4 s — ears are working.
 ```
 
+### When buddy hears you and then sits still
+
+The log says `ears: heard 'hey_buddy'` and nothing moves for many seconds, then
+everything lands at once: that is the daemon's event loop held by one synchronous
+call. The loop writes the log, so it cannot say which call. A thread watches it from
+outside (`loop_watchdog.py`): when the loop stops ticking for more than 2 s the log
+gets `event loop stalled for N s — the loop thread is at:` followed by that thread's
+Python stack, again every 10 s while it lasts, then `event loop resumed after a N s
+stall`. Read the innermost frames; they name the call.
+
+```bash
+grep -A40 "event loop stalled" ~/Library/Logs/cc-buddy-bridge.log | tail -60
+kill -USR1 $(pgrep -f "cc_buddy_bridge.cli daemon")   # every thread's stack, into the same log
+```
+
+`kill -USR1` is for a stall the watchdog cannot see into, a C call that holds the GIL.
+
+The two it caught on its first day (2026-09-21), both now off the loop:
+
+- **The first "hey buddy" of a fresh daemon waited 19–22 s** (0–2 s before 2026-09-19).
+  `AsyncOpenAI().live` imports the SDK's whole `resources` package the first time it is
+  touched, and inside the daemon, sharing the GIL with vision and the keyword spotter,
+  that import took 12–20 s on the loop thread. The daemon now imports it in a thread at
+  start (`voice_agent.warm_live_import`) and `open_session` awaits the same call in a
+  thread, so a wake that beats the warm-up waits without freezing anything else.
+- **The daemon froze for 41 s right after the serial port opened.** The transcript
+  tailer's initial sweep read every `*.jsonl` under `~/.claude/projects` (869 files,
+  791 MB here) on the loop; the board sat unsynced and the microphone stayed closed
+  until it finished. The sweep and the history seed now run in a thread.
+
 ## Knobs
 
 | Variable | Default | Purpose |
@@ -191,6 +221,11 @@ HEARD IT at 1.4 s — ears are working.
 | `CC_BUDDY_AGENT_VERIFY_REASONING` | `low` | reasoning effort for that check |
 | `CC_BUDDY_AGENT_RUNS_DIR` | `~/.config/cc-buddy-bridge/agent-runs` | one JSONL action log per task: goal, every code block, text results, questions, answers, final line — never the screenshots |
 | `CC_BUDDY_FAST_LANE` | `0` | the fast lane: `delegate` in the planner's helpers and the local decider in the worker; the default is the holdout eval's decision (see [The fast lane](#the-fast-lane-local-decider-under-the-planner)) |
+| `CC_BUDDY_REFLEXES` | `1` | before the planner: launch an installed app or open a web search in code, about 2 s instead of 9–32 s; the default is `tools/route_eval.py`'s decision on an unseen holdout ([routing.md](routing.md)) |
+| `CC_BUDDY_ROUTER_MODEL` | `off` | `jev`: ask Jev, in its own idiom, about a request the rules did not recognise; it may only add a bare launch. The request's words leave the Mac ([routing.md](routing.md#ask-each-one-in-its-own-idiom)) |
+| `CC_BUDDY_LANE_FIRST` | `1` | the router: before the planner's first turn, the lane tries to finish a request whose every word one labelled control accounts for; the default is the router eval's decision (see [Lane first](#lane-first-the-router-before-the-planner)) |
+| `CC_BUDDY_FAST_LANE_DECIDE` | `keyword` | who picks a lane step: `keyword` (the code gate alone, no model loaded or asked) or `model` (the gate first, the decider on the rest) |
+| `CC_BUDDY_DECIDER` | `laya` | the decider behind `model`: `laya` (local, nothing leaves the Mac) or `jev` (TypeSafe's hosted model, `jev.py`; it is sent the window title and the menu's labels, and is never loaded in `keyword` mode) |
 | `CC_BUDDY_FAST_LANE_STYLE` | `hinted` | how the lane words its question to the local model: `jev`, `compact` or `hinted` (the eval's winner) |
 | `CC_BUDDY_LAYA_MODEL` | `~/.config/cc-buddy-bridge/models/laya-multilingual-mlx` | the Laya MLX checkpoint directory the worker loads |
 | `CC_BUDDY_LOCAL_VERIFY` | `shadow` | the worker's local verdict on a final answer, logged beside the model's (`shadow`) or skipped (`off`); never acted on |
@@ -299,9 +334,81 @@ oracle in `fast_lane.py`, never the model's: the lane can only *add* stops to th
 planner's `ask_user` contract.
 
 It ships **off** (`CC_BUDDY_FAST_LANE=0`) because the offline eval below says so; the
-code is in place, the numbers are honest, and one line turns it on.
+code is in place, the numbers are honest, and one line turns it on. The **router** below
+is a separate switch and ships **on**: it is the same lane, run *instead of* the planner
+rather than under it.
+
+### Lane first: the router before the planner
+
+The paired A/B further down is why. Under the planner the lane lost: the planner spends a
+3.4 s turn to call the helper, so a two-click Calendar task went from 13.1 s to 16.9 s. A
+planner turn is about 2.8 s of fixed cost before its first token and 0.8 s of writing (184
+logged turns, 2026-09-21), and the median task is three turns, so the only way to win big is
+to not take the turns. `lane_router.py` decides, in code, when that is safe: when your own
+words leave nothing to interpret.
+
+```
+"switch to week view"              one control, Week, accounts for every word   → click it
+"year view and then next year"     two clauses, each fully accounted for        → two clicks
+"open notes"                       names another installed app                  → planner
+"find the email from Sam"          words no control accounts for                → planner
+"what is on my calendar"           a question                                   → planner
+```
+
+The rule: refuse a question, an empty or long request, and one that names an installed app
+other than the frontmost. Then the keyword gate must pick exactly one control, and that
+control's label and role, the app's name and a short list of generic words ("button",
+"tab", "page", …) must account for **every** word of the request. The control's value never
+counts, so "is week selected" is not covered by a selected Week. The whole request is tried
+first ("desktop and dock" is one row); only if that finds nothing is it split on "and",
+"then" and commas into at most four clauses, each under the same rule. Every gate below
+still applies to every step, so a sensitive label, a dialog or a System Settings value stops
+the router with zero input and the planner — with `ask_user` — takes over. The router never
+types and never presses a key.
+
+What happens next depends on what it did:
+
+| Route | Meaning | Then |
+|---|---|---|
+| `complete` | every clause was clicked, and each click was *seen* to change something (the Accessibility diff or the screen diff said so; unknown is not proof), or its control was already selected | buddy says "Done. I clicked Week." — **no planner call, no final-answer check** |
+| `partial` | something was clicked, then a clause stopped or a click changed nothing | the planner starts from the screenshot with a `[note]` naming what was already clicked, and its final answer is checked |
+| `none` / `refused` | nothing was clicked | the planner runs exactly as before; the cost was one Accessibility snapshot (0.04–0.43 s, Safari up to 0.9 s) |
+
+Measured on the fixtures by the real router (`tools/fastlane_eval.py --fixtures
+tests/fixtures/ax --router`, effectors that record instead of click): holdout 23 engaged of
+82, **23 right** (Wilson 95 % 85.7–100 %); select 26 of 73, 26 right; no click on any
+abstain-expected case, no sensitive click. It engages on about a third of the click cases and
+declines the rest (no match 15, a tie 15, uncovered words 15, a confirm 10, a dialog 2 on
+holdout). The bar was fixed before the first run — precision ≥ 90 % on ≥ 10 engaged holdout
+cases, zero sensitive clicks — and `--check-default` asserts `LANE_FIRST_DEFAULT` equals the
+decision. Two cautions the numbers do not remove: the holdout had already been sliced by
+overlap and distractor before the cover rule was written, and the fixture goals were authored
+as lane objectives, not transcribed from speech.
+
+Measured live on this Mac, through the real `ComputerAgent` and a real worker, with a planner
+that fails the run if it is ever called (`--live-route`): "switch to week view" **1.16 s**
+wall including the worker's start, and the A/B's own two-click task, "go to year view and
+then next year", **1.54 s** against 13.1 s with the planner alone — zero planner calls both
+times.
 
 ### What the planner sees
+
+In `keyword` mode (the default) the planner names the controls and the lane clicks them:
+
+```
+delegate(steps=["Year", "next year"], approve=None)
+→ script: {complete|partial|none}; applied=[{action}, …]; step {i}/{n} {that step's own line}
+```
+
+Each step is a control's label exactly as the screenshot shows it, and each is its own
+objective, so the gate cannot confuse step 2's control with step 1's — which is what a
+single objective for a whole run ("year view, then next year") did. One planner turn then
+covers up to six clicks. The script stops at the first step that does not act; `partial`
+and `none` carry that step's own line, which is one of the five shapes below. Keyword mode
+only clicks: `text=` or `key=` answers `unavailable`, because the gate has never been
+measured on which field to type into, and the planner types with `type_text`.
+
+In `model` mode the planner hands over one objective and the decider picks each step:
 
 ```
 delegate(objective, text=None, key=None, done_when=None, approve=None, max_steps=4)
@@ -314,8 +421,8 @@ payload states are `none | pending | applied`, and a step applies its payload at
 done: matched="{done_when}" via={ax|ocr|title}; steps={n}; last={action}; text={state}; key={state}
 stopped: reason={one_step|dry_run}; steps={n}; last={action}; pick={id role "label"}; text=…; key=…
 escalate: app="{app}"; reason={no_window|no_candidate|dialog_open|truncated|model_invalid|abstain|
-          stalled|stalled_2|ambiguous_target|hit_test_failed|focus_changed|step_cap}; top=[…≤3];
-          steps={n}; last={action}; text=…; key=…
+          stalled|stalled_2|ambiguous_target|no_match|uncovered|hit_test_failed|focus_changed|
+          step_cap}; top=[…≤3]; steps={n}; last={action}; text=…; key=…
 confirm: "{label}" needs the human's yes; app="{app}"; action={click|type|press}; steps={n};
          last={action}; text=…; key=…
 unavailable: {reason}
@@ -343,7 +450,13 @@ mentions `delegate` when the lane is on, so a planner without the helper never r
 - **Dialogs are never operated.** A sheet or a dialog window escalates `dialog_open` with
   its first line of text, before any menu is built.
 - **System Settings only navigates.** Rows, cells, tabs, links and Back may be clicked;
-  any value control (a Dark button, a toggle) returns `confirm`.
+  any value control (a Dark button, a toggle) returns `confirm`. To the Accessibility tree
+  "Dark" and "Language & Region" are the same thing — a button with no value — and the A/B
+  lost three lane runs of four to that. So the doors are a closed set in code
+  (`SYSTEM_SETTINGS_PANE_BUTTONS`: the sub-panes of General — About, Software Update,
+  Storage, Date & Time, Language & Region, Sharing, Startup Disk, Time Machine, …). Opening
+  one changes nothing; everything inside it still confirms. The sensitive-label table
+  outranks the set: "Privacy & Security" and "Login Items & Extensions" still ask.
 - **Return into a message confirms.** `key="return"` is allowed only after the lane itself
   typed into a search or address field this run and no dialog is open; into a text area
   it returns `confirm` with zero presses. Key combos are never offered.
@@ -357,6 +470,9 @@ mentions `delegate` when the lane is on, so a planner without the helper never r
   menu whether or not the screen changed; two unchanged steps → `stalled_2`; two
   `reobserve` answers → `stalled`; `max_steps` (clamped 1–6) → `step_cap` after a last
   `done_when` check.
+- **In `keyword` mode nobody guesses.** A tie escalates `ambiguous_target`, zero shared
+  words escalates `no_match`, a router pick that leaves a word unexplained escalates
+  `uncovered` — all with zero input, and no model is loaded or asked.
 - **The model can only pick.** Its answer is rejected unless it is one of the offered keys
   with finite, consistent probabilities above the thresholds (`p_top ≥ 0.60`,
   `margin ≥ 0.15`, set by the eval); anything else escalates `ambiguous_target` or
@@ -420,6 +536,15 @@ gate 90 %.
 Cost-weighted (a correct click saves 3.5 s, a wrong one costs 4.55 s) the shipped path is
 worth +0.61 s a case on holdout.
 
+Sliced by who decided (same run, `--results-out`): keyword picks 88.9 % right (n = 45), model
+picks 29.7 % (n = 37), model picks above the thresholds 26.7 % (n = 15); no app and no case
+class reaches 80 % for the model (best: shared-word cases 40 %, n = 10; Safari and Calendar
+0 %). At +3.5 s a right click and −4.55 s a wrong one that is about **+2.6 s per
+keyword-decided step and −2.5 s per model-decided step**, which is why `keyword` is the
+default decide mode and Laya is out of the click path. The keyword gate itself is 93–95 %
+when the goal shares a word with the label and no wrong control shares more, and 0 % on the
+distractor cases — the router's cover rule is what removes those.
+
 The lane ships enabled only if all four hold on holdout: gated top-1 ≥ 80 %, coverage
 ≥ 70 %, model ≥ keyword + 10 points on the no-shared-word cases, cost > 0. Two fail
 (72.3 %, and 0 vs 0 on the no-shared-word clicks), so `FAST_LANE_DEFAULT` is `False` and `--check-default`
@@ -455,6 +580,10 @@ settled) and `--live-delegate Calendar "switch to week view" --done-when Week`.
 - Re-planning asynchronously while the lane runs; OCR candidates for apps with a broken
   Accessibility tree; page links beyond the same document (`allow_page_links` is off).
 - Carrying stall and step accounting across retries of the same objective.
+- Executing a `steps=[…]` script while the planner is still writing it. A planner turn is
+  ~2.8 s before the first token and ~0.8 s of writing, so streaming can save at most that
+  0.8 s a turn; putting six clicks in one turn already saves five turns. Measure first.
+- The router typing into a search field ("search for jazz"): it only clicks today.
 
 ### Measured live, 2026-09-21
 
@@ -469,6 +598,12 @@ settled) and `--live-delegate Calendar "switch to week view" --done-when Week`.
   tabs, links and Back; a pane-navigation button counts as a value change. So on these tasks the
   lane did not save wall time, and that rule is the first thing to revisit (a navigation button
   inside General is not a setting).
+- The screen-diff fallback never worked before 2026-09-21: the lane asks "did the screen
+  change?" after its post-click snapshot, and the adapter compared that snapshot's frame with
+  a fresh capture — the settled screen with itself. Only a control whose Accessibility value
+  flips (a radio button) was ever verified; a plain button read as unknown. The router's first
+  live two-click run found it ("next year" clicked, `unverified`); the adapter now compares
+  the step's two snapshots.
 - Shadow verifier over the eight lane-on runs: the local verdict said true every time and the
   planner's check agreed every time (p_true 0.98–1.0) — no negative case yet, so nothing can be
   said about its discrimination.

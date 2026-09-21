@@ -70,6 +70,7 @@ import base64
 import json
 import logging
 import os
+import re
 import threading
 import time
 from dataclasses import dataclass
@@ -99,6 +100,10 @@ TURN_GAP_SECS = 1.2            # silence that closes a caption page, absent a tr
 FAREWELL_QUIET_SECS = 0.8      # after buddy's goodbye has been said, this much quiet closes the session
 FAREWELL_MAX_SECS = 6.0        # a goodbye closes the session this long after it, answered or not
 LOOK_ROUTE_DELAY_SECS = 0.6    # a head request waits this long for the voice to delegate it itself
+# Only a turn that could be about the head is sent to the hosted pose model (typed_ask.py): everything
+# else the owner says stays where it was. The model, not this list, decides whether it IS a head request.
+HEAD_WORDS = re.compile(r"\b(left|right|up|down|upwards?|downwards?|cent(?:er|re)|straight|ahead|forward|desk|table|"
+                        r"ceiling|higher|lower|head|eyes|face me|look at me|turn|tilt|pan|swivel|rotate)\b", re.IGNORECASE)
 LESSON_ROUTE_DELAY_SECS = 0.6  # a "teach me" waits this long for the voice to delegate it itself
 MUTED_NOTE = ("[sound] You are muted: nobody hears you. You still move and light up, and your words still "
               "show on your screen, so keep them short.")
@@ -588,7 +593,10 @@ class VoiceSession:
         on_spoken_idea: Optional[Callable[[str, str], Any]] = None,   # LearningApp.append_spoken (blocking)
         on_think_aloud: Optional[Callable[[bool, Optional[str]], None]] = None,   # (listening, lesson id)
         lesson_wake: bool = False,                          # opened by the "lesson" wake word
+        head_pose: Optional[Callable[[str], Awaitable[str]]] = None,   # typed_ask: utterance -> a pose label, or "none"
     ) -> None:
+        self.head_pose = head_pose
+        self._fast_head: Optional[tuple[float, dict[str, Any]]] = None   # (the turn it answered, what the head did)
         self.learning = learning
         # Think out loud: the lesson the learner is talking through, or None. While it is set the
         # session waits through long thinking pauses, saves what the learner says into the lesson's
@@ -1170,7 +1178,12 @@ class VoiceSession:
                 result = {"ok": True}
                 self._ended.set()
         elif name == "move_head":
-            result = await self._move_head(args)
+            fast = self._fast_head
+            if fast is not None and fast[0] >= self._user_turn_started_at:
+                # the fast path already turned the head for THIS turn: a relative move must never run twice
+                result = dict(fast[1])
+            else:
+                result = await self._move_head(args)
         elif name == "set_sound":
             on = args.get("on")
             if isinstance(on, bool):
@@ -1341,6 +1354,12 @@ class VoiceSession:
             log.info("voice: the learner is done thinking out loud")
             self._begin_farewell(said_at)
             return
+        if (self.head_pose is not None and self.head is not None and self._think_aloud is None
+                and HEAD_WORDS.search(text)):
+            # "look left" used to wait ~3.2 s for the backend to pick the numbers. A typed-decision model picks
+            # from a closed set of poses in a quarter of a second; only a turn that mentions a direction or the
+            # head is ever sent to it. The ordinary routing below still runs, and sees that the head has moved.
+            self._bg(self._fast_head_move(text, self._user_turn_started_at))
         label = fast_intent(text)
         if label is not None:
             self._apply_intent(label, text, "phrase", said_at)
@@ -1418,6 +1437,28 @@ class VoiceSession:
                                  "it, in three or four words. Do not repeat it back to them."))
         else:
             self._bg(self._quiet("[memory] You could not write it down. Say so in one short line, plainly."))
+
+    async def _fast_head_move(self, text: str, turn_started_at: float) -> None:
+        """Ask the typed model for a pose and, when it is sure, turn the head now. Any failure, an abstention or
+        "none" leaves the turn to the ordinary path exactly as before."""
+        assert self.head_pose is not None and self.head is not None
+        t0 = self._clock()
+        try:
+            pose = await self.head_pose(text)
+        except Exception as e:  # noqa: BLE001 — the fast path is an optimisation, never a way to fail a turn
+            log.warning("voice: fast head pose failed (%s: %s)", type(e).__name__, e)
+            return
+        move = head_mod.POSE_MOVES.get(pose)
+        if move is None or self._ended.is_set():
+            return
+        if self._last_head_tool_at >= turn_started_at:
+            return                                       # the backend got there first: never move twice
+        self._last_head_tool_at = self._clock()          # _route_look and the backend's move_head both read this
+        result = await self.head.move(move.get("yaw"), move.get("pitch"), relative=bool(move["relative"]),
+                                      hold_secs=head_mod.DEFAULT_HOLD_SECS)
+        if result.get("ok"):
+            self._fast_head = (turn_started_at, {**result, "note": "already done: the head turned for these words"})
+            log.info("voice: head → %s in %.2f s (fast path)", pose, self._clock() - t0)
 
     async def _route_look(self, text: str, turn_started_at: float) -> None:
         """Hand a head request to the backend unless the voice already delegated this
@@ -1587,6 +1628,12 @@ def _attr(event: Any, name: str) -> Any:
 
 # ---- the real wiring --------------------------------------------------------------------------
 
+def warm_live_import() -> None:
+    """Import what `AsyncOpenAI().live` imports lazily: `openai.resources`, some
+    hundreds of modules. Idempotent and cheap once cached; call it off the loop."""
+    import openai.resources.live  # noqa: F401 — the import is the work
+
+
 async def open_session(
     mic: "asyncio.Queue[bytes]",
     on_state: Callable[[str], None],
@@ -1612,6 +1659,7 @@ async def open_session(
     on_think_aloud: Optional[Callable[[bool, Optional[str]], None]] = None,
     on_open: Optional[Callable[[VoiceSession], None]] = None,
     lesson_wake: bool = False,
+    head_pose: Optional[Callable[[str], Awaitable[str]]] = None,
 ) -> None:
     """Run one full conversation on the real Live API — captions to the robot,
     or the real speaker in audio mode.
@@ -1624,6 +1672,11 @@ async def open_session(
     client = AsyncOpenAI(api_key=api_key) if api_key else AsyncOpenAI()
     speaker: Any = NullSpeaker() if cfg.output == "captions" else Speaker()
     speaker.start()
+    # `client.live` imports the SDK's whole resources package the first time it is
+    # touched. Done on the loop thread inside the daemon that took 12–20 s (the loop
+    # watchdog named it, 2026-09-21): every wake of a fresh daemon sat silent that long.
+    # A thread pays it instead, and the daemon warms it at start (warm_live_import).
+    await asyncio.to_thread(warm_live_import)
     try:
         async with client.live.connect() as conn:
             session = VoiceSession(conn, mic, speaker, agent_factory, on_state, config=cfg,
@@ -1632,7 +1685,7 @@ async def open_session(
                                    on_sound=on_sound, muted=muted, thinker=thinker, on_photo=on_photo,
                                    memory=memory, on_star=on_star, learning=learning,
                                    think_aloud=think_aloud, lesson_wake=lesson_wake, on_spoken_idea=on_spoken_idea,
-                                   on_think_aloud=on_think_aloud)
+                                   on_think_aloud=on_think_aloud, head_pose=head_pose)
             if on_open is not None:
                 on_open(session)
             try:

@@ -347,6 +347,10 @@ def test_offline_eval_refuses_small_sets(tmp_path: Path, capsys) -> None:
 
 def test_check_default_compares_the_decision_with_the_shipped_constant(tmp_path: Path, capsys, monkeypatch) -> None:
     root = sets_root(tmp_path)
+    # the router's own decision on these few cases, so this test isolates the FAST_LANE half first
+    routed = [fe.route_case(f, c) for f in fe.load_sets(root)["holdout"] for c in f.cases]
+    router_ok, _numbers = fe.router_ship_decision(routed)
+    monkeypatch.setattr(fe, "shipped_router", lambda: router_ok)
     monkeypatch.setattr(fe, "shipped_settings", lambda: (0.2, 0.05, "compact", False))
     fe.main(["--fixtures", str(root), "--check-default", "--fake-predictor"])
     out = capsys.readouterr().out
@@ -358,6 +362,40 @@ def test_check_default_compares_the_decision_with_the_shipped_constant(tmp_path:
     out = capsys.readouterr().out
     assert (code == 0 and "DEFAULT_CONSISTENT" in out) == (ok is True)
     assert (code == 1 and "DEFAULT_MISMATCH" in out) == (ok is False)
+    # and the router half: a shipped LANE_FIRST_DEFAULT that disagrees with its eval is a mismatch
+    monkeypatch.setattr(fe, "shipped_settings", lambda: (0.2, 0.05, "compact", ok))
+    monkeypatch.setattr(fe, "shipped_router", lambda: not router_ok)
+    code = fe.main(["--fixtures", str(root), "--check-default", "--fake-predictor"])
+    out = capsys.readouterr().out
+    assert code == 1 and "DEFAULT_MISMATCH: the router eval says" in out and "DEFAULT_CONSISTENT" not in out
+    monkeypatch.setattr(fe, "shipped_router", lambda: router_ok)
+    assert fe.main(["--fixtures", str(root), "--check-default", "--fake-predictor"]) == 0
+    assert "DEFAULT_CONSISTENT" in capsys.readouterr().out
+
+
+def test_router_eval_runs_the_real_router_and_counts_wrong_and_sensitive_clicks(tmp_path: Path, capsys) -> None:
+    cal = ax.snapshot_from_raw(calendar_raw(), seq=1, screen=(1440, 900))
+    fx = fe.Fixture(path=Path("x"), set_name="holdout", name="x", snapshot=cal, cases=[], captured={}, screen=None,
+                    raw={})
+    week = ids(cal)["Week"]
+    right = fe.route_case(fx, {"goal": "switch to week view", "expected_id": week, "expected": "click"})
+    assert right.engaged and right.correct and right.clicked == [week] and not right.sensitive
+    declined = fe.route_case(fx, {"goal": "show the next seven days", "expected_id": week, "expected": "click"})
+    assert not declined.engaged and declined.reason == "no_match" and declined.clicked == []
+    # a click on an abstain-expected case is an engaged WRONG case: the counter the ship bar reads
+    wrong = fe.route_case(fx, {"goal": "switch to week view", "expected_id": None, "expected": "abstain"})
+    assert wrong.engaged and not wrong.correct
+    s = fe.router_summary([right, declined, wrong])
+    assert (s["engaged"], s["right"], s["engaged_on_abstain"], s["sensitive"]) == (2, 1, 1, 0)
+    assert s["precision"] == 0.5 and len(s["wrong"]) == 1 and s["declined"] == {"no_match": 1}
+    ok, _ = fe.router_ship_decision([right] * 9)
+    assert ok is False                                   # 9 engaged is under ROUTER_MIN_ENGAGED
+    assert fe.router_ship_decision([right] * 10)[0] is True
+    assert fe.router_ship_decision([right] * 17 + [wrong] * 3)[0] is False      # 85% is under the bar
+    root = sets_root(tmp_path)
+    assert fe.main(["--fixtures", str(root), "--router"]) == 0
+    out = capsys.readouterr().out
+    assert "ROUTER SHIP DECISION:" in out and "ROUTER_EVAL_COMPLETE" in out
 
 
 def test_run_case_records_forbidden_offers_and_rejections() -> None:

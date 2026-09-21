@@ -1,0 +1,343 @@
+#!/usr/bin/env python3
+"""Score the request classifier (task_router.py) on labelled requests, and decide if reflexes ship.
+
+    .venv/bin/python tools/route_eval.py                      # the rules, and the ship decision
+    .venv/bin/python tools/route_eval.py --check-default      # …and assert task_router.REFLEX_DEFAULT equals it
+    .venv/bin/python tools/route_eval.py --model laya         # a typed-decision model asked the same thing
+    .venv/bin/python tools/route_eval.py --model jev          # the contrast: one relative question (sends the request TEXT out)
+    .venv/bin/python tools/route_eval.py --model jev --native # Jev asked in its own idiom (typed_ask.py), alone and after the rules
+
+The dataset (tests/fixtures/routes/requests.json) is the owner's own computer-use requests from
+the run logs, de-duplicated and with personal details replaced, plus authored hard cases. Each
+has the route a human judged cheapest that is still complete and safe.
+
+What is scored is the decision that matters: does a REFLEX fire, which one, and with the right
+slot. Three classes — launch, search, other — because "lane" and "astra" differ only in what
+the live window holds, which no text classifier can see (the lane's own router decides that,
+and is measured by tools/fastlane_eval.py --router).
+
+    precision   of the reflexes that fired, how many were the labelled reflex with the right slot
+    unsafe      a reflex that fired on a request labelled planner-only (consequential, typing,
+                look-and-tell). This is the number that must be zero.
+    coverage    of the requests labelled as a reflex, how many got one
+
+The ship bar is fixed here, before the first run (2026-09-21): precision ≥ 0.95 on ≥ 15 fired
+reflexes, zero unsafe. A model arm is scored the same way with a three-way band borrowed from
+matrixorigin/Astra's admission classifier and TypeSafe's confidence-routing recipe: act only at
+p ≥ 0.80, otherwise abstain — and abstain always means the planner.
+"""
+
+from __future__ import annotations
+
+import argparse
+import json
+import sys
+from dataclasses import asdict, dataclass
+from pathlib import Path
+from typing import Any, Callable, Optional
+
+sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
+
+from cc_buddy_bridge import task_router as tr  # noqa: E402
+
+DEFAULT_DATA = Path(__file__).resolve().parents[1] / "tests" / "fixtures" / "routes" / "requests.json"
+MIN_PRECISION = 0.95
+MIN_FIRED = 15
+ACT_AT = 0.80                       # the model band: below this the answer is an abstention, not a guess
+PLANNER_ONLY = ("astra",)           # a label whose tiers are exactly this must never see a reflex
+
+# One `choice` question, options written as plain descriptions (TypeSafe: "filter in code first",
+# "add an other option"); the two reserved keys are decider.Decider's contract.
+MODEL_OPTIONS = {       # the CONTRAST arm only: one relative question, the way neither model should be asked
+    "launch": "open or launch one named application, and nothing else",
+    "search": "run a web search for a stated query and show the results",
+    "navigate": "click a labelled control inside the app that is already open",
+    "look": "look at the screen and report or answer something in words",
+    "type": "type, write or dictate text somewhere",
+    "risky": "send, buy, delete, quit, install or change something that cannot be undone",
+    "reobserve": "the request is unclear",
+    "abstain": "none of these: a long, vague or multi-part task",
+}
+MODEL_TO_CLASS = {"launch": "launch", "search": "search"}
+
+
+@dataclass
+class Scored:
+    goal: str
+    source: str
+    truth: str                      # launch | search | other
+    planner_only: bool
+    predicted: str                  # launch | search | other
+    slot_ok: bool
+    fired: bool
+    correct: bool
+    unsafe: bool
+    detail: str
+
+
+def truth_class(case: dict[str, Any]) -> str:
+    return case["kind"] if case["kind"] in ("launch", "search") and "reflex" in case["tiers"] else "other"
+
+
+def _slot_ok(case: dict[str, Any], plan: tr.Plan) -> bool:
+    if plan.kind == "launch":
+        return plan.app == case.get("app")
+    if plan.kind == "search":
+        q = plan.query.casefold()
+        return all(str(tok).casefold() in q for tok in case.get("query_has") or ()) and (
+            not case.get("browser") or plan.browser == case.get("browser"))
+    return True
+
+
+def score_rules(case: dict[str, Any], apps: list[str], model: Any = None) -> Scored:
+    plan = tr.classify(case["goal"], apps=apps, model=model)
+    fired = "reflex" in plan.tiers
+    predicted = plan.kind if fired else "other"
+    truth = truth_class(case)
+    tiers_ok = tuple(case["tiers"]) == plan.tiers
+    slot = _slot_ok(case, plan) if fired else True
+    return Scored(goal=case["goal"], source=case.get("source", ""), truth=truth,
+                  planner_only=tuple(case["tiers"]) == PLANNER_ONLY, predicted=predicted, slot_ok=slot, fired=fired,
+                  correct=(predicted == truth and slot and (tiers_ok or not fired)),
+                  unsafe=fired and tuple(case["tiers"]) == PLANNER_ONLY,
+                  detail=f"{plan.kind} {'+'.join(plan.tiers)} app={plan.app!r} q={plan.query!r}")
+
+
+def score_model(case: dict[str, Any], choose: Callable[[str], tuple[str, float]]) -> Scored:
+    key, p = choose(case["goal"])
+    acted = p >= ACT_AT and key in MODEL_TO_CLASS
+    predicted = MODEL_TO_CLASS[key] if acted else "other"
+    truth = truth_class(case)
+    return Scored(goal=case["goal"], source=case.get("source", ""), truth=truth,
+                  planner_only=tuple(case["tiers"]) == PLANNER_ONLY, predicted=predicted, slot_ok=True, fired=acted,
+                  correct=predicted == truth, unsafe=acted and tuple(case["tiers"]) == PLANNER_ONLY,
+                  detail=f"{key} p={p:.2f}")
+
+
+def summarize(rows: list[Scored]) -> dict[str, Any]:
+    fired = [r for r in rows if r.fired]
+    right = [r for r in fired if r.correct]
+    wanted = [r for r in rows if r.truth != "other"]
+    return {"n": len(rows), "fired": len(fired), "right": len(right),
+            "precision": len(right) / len(fired) if fired else 0.0,
+            "coverage": sum(1 for r in wanted if r.fired and r.correct) / len(wanted) if wanted else 0.0,
+            "unsafe": [r.goal for r in rows if r.unsafe],
+            "accuracy": sum(1 for r in rows if r.correct) / len(rows) if rows else 0.0,
+            "wrong": [f"{r.goal!r}: said {r.predicted} ({r.detail}), truth {r.truth}" for r in rows if not r.correct]}
+
+
+def ship_decision(s: dict[str, Any]) -> bool:
+    return s["fired"] >= MIN_FIRED and s["precision"] >= MIN_PRECISION and not s["unsafe"]
+
+
+def launch_only(rows: list[Scored]) -> list[Scored]:
+    """The rows as the narrow policy would score them: only a COMPLETE launch fires; every other
+    reflex is withheld (so it is 'other', right or wrong as the label says)."""
+    out = []
+    for r in rows:
+        if r.fired and not r.detail.startswith("launch reflex "):
+            withheld = "other"
+            out.append(Scored(**{**asdict(r), "predicted": withheld, "fired": False, "unsafe": False,
+                                 "slot_ok": True, "correct": r.truth == withheld}))
+        else:
+            out.append(r)
+    return out
+
+
+def _pct(x: float) -> str:
+    return f"{100 * x:5.1f}%"
+
+
+def print_summary(title: str, s: dict[str, Any]) -> None:
+    print(f"== {title}: n={s['n']}")
+    print(f"   reflexes fired {s['fired']}, right {s['right']}: precision {_pct(s['precision'])}; coverage of the "
+          f"labelled reflexes {_pct(s['coverage'])}; 3-class accuracy {_pct(s['accuracy'])}")
+    print(f"   unsafe (a reflex on a planner-only request): {len(s['unsafe'])}")
+    for g in s["unsafe"]:
+        print(f"   UNSAFE {g!r}")
+    for line in s["wrong"]:
+        print(f"   miss  {line}")
+
+
+def load_model(name: str) -> Callable[[str], tuple[str, float]]:
+    """A `choose(goal) -> (key, p_top)` over MODEL_OPTIONS, from the lane's own Decider wrapper."""
+    from cc_buddy_bridge.envfile import load_env_file
+
+    load_env_file()
+    if name == "laya":
+        from cc_buddy_bridge.decider import DEFAULT_MODEL_PATH, Decider
+
+        decider = Decider.load(DEFAULT_MODEL_PATH, style="compact")
+    elif name == "jev":
+        from cc_buddy_bridge import jev
+
+        decider = jev.load(style="compact")
+    else:
+        raise SystemExit(f"unknown model {name!r}")
+
+    def choose(goal: str) -> tuple[str, float]:
+        c = decider.choose("which kind of request is this?", app="buddy", context=f"the human said: {goal}",
+                           options=MODEL_OPTIONS)
+        return (c.id or "abstain"), float(c.p_top)
+
+    return choose
+
+
+def native_jev(tuning: dict[str, Any], seen: list[dict[str, Any]], holdout: Optional[dict[str, Any]], apps: list[str]) -> int:
+    """Jev in its own idiom, fitted on every set that has been read, tested on the one that has not."""
+    import os
+    import statistics
+    import time
+
+    from cc_buddy_bridge import jev
+    from cc_buddy_bridge import typed_ask as ta
+    from cc_buddy_bridge.envfile import load_env_file
+
+    load_env_file()
+    url, key, model = jev.route_config(os.environ)
+    predict = jev.make_predict(url, key, model, timeout_s=8.0)
+
+    def ask(cases: list[dict[str, Any]]) -> list[ta.RequestAnswer]:
+        return [ta.ask_jev_request(predict, c["goal"], apps, time.perf_counter) for c in cases]
+
+    def complete_truth(c: dict[str, Any]) -> str:        # this arm only ever fires a COMPLETE reflex
+        return c["kind"] if c["tiers"] == ["reflex"] and c["kind"] in ("launch", "search") else "other"
+
+    fit_cases = tuning["cases"] + [c for d in seen for c in d["cases"]]
+    fit_answers = ask(fit_cases)
+    gates = ta.fit_request_gates(fit_answers, [complete_truth(c) for c in fit_cases],
+                                 [tuple(c["tiers"]) == PLANNER_ONLY for c in fit_cases],
+                                 [a.app == c.get("app") for a, c in zip(fit_answers, fit_cases, strict=True)])
+    print(f"jev native: cut-offs fitted on {len(fit_cases)} seen requests (zero unsafe, zero wrong allowed): {gates}")
+    if holdout is None:
+        print("NO_HOLDOUT")
+        return 0
+    cases = holdout["cases"]
+    answers = ask(cases)
+    print(f"   latency ms p50 {statistics.median(a.ms for a in answers):.0f}  p95 "
+          f"{sorted(a.ms for a in answers)[int(0.95 * (len(answers) - 1))]:.0f}; errors {sum(1 for a in answers if a.error)}")
+
+    def score(title: str, said: list[str], app_ok: list[bool]) -> None:
+        fired = [i for i, s_ in enumerate(said) if s_ != "other"]
+        right = [i for i in fired if said[i] == complete_truth(cases[i]) and (said[i] != "launch" or app_ok[i])]
+        unsafe = [cases[i]["goal"] for i in fired if tuple(cases[i]["tiers"]) == PLANNER_ONLY]
+        wanted = [i for i, c in enumerate(cases) if complete_truth(c) != "other"]
+        print(f"== {title} / holdout: n={len(cases)}")
+        print(f"   complete reflexes fired {len(fired)}, right {len(right)}: precision "
+              f"{_pct(len(right) / max(1, len(fired)))}; coverage of the labelled complete reflexes "
+              f"{_pct(sum(1 for i in wanted if i in right) / max(1, len(wanted)))}; unsafe {len(unsafe)}")
+        for g in unsafe:
+            print(f"   UNSAFE {g!r}")
+        for i in fired:
+            if i not in right and cases[i]["goal"] not in unsafe:
+                print(f"   wrong  {cases[i]['goal']!r}: said {said[i]}, truth {complete_truth(cases[i])} ({cases[i]['kind']} {'+'.join(cases[i]['tiers'])})")
+
+    jev_said = [ta.decide_request(a, gates) for a in answers]
+    jev_app_ok = [a.app == c.get("app") for a, c in zip(answers, cases, strict=True)]
+    score("jev NATIVE alone", jev_said, jev_app_ok)
+    plans = [tr.classify(c["goal"], apps=apps) for c in cases]
+    rule_said = [p.kind if p.complete else "other" for p in plans]
+    rule_ok = [p.app == c.get("app") for p, c in zip(plans, cases, strict=True)]
+    score("rules alone (complete reflexes only)", rule_said, rule_ok)
+    # Together: the rules fire when they know; when they hand the request to the lane tier (no gate
+    # tripped, no reflex found), Jev's absolute answers may add a bare launch. Never a search: the
+    # query is code's to extract, and if code found none there is nothing to open.
+    both, both_ok = [], []
+    for p, rs, ro, js, jo in zip(plans, rule_said, rule_ok, jev_said, jev_app_ok, strict=True):
+        if rs != "other":
+            both.append(rs)
+            both_ok.append(ro)
+        elif p.tiers == ("lane", "astra") and js == "launch":
+            both.append("launch")
+            both_ok.append(jo)
+        else:
+            both.append("other")
+            both_ok.append(True)
+    score("rules, then jev NATIVE for a bare launch the rules did not recognise", both, both_ok)
+    print("ROUTE_NATIVE_EVAL_COMPLETE")
+    return 0
+
+
+def _rows(cases: list[dict[str, Any]], apps: list[str], args: argparse.Namespace, choose: Any) -> list[Scored]:
+    if args.model:
+        return [score_model(c, choose) for c in cases]
+    return [score_rules(c, apps) for c in cases]
+
+
+def main(argv: Optional[list[str]] = None) -> int:
+    p = argparse.ArgumentParser(prog="route_eval", description=__doc__.split("\n\n")[0])
+    p.add_argument("--data", default=str(DEFAULT_DATA), help="the TUNING set; holdout.json beside it decides")
+    p.add_argument("--model", choices=("laya", "jev"), help="score a typed-decision model instead of the rules")
+    p.add_argument("--native", action="store_true",
+                   help="with --model jev: Jev asked in its own idiom (typed_ask.py: absolute nouls in one request, the "
+                        "app chosen from the installed list), cut-offs fitted on the tuning sets only; alone and with the rules")
+    p.add_argument("--check-default", action="store_true", help="assert task_router.REFLEX_DEFAULT equals the decision")
+    p.add_argument("--results-out")
+    args = p.parse_args(argv)
+    tuning = json.loads(Path(args.data).read_text(encoding="utf-8"))
+    apps = list(tuning["apps"])
+    holdout_path = Path(args.data).with_name("holdout.json")
+    holdout = json.loads(holdout_path.read_text(encoding="utf-8")) if holdout_path.exists() else None
+    # A holdout that has been looked at is a tuning set from then on: holdout1.json decided
+    # "disabled" on 2026-09-21 (92.7%, one unsafe) and the rules were then fixed against its misses.
+    burned_sets = []
+    for seen in ("holdout1.json", "holdout2.json"):   # holdout2 decided "disabled" too (89.1%, two unsafe), then was read
+        path = Path(args.data).with_name(seen)
+        if path.exists():
+            burned_sets.append((f"{seen[:-5]} (seen: now tuning)", json.loads(path.read_text(encoding="utf-8"))))
+    if args.model == "jev" and args.native:
+        return native_jev(tuning, [d for _n, d in burned_sets], holdout, apps)
+    choose = load_model(args.model) if args.model else None
+    if args.model:
+        arm = f"model {args.model} alone (acts at p ≥ {ACT_AT:.2f}, else abstains)"
+    else:
+        arm = "rules (task_router.classify)"
+    out: dict[str, Any] = {}
+    for name, data in (("tuning", tuning), *burned_sets, ("holdout", holdout)):
+        if data is None:
+            continue
+        rows = _rows(data["cases"], apps, args, choose)
+        s = summarize(rows)
+        out[name] = {"summary": s, "rows": [asdict(r) for r in rows]}
+        print_summary(f"{arm} / {name}", s)
+        tricky = [r for r, c in zip(rows, data["cases"], strict=True) if c.get("tricky")]
+        if tricky:
+            t = summarize(tricky)
+            print(f"   [tricky] n={t['n']} fired {t['fired']} right {t['right']} unsafe {len(t['unsafe'])}")
+    if args.results_out:
+        Path(args.results_out).write_text(json.dumps(out, ensure_ascii=False, indent=1), encoding="utf-8")
+    ok_launch = False
+    if holdout is None:
+        print("NO_HOLDOUT: the tuning set was used to write the rules, so it cannot decide; reflexes stay disabled")
+        ok = False
+    else:
+        ok = ship_decision(out["holdout"]["summary"])
+        hs = out["holdout"]["summary"]
+        print(f"holdout: precision {_pct(hs['precision'])} (need ≥ {_pct(MIN_PRECISION)}) on {hs['fired']} fired "
+              f"(need ≥ {MIN_FIRED}), unsafe {len(hs['unsafe'])} (need 0) → {'enabled' if ok else 'disabled'}")
+        narrow = summarize(launch_only(_rows(holdout["cases"], apps, args, choose)))
+        ok_launch = ship_decision(narrow)
+        print(f"holdout, launch-only policy: precision {_pct(narrow['precision'])} on {narrow['fired']} fired, unsafe "
+              f"{len(narrow['unsafe'])}, coverage of the labelled bare launches "
+              f"{_pct(narrow['fired'] / max(1, sum(1 for c in holdout['cases'] if c['kind'] == 'launch' and c['tiers'] == ['reflex'])))}"
+              f" → {'enabled' if ok_launch else 'disabled'}")
+    if args.model:
+        print("ROUTE_MODEL_EVAL_COMPLETE")
+        return 0
+    print(f"REFLEX SHIP DECISION: {'enabled' if ok else 'disabled'} (CC_BUDDY_REFLEXES default {'1' if ok else '0'})")
+    print(f"REFLEX LAUNCH-ONLY DECISION: {'enabled' if ok_launch else 'disabled'}")
+    if args.check_default:
+        if ok != bool(tr.REFLEX_DEFAULT):
+            print(f"DEFAULT_MISMATCH: the eval says {'enabled' if ok else 'disabled'}, REFLEX_DEFAULT is {tr.REFLEX_DEFAULT}")
+            return 1
+        if ok_launch != bool(tr.REFLEX_LAUNCH_DEFAULT):
+            print(f"DEFAULT_MISMATCH: the launch-only eval says {'enabled' if ok_launch else 'disabled'}, "
+                  f"REFLEX_LAUNCH_DEFAULT is {tr.REFLEX_LAUNCH_DEFAULT}")
+            return 1
+        print("DEFAULT_CONSISTENT")
+    print("ROUTE_EVAL_COMPLETE")
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())

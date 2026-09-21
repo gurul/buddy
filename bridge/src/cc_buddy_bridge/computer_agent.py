@@ -54,7 +54,8 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any, Awaitable, Callable, Optional
 
-from .fast_lane import FAST_LANE_DEFAULT
+from . import task_router
+from .fast_lane import DECIDE_MODES, DEFAULT_DECIDE, FAST_LANE_DEFAULT, LANE_FIRST_DEFAULT
 
 log = logging.getLogger(__name__)
 
@@ -76,6 +77,7 @@ WORKER_LINE_LIMIT = 32 * 1024 * 1024
 LOCAL_VERIFY_MODES = ("off", "shadow")     # "on" (short-circuiting the model's check) is deferred: needs calibration
 DEFAULT_LOCAL_VERIFY = "shadow"
 VERIFY_WORKER_TIMEOUT_SECS = 5.0
+LANE_FIRST_TIMEOUT_SECS = 12.0             # ≤ 4 clicks × (snapshot 0.4 + click 0.2 + settle 1.0 + snapshot 0.4) + slack
 
 INSTRUCTIONS_TEMPLATE = """You are buddy, a small desk robot, operating the human's own Mac for them by voice request.
 
@@ -159,6 +161,11 @@ FAST_LANE_HELPER = """  delegate(objective, text=None, key=None, done_when=None,
                                      local clicks on labelled controls in the frontmost app (milliseconds a
                                      step, no vision); returns done / stopped / escalate / confirm / unavailable
 """
+KEYWORD_LANE_HELPER = """  delegate(steps=["Year", "next year"], approve=None)
+                                     local clicks on labelled controls in the frontmost app, in order, by their
+                                     exact labels (under half a second a click, no vision); returns one
+                                     "script: complete / partial / none; applied=[…]; step i/n …" line
+"""
 FAST_LANE_RULE = """
 11. delegate(objective, text=None, key=None, done_when=None, approve=None, max_steps=4) hands a narrow run of
     clicks on labelled controls inside the frontmost app to a local decider (milliseconds a step, no vision).
@@ -173,12 +180,30 @@ FAST_LANE_RULE = """
     against the goal in the screenshot."""
 
 
-def instructions(fast_lane: bool = False) -> str:
+KEYWORD_LANE_RULE = """
+11. delegate(steps=[…]) clicks labelled controls inside the frontmost app for you, in the order you list them,
+    under half a second a click. Each step is the control's label exactly as the screenshot shows it ("Year",
+    "next year", "Language & Region"); the lane finds the one control carrying that label, checks it is still
+    under the pointer, clicks it, waits for the screen to settle and takes the next step from a fresh look. When
+    the next controls you need are labelled and you can read their labels, send them all in ONE call — after
+    open_app, for menus, tabs, sidebar rows, view switches and panes — and end the exec_py call there. Use
+    click_text, click_element or pyautogui for anything without a label, for typing, keys and gestures. Read the
+    line it returns: "script: complete" means every step was clicked and seen to change something — check the
+    screenshot against the goal and finish. "partial" and "none" say which step stopped and why: a line with
+    "confirm" names a control that needs the human — call ask_user, and on a clear yes call delegate again with
+    the remaining steps plus approve=<that label>; a line with "escalate" lists what the lane saw at that step —
+    look at the screenshot and do that step yourself. The applied=[…] list is what was really clicked."""
+
+
+def instructions(fast_lane: bool = False, decide: str = DEFAULT_DECIDE) -> str:
     """The system prompt: the fast-lane helper and its rule appear only when the lane is on, so
-    a planner without the helper never reads its name."""
+    a planner without the helper never reads its name. The keyword lane (fast_lane.DECIDE_MODES)
+    takes exact labels in order; the model lane keeps the objective form it was measured with."""
     # str.replace, not format: the template carries literal braces ({"app", "title"} …)
-    return (INSTRUCTIONS_TEMPLATE.replace("{fast_lane_helper}", FAST_LANE_HELPER if fast_lane else "")
-            .replace("{fast_lane_rule}", FAST_LANE_RULE if fast_lane else ""))
+    helper = KEYWORD_LANE_HELPER if decide == "keyword" else FAST_LANE_HELPER
+    rule = KEYWORD_LANE_RULE if decide == "keyword" else FAST_LANE_RULE
+    return (INSTRUCTIONS_TEMPLATE.replace("{fast_lane_helper}", helper if fast_lane else "")
+            .replace("{fast_lane_rule}", rule if fast_lane else ""))
 
 
 INSTRUCTIONS = instructions(False)
@@ -253,6 +278,10 @@ class AgentConfig:
     progress_min_gap_secs: float = 1.5             # the voice session's caption pacing for progress lines
     local_verify: str = DEFAULT_LOCAL_VERIFY       # off | shadow: the worker's local verdict, logged only
     fast_lane: bool = FAST_LANE_DEFAULT            # the delegate helper in the prompt and the tool text
+    lane_decide: str = DEFAULT_DECIDE              # keyword | model: who picks a lane step (fast_lane.DECIDE_MODES)
+    lane_first: bool = LANE_FIRST_DEFAULT          # the router runs before the planner's first turn (lane_router.py)
+    reflexes: bool = task_router.REFLEX_DEFAULT    # task_router.py: launch an app / open a search with no model at all
+    router_model: str = task_router.ROUTER_MODEL_DEFAULT   # off | jev: asked only for wording the rules do not know
 
 
 def _effort(env: Any, key: str, default: str) -> str:
@@ -296,8 +325,19 @@ def configured(environ: Any = None) -> AgentConfig:
         local_verify = "shadow"
     raw_lane = (env.get("CC_BUDDY_FAST_LANE") or "").strip().lower()
     fast_lane = FAST_LANE_DEFAULT if not raw_lane else raw_lane not in ("0", "false", "no", "off")
+    lane_decide = (env.get("CC_BUDDY_FAST_LANE_DECIDE") or "").strip().lower()
+    if lane_decide not in DECIDE_MODES:
+        lane_decide = DEFAULT_DECIDE
+    raw_first = (env.get("CC_BUDDY_LANE_FIRST") or "").strip().lower()
+    lane_first = LANE_FIRST_DEFAULT if not raw_first else raw_first not in ("0", "false", "no", "off")
+    raw_reflex = (env.get("CC_BUDDY_REFLEXES") or "").strip().lower()
+    reflexes = task_router.REFLEX_DEFAULT if not raw_reflex else raw_reflex not in ("0", "false", "no", "off")
+    router_model = (env.get("CC_BUDDY_ROUTER_MODEL") or "").strip().lower()
+    if router_model not in task_router.ROUTER_MODELS:
+        router_model = task_router.ROUTER_MODEL_DEFAULT
     return AgentConfig(
-        local_verify=local_verify, fast_lane=fast_lane,
+        local_verify=local_verify, fast_lane=fast_lane, lane_decide=lane_decide, lane_first=lane_first,
+        reflexes=reflexes, router_model=router_model,
         enabled=enabled, model=model, max_turns=turns, runs_dir=runs,
         reasoning_effort=_effort(env, "CC_BUDDY_AGENT_REASONING", DEFAULT_REASONING_EFFORT),
         plan_reasoning_effort=_effort(env, "CC_BUDDY_AGENT_PLAN_REASONING", DEFAULT_PLAN_REASONING_EFFORT),
@@ -402,6 +442,24 @@ class WorkerClient:
         if not isinstance(verdict, dict):
             return {"error": "no verdict in the worker reply"}
         return verdict
+
+    async def lane_first(self, goal: str, timeout: float = LANE_FIRST_TIMEOUT_SECS) -> dict[str, Any]:
+        """The router's attempt at the goal (desktop_worker.lane_first): RouteResult.to_dict(), or
+        {"status": "unavailable", "reason": …}. Like verify it never restarts the worker: a slow or
+        failed route means the planner does the task, and a stale reply is skipped by id."""
+        if self.proc is None or self.proc.stdin is None or self.proc.stdout is None:
+            return {"status": "unavailable", "reason": "desktop worker is not running"}
+        try:
+            msg = await self._exchange({"operation": "lane_first", "goal": goal}, timeout)
+        except asyncio.TimeoutError:
+            self._grace = LANE_FIRST_TIMEOUT_SECS
+            return {"status": "unavailable", "reason": "timeout"}
+        except (OSError, ValueError) as e:
+            return {"status": "unavailable", "reason": f"{type(e).__name__}: {e}"[:200]}
+        route = msg.get("lane_first") if isinstance(msg, dict) else None
+        if not isinstance(route, dict):
+            return {"status": "unavailable", "reason": "no route in the worker reply"}
+        return route
 
     async def _exchange(self, body: dict[str, Any], timeout: float) -> Optional[dict[str, Any]]:
         """One request, the reply with the matching id (stale replies from a timed-out
@@ -747,6 +805,33 @@ class ComputerAgent:
     async def _loop(self, goal: str, worker: Any) -> str:
         cfg = self.config
         previous: Optional[str] = None
+        lane_note = ""
+        plan = None
+        if cfg.reflexes:
+            # In a thread: the rules are microseconds, but a hosted model is a network call, and the
+            # daemon's loop is never the place to wait on one (loop_watchdog.py exists because of that).
+            plan = await self._interruptible(asyncio.to_thread(
+                task_router.classify, goal, apps=task_router.installed_apps(), model=self._router_asker()))
+            self._log({"turn": 0, "route": {"kind": plan.kind, "tiers": list(plan.tiers), "app": plan.app,
+                                            "query": plan.query, "reasons": list(plan.reasons)}})
+        if plan is not None and "reflex" in plan.tiers:
+            done, lane_note = await self._reflex(plan, worker)
+            if done:
+                self._emit("final", done, 0)
+                return done
+        if cfg.lane_first and (plan is None or "lane" in plan.tiers):
+            routed = await self._lane_first(goal, worker)
+            if routed.get("status") == "complete" and routed.get("sentence"):
+                answer = str(routed["sentence"])
+                self._emit("final", answer, 0)
+                return answer
+            clicked = [str(c) for c in routed.get("clicked") or []]
+            if clicked:
+                self._acted = True                  # the lane clicked: the planner's final answer gets checked
+                why = routed.get("reason") or "unverified"
+                lane_note = ("\n\n[note] Before you started, the fast lane already clicked, in order: "
+                             + ", ".join(f'"{c}"' for c in clicked) + f". It stopped there ({why}). "
+                             "Start from the screenshot; do not repeat those clicks.")
         items = await self._interruptible(worker.observe())
         texts = [o["text"] for o in items if o.get("type") == "input_text"]
         context = texts[0] if texts else ""          # the context line; the worker's [after] line is noise here
@@ -754,7 +839,8 @@ class ComputerAgent:
         self._log({"turn": 0, "context": context})
         next_input: list[dict[str, Any]] = [{
             "type": "message", "role": "user",
-            "content": [{"type": "input_text", "text": f"Goal: {goal}\n\nMac: {context}. Screenshot attached."},
+            "content": [{"type": "input_text",
+                         "text": f"Goal: {goal}\n\nMac: {context}. Screenshot attached.{lane_note}"},
                         *images]}]
         effort = cfg.plan_reasoning_effort
         continued = False
@@ -767,7 +853,7 @@ class ComputerAgent:
             self.turn = turn
             req: dict[str, Any] = {
                 "model": cfg.model,
-                "instructions": instructions(cfg.fast_lane),
+                "instructions": instructions(cfg.fast_lane, cfg.lane_decide),
                 "input": next_input,
                 "tools": tools(cfg.fast_lane),
                 "parallel_tool_calls": False,
@@ -828,8 +914,9 @@ class ComputerAgent:
                     self._log(entry)
                     if any(("Traceback" in t or "exec_py error" in t or "was restarted" in t) for t in texts):
                         escalate = True
-                    # the lane handing back (a confirm or an escalate) is a recovery turn too
-                    if any(t.startswith(("delegate escalate", "delegate confirm")) for t in texts):
+                    # the lane handing back (a confirm, an escalate, a script that stopped) is a recovery turn too
+                    if any(t.startswith(("delegate escalate", "delegate confirm", "delegate script: partial",
+                                         "delegate script: none")) for t in texts):
                         escalate = True
                     after = next((t for t in reversed(texts) if t.startswith("[after")), "")
                     if after:
@@ -869,6 +956,82 @@ class ComputerAgent:
         msg = f"I ran out of steps ({cfg.max_turns}) before finishing."
         self._emit("final", msg, self.turn)
         return msg
+
+    def _router_asker(self) -> Optional[Callable[[str, list[str]], str]]:
+        """The hosted classifier for wording the rules do not know, or None (CC_BUDDY_ROUTER_MODEL=off,
+        no key, anything wrong): built once per agent, and a failure to build it is simply "off"."""
+        if self.config.router_model != "jev":
+            return None
+        if getattr(self, "_asker", None) is None:
+            try:
+                from . import jev, typed_ask
+
+                url, key, model = jev.route_config(os.environ)
+                self._asker = typed_ask.make_jev_request_asker(jev.make_predict(url, key, model, timeout_s=2.0),
+                                                               time.perf_counter)
+            except Exception as e:  # noqa: BLE001
+                log.warning("agent: the router model is off (%s: %s)", type(e).__name__, e)
+                self._asker = False
+        return self._asker or None
+
+    async def _reflex(self, plan: "task_router.Plan", worker: Any) -> tuple[str, str]:
+        """Run a reflex (task_router.Plan.code(): one open_app or open_url line) in the worker.
+
+        Returns (what to say, "") when the reflex fully answered the request and the helper's own
+        sentence confirms it; ("", a [note] for the planner) when it did its part and the planner
+        continues; ("", "") when it failed — the planner then runs as if nothing had been tried."""
+        code = plan.code()
+        if not code:
+            return "", ""
+        t0 = self._clock()
+        try:
+            out = await self._interruptible(worker.execute(code))
+        except (Cancelled, FailSafe):
+            raise
+        except Exception as e:  # noqa: BLE001 — a reflex is an optimisation, never a way to fail a task
+            log.warning("agent: reflex failed (%s: %s); the planner takes the task", type(e).__name__, e)
+            self._log({"turn": 0, "reflex": {"kind": plan.kind, "error": type(e).__name__}})
+            return "", ""
+        texts = [o.get("text", "") for o in out if o.get("type") == "input_text"]
+        said = next((t for t in texts if t.startswith("opened ")), "")
+        ok = bool(said) and " but " not in said and not any("Traceback" in t or "exec_py error" in t for t in texts)
+        self._log({"turn": 0, "reflex": {"kind": plan.kind, "app": plan.app, "query": plan.query, "ok": ok,
+                                         "reasons": list(plan.reasons)}, "exec": code,
+                   "secs": round(self._clock() - t0, 2)})
+        log.info("agent: reflex %s %s in %.2f s", plan.kind, "ok" if ok else "did not confirm", self._clock() - t0)
+        if not ok:
+            return "", ""
+        self._emit("progress", said, 0)
+        if plan.complete:
+            return plan.sentence(), ""
+        did = f"opened {plan.app}" if plan.kind == "launch" else f"opened a web search for {plan.query!r}"
+        return "", (f"\n\n[note] Before you started, a reflex already {did}. Start from the screenshot and do the "
+                    f"rest of the request: {plan.rest or 'what remains'}.")
+
+    async def _lane_first(self, goal: str, worker: Any) -> dict[str, Any]:
+        """Ask the worker's router to finish the goal before any planner call. Whatever goes wrong
+        here is logged and answered as "unavailable": the planner then runs exactly as before."""
+        t0 = self._clock()
+        route = getattr(worker, "lane_first", None)
+        if route is None:
+            return {"status": "unavailable", "reason": "this worker has no router"}
+        try:
+            routed = await self._interruptible(route(goal))
+        except Cancelled:
+            raise
+        except Exception as e:  # noqa: BLE001 — the router is an optimisation, never a way to fail a task
+            log.warning("agent: lane-first failed (%s: %s); the planner takes the task", type(e).__name__, e)
+            routed = {"status": "unavailable", "reason": type(e).__name__}
+        if not isinstance(routed, dict):
+            routed = {"status": "unavailable", "reason": "bad reply"}
+        secs = round(self._clock() - t0, 2)
+        self._log({"turn": 0, "lane_first": {k: routed.get(k) for k in ("status", "reason", "clicked", "already",
+                                                                       "line", "ms")}, "secs": secs})
+        log.info("agent: lane-first %s%s in %.2f s", routed.get("status"),
+                 f" ({routed.get('reason')})" if routed.get("reason") else "", secs)
+        for line in (routed.get("log") or [])[-2:]:
+            self._emit("progress", str(line), 0)
+        return routed
 
     async def _checked_final(self, goal: str, claim: str, turn: int, worker: Any) -> Optional[str]:
         """The answer to speak, or None to send the agent back once to look again.

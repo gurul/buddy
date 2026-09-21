@@ -356,18 +356,26 @@ def test_verify_without_a_decider_or_with_a_broken_one_reports_an_error() -> Non
 
 def test_start_fast_lane_loads_in_a_thread_and_reports_status() -> None:
     h, ns, _c, _s = _bench([_still()])
-    assert dw.start_fast_lane(h, {"CC_BUDDY_FAST_LANE": "0"}) == "off (CC_BUDDY_FAST_LANE)" and not h.fast_lane
+    off = {"CC_BUDDY_FAST_LANE": "0", "CC_BUDDY_LANE_FIRST": "0"}
+    assert dw.start_fast_lane(h, off) == "off (CC_BUDDY_FAST_LANE)" and not h.fast_lane
     h.install(ns)
     assert "delegate" not in ns
-    env = {"CC_BUDDY_FAST_LANE": "1", "CC_BUDDY_LAYA_MODEL": "/nonexistent/model"}
+    # the model path needs its checkpoint; the keyword path (the default) does not
+    env = {"CC_BUDDY_FAST_LANE": "1", "CC_BUDDY_LAYA_MODEL": "/nonexistent/model", "CC_BUDDY_FAST_LANE_DECIDE": "model",
+           "CC_BUDDY_LANE_FIRST": "0"}
     assert dw.start_fast_lane(h, env).startswith("off (no checkpoint at /nonexistent/model)")
+    hk, nsk, _ck, _sk = _bench([_still()])
+    keyword_env = {"CC_BUDDY_FAST_LANE": "1", "CC_BUDDY_LAYA_MODEL": "/nonexistent/model", "CC_BUDDY_LANE_FIRST": "0"}
+    assert dw.start_fast_lane(hk, keyword_env) == "ready (keyword gate)" and hk.fast_lane and hk.decider is None
+    assert hk.lane_decide == "keyword" and hk.lane_first_on is False
     calls: list[tuple] = []
 
     def loader(model: str, style: str):
         calls.append((model, style))
         return SimpleNamespace(available=True, load_ms=400.0, warm_ms=1500.0, judge=lambda *a, **k: None)
     import os
-    env = {"CC_BUDDY_FAST_LANE": "1", "CC_BUDDY_LAYA_MODEL": os.getcwd(), "CC_BUDDY_FAST_LANE_STYLE": "hinted"}
+    env = {"CC_BUDDY_FAST_LANE": "1", "CC_BUDDY_LAYA_MODEL": os.getcwd(), "CC_BUDDY_FAST_LANE_STYLE": "hinted",
+           "CC_BUDDY_FAST_LANE_DECIDE": "model", "CC_BUDDY_LANE_FIRST": "0"}
     status = dw.start_fast_lane(h, env, loader=loader, thread=False)
     assert status.startswith("ready (load 400 ms, warm 1500 ms, style hinted)") and h.fast_lane and h.decider is not None
     assert calls == [(os.getcwd(), "hinted")]
@@ -394,3 +402,102 @@ def test_fast_lane_config_defaults_follow_the_eval_decision() -> None:
     assert enabled is FAST_LANE_DEFAULT and model == os.path.expanduser(DEFAULT_MODEL_PATH) and style == DEFAULT_STYLE
     assert dw.fast_lane_config({"CC_BUDDY_FAST_LANE": "yes", "CC_BUDDY_FAST_LANE_STYLE": "turbo"})[::2] == (True, DEFAULT_STYLE)
     assert dw.fast_lane_config({"CC_BUDDY_FAST_LANE_STYLE": "jev"})[2] == "jev"
+
+
+# ---- the lane_first operation (GATES.md G7) -------------------------------------------------
+
+
+def _lane_bench(monkeypatch, snapshots: list):
+    """A worker bench whose accessibility snapshots are scripted and whose hit-test finds the
+    Week radio button under its own centre, so the real Helpers → adapter → router path runs."""
+    from cc_buddy_bridge import ax_candidates
+
+    h, ns, _clock, _s = _bench([_still()])
+    served = iter(snapshots)
+    last = [snapshots[-1]]
+
+    def fake_snapshot(_pid=None, **_kw):
+        last[0] = next(served, last[0])
+        return last[0]
+
+    monkeypatch.setattr(ax_candidates, "ax_snapshot", fake_snapshot)
+    h._element_at = lambda x, y: {"role": "AXRadioButton", "title": "Week", "frame": (240, 100, 60, 30),
+                                  "app": "Calendar"}
+    # the scripted snapshots belong to pid 42: the lane refuses to click when another app is in front
+    h._front = lambda: {"app": "Calendar", "bundle": "com.apple.iCal", "title": "x", "pid": 42}   # type: ignore[method-assign]
+    h.install(ns)
+    return h, ns
+
+
+def test_lane_first_operation_replies_with_the_route(monkeypatch) -> None:
+    from test_fast_lane import calendar
+
+    h, ns = _lane_bench(monkeypatch, [calendar(), calendar(True)])
+    assert dw.start_fast_lane(h, {"CC_BUDDY_LANE_FIRST": "1"}) == "off (CC_BUDDY_FAST_LANE); router on"
+    assert h.lane_first_on is True and h.fast_lane is False            # the router does not need the helper
+    out: list[dict] = []
+    monkeypatch.setattr(dw, "emit", out.append)
+    dw.serve(ns, iter([json.dumps({"id": 1, "operation": "lane_first", "goal": "switch to week view"}) + "\n",
+                       json.dumps({"id": 2, "operation": "lane_first"}) + "\n",
+                       json.dumps({"id": 3, "operation": "execute", "code": "log('still serving')"}) + "\n"]), h)
+    route = out[0]["lane_first"]
+    assert out[0]["id"] == 1 and route["status"] == "complete" and route["clicked"] == ["Week"], route
+    assert route["sentence"] == "Done. I clicked Week." and route["line"].startswith("script: complete")
+    assert any(line.startswith("delegate step 1: Week (radio button)") for line in route["log"])
+    assert h.gui.clicks == [(270, 115)] and "ax" in out[0]["timing"]
+    assert out[1] == {"id": 2, "lane_first": {"status": "unavailable", "reason": "lane_first needs a string goal"}}
+    assert out[2]["output"][0] == {"type": "input_text", "text": "still serving"}     # never terminal
+
+
+def test_lane_first_without_the_lane_says_unavailable(monkeypatch) -> None:
+    from test_fast_lane import calendar
+
+    h, ns = _lane_bench(monkeypatch, [calendar()])
+    assert dw.start_fast_lane(h, {"CC_BUDDY_LANE_FIRST": "0"}) == "off (CC_BUDDY_FAST_LANE)" and h.lane_first_on is False
+    reply = dw.lane_first({"goal": "switch to week view"}, h)
+    assert reply == {"lane_first": {"status": "unavailable", "reason": "the router is off (CC_BUDDY_LANE_FIRST)"}}
+    assert h.gui.clicks == []
+    assert dw.lane_first({"goal": "x"}, None)["lane_first"]["status"] == "unavailable"
+    # a router that raises is "the planner does it", with zero input
+    h.lane_first_on = True
+    h.lane_first = lambda goal, dry_run=False: (_ for _ in ()).throw(RuntimeError("ax down"))   # type: ignore[method-assign]
+    broken = dw.lane_first({"goal": "switch to week view"}, h)["lane_first"]
+    assert broken["status"] == "none" and broken["reason"] == "error:RuntimeError"
+    from cc_buddy_bridge.fast_lane import LANE_FIRST_DEFAULT
+
+    assert dw.lane_modes({}) == ("keyword", LANE_FIRST_DEFAULT)          # the default is the eval's decision
+    assert dw.lane_modes({"CC_BUDDY_FAST_LANE_DECIDE": "model", "CC_BUDDY_LANE_FIRST": "on"}) == ("model", True)
+    assert dw.lane_modes({"CC_BUDDY_FAST_LANE_DECIDE": "nonsense", "CC_BUDDY_LANE_FIRST": "off"}) == ("keyword", False)
+
+
+def test_unknown_operation_is_still_unsupported(monkeypatch) -> None:
+    out = _serve([json.dumps({"id": 1, "operation": "lane_second", "goal": "x"})], monkeypatch=monkeypatch)
+    assert out[0]["error"]["code"] == "unsupported" and "lane_first" in out[0]["error"]["message"]
+
+
+def test_decider_backend_selects_jev_only_on_the_model_path(monkeypatch) -> None:
+    from cc_buddy_bridge import jev
+
+    loads: list[dict] = []
+
+    def fake_load(*, env=None, style="jev", **_kw):
+        loads.append({"style": style, "route": (env or {}).get("CC_BUDDY_JEV_ROUTE")})
+        return SimpleNamespace(available=True, load_ms=1.0, warm_ms=250.0)
+
+    monkeypatch.setattr(jev, "load", fake_load)
+    assert dw.decider_backend({}) == "laya" and dw.decider_backend({"CC_BUDDY_DECIDER": "JEV"}) == "jev"
+    assert dw.decider_backend({"CC_BUDDY_DECIDER": "gpt"}) == "laya"
+    base = {"CC_BUDDY_FAST_LANE": "1", "CC_BUDDY_DECIDER": "jev", "CC_BUDDY_LANE_FIRST": "0",
+            "CC_BUDDY_LAYA_MODEL": "/nonexistent/model", "CC_BUDDY_JEV_ROUTE": "openrouter"}
+    # keyword mode: the gate decides, so a hosted model is not loaded at all — nothing leaves the Mac
+    h, _ns, _c, _s = _bench([_still()])
+    assert dw.start_fast_lane(h, base, thread=False) == "ready (keyword gate)"
+    assert loads == [] and h.decider is None and h.decider_remote is True
+    # model mode: Jev needs no checkpoint on disk, loads through jev.load, in the style it scored best with
+    h2, _ns2, _c2, _s2 = _bench([_still()])
+    status = dw.start_fast_lane(h2, {**base, "CC_BUDDY_FAST_LANE_DECIDE": "model"}, thread=False)
+    assert status.startswith("ready (load 1 ms, warm 250 ms, style jev)") and h2.decider is not None
+    assert loads == [{"style": "jev", "route": "openrouter"}]
+    # and the shadow verifier never hands a hosted model the screen's text
+    assert h2.local_verify("goal", "claim") == {
+        "error": "the decider is remote; the shadow verifier only runs on a local model"}

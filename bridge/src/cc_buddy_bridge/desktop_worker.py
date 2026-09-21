@@ -217,6 +217,34 @@ def fast_lane_config(env: Any) -> tuple[bool, str, str]:
     return enabled, model, style
 
 
+def lane_modes(env: Any) -> tuple[str, bool]:
+    """(who decides a step, whether the router may run) from CC_BUDDY_FAST_LANE_DECIDE and
+    CC_BUDDY_LANE_FIRST. The defaults are fast_lane.DEFAULT_DECIDE and fast_lane.LANE_FIRST_DEFAULT."""
+    from .fast_lane import DECIDE_MODES, DEFAULT_DECIDE, LANE_FIRST_DEFAULT
+
+    decide = (env.get("CC_BUDDY_FAST_LANE_DECIDE") or "").strip().lower()
+    if decide not in DECIDE_MODES:
+        decide = DEFAULT_DECIDE
+    raw = (env.get("CC_BUDDY_LANE_FIRST") or "").strip().lower()
+    first = LANE_FIRST_DEFAULT if not raw else raw not in ("0", "false", "no", "off")
+    return decide, first
+
+
+DECIDER_BACKENDS = ("laya", "jev")
+
+
+def decider_backend(env: Any) -> str:
+    """Who answers the lane's one `choice` question: CC_BUDDY_DECIDER, "laya" by default.
+
+    "laya" is the local checkpoint (11.6 ms p50, nothing leaves the Mac). "jev" is
+    TypeSafe's hosted System One model over the same predict seam (jev.py): a network
+    call, and the state it sends carries the focused window's title and visible text.
+    An unknown value falls back to "laya" rather than turning the lane off.
+    """
+    name = (env.get("CC_BUDDY_DECIDER") or "").strip().lower()
+    return name if name in DECIDER_BACKENDS else "laya"
+
+
 def start_fast_lane(helpers: Any, env: Any, loader: Any = None, thread: bool = True) -> str:
     """Turn the lane on for `helpers` and load the decider off the critical path.
 
@@ -226,31 +254,58 @@ def start_fast_lane(helpers: Any, env: Any, loader: Any = None, thread: bool = T
     or "failed: <one line>" — the delegate helper answers `unavailable` until ready.
     """
     enabled, model, style = fast_lane_config(env)
+    decide, first = lane_modes(env)
+    backend = decider_backend(env)
+    if backend == "jev" and not (env.get("CC_BUDDY_FAST_LANE_STYLE") or "").strip():
+        style = "jev"                          # the style Jev scored best with on select (jev.py)
+    helpers.lane_decide = decide
+    # A hosted decider sees what it is sent. It may answer the lane's one choice question; it never
+    # gets the shadow verifier's state (up to 40 OCR lines of the whole screen) for a log-only value.
+    helpers.decider_remote = backend != "laya"
+    helpers.lane_first_on = bool(first) and sys.platform == "darwin"
+    router = "; router on" if helpers.lane_first_on else ""
     if not enabled:
-        helpers.fast_lane_status = "off (CC_BUDDY_FAST_LANE)"
+        helpers.fast_lane_status = "off (CC_BUDDY_FAST_LANE)" + router
         return helpers.fast_lane_status
     if sys.platform != "darwin":
         helpers.fast_lane_status = f"off (not macOS: {sys.platform})"
         return helpers.fast_lane_status
-    if not os.path.isdir(model):
-        helpers.fast_lane_status = f"off (no checkpoint at {model})"
+    if decide == "keyword":
+        # The keyword gate is code: the lane is ready now. A checkpoint, when there is one, still
+        # loads below for the shadow verifier; without one the lane works and the shadow says so.
+        helpers.fast_lane = True
+        helpers.fast_lane_status = "ready (keyword gate)" + router
+        if backend != "laya" or not os.path.isdir(model):
+            return helpers.fast_lane_status    # no model in the click path: a remote one is not loaded at all
+    elif backend == "laya" and not os.path.isdir(model):
+        helpers.fast_lane_status = f"off (no checkpoint at {model})" + router
         return helpers.fast_lane_status
-    helpers.fast_lane = True
-    helpers.fast_lane_status = "loading"
+    else:
+        helpers.fast_lane = True
+        helpers.fast_lane_status = "loading"
 
     def load() -> None:
         try:
             if loader is not None:
                 decider = loader(model, style)
+            elif backend == "jev":
+                from . import jev
+
+                decider = jev.load(env=env, style=style)
             else:
                 from .decider import Decider
 
                 decider = Decider.load(model, style=style)
             helpers.decider = decider
-            helpers.fast_lane_status = (f"ready (load {getattr(decider, 'load_ms', 0):.0f} ms, "
-                                        f"warm {getattr(decider, 'warm_ms', 0):.0f} ms, style {style})")
+            loaded = (f"load {getattr(decider, 'load_ms', 0):.0f} ms, "
+                      f"warm {getattr(decider, 'warm_ms', 0):.0f} ms, style {style}")
+            helpers.fast_lane_status = (f"ready (keyword gate; model for the shadow: {loaded})" if decide == "keyword"
+                                        else f"ready ({loaded})") + router
         except Exception as e:  # noqa: BLE001 — the lane stays unavailable; the model keeps its ordinary helpers
-            helpers.fast_lane_status = f"failed: {type(e).__name__}: {e}"[:200]
+            if decide == "keyword":               # the gate never needed the model
+                helpers.fast_lane_status = f"ready (keyword gate; no model: {type(e).__name__})"[:200] + router
+            else:
+                helpers.fast_lane_status = f"failed: {type(e).__name__}: {e}"[:200]
 
     if thread:
         threading.Thread(target=load, name="fast-lane-loader", daemon=True).start()
@@ -270,6 +325,26 @@ def verify(req: dict[str, Any], helpers: Any) -> dict[str, Any]:
         return {"verify": helpers.local_verify(goal[:2000], claim[:2000])}
     except Exception as e:  # noqa: BLE001 — a shadow verdict never becomes a protocol error
         return {"verify": {"error": f"{type(e).__name__}: {e}"[:200]}}
+
+
+def lane_first(req: dict[str, Any], helpers: Any) -> dict[str, Any]:
+    """The `lane_first` operation: the router's attempt at the goal before any planner call
+    (lane_router.RouteResult.to_dict(), plus the worker's timing). Never a terminal error: a
+    worker without the router answers {"status": "unavailable"} and the planner runs as before."""
+    goal = req.get("goal")
+    if not isinstance(goal, str) or not goal.strip():
+        return {"lane_first": {"status": "unavailable", "reason": "lane_first needs a string goal"}}
+    if helpers is None or not getattr(helpers, "lane_first_on", False):
+        return {"lane_first": {"status": "unavailable", "reason": "the router is off (CC_BUDDY_LANE_FIRST)"}}
+    lines: list[str] = []
+    helpers.bind(lambda *values: lines.append(" ".join(str(v) for v in values)), lambda _image: None)
+    helpers.begin()
+    try:
+        result = dict(helpers.lane_first(goal, dry_run=bool(req.get("dry_run"))))
+    except Exception as e:  # noqa: BLE001 — the router failing is "the planner does it"
+        result = {"status": "none", "reason": f"error:{type(e).__name__}"}
+    result.setdefault("log", lines)
+    return {"lane_first": result, "timing": dict(helpers.timing_ms())}
 
 
 def serve(namespace: dict[str, Any], stream: Any, helpers: Any = None) -> None:
@@ -295,9 +370,12 @@ def serve(namespace: dict[str, Any], stream: Any, helpers: Any = None) -> None:
         if isinstance(req, dict) and req.get("operation") == "verify":
             emit({"id": rid, **verify(req, helpers)})
             continue
+        if isinstance(req, dict) and req.get("operation") == "lane_first":
+            emit({"id": rid, **lane_first(req, helpers)})
+            continue
         if not isinstance(req, dict) or req.get("operation") != "execute":
             emit({"id": rid, "error": {"code": "unsupported",
-                                       "message": "only execute, observe and verify are supported"}})
+                                       "message": "only execute, observe, verify and lane_first are supported"}})
             continue
         code = req.get("code")
         if not isinstance(code, str) or not code.strip() or len(code.encode("utf-8")) > MAX_CODE_BYTES:

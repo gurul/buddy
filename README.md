@@ -41,7 +41,8 @@ again, up to 25 steps). It asks before anything consequential, takes "actually, 
 Safari" mid-task, and stops on "stop". Then it nods and tells you.
 
 **It sees and moves.** It follows your face, learns where you usually sit, and knows you
-from a stranger. Ask "where's my mug?" and it turns to find it. It can dance (sway, nod,
+from a stranger. In a conversation it keeps its eyes on whoever is talking to it, you or a
+guest, as you lean back, stand up or move round the desk. Ask "where's my mug?" and it turns to find it. It can dance (sway, nod,
 wiggle, figure-8) when you run `cc-buddy-bridge move dance`, and a pat on the head gets a
 pink heartbeat.
 
@@ -211,6 +212,9 @@ Then:
 tail -f ~/Library/Logs/cc-buddy-bridge.log | grep -E "ears|agent|voice|diary"
 ```
 
+If buddy hears you and then sits still, the log names the call that held it: look for
+`event loop stalled` ([voice.md](docs/stackchan/voice.md#when-buddy-hears-you-and-then-sits-still)).
+
 Try *"hey buddy, what time is it?"*, *"hey buddy, open a new tab and search for the
 weather"*, *"actually use Bing"*, *"stop"*. Leave it for ten minutes and it starts
 exploring, and the widget fills up. Or send it off yourself: *"hey buddy, go explore"*
@@ -242,7 +246,8 @@ camera frames ◀──────────────▶ macOS Vision (fac
 
 | | Where | Read |
 |---|---|---|
-| Ears, voice, web search, deep reasoning, computer control, the fast lane | `bridge/src/cc_buddy_bridge/ears.py`, `voice_agent.py`, `think.py`, `computer_agent.py`, `desktop_worker.py`, `fast_lane.py`, `decider.py`, `ax_candidates.py` | [voice.md](docs/stackchan/voice.md) |
+| Ears, voice, web search, deep reasoning, computer control, the fast lane | `bridge/src/cc_buddy_bridge/ears.py`, `voice_agent.py`, `think.py`, `computer_agent.py`, `desktop_worker.py`, `fast_lane.py`, `lane_router.py`, `decider.py`, `ax_candidates.py` | [voice.md](docs/stackchan/voice.md) |
+| Which engine carries a request: code reflexes, the lane, Jev, laya, the planner — and how each model is asked | `bridge/src/cc_buddy_bridge/task_router.py`, `typed_ask.py`, `lane_router.py`, `jev.py` | [routing.md](docs/stackchan/routing.md) |
 | Seeing, turning its head, goodbye, mute | `bridge/src/cc_buddy_bridge/scene.py`, `head.py`, `intent.py`, `sound.py`; `firmware/claude_pet_stackchan/src/hostlook.h` | [vision.md](docs/stackchan/vision.md) |
 | Feelings, phases, the diary | `firmware/claude_pet_stackchan/src/mood.cpp`, `body.cpp`, `eyes.cpp`; `bridge/src/cc_buddy_bridge/diary.py` | [personality.md](docs/stackchan/personality.md) |
 | Taking notes on the room | `bridge/src/cc_buddy_bridge/notes.py` | [voice.md](docs/stackchan/voice.md#taking-notes-on-the-room) |

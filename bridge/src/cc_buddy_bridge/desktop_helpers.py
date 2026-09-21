@@ -41,7 +41,7 @@ import subprocess
 import time
 from dataclasses import dataclass
 from datetime import datetime
-from typing import Any, Callable, Optional
+from typing import Any, Callable, Optional, Sequence
 from urllib.parse import urlsplit
 
 HELPER_NAMES = ("open_app", "open_url", "frontmost", "screen_text", "find_text", "click_text",
@@ -410,6 +410,9 @@ class Helpers:
         self._element_at = element_at
         self._focused_element = focused_element or ax_focused_element
         self.fast_lane_status = "off"           # what the worker reports: off | loading | ready (…) | failed: …
+        self.lane_decide = "keyword"            # fast_lane.DECIDE_MODES: who picks a step (the worker sets it from env)
+        self.decider_remote = False             # a hosted decider (jev.py): never handed the shadow verifier's state
+        self.lane_first_on = False              # the router (lane_router.py) may run before the planner
         self._run = run
         self._last_click: Optional[str] = None      # "AXButton 'Search'" under the last raw click
         self._clipboard = clipboard
@@ -818,26 +821,58 @@ class Helpers:
         return seq == self._action_seq and 0.0 <= self._clock() - at < SETTLE_REUSE_SECS
 
     # -- the fast lane --
-    def delegate(self, objective: str, text: Optional[str] = None, key: Optional[str] = None,
+    def delegate(self, objective: str = "", text: Optional[str] = None, key: Optional[str] = None,
                  done_when: Optional[str] = None, approve: Optional[str] = None, max_steps: int = 4,
-                 dry_run: bool = False) -> str:
-        """Hand a narrow run of clicks on labelled controls in the frontmost app to the local
-        decider (fast_lane.run_delegate). Returns the one-line result the model reads; every
-        step and the final `delegate {status}: …` line are logged for the human."""
-        from .fast_lane import run_delegate
+                 dry_run: bool = False, steps: Optional[Sequence[str]] = None) -> str:
+        """Hand a narrow run of clicks on labelled controls in the frontmost app to the lane.
 
+        `steps=[…]` is an ordered list of exact labels, one click each (fast_lane.run_script);
+        otherwise `objective` is one run (fast_lane.run_delegate). Who decides is
+        `self.lane_decide` (fast_lane.DECIDE_MODES). Returns the one-line result the model reads;
+        every step and the final line are logged for the human."""
+        from .fast_lane import run_delegate, run_script
+
+        adapter = _LaneAdapter(self, approve)
+        if steps is not None:
+            if isinstance(steps, str):
+                steps = [steps]
+            script = run_script([str(s)[:200] for s in steps], senses=adapter, effectors=adapter,
+                                decider=self.decider, decide=self.lane_decide, approve=approve,
+                                dry_run=bool(dry_run), clock=self._clock)
+            for result in script.results:
+                for step in result.steps:
+                    self.timing["decide"] = self.timing.get("decide", 0.0) + float(step.decide_ms)
+            for line in script.log_lines:
+                self.log(line)
+            return script.line
         objective = str(objective or "")[:200]
         text = str(text)[:200] if text is not None else None
         max_steps = max(1, min(6, int(max_steps)))
-        adapter = _LaneAdapter(self, approve)
         result = run_delegate(objective, senses=adapter, effectors=adapter, decider=self.decider, text=text,
                               key=key, done_when=done_when, approve=approve, max_steps=max_steps,
-                              dry_run=bool(dry_run), clock=self._clock)
+                              dry_run=bool(dry_run), clock=self._clock, decide=self.lane_decide)
         for step in result.steps:
             self.timing["decide"] = self.timing.get("decide", 0.0) + float(step.decide_ms)
         for line in result.log_lines:
             self.log(line)
         return result.line
+
+    def lane_first(self, goal: str, dry_run: bool = False) -> dict[str, Any]:
+        """The router (lane_router.route) over this desktop: try to finish `goal` with keyword-decided
+        clicks before any planner call. Returns RouteResult.to_dict(); never raises."""
+        from .lane_router import RouteResult, route
+
+        t0 = self._clock()
+        try:
+            adapter = _LaneAdapter(self, None)
+            front = str(self._front().get("app") or "")
+            result = route(str(goal or "")[:400], senses=adapter, effectors=adapter, frontmost_app=front,
+                           dry_run=bool(dry_run), clock=self._clock)
+        except Exception as e:  # noqa: BLE001 — a router that fails is "the planner does it", never a dead task
+            result = RouteResult("none", reason=f"error:{type(e).__name__}", ms=(self._clock() - t0) * 1000.0)
+        for line in result.log_lines:
+            self.log(line)
+        return result.to_dict()
 
     def local_verify(self, goal: str, claim: str, max_lines: int = 40) -> dict[str, Any]:
         """The shadow verifier: one local noul over the frontmost app, its title and the fast OCR
@@ -847,6 +882,8 @@ class Helpers:
         decider = self.decider
         if decider is None:
             return {"error": "no local decider (fast lane off)"}
+        if self.decider_remote:
+            return {"error": "the decider is remote; the shadow verifier only runs on a local model"}
         t0 = self._clock()
         try:
             front = self._front()
@@ -992,7 +1029,8 @@ class _LaneAdapter:
     def __init__(self, helpers: "Helpers", approve: Optional[str]) -> None:
         self.h = helpers
         self.approve = _norm(approve) if approve else ""
-        self._thumb0: Any = None
+        self._thumb0: Any = None                    # the screen at the latest snapshot
+        self._thumb_before: Any = None              # the screen at the snapshot before that: the step's start
         self._snapshot: Any = None
         self._seq = 0
 
@@ -1007,6 +1045,7 @@ class _LaneAdapter:
         finally:
             self.h._add_timing("ax", t0)
         self._snapshot = snap
+        self._thumb_before = self._thumb0
         try:
             self._thumb0 = self.h._capture().thumb()
         except Exception:  # noqa: BLE001 — no baseline means screen_changed() answers None
@@ -1049,9 +1088,17 @@ class _LaneAdapter:
             return 0
 
     def screen_changed(self) -> Optional[bool]:
+        """Did the screen change since the step began? The lane asks this AFTER its post-click
+        snapshot, so the step's start is the snapshot before the latest one. Until 2026-09-21 this
+        compared the latest snapshot's frame with a fresh capture — the settled screen with itself —
+        and so could never see a change: only a control whose AX value flips (a radio button) was
+        ever verified, and a plain button ("next year") always read as unknown."""
         if self._thumb0 is None:
             return None
         try:
+            if self._thumb_before is not None:
+                frame = self.h._frame or self.h._capture()
+                return change_box(self._thumb_before, self._thumb0, self.h._skip_rows(frame)) is not None
             frame = self.h._capture()
             return change_box(self._thumb0, frame.thumb(), self.h._skip_rows(frame)) is not None
         except Exception:  # noqa: BLE001

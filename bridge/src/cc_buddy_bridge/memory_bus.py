@@ -79,6 +79,7 @@ TOPICS: dict[str, str] = {
     "/buddy/memory/lesson": "buddy_msgs/LessonEvent",           # a lesson action and buddy's feedback
     "/buddy/memory/remember": "buddy_msgs/Remember",            # inbound: someone asks buddy to keep a line
     "/buddy/state": "buddy_msgs/AgentState",                    # idle / wake / listening / thinking / speaking
+    "/buddy/presence": "buddy_msgs/Presence",                   # follow.py: seen / lost / found (and how), with the angles
     "/claude/observation": "buddy_msgs/ClaudeObservation",      # mirrored from the owner's claude-mem stream
 }
 # service -> type. args and values shapes are in docs/memory-bus.md.

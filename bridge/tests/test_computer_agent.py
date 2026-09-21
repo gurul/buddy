@@ -97,7 +97,11 @@ class FakeWorker:
 
 def _agent(client: FakeClient, worker: FakeWorker, tmp: Path, **kw) -> tuple[ComputerAgent, list[AgentEvent]]:
     events: list[AgentEvent] = []
-    cfg = kw.pop("config", AgentConfig(runs_dir=tmp / "runs", max_turns=kw.pop("max_turns", 25)))
+    # These tests drive the PLANNER loop. The tiers in front of it (task_router reflexes, the lane
+    # router) answer some of these goals before the planner is ever called, and have their own files:
+    # tests/test_task_router.py and tests/test_agent_lane_first.py.
+    cfg = kw.pop("config", AgentConfig(runs_dir=tmp / "runs", max_turns=kw.pop("max_turns", 25), reflexes=False,
+                                       lane_first=False))
     clock = kw.pop("clock", lambda: 1.0)
     a = ComputerAgent(client, worker_factory=lambda: worker, config=cfg, on_event=events.append,
                       clock=clock, **kw)
@@ -770,9 +774,12 @@ def test_instructions_variants_track_fast_lane_default() -> None:
     default variant is the one the eval decided (fast_lane.FAST_LANE_DEFAULT)."""
     from cc_buddy_bridge.fast_lane import FAST_LANE_DEFAULT
 
-    off, on = ca.instructions(False), ca.instructions(True)
+    off, on = ca.instructions(False), ca.instructions(True, "model")
     assert "delegate" not in off and "delegate" not in json.dumps(ca.tools(False))
     assert "11. delegate(objective" in on and "approve=" in on and "confirm" in on and "escalate" in on
+    keyword = ca.instructions(True)                      # the default decide mode: exact labels, in order
+    assert "11. delegate(steps=[" in keyword and "approve=" in keyword and "script: complete" in keyword
+    assert "done_when" not in keyword and "{fast_lane" not in keyword
     assert ", delegate" in ca.tools(True)[0]["parameters"]["properties"]["code"]["description"]
     assert "{fast_lane" not in on and "{fast_lane" not in off
     assert ca.AgentConfig().fast_lane is FAST_LANE_DEFAULT and configured({}).fast_lane is FAST_LANE_DEFAULT

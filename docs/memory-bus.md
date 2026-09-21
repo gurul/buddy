@@ -37,6 +37,7 @@ rosbridge client sends with `subscribe`.
 | `/buddy/memory/conversation` | `buddy_msgs/ConversationNote` | `title`, `note[]`, `open[]`, `owes[]`, `session_id`, `ended` | A conversation closed and buddy distilled it. The note, never the transcript. |
 | `/buddy/memory/lesson` | `buddy_msgs/LessonEvent` | `action`, `stage`, `topic`, `level`, `mode`, `lesson_id`, `feedback` | A lesson moved on: from the web page, the voice, or `cc-buddy-bridge lesson`. `feedback` is buddy's own words. `action` is the lesson action when the event came through the terminal or voice, `notice` when the web page drove it. |
 | `/buddy/state` | `buddy_msgs/AgentState` | `state` | The conversation phase changed: `idle`, `wake`, `listening`, `thinking`, `speaking`, `working`, `done`, `error`. |
+| `/buddy/presence` | `buddy_msgs/Presence` | `state` | In a conversation, buddy's sense of where its person is changed ([vision.md](stackchan/vision.md#following-whoever-is-talking)): `seen`, `lost` (with `leaving`: they were moving fast or left by a frame edge), `found` (with `how`: where they were heading, where they usually are, either side, up and down). Carries `yaw`, `pitch`, `speed` (deg/s) and `phase`. Live only: not stored in claude-mem. |
 | `/buddy/memory/remember` | `buddy_msgs/Remember` | `text`, `title` (optional) | **Inbound.** Anyone on the bus asks buddy to keep a line. |
 | `/claude/observation` | `buddy_msgs/ClaudeObservation` | as claude-mem sends it | The owner's claude-mem stream reported a new observation (mirror on). |
 
