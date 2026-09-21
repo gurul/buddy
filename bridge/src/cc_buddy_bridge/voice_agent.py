@@ -599,7 +599,10 @@ class VoiceSession:
         lesson_wake: bool = False,                          # opened by the "lesson" wake word
         head_pose: Optional[Callable[[str], Awaitable[str]]] = None,   # typed_ask: utterance -> a pose label, or "none"
         gate: Any = None,              # voice_gate.SpeakerGate for this conversation, or None (today's behaviour)
+        on_expression: Optional[Callable[[str, str], None]] = None,
     ) -> None:
+        self.on_expression = on_expression
+        self._expression_chars = 0
         self.head_pose = head_pose
         self.gate = gate
         self._fast_head: Optional[tuple[float, dict[str, Any]]] = None   # (the turn it answered, what the head did)
@@ -1082,6 +1085,8 @@ class VoiceSession:
         closed = self._turns.delta(who, text, now)
         if closed is not None:
             self._close_turn(*closed)
+        if closed is not None or self._turns.text == text:
+            self._expression_chars = 0
         if who == "user":
             if closed is not None or self._turns.text == text:
                 self._user_turn_started_at = now        # the first words of a new turn of the owner's
@@ -1095,6 +1100,12 @@ class VoiceSession:
             return
         self._last_reply_at = now                     # buddy's last spoken word (a goodbye waits on it)
         self._set("speaking")
+        # Stable clauses during a streamed reply; the local worker coalesces at 1.2s.
+        current = self._turns.text
+        fresh = current[self._expression_chars:]
+        if len(fresh) >= 24 and (re.search(r"[.!?](?:\s|$)", fresh) or len(fresh) >= 100):
+            self._emit_expression("assistant", current)
+            self._expression_chars = len(current)
         if self._captions:
             if not self._reply_open:
                 self._pager.begin_reply(now)
@@ -1110,6 +1121,8 @@ class VoiceSession:
     def _close_turn(self, who: str, text: str) -> None:
         if not text:
             return
+        if who in ("user", "assistant"):
+            self._emit_expression(who, text)
         listening = self._think_aloud is not None
         # While listening, neither side is kept for chat memory: the learner's words go to their lesson only.
         if who in ("user", "assistant") and not listening:
@@ -1137,6 +1150,13 @@ class VoiceSession:
             self._reply_open = False
             self._flush_pager()
         self._set_after_captions("working" if self.task_running else "listening")
+
+    def _emit_expression(self, who: str, text: str) -> None:
+        if self.on_expression is not None:
+            try:
+                self.on_expression(who, text)
+            except Exception:
+                log.exception("voice: expression callback failed")
 
     # -- tools --
     async def _tool(self, name: str, call_id: str, arguments: str) -> None:
@@ -1676,6 +1696,7 @@ async def open_session(
     lesson_wake: bool = False,
     head_pose: Optional[Callable[[str], Awaitable[str]]] = None,
     gate: Any = None,
+    on_expression: Optional[Callable[[str, str], None]] = None,
 ) -> None:
     """Run one full conversation on the real Live API — captions to the robot,
     or the real speaker in audio mode.
@@ -1701,7 +1722,8 @@ async def open_session(
                                    on_sound=on_sound, muted=muted, thinker=thinker, on_photo=on_photo,
                                    memory=memory, on_star=on_star, learning=learning,
                                    think_aloud=think_aloud, lesson_wake=lesson_wake, on_spoken_idea=on_spoken_idea,
-                                   on_think_aloud=on_think_aloud, head_pose=head_pose, gate=gate)
+                                   on_think_aloud=on_think_aloud, head_pose=head_pose, gate=gate,
+                                   on_expression=on_expression)
             if on_open is not None:
                 on_open(session)
             try:

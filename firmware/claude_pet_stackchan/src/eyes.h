@@ -48,7 +48,7 @@ uint16_t eyesColor();
 //                   thinking with quick saccades, working = squint + fast
 //                   saccades, asking wide, done = laugh, error = confused
 void eyesSet(PersonaState s, bool needsAttention, bool listening, bool hotPrompt, int8_t gazeSide,
-             bool explore = false, uint8_t agent = 0, const MoodExpr* mood = nullptr);
+             bool explore = false, uint8_t agent = 0, const MoodExpr* mood = nullptr, uint8_t expressionKind = 0);
 
 // Keep the eyes and the head agreeing: head yaw/pitch in degrees →
 // setPosition band (W / NW / N / NE / E, DEFAULT when centred).

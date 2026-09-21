@@ -1,3 +1,4 @@
+#include "expression.h"
 // FluxGarage RoboEyes on a 1-bit LovyanGFX canvas. The ONLY TU that
 // includes FluxGarage_RoboEyes.h (bare DEFAULT/N/E/S/W/ON/OFF macros).
 #include "eyes.h"
@@ -27,12 +28,12 @@ static const int EYE_H_BUSY = 67, EYE_H_LISTEN = 110;
 
 struct EyesKey {
   uint8_t state = 0xFF; bool attn = false, listen = false, hot = false; int8_t side = 0; bool explore = false;
-  uint8_t agent = 0;
+  uint8_t agent = 0, expressionKind = 0;
   // Mood expression, quantised so a re-apply happens on a visible change only.
   uint8_t moodKind = 0xFF, moodOpen = 0, moodFlags = 0, moodBlink = 0, moodSacc = 0;
   bool operator!=(const EyesKey& o) const {
     return state != o.state || attn != o.attn || listen != o.listen || hot != o.hot || side != o.side
-        || explore != o.explore || agent != o.agent || moodKind != o.moodKind || moodOpen != o.moodOpen
+        || expressionKind != o.expressionKind || explore != o.explore || agent != o.agent || moodKind != o.moodKind || moodOpen != o.moodOpen
         || moodFlags != o.moodFlags || moodBlink != o.moodBlink || moodSacc != o.moodSacc;
   }
 };
@@ -213,16 +214,30 @@ static void applyState(const EyesKey& k, uint32_t now) {
       eyes.anim_confused();
       break;
   }
+  if (k.expressionKind && !k.listen && !k.attn && k.state != P_ATTENTION
+      && k.agent != AG_LISTENING && k.agent != AG_ASKING && k.agent != AG_ERROR) {
+    auto kind = (expression::Kind)k.expressionKind;
+    sleepy = false;
+    peekCloseAt = 0;
+    eyes.open();
+    eyes.setMood(kind == expression::Happy || kind == expression::Affection ? HAPPY : DEFAULT);
+    eyes.setCuriosity(kind == expression::Curious || kind == expression::Affection ? ON : OFF);
+    int h = kind == expression::Surprised ? 110 : kind == expression::Happy ? 86
+          : kind == expression::Affection ? 88 : EYE_H;
+    eyes.setHeight(h, h);
+    eyes.setHFlicker(OFF, 0);
+    eyes.setAutoblinker(ON, 3, 1);
+  }
   if (!sleepy) peekAt = 0;
   lastPos = 0xFF;                      // force a position re-apply next eyesLookAt
 }
 
 void eyesSet(PersonaState s, bool needsAttention, bool listening, bool hotPrompt, int8_t gazeSide,
-             bool explore, uint8_t agent, const MoodExpr* mood) {
+             bool explore, uint8_t agent, const MoodExpr* mood, uint8_t expressionKind) {
   EyesKey k;
   k.state = (uint8_t)s; k.attn = needsAttention; k.listen = listening;
   k.hot = hotPrompt && (s == P_ATTENTION || needsAttention); k.side = gazeSide; k.explore = explore;
-  k.agent = agent;
+  k.agent = agent; k.expressionKind = expressionKind;
   if (mood && explore) {
     k.moodKind  = (uint8_t)mood->kind;
     k.moodOpen  = (uint8_t)((mood->openness / 10) * 10);       // 10 % steps
@@ -232,7 +247,7 @@ void eyesSet(PersonaState s, bool needsAttention, bool listening, bool hotPrompt
   }
   if (!(k != cur)) return;
   bool sideOnly = k.state == cur.state && k.attn == cur.attn && k.listen == cur.listen && k.hot == cur.hot
-               && k.explore == cur.explore && k.agent == cur.agent && k.moodKind == cur.moodKind
+               && k.expressionKind == cur.expressionKind && k.explore == cur.explore && k.agent == cur.agent && k.moodKind == cur.moodKind
                && k.moodOpen == cur.moodOpen && k.moodFlags == cur.moodFlags && k.moodBlink == cur.moodBlink
                && k.moodSacc == cur.moodSacc;
   cur = k;

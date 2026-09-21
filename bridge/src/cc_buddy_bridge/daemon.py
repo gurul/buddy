@@ -48,6 +48,7 @@ from .ipc import IPCServer
 from .jsonl_tailer import JSONLTailer
 from .learning.think_aloud import LISTEN_ACTIONS
 from .listen_key import Stopper, start_listen_key
+from .live_expressions import LiveExpressions
 from .matchers import MatcherConfig, classify_command
 from .matchers import load_config as load_matcher_config
 from .memory_bus import MemoryBus
@@ -182,6 +183,10 @@ class Daemon:
         # The owner's mute choice (sound.py): persisted, re-sent on every connect.
         self._sound = SoundSetting()
         self._sound.load()
+        self._expressions = LiveExpressions(self.ble.send, connected=lambda: self.ble.connected,
+                                           muted=lambda: self._sound.muted,
+                                           phase=lambda: getattr(self, "_agent_state", "idle"))
+        self._expression_audition = None
         # The owner's microphone switch (`cc-buddy-bridge mic`, or the menu-bar
         # app): persisted, and one of the two things the mic policy checks.
         self._mic = SoundSetting(name="mic")
@@ -346,6 +351,7 @@ class Daemon:
         if self._sound.muted:
             log.info("sound: muted (owner's choice, %s) — the head and lights still move", self._sound.path)
         tasks = [
+            asyncio.create_task(self._expressions.run(), name="laya-expressions"),
             asyncio.create_task(self.ipc.serve_forever(), name="ipc"),
             asyncio.create_task(self.ble.run(), name="ble"),
             asyncio.create_task(self.jsonl.run(), name="jsonl"),
@@ -381,6 +387,9 @@ class Daemon:
             # task is cancelled — its reader owns the port close, so a send
             # after that goes nowhere.
             await self._stop_explore("daemon stopping")
+            if self._expression_audition is not None:
+                self._expression_audition.cancel()
+                await asyncio.gather(self._expression_audition, return_exceptions=True)
             await self._send_cam(False)
             self._vision.stop()
             for t in tasks:
@@ -911,6 +920,7 @@ class Daemon:
             await voice_agent.open_session(mic, self._on_agent_state, self._make_agent,
                                            config=self._voice_cfg, agent_enabled=self._agent_cfg.enabled,
                                            on_caption=self._on_caption, on_explore=self._on_voice_explore,
+                                           on_expression=lambda who, text: Daemon._on_expression_text(self, who, text),
                                            scene=self._scene, head=self._head, intent=self._intent,
                                            on_sound=self._set_sound, muted=lambda: self._sound.muted,
                                            thinker=self._thinker, on_photo=self._photo_for_owner,
@@ -1148,10 +1158,18 @@ class Daemon:
         log.info("think aloud: %s", "listening" if on else "off")
         Daemon._sync_listen_pose(self)
 
+    def _on_expression_text(self, who: str, text: str) -> None:
+        service = getattr(self, "_expressions", None)
+        if service is not None:
+            service.offer(who, text)
+
     def _on_caption(self, msg: dict) -> None:
         """One page of buddy's reply (or a clear) onto the robot's screen; the pager owns the timing.
         Muted, the page goes without its talk chirp (older firmware has no sound command)."""
         if self.ble.connected:
+            service = getattr(self, "_expressions", None)
+            if service is not None and service.enabled and service.ready:
+                msg = {**msg, "chirp": False}  # Laya owns semantic chirps; no babble on every page.
             asyncio.create_task(self.ble.send(quiet_caption(msg, self._sound.muted)))
 
     def _on_agent_state(self, state: str) -> None:
@@ -1281,6 +1299,7 @@ class Daemon:
         if thought.photographed:
             text = f"{text} [photo]"
         self._thought_pager.begin_reply(now)
+        Daemon._on_expression_text(self, "diary", text)
         self._thought_pager.update(now, text, True)
         self._flush_thought_pager()
         log.info("explore: thought on screen — %s", text[:70])
@@ -1503,12 +1522,48 @@ class Daemon:
         # Drop pretooluse from the trace: it has its own dedicated INFO log,
         # and the volume would drown out everything else. get_state is the
         # hud polling — also too chatty to be useful here.
-        if evt not in ("pretooluse", "get_state"):
+        if evt not in ("pretooluse", "get_state", "expressions"):
             log.info("ipc evt=%r session=%s", evt, (req.get("session_id") or "?")[:8])
         # Every hook event is activity for the idle explorer, except the
         # polls that fire on their own (statusline, diag watch).
-        if evt not in ("get_state", "diag", "explore"):
+        if evt not in ("get_state", "diag", "explore", "expressions"):
             self._note_activity()
+
+        if evt == "expressions":
+            service = self._expressions
+            action = req.get("action", "status")
+            if action in ("on", "off"):
+                await service.set_enabled(action == "on")
+            elif action in ("react", "audition"):
+                text = req.get("text")
+                if not isinstance(text, str) or not text.strip() or len(text) > 2000:
+                    return {"ok": False, "error": "text must contain 1..2000 characters"}
+                if not service.enabled or not service.ready or not self.ble.connected:
+                    return {"ok": False, "error": "expressions are not ready or board is disconnected"}
+                if action == "audition":
+                    phase = req.get("phase", "speaking")
+                    if phase not in ("speaking", "listening", "idle"):
+                        return {"ok": False, "error": "audition phase must be speaking, listening, or idle"}
+                    if ((self._conversation is not None and not self._conversation.done())
+                            or self.state.pending_count or (self._expression_audition is not None and not self._expression_audition.done())):
+                        return {"ok": False, "error": "wait until the conversation, prompt, or audition ends"}
+                    previous = self._agent_state
+                    self._on_agent_state(phase)
+
+                    async def restore_phase():
+                        try:
+                            await asyncio.sleep(6)
+                        finally:
+                            if (self._agent_state == phase and
+                                    (self._conversation is None or self._conversation.done())):
+                                self._on_agent_state(previous)
+
+                    self._expression_audition = asyncio.create_task(restore_phase(), name="expression-audition")
+                event = service.offer("demo", text, sound=req.get("sound", True) is True)
+                return {"ok": event is not None, "id": event, "expressions": service.status()}
+            elif action != "status":
+                return {"ok": False, "error": "unknown expression action"}
+            return {"ok": True, "connected": self.ble.connected, "expressions": service.status()}
 
         if evt == "explore":
             # `cc-buddy-bridge explore [start|stop|status]`: the owner sends
@@ -1902,6 +1957,12 @@ class Daemon:
             self._head.observe(frame.get("yaw"), frame.get("pitch"))
             self._scene.offer(frame)
             await self._vision.on_frame(frame)
+            return
+        expression = obj.get("expression")
+        if isinstance(expression, dict):
+            service = getattr(self, "_expressions", None)
+            if service is not None:
+                service.observe(expression)
             return
         diag = obj.get("diag")
         if isinstance(diag, dict):
