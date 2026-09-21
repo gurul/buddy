@@ -4,12 +4,13 @@ from contextlib import suppress
 
 import pytest
 
+from cc_buddy_bridge.eye_model import LABELS, ConversationContext
 from cc_buddy_bridge.live_expressions import LiveExpressions
 
 
 class Model:
     def predict(self, text):
-        return {"probabilities": [0, 1, 0, 0, 0, 0], "ms": 1.0}
+        return {"probabilities": [0, 1] + [0] * (len(LABELS) - 2), "ms": 1.0}
 
 
 async def until(predicate):
@@ -127,8 +128,21 @@ def test_invalid_results(values):
         LiveExpressions.label({"probabilities": values})
 
 
-def test_text_cannot_trigger_startle():
-    assert LiveExpressions.label({"probabilities": [0, 0, 0, 0, 0, 1]}) == ("calm", 1)
+def test_every_expression_is_accepted_without_startle():
+    assert "startled" not in LABELS
+    for i, label in enumerate(LABELS):
+        values = [0] * len(LABELS)
+        values[i] = 1
+        assert LiveExpressions.label({"probabilities": values}) == (label, 1)
+
+
+def test_context_has_speaker_roles_and_expires():
+    context = ConversationContext()
+    context.state("user", "My dog died.", 0)
+    state = context.state("assistant", "I'm sorry to hear that.", 1)
+    assert state.endswith("Buddy: I'm sorry to hear that.")
+    assert "User: My dog died." in state
+    assert "My dog died" not in context.state("assistant", "What next?", 91)
 
 
 @pytest.mark.parametrize("muted", [False, True])

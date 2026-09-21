@@ -22,3 +22,8 @@ Scope: Run local Laya on live conversation/diary events and render temporary eye
 
 - [ ] G5: README and docs describe live behavior, controls, model location, known accuracy limits and measured verification. Authorized changes are pushed to main.
   EVIDENCE: pending
+
+- [ ] G6: Expanded eleven-label eye vocabulary has distinct visual profiles and uses speaker-labelled conversational context. A real local model evaluation measures label correspondence on authored user/reply scenarios; at least 28 of 36 explicit benchmark labels match, and every added expression is exercised, including three wink cases. This is a development check reused for prompt selection, not a held-out accuracy estimate. Results remain synthetic, not human validation.
+  CHECK: bridge/.venv/bin/python bridge/tools/eye_context_eval.py && echo EYE_CONTEXT_OK
+  EXPECT: EYE_CONTEXT_OK
+  EVIDENCE: pending

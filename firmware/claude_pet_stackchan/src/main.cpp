@@ -843,7 +843,7 @@ void loop() {
   bool expressionAllowed = expression::allowed(napping || screenOff || clocking,
       baseState == P_ATTENTION || activeState == P_ATTENTION, listenNow || tama.agentState == AG_LISTENING,
       tama.agentState == AG_ASKING, tama.agentState == AG_ERROR);
-  bool expressionApplied = false;
+  bool expressionApplied = false, expressionWinked = false;
   if (napping || screenOff || landscapeClock) {
     // skip sprite render — face-down, powered off, or landscape clock
   } else {
@@ -874,6 +874,13 @@ void loop() {
       int ey = bodyYawDeg() + gazeEyeLeadYawDeg();
       int ep = bodyPitchDeg() + gazeEyeLeadPitchDeg();
       eyesLookAt((int8_t)(ey < -120 ? -120 : ey > 120 ? 120 : ey), (int8_t)(ep < 0 ? 0 : ep > 90 ? 90 : ep));
+    }
+    static uint32_t winkedId = 0;
+    if (expressionAllowed && semanticExpression.active(now) && semanticExpression.request.kind == expression::Wink
+        && semanticExpression.request.id != winkedId) {
+      eyesWink();
+      winkedId = semanticExpression.request.id;
+      expressionWinked = true;
     }
     eyesTick(now);
     expressionApplied = expressionAllowed && semanticExpression.active(now);
@@ -923,10 +930,10 @@ void loop() {
   static bool expressionReportedActive = false, expressionReportedApplied = false;
   bool expressionActive = semanticExpression.active(now);
   if (semanticExpression.request.id && (expressionReportedId != semanticExpression.request.id
-      || expressionReportedActive != expressionActive || expressionReportedApplied != expressionApplied)) {
-    Serial.printf("{\"expression\":{\"id\":%lu,\"label\":\"%s\",\"active\":%s,\"applied\":%s,\"chirp\":%s,\"muted\":%s,\"phase\":%u,\"fw\":\"%s\"}}\n",
+      || expressionReportedActive != expressionActive || expressionReportedApplied != expressionApplied || expressionWinked)) {
+    Serial.printf("{\"expression\":{\"id\":%lu,\"label\":\"%s\",\"active\":%s,\"applied\":%s,\"chirp\":%s,\"wink\":%s,\"muted\":%s,\"phase\":%u,\"fw\":\"%s\"}}\n",
       (unsigned long)semanticExpression.request.id, expression::name(semanticExpression.request.kind),
-      expressionActive ? "true" : "false", expressionApplied ? "true" : "false", "false",
+      expressionActive ? "true" : "false", expressionApplied ? "true" : "false", "false", expressionWinked ? "true" : "false",
       settings().sound ? "false" : "true", (unsigned)tama.agentState, CLAUDE_PET_GIT_SHA);
     expressionReportedId = semanticExpression.request.id;
     expressionReportedActive = expressionActive; expressionReportedApplied = expressionApplied;

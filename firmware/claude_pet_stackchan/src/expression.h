@@ -5,15 +5,32 @@
 
 // Transient semantic eyes only. No pose or actuator fields.
 namespace expression {
-enum Kind : uint8_t { None, Calm, Happy, Curious, Affection, Surprised, Startled };
+enum Kind : uint8_t { None, Calm, Happy, Curious, Affection, Surprised, Startled, Sad, Worried, Skeptical, Frustrated, Excited, Wink };
 inline const char* name(Kind k) {
-  static const char* names[] = {"none", "calm", "happy", "curious", "affection", "surprised", "startled"};
-  return k <= Startled ? names[k] : "none";
+  static const char* names[] = {"none", "calm", "happy", "curious", "affection", "surprised", "startled", "sad", "worried", "skeptical", "frustrated", "excited", "wink"};
+  return k <= Wink ? names[k] : "none";
 }
 inline Kind parse(const char* s) {
-  if (s) for (unsigned i = Calm; i <= Startled; ++i)
+  if (s) for (unsigned i = Calm; i <= Wink; ++i)
     if (!strcmp(s, name((Kind)i))) return (Kind)i;
   return None;
+}
+// Distinct eye shapes; mood: 0 neutral, 1 smile, 2 droop, 3 inward brow.
+struct Style { uint8_t left, right, width, radius, mood, blink; bool curious; };
+inline Style style(Kind kind) {
+  switch (kind) {
+    case Wink:       return {80, 92, 96, 28, 1, 4, true};
+    case Happy:      return {86, 86, 96, 22, 1, 3, false};
+    case Curious:    return {100, 88, 96, 22, 0, 3, true};
+    case Affection:  return {76, 76, 100, 32, 1, 5, true};
+    case Surprised:  return {110, 110, 84, 36, 0, 5, false};
+    case Sad:        return {72, 72, 92, 22, 2, 5, false};
+    case Worried:    return {102, 94, 90, 26, 2, 2, true};
+    case Skeptical:  return {58, 96, 94, 18, 0, 4, true};
+    case Frustrated: return {70, 70, 94, 16, 3, 2, false};
+    case Excited:    return {110, 110, 104, 26, 1, 1, false};
+    default:        return {96, 96, 96, 22, 0, 3, false};
+  }
 }
 struct Request { uint32_t id = 0; Kind kind = None; uint32_t ttl = 4000; };
 struct State {
@@ -23,7 +40,7 @@ struct State {
     return request.kind != None && ticks::elapsedMs(now, at) < request.ttl;
   }
   bool accept(Request next, uint32_t now) {
-    if (!next.id || next.kind > Startled || (request.id && (int32_t)(next.id - request.id) <= 0)) return false;
+    if (!next.id || next.kind > Wink || (request.id && (int32_t)(next.id - request.id) <= 0)) return false;
     next.ttl = next.ttl < 500 ? 500 : next.ttl > 6000 ? 6000 : next.ttl;
     request = next; at = now;
     return true;

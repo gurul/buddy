@@ -4,6 +4,18 @@
 int main() {
   using namespace expression;
   assert(parse("happy") == Happy && parse("invalid") == None && parse(nullptr) == None);
+  // Every live label has a distinct shape, not just a new name.
+  Kind live[] = {Calm, Happy, Curious, Affection, Surprised, Sad, Worried, Skeptical, Frustrated, Excited, Wink};
+  for (auto k : live) {
+    assert(parse(name(k)) == k);
+    auto a = style(k);
+    assert(a.left >= 24 && a.left <= 110 && a.right >= 24 && a.right <= 110);
+    for (auto other : live) if (other != k) {
+      auto b = style(other);
+      assert(a.left != b.left || a.right != b.right || a.width != b.width || a.radius != b.radius
+          || a.mood != b.mood || a.curious != b.curious);
+    }
+  }
   State s;
   assert(s.accept({1, Happy, 4000}, 100));
   assert(s.active(99) && s.active(4099) && !s.active(4100));

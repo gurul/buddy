@@ -33,10 +33,13 @@ def check():
     wait_for(lambda r: r.get("connected") and r["expressions"]["ready"], 60)
     muted = request("sound", action="status")["sound"] == "off"
     evidence = []
-    for phase, text in [
-        ("speaking", "I passed my final exam! This is wonderful news!"),
-        ("speaking", "I am curious about that strange new object on the desk."),
-        ("listening", "Thank you for being my friend. I really appreciate you."),
+    for phase, expected, text in [
+        ("speaking", "happy", "I had a really nice day and everything went well."),
+        ("speaking", "sad", "My dog died yesterday and I miss him terribly."),
+        ("speaking", "skeptical", "Are you sure that's true? Those numbers don't look right."),
+        ("speaking", "excited", "I GOT INTO MY DREAM UNIVERSITY! I CAN'T WAIT!"),
+        ("speaking", "wink", "Give me a wink, Buddy!"),
+        ("listening", "affection", "I love having you around, Buddy. You're my friend."),
     ]:
         event = request(action="audition", phase=phase, text=text)["id"]
         applied = phase != "listening"
@@ -53,6 +56,9 @@ def check():
         )
         rows = [b for b in result["expressions"]["board_history"] if b["id"] == event]
         assert result["expressions"]["last"]["id"] == event
+        assert result["expressions"]["last"]["label"] == expected
+        if expected == "wink":
+            assert sum(bool(b.get("wink")) for b in rows) == 1
         assert result["expressions"]["last"]["chirp_requested"] is False
         assert all(not b["chirp"] and b["muted"] == muted for b in rows)
         assert any(b["applied"] for b in rows) == applied

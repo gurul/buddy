@@ -63,6 +63,9 @@ void eyesCardUp(bool up);
 // canvas is pushed into the main sprite at (0, EYES_Y).
 void eyesTick(uint32_t now);
 
+// One brief left-eye blink; caller debounces the semantic event id.
+void eyesWink();
+
 // One short word for the status row: "zzz", "working...", "needs you!",
 // "listening...", "done!", "<3", "@_@". Empty for idle-without-daemon.
 const char* eyesStatusText(PersonaState s, bool listening, bool explore = false, uint8_t agent = 0,
