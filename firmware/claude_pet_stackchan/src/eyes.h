@@ -63,7 +63,7 @@ void eyesCardUp(bool up);
 // canvas is pushed into the main sprite at (0, EYES_Y).
 void eyesTick(uint32_t now);
 
-// Hold the left eye as a curved closed line for 650 ms; caller debounces event id.
+// Hold the viewer-right eye as a curved closed line for 650 ms; caller debounces event id.
 void eyesWink();
 bool eyesWinkClosed();
 

@@ -303,27 +303,34 @@ void eyesTick(uint32_t now) {
   if (winking) {
     eyes.setAutoblinker(OFF);
     eyes.setCuriosity(OFF);
-    eyes.close(true, false);
-    eyes.open(false, true);
+    eyes.close(false, true);
+    eyes.open(true, false);
   } else if (winkHold.running) {
     winkHold.running = false;
     // A priority/state change already set the correct base face in applyState().
     if (cur.expressionKind == expression::Wink && !cur.listen && !cur.attn
         && cur.agent != AG_LISTENING && cur.agent != AG_ASKING && cur.agent != AG_ERROR) {
-      eyes.open(true, false);
+      eyes.open(false, true);
       eyes.setAutoblinker(ON, 4, 1);
     }
   }
   eyes.update();                       // redraws at most every 20 ms
   if (winking) {
-    // Erase the entire left-eye column: absolutely no open slit remains.
-    int left = eyes.eyeLx, width = eyes.eyeLwidthCurrent;
-    int centreY = eyes.eyeLy + eyes.eyeLheightCurrent / 2;
-    canvas.fillRect(left - 3, 0, width + 6, EYES_H, 0);
-    int span = width * 4 / 5;
+    // Reference-inspired wink: open oval at viewer left, curved closed lid at right.
+    int left = eyes.eyeRx, width = eyes.eyeRwidthCurrent;
+    int centreY = eyes.eyeRy + eyes.eyeRheightCurrent / 2;
+    canvas.fillRect(left - 8, 0, width + 16, EYES_H, 0);
+    int span = width + 4;
     int startX = left + (width - span) / 2;
     for (int x = 0; x <= span; ++x)
-      canvas.fillCircle(startX + x, centreY + expression::winkCurveY(x, span), 2, 1);
+      canvas.fillCircle(startX + x, centreY + expression::winkCurveY(x, span), 3, 1);
+    // A lifted brow over the open eye, only as part of the wink.
+    int browWidth = eyes.eyeLwidthCurrent * 3 / 4;
+    int browX = eyes.eyeLx + (eyes.eyeLwidthCurrent - browWidth) / 2;
+    int browY = eyes.eyeLy - 8;
+    for (int x = 0; x <= browWidth; ++x)
+      canvas.fillCircle(browX + x, browY - x * 10 / (browWidth ? browWidth : 1)
+                        + expression::winkCurveY(x, browWidth) / 3, 2, 1);
   }
   canvas.pushSprite(&spr, 0, EYES_Y);  // palette → RGB565 into the frame
 }

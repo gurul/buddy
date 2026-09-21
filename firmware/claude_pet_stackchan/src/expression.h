@@ -19,7 +19,7 @@ inline Kind parse(const char* s) {
 struct Style { uint8_t left, right, width, radius, mood, blink; bool curious; };
 inline Style style(Kind kind) {
   switch (kind) {
-    case Wink:       return {80, 92, 96, 28, 1, 4, true};
+    case Wink:       return {104, 84, 78, 39, 0, 4, false};
     case Happy:      return {86, 86, 96, 22, 1, 3, false};
     case Curious:    return {100, 88, 96, 22, 0, 3, true};
     case Affection:  return {76, 76, 100, 32, 1, 5, true};
