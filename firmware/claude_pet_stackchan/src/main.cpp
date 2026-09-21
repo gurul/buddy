@@ -508,6 +508,7 @@ void setup() {
 
 // The mood expression the eyes render this frame (nullptr = not exploring).
 static const MoodExpr* moodExprForEyes = nullptr;
+static expression::State semanticExpression;
 
 void loop() {
   diagWatchdogFeed();   // a hang past DIAG_WDT_SECS now resets + reports
@@ -529,6 +530,10 @@ void loop() {
 
   diagPhase(DP_DATA);
   dataPoll(&tama);
+  if (tama.expressionPending) {
+    semanticExpression.accept(tama.expressionRequest, millis());
+    tama.expressionPending = false;
+  }
   diagPhase(DP_STATS);
   if (statsPollLevelUp()) triggerOneShot(P_CELEBRATE, 3000);
   baseState = derive(tama);
@@ -835,6 +840,10 @@ void loop() {
   // it. The 18 ASCII species and the GIF renderer still compile but are not
   // drawn (buddyMode/characterLoaded are ignored here); the sprite/HUD/card
   // pipeline below is the pet build's, unchanged.
+  bool expressionAllowed = expression::allowed(napping || screenOff || clocking,
+      baseState == P_ATTENTION || activeState == P_ATTENTION, listenNow || tama.agentState == AG_LISTENING,
+      tama.agentState == AG_ASKING, tama.agentState == AG_ERROR);
+  bool expressionApplied = false, expressionChirped = false;
   if (napping || screenOff || landscapeClock) {
     // skip sprite render — face-down, powered off, or landscape clock
   } else {
@@ -855,7 +864,8 @@ void loop() {
     if (captionUp) lastTextMs = now ? now : 1;
     PersonaState faceNow = face::faceState(activeState, captionUp, now, lastTextMs);
     eyesSet(faceNow, baseState == P_ATTENTION, listenNow, false, bodyGazeSide(), tama.explore,
-            tama.agentState, moodExprForEyes);
+            tama.agentState, moodExprForEyes,
+            expressionAllowed && semanticExpression.active(now) ? semanticExpression.request.kind : expression::None);
     // A caption page (y >= 112) owns the lower band: the eyes park on the N row.
     eyesCardUp(captionUp);
     // The eyes lead the head toward a face the host just reported (gaze.h): they glance at once, the neck
@@ -866,10 +876,16 @@ void loop() {
       eyesLookAt((int8_t)(ey < -120 ? -120 : ey > 120 ? 120 : ey), (int8_t)(ep < 0 ? 0 : ep > 90 ? 90 : ep));
     }
     eyesTick(now);
+    expressionApplied = expressionAllowed && semanticExpression.active(now);
+    if (semanticExpression.wantsChirp(now, expressionApplied, !settings().sound, chirpPlaying())) {
+      auto kind = semanticExpression.request.kind;
+      chirpPlay(kind == expression::Curious ? CHIRP_CURIOUS : kind == expression::Surprised ? CHIRP_SURPRISE : CHIRP_WARBLE);
+      if (chirpPlaying()) { semanticExpression.played(now); expressionChirped = true; }
+    }
     static uint32_t captionSeenAt = 0;
     if (captionUp && tama.captionAtMs != captionSeenAt) {
       captionSeenAt = tama.captionAtMs;
-      if (tama.captionChirp) chirpPlay(CHIRP_TALK);            // one babble per page, host decides
+      if (tama.captionChirp && !expressionApplied) chirpPlay(CHIRP_TALK);            // one babble per page, host decides
       diagLog("caption p%u/%u %u lines hold %u", (unsigned)tama.captionPage, (unsigned)tama.captionOf,
               (unsigned)tama.captionNLines, (unsigned)tama.captionHoldMs);
     }
@@ -906,6 +922,20 @@ void loop() {
       spr.setCursor(8, EYES_STATUS_Y + 22);
       spr.printf("installing %luK / %luK", done/1024, total/1024);
     }
+  }
+  // ACK only after the eye render path ran; sound ACK requires speaker activity.
+  static uint32_t expressionReportedId = 0;
+  static bool expressionReportedActive = false, expressionReportedApplied = false;
+  bool expressionActive = semanticExpression.active(now);
+  if (!expressionAllowed) semanticExpression.pending = false;
+  if (semanticExpression.request.id && (expressionReportedId != semanticExpression.request.id
+      || expressionReportedActive != expressionActive || expressionReportedApplied != expressionApplied || expressionChirped)) {
+    Serial.printf("{\"expression\":{\"id\":%lu,\"label\":\"%s\",\"active\":%s,\"applied\":%s,\"chirp\":%s,\"muted\":%s,\"phase\":%u,\"fw\":\"%s\"}}\n",
+      (unsigned long)semanticExpression.request.id, expression::name(semanticExpression.request.kind),
+      expressionActive ? "true" : "false", expressionApplied ? "true" : "false", expressionChirped ? "true" : "false",
+      settings().sound ? "false" : "true", (unsigned)tama.agentState, CLAUDE_PET_GIT_SHA);
+    expressionReportedId = semanticExpression.request.id;
+    expressionReportedActive = expressionActive; expressionReportedApplied = expressionApplied;
   }
   if (landscapeClock) {
     drawClock();

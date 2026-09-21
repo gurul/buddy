@@ -334,3 +334,7 @@ is cited in [personality.md](docs/stackchan/personality.md).
 See the [bridge license](bridge/LICENSE), [canvas attribution](bridge/web-canvas/LICENSE.md),
 [tldraw license](bridge/web-canvas/TLDRAW-LICENSE.md), and bundled font license
 notices for the respective components.
+
+### Live Laya expressions
+
+Buddy can now use local Laya to choose temporary eye expressions and matching chirps from conversation and diary text, including while speaking. The Mac runs the model and the board renders the cues. This owner-enabled experimental mode uses the original checkpoint because the tuned head performed worse on fresh examples. See [controls, limitations, and device verification](docs/stackchan/laya-expressions/README.md).

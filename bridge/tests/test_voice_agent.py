@@ -1815,3 +1815,14 @@ def test_take_photo_without_a_camera_or_when_it_stalls_says_why() -> None:
     asyncio.run(go())
     out = conn.tool_outputs()[0]
     assert out["ok"] is False and "did not answer in time" in out["reason"]
+
+
+def test_live_expression_callback_receives_streamed_reply_and_user_turn():
+    async def run():
+        seen = []
+        s, _, _ = _session(FakeConnection(), [], on_expression=lambda who, text: seen.append((who, text)))
+        s._transcript_delta("assistant", "That is such wonderful news!")
+        assert seen == [("assistant", "That is such wonderful news!")]
+        s._close_turn("user", "I found something interesting.")
+        assert seen[-1] == ("user", "I found something interesting.")
+    asyncio.run(run())

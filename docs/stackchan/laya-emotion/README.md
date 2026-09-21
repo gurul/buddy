@@ -1,5 +1,7 @@
 # Laya for Buddy's eyes and chirps: research and tuning
 
+**Live follow-up:** the owner subsequently requested expressions on the robot. [Live Laya expressions](../laya-expressions/README.md) implements an explicitly enabled experimental top-choice mode using the original checkpoint. The research failures and measurements below remain unchanged.
+
 **Decision, 2026-09-21: fast enough to investigate, not accurate enough to enable.**
 We trained real local weights in nine configurations. Scorer-only tuning did not
 improve accuracy. Adapting the decision transformer improved the original test

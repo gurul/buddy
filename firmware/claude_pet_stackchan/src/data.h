@@ -5,8 +5,11 @@
 #include "xfer.h"
 #include "persona.h"
 #include "motion.h"
+#include "expression.h"
 
 struct TamaState {
+  expression::Request expressionRequest;
+  bool expressionPending;
   uint8_t  sessionsTotal;
   uint8_t  sessionsRunning;
   uint8_t  sessionsWaiting;
@@ -115,6 +118,22 @@ static void _applyJson(const char* line, TamaState* out) {
   // {"cmd":"listen","on":true|false}: the user holds the dictation key on
   // the host. Checked before xferCommand(), which swallows unknown cmds.
   const char* cmd = doc["cmd"];
+  if (cmd && strcmp(cmd, "expression") == 0) {
+    if (!doc["id"].is<uint32_t>() || !doc["id"].as<uint32_t>()) return;
+    bool clear = doc["clear"].is<bool>() && doc["clear"].as<bool>();
+    expression::Kind kind = expression::parse(doc["label"] | "");
+    if (!clear && kind == expression::None) return;
+    expression::Request req;
+    req.id = doc["id"].as<uint32_t>();
+    req.kind = clear ? expression::None : kind;
+    req.ttl = doc["ttl_ms"].is<uint32_t>() ? doc["ttl_ms"].as<uint32_t>() : 4000;
+    req.chirp = doc["chirp"].is<bool>() && doc["chirp"].as<bool>();
+    out->expressionRequest = req;
+    out->expressionPending = true;
+    _lastLiveMs = millis();
+    return;
+  }
+
   if (cmd && strcmp(cmd, "listen") == 0) {
     out->listening = doc["on"] | false;
     _lastLiveMs = millis();
