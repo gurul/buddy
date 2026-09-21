@@ -45,6 +45,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         BrandFonts.register()
         registerLoginItemOnce()
         NotesMirror.shared.start()
+        PowerRelay.shared.start()
     }
 
     /// A URL open must bring the (LSUIElement) app forward so the window shows.
@@ -82,9 +83,8 @@ private struct MenuContent: View {
     @State private var mic: MicState?
     @State private var micAsked = false
     @State private var micOn = true
-    /// launchd's word on buddy's agent; nil until asked.
-    @State private var service: ServiceState?
-    @State private var switching = false
+    /// buddy's power switch, shared with the desktop card (PowerRelay).
+    @State private var power = PowerRelay.shared
 
     var body: some View {
         Text(status)
@@ -118,16 +118,16 @@ private struct MenuContent: View {
             // opens its socket a beat after it has a pid).
             .task {
                 while !Task.isCancelled {
-                    if !switching {
-                        await refreshService()
+                    if !power.switching {
+                        await power.refresh()
                         await refreshMic()
                     }
                     try? await Task.sleep(for: .seconds(5))
                 }
             }
-        if let title = service?.buttonTitle {
+        if let title = power.state?.buttonTitle {
             Button(title) { Task { await flipService() } }
-                .disabled(switching)
+                .disabled(power.switching)
         }
         Divider()
         Button("Open diary") {
@@ -161,27 +161,21 @@ private struct MenuContent: View {
 
     private var micLine: String {
         if let mic { return mic.line }
-        if let service, service.installed, !service.on, !service.reachable {
+        if let service = power.state, service.installed, !service.on, !service.reachable {
             return "Microphone: closed (buddy is off)"
         }
         return micAsked ? "Microphone: daemon not reachable" : "Microphone: asking the daemon…"
     }
 
     private var serviceLine: String {
-        if switching { return service?.on == true ? "buddy: stopping…" : "buddy: starting…" }
-        return service?.line ?? "buddy: asking launchd…"
-    }
-
-    private func refreshService() async {
-        service = await BuddyService.status()
+        if power.switching { return power.state?.on == true ? "buddy: stopping…" : "buddy: starting…" }
+        return power.state?.line ?? "buddy: asking launchd…"
     }
 
     /// Off then on is the same button: it reads where buddy is and goes the other way.
     private func flipService() async {
-        guard let current = service, !switching else { return }
-        switching = true
-        service = current.on ? await BuddyService.turnOff() : await BuddyService.turnOn()
-        switching = false
+        guard let current = power.state, !power.switching else { return }
+        await power.turn(on: !current.on)
         // The mic line follows the daemon: gone when buddy is off, back when it is on.
         await refreshMic()
     }

@@ -12,6 +12,7 @@
 // in the helper app (stackchan://diary). The learning widget shows the saved
 // lessons and opens the learning dashboard (stackchan://learning).
 
+import AppIntents
 import SwiftUI
 import WidgetKit
 
@@ -30,6 +31,27 @@ struct StackChanNotesWidgetBundle: WidgetBundle {
 struct NotesEntry: TimelineEntry {
     let date: Date
     let snapshot: NotesSnapshot
+    /// buddy's power switch as the card should draw it (BuddyPower.face).
+    var power: BuddyPower.Face = .unknown
+}
+
+/// The card's power button. The extension is sandboxed, so `perform` only
+/// leaves a request in the App Group; the menu-bar helper (PowerRelay) does the
+/// launchctl work and writes the state back, which reloads the card.
+struct SetBuddyPowerIntent: AppIntent {
+    static let title: LocalizedStringResource = "Turn buddy on or off"
+    static let description = IntentDescription("Stops or starts the buddy daemon on this Mac.")
+
+    @Parameter(title: "On")
+    var on: Bool
+
+    init() {}
+    init(on: Bool) { self.on = on }
+
+    func perform() async throws -> some IntentResult {
+        try BuddyPower.writeRequest(on: on)
+        return .result()
+    }
 }
 
 struct NotesProvider: TimelineProvider {
@@ -38,14 +60,21 @@ struct NotesProvider: TimelineProvider {
     }
 
     func getSnapshot(in context: Context, completion: @escaping (NotesEntry) -> Void) {
-        completion(NotesEntry(date: .now, snapshot: context.isPreview ? .placeholder : NoteStore.load()))
+        completion(context.isPreview
+                   ? NotesEntry(date: .now, snapshot: .placeholder, power: .on)
+                   : NotesEntry(date: .now, snapshot: NoteStore.load(), power: BuddyPower.face()))
     }
 
     /// One entry, refreshed every 15 min as a fallback. The helper app's
-    /// `WidgetCenter.reloadAllTimelines()` is the real trigger.
+    /// `WidgetCenter.reloadAllTimelines()` is the real trigger. While a power
+    /// request is pending the card re-reads sooner, so a helper that never
+    /// answers turns into "waiting" rather than "stopping…" forever.
     func getTimeline(in context: Context, completion: @escaping (Timeline<NotesEntry>) -> Void) {
-        let entry = NotesEntry(date: .now, snapshot: NoteStore.load())
-        completion(Timeline(entries: [entry], policy: .after(.now.addingTimeInterval(15 * 60))))
+        let power = BuddyPower.face()
+        let entry = NotesEntry(date: .now, snapshot: NoteStore.load(), power: power)
+        let pending = power == .turningOn || power == .turningOff
+        let next: TimeInterval = pending ? BuddyPower.helperTimeout + 1 : 15 * 60
+        completion(Timeline(entries: [entry], policy: .after(.now.addingTimeInterval(next))))
     }
 }
 
@@ -123,6 +152,23 @@ struct NotesView: View {
 
     private var shown: [Row] { Array(rows.prefix(visibleCount)) }
 
+    /// buddy is stopped (or on its way there): the card sleeps instead of showing thoughts.
+    private var off: Bool {
+        switch entry.power {
+        case .off, .turningOn, .turningOff, .waiting: true
+        case .on, .unknown: false
+        }
+    }
+
+    private var offLine: String {
+        switch entry.power {
+        case .turningOff: "Stopping the daemon…"
+        case .turningOn: "Starting the daemon…"
+        case .waiting: "Waiting for StackChan Notes, the menu-bar app. Open it and try again."
+        default: "The daemon is stopped and stays stopped until you turn it on."
+        }
+    }
+
     private var count: Int {
         max(entry.snapshot.notes.count, entry.snapshot.thoughts.filter(\.written).count)
     }
@@ -147,9 +193,22 @@ struct NotesView: View {
             HStack(spacing: 6) {
                 InkHeading("buddy", size: 17)
                 Spacer(minLength: 0)
-                if let mood = entry.snapshot.mood { MoodPill(mood: mood, size: 9.5) }
+                if off {
+                    PowerPill(face: entry.power, size: 9.5)
+                } else {
+                    if let mood = entry.snapshot.mood { MoodPill(mood: mood, size: 9.5) }
+                    PowerPill(face: entry.power, size: 9.5)
+                }
             }
-            if rows.isEmpty {
+            if off {
+                Spacer(minLength: 0)
+                RobotFace(size: 54, compact: true)
+                Text(offLine)
+                    .font(BrandFont.hand(14))
+                    .lineLimit(3)
+                    .fixedSize(horizontal: false, vertical: true)
+                Spacer(minLength: 0)
+            } else if rows.isEmpty {
                 Spacer(minLength: 0)
                 RobotFace(size: 54, compact: true)
                 Text("Nothing yet! buddy looks around when Claude is resting.")
@@ -173,29 +232,40 @@ struct NotesView: View {
 
     private var medium: some View {
         HStack(alignment: .top, spacing: 12) {
-            Group {
-                if let lead, let image = NSImage(contentsOf: lead.url) {
+            // The left column: the photo or the face, with the power button under it.
+            VStack(spacing: 6) {
+                if !off, let lead, let image = NSImage(contentsOf: lead.url) {
                     PhotoStrip(image: image, shadow: .brandSun)
                         .frame(width: 89)
                         .padding(.trailing, 3)
                         .padding(.bottom, 3)
                 } else {
-                    RobotFace(size: 92, line: rows.isEmpty ? "Hi!" : entry.snapshot.mood?.label)
+                    RobotFace(size: 92, line: off ? "zzz" : rows.isEmpty ? "Hi!" : entry.snapshot.mood?.label)
                         .frame(maxHeight: .infinity)
                 }
+                PowerPill(face: entry.power, size: 9.5)
             }
             .frame(width: 92)
 
             VStack(alignment: .leading, spacing: 5) {
                 HStack(spacing: 6) {
                     InkHeading("buddy", size: 18)
-                    if let mood = entry.snapshot.mood { MoodPill(mood: mood, size: 9.5) }
+                    if !off, let mood = entry.snapshot.mood { MoodPill(mood: mood, size: 9.5) }
                     Spacer(minLength: 0)
                     Link(destination: learningURL) {
                         BrandPill("lessons", fill: .brandSun, size: 9.5)
                     }
                 }
-                if rows.isEmpty {
+                if off {
+                    Spacer(minLength: 0)
+                    Text("buddy is off.")
+                        .font(BrandFont.display(16))
+                    Text(offLine)
+                        .font(BrandFont.body(12))
+                        .foregroundStyle(BrandStyle.inkSoft)
+                        .fixedSize(horizontal: false, vertical: true)
+                    Spacer(minLength: 0)
+                } else if rows.isEmpty {
                     Spacer(minLength: 0)
                     Text("Nothing noticed yet.")
                         .font(BrandFont.display(16))
@@ -229,14 +299,29 @@ struct NotesView: View {
                 Link(destination: learningURL) {
                     BrandPill("lessons", fill: .brandSun)
                 }
+                PowerPill(face: entry.power)
             }
             HStack(spacing: 8) {
                 InkHeading("buddy", size: 26)
-                if let mood = entry.snapshot.mood { MoodPill(mood: mood, size: 10.5) }
+                if !off, let mood = entry.snapshot.mood { MoodPill(mood: mood, size: 10.5) }
                 Spacer(minLength: 0)
                 BrandPill("\(count) notes")
             }
-            if rows.isEmpty {
+            if off {
+                Spacer(minLength: 0)
+                HStack(spacing: 14) {
+                    RobotFace(size: 80, line: "zzz")
+                    VStack(alignment: .leading, spacing: 4) {
+                        Text("buddy is off.")
+                            .font(BrandFont.display(16))
+                        Text(offLine)
+                            .font(BrandFont.body(12))
+                            .foregroundStyle(BrandStyle.inkSoft)
+                            .fixedSize(horizontal: false, vertical: true)
+                    }
+                }
+                Spacer(minLength: 0)
+            } else if rows.isEmpty {
                 Spacer(minLength: 0)
                 HStack(spacing: 14) {
                     RobotFace(size: 80, line: "Hi!")
@@ -272,6 +357,50 @@ struct NotesView: View {
                     .font(BrandFont.hand(14))
                     .foregroundStyle(BrandStyle.inkSoft)
             }
+        }
+    }
+}
+
+/// The power switch as a pill: a button that asks the helper to stop or start
+/// buddy (SetBuddyPowerIntent), a plain pill while that is in flight, nothing
+/// when no helper has ever reported (this Mac has no service, or the helper is
+/// too old to know about power).
+private struct PowerPill: View {
+    let face: BuddyPower.Face
+    var size: CGFloat = 10.5
+
+    var body: some View {
+        switch face {
+        case .unknown:
+            EmptyView()
+        case .on:
+            Button(intent: SetBuddyPowerIntent(on: false)) { label("turn off", symbol: "power", fill: .brandSheet) }
+                .buttonStyle(.plain)
+                .accessibilityLabel("turn buddy off")
+        case .off:
+            Button(intent: SetBuddyPowerIntent(on: true)) { label("turn on", symbol: "power", fill: .brandSun) }
+                .buttonStyle(.plain)
+                .accessibilityLabel("turn buddy on")
+        case .turningOff:
+            label("stopping…", symbol: "hourglass", fill: .brandSheet)
+        case .turningOn:
+            label("starting…", symbol: "hourglass", fill: .brandSun)
+        case .waiting:
+            label("waiting", symbol: "hourglass", fill: .brandSheet)
+        }
+    }
+
+    /// The words when they fit, the symbol alone when they do not.
+    private func label(_ text: String, symbol: String, fill: Color) -> some View {
+        ViewThatFits(in: .horizontal) {
+            BrandPill(text, fill: fill, size: size)
+            Image(systemName: symbol)
+                .font(.system(size: size + 1, weight: .bold))
+                .foregroundStyle(BrandStyle.ink)
+                .padding(.horizontal, 6)
+                .padding(.vertical, 3)
+                .background(Capsule().fill(BrandStyle.fill(fill)))
+                .overlay(Capsule().strokeBorder(BrandStyle.ink, lineWidth: 1.5))
         }
     }
 }

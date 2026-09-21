@@ -129,25 +129,49 @@ across restarts, the same as `cc-buddy-bridge mic off`. It talks to the daemon
 over its IPC socket (`/tmp/cc-buddy-bridge.sock`), so it needs the daemon
 running; the WidgetKit widget itself is sandboxed and only shows notes.
 
-The *buddy* line is the power switch for the whole thing: the bridge daemon
-that runs in the background on your Mac. It says where buddy is (`on (pid …)`,
-`off (your choice)`, running from a terminal, or not installed as a service),
-and the button under it goes the other way. **Turn buddy off** stops the
-daemon and keeps it stopped: the robot goes quiet, the mic closes, no
-exploring, no diary, and it stays off across logins until you press **Turn
-buddy on**. That is the difference from quitting the process: the daemon is
-a launchd agent with `KeepAlive` on (`cc-buddy-bridge install --service`), so
-a plain kill only respawns it. The button runs `launchctl bootout` then
-`launchctl disable` on `gui/<uid>/com.github.cc-buddy-bridge.daemon`, and
-`launchctl enable` then `launchctl bootstrap` to bring it back (the same
-override `cc-buddy-bridge install --service` clears with `load -w`). The
-helper can do this because it is not sandboxed; the desktop widget cannot.
-Both lines are re-read every five seconds while the menu is alive, and after
-a flip the helper waits for launchd to settle (the agent still prints as
-running, without a pid, for a moment after a bootout) before it shows the
-result. A daemon you started by hand from a terminal (`cc-buddy-bridge
-daemon`) is not launchd's to stop, so the button hides and the line says to
-stop it there. Implementation: `widget/StackChanNotes/BuddyService.swift`.
+## The power switch
+
+buddy is the bridge daemon that runs in the background on your Mac, and both
+the desktop card and the menu have a switch for it. On the card it is the
+**TURN OFF** pill (under the robot face on the medium size, in the header on
+the small and large sizes). In the menu it is the *buddy* line, which says
+where buddy is (`on (pid …)`, `off (your choice)`, running from a terminal,
+or not installed as a service), and the **Turn buddy off** / **Turn buddy
+on** button under it.
+
+**Off stops the daemon and keeps it stopped:** the robot goes quiet, the mic
+closes, no exploring, no diary, and it stays off across logins until you turn
+it on. The card sleeps meanwhile (`buddy is off.`, the face says *zzz*, and
+the pill reads **TURN ON**). That is the difference from quitting the
+process: the daemon is a launchd agent with `KeepAlive` on
+(`cc-buddy-bridge install --service`), so a plain kill only respawns it.
+Turning off runs `launchctl bootout` then `launchctl disable` on
+`gui/<uid>/com.github.cc-buddy-bridge.daemon`; on runs `launchctl enable`
+then `launchctl bootstrap` (the same override `install --service` clears
+with `load -w`). After a flip the helper waits for launchd to settle (the
+agent still prints as running, without a pid, for a moment after a bootout)
+before it reports. A daemon you started by hand from a terminal
+(`cc-buddy-bridge daemon`) is not launchd's to stop, so the switch hides and
+the menu says to stop it there.
+
+**How the card does it, being sandboxed.** The card cannot run `launchctl`,
+so its pill is an interactive-widget button (`SetBuddyPowerIntent`, an
+App Intent) whose only job is to write `power-request.json` (`{on, at}`)
+into the App Group container. The helper watches that directory
+(`PowerRelay`), does the launchctl work (`BuddyService`), and writes
+`power.json` (`{on, switchable, line, at}`) back, then reloads the card. A
+request stamped after the state is one the helper has not answered yet, so
+the card shows **STOPPING…** / **STARTING…** until the helper's state
+overtakes it, and **WAITING** (with a line saying to open StackChan Notes)
+if twenty seconds pass with no answer, which means the helper is not
+running. The helper also re-reads launchd every 30 s (and the menu every
+5 s while it is open) so `power.json` stays true when buddy is stopped some
+other way. The card's pill only appears once a helper that knows about power
+has written `power.json`; a Mac with no service, or the daemon run by hand,
+gets no pill. Files: `widget/Shared/BuddyPower.swift` (the two JSON files),
+`widget/StackChanNotes/BuddyService.swift` (launchctl),
+`widget/StackChanNotes/PowerRelay.swift` (the watcher), the intent and pill
+in `widget/StackChanNotesWidget/StackChanNotesWidget.swift`.
 
 ## Add the widget to the desktop (manual)
 

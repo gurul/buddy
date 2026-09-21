@@ -8,6 +8,7 @@
 
 /* Begin PBXBuildFile section */
 		034B90A58D5D77B652F052EF /* Andika-Regular.ttf in Resources */ = {isa = PBXBuildFile; fileRef = CC5C119E441B8C5FE796F0EB /* Andika-Regular.ttf */; };
+		067C179C64BC0C1AADD49894 /* BuddyPower.swift in Sources */ = {isa = PBXBuildFile; fileRef = 4BDCCB5EA0C589C5C5FE8EAC /* BuddyPower.swift */; };
 		0D9D2B38517F4928E7660D15 /* StackChanNotesWidget.appex in Embed Foundation Extensions */ = {isa = PBXBuildFile; fileRef = 90B0C584761D23A8F5B381DC /* StackChanNotesWidget.appex */; settings = {ATTRIBUTES = (RemoveHeadersOnCopy, ); }; };
 		10F996DECC3621CDBC0238EE /* OFL-vt323.txt in Resources */ = {isa = PBXBuildFile; fileRef = 3B6DC1423A552A4697862DF9 /* OFL-vt323.txt */; };
 		16A8EA1C124984DBD1E9E49B /* BuddyDaemon.swift in Sources */ = {isa = PBXBuildFile; fileRef = FF97E4D3AD70892D4607419A /* BuddyDaemon.swift */; };
@@ -28,8 +29,10 @@
 		7F505FC43B317BECFBCF1ED1 /* NotesMirror.swift in Sources */ = {isa = PBXBuildFile; fileRef = 8D991EA2CD7ADE334CFD65C9 /* NotesMirror.swift */; };
 		7FE9748D34775E716FC96487 /* Grandstander-Bold.ttf in Resources */ = {isa = PBXBuildFile; fileRef = F3A6DCDD52C01951B686501D /* Grandstander-Bold.ttf */; };
 		85E0095C45F238556BAE6518 /* BuddyService.swift in Sources */ = {isa = PBXBuildFile; fileRef = 387A8B1402D0F827CEDD1038 /* BuddyService.swift */; };
+		9D29263BD007A6F4D857F9EA /* BuddyPower.swift in Sources */ = {isa = PBXBuildFile; fileRef = 4BDCCB5EA0C589C5C5FE8EAC /* BuddyPower.swift */; };
 		9EF02456919C3BEC7798D42E /* VT323-Regular.ttf in Resources */ = {isa = PBXBuildFile; fileRef = DC9EE994781EFA1409635389 /* VT323-Regular.ttf */; };
 		B541AE383A4596C48E291DA5 /* OFL-andika.txt in Resources */ = {isa = PBXBuildFile; fileRef = 130B9D4D7A7A5186D880DECF /* OFL-andika.txt */; };
+		BA8D6ED800DE7698267FEA8A /* PowerRelay.swift in Sources */ = {isa = PBXBuildFile; fileRef = 2185226C924700217519DF54 /* PowerRelay.swift */; };
 		C5E75211933FE3BC9561E881 /* OFL-grandstander.txt in Resources */ = {isa = PBXBuildFile; fileRef = AE8E1E7CB4B022226B3E252A /* OFL-grandstander.txt */; };
 		CFE88E9336BF933D0AD55E57 /* Grandstander-Black.ttf in Resources */ = {isa = PBXBuildFile; fileRef = C3D3F3D6F1CF428CD102AD73 /* Grandstander-Black.ttf */; };
 		D35F18441A4006EDB359D15D /* GochiHand-Regular.ttf in Resources */ = {isa = PBXBuildFile; fileRef = 2FE44DF443242C51DA997F4B /* GochiHand-Regular.ttf */; };
@@ -66,10 +69,12 @@
 
 /* Begin PBXFileReference section */
 		130B9D4D7A7A5186D880DECF /* OFL-andika.txt */ = {isa = PBXFileReference; lastKnownFileType = text; path = "OFL-andika.txt"; sourceTree = "<group>"; };
+		2185226C924700217519DF54 /* PowerRelay.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PowerRelay.swift; sourceTree = "<group>"; };
 		2FE44DF443242C51DA997F4B /* GochiHand-Regular.ttf */ = {isa = PBXFileReference; lastKnownFileType = file; path = "GochiHand-Regular.ttf"; sourceTree = "<group>"; };
 		387A8B1402D0F827CEDD1038 /* BuddyService.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = BuddyService.swift; sourceTree = "<group>"; };
 		3AD72D4FED4488570BCA96ED /* NoteStore.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = NoteStore.swift; sourceTree = "<group>"; };
 		3B6DC1423A552A4697862DF9 /* OFL-vt323.txt */ = {isa = PBXFileReference; lastKnownFileType = text; path = "OFL-vt323.txt"; sourceTree = "<group>"; };
+		4BDCCB5EA0C589C5C5FE8EAC /* BuddyPower.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = BuddyPower.swift; sourceTree = "<group>"; };
 		57D43F8C648A32C3F67687C1 /* OFL-gochihand.txt */ = {isa = PBXFileReference; lastKnownFileType = text; path = "OFL-gochihand.txt"; sourceTree = "<group>"; };
 		6123FC6BED038D450CCCA6D0 /* BuddyBrand.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = BuddyBrand.swift; sourceTree = "<group>"; };
 		7D9ED287F21568518C44885F /* Info.plist */ = {isa = PBXFileReference; lastKnownFileType = text.plist; path = Info.plist; sourceTree = "<group>"; };
@@ -132,6 +137,7 @@
 			isa = PBXGroup;
 			children = (
 				6123FC6BED038D450CCCA6D0 /* BuddyBrand.swift */,
+				4BDCCB5EA0C589C5C5FE8EAC /* BuddyPower.swift */,
 				3AD72D4FED4488570BCA96ED /* NoteStore.swift */,
 				40790F64342CCC8E37C8BD33 /* Fonts */,
 			);
@@ -156,6 +162,7 @@
 				F62C19E6D654259E691D6474 /* DiaryView.swift */,
 				7D9ED287F21568518C44885F /* Info.plist */,
 				8D991EA2CD7ADE334CFD65C9 /* NotesMirror.swift */,
+				2185226C924700217519DF54 /* PowerRelay.swift */,
 				F54C4933A274AD6C400BBE85 /* StackChanNotes.entitlements */,
 				9CAF58838BD7BD34C55C270A /* StackChanNotesApp.swift */,
 			);
@@ -285,6 +292,7 @@
 			buildActionMask = 2147483647;
 			files = (
 				E56B1332E4077412DA34EB62 /* BuddyBrand.swift in Sources */,
+				067C179C64BC0C1AADD49894 /* BuddyPower.swift in Sources */,
 				60A1428A6FE897347E2394B9 /* NoteStore.swift in Sources */,
 				DB91CAC4866F15A5FDD08E58 /* StackChanNotesWidget.swift in Sources */,
 			);
@@ -296,10 +304,12 @@
 			files = (
 				35DF1F3E0A641A9204BC459C /* BuddyBrand.swift in Sources */,
 				16A8EA1C124984DBD1E9E49B /* BuddyDaemon.swift in Sources */,
+				9D29263BD007A6F4D857F9EA /* BuddyPower.swift in Sources */,
 				85E0095C45F238556BAE6518 /* BuddyService.swift in Sources */,
 				1AFEE56DD21647A645159D29 /* DiaryView.swift in Sources */,
 				61576D5572BCCEA5587116ED /* NoteStore.swift in Sources */,
 				7F505FC43B317BECFBCF1ED1 /* NotesMirror.swift in Sources */,
+				BA8D6ED800DE7698267FEA8A /* PowerRelay.swift in Sources */,
 				7EBD54E6D6885AAA13F3CFA6 /* StackChanNotesApp.swift in Sources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
