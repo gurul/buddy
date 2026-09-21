@@ -1,14 +1,14 @@
 # Gates: text buddy through Telegram
 
-OWNS: bridge/src/cc_buddy_bridge/telegram.py, bridge/src/cc_buddy_bridge/daemon.py, bridge/src/cc_buddy_bridge/cli.py, bridge/tests/test_telegram.py, bridge/tools/check_telegram_docs.py, bridge/pyproject.toml, docs/stackchan/telegram.md, README.md, GATES.md
+OWNS: bridge/src/cc_buddy_bridge/records.py, bridge/tests/test_records.py, bridge/src/cc_buddy_bridge/telegram.py, bridge/src/cc_buddy_bridge/daemon.py, bridge/src/cc_buddy_bridge/cli.py, bridge/tests/test_telegram.py, bridge/tools/check_telegram_docs.py, bridge/pyproject.toml, docs/stackchan/telegram.md, README.md, GATES.md
 
-Scope: The owner can text buddy from Telegram and get an answer, start and stop a computer task, answer a task's question, and receive a photo from the robot's camera. The daemon long-polls the Bot API (outbound HTTPS only: no port, no webhook, no public URL). Only the owner's numeric Telegram id, in a private chat, reaches a model; everyone and everything else is dropped without a reply. Message text and the bot token are never logged. It ships OFF behind CC_BUDDY_TELEGRAM. The previous ledger (plan once, the voice gate, the power pill) is in git at 5ee6164. Pytest gates use `&& echo …_OK` so the exit code decides; tests are selected by file or node id, never by -k. No type-checker is configured for the bridge (pyproject has ruff and pytest only).
+Scope: The owner can text buddy from Telegram and get an answer, start and stop a computer task, answer a task's question, and receive a photo from the robot's camera. The daemon long-polls the Bot API (outbound HTTPS only: no port, no webhook, no public URL). Only the owner's numeric Telegram id, in a private chat, reaches a model; everyone and everything else is dropped without a reply. Message text and the bot token are never logged. It ships OFF behind CC_BUDDY_TELEGRAM. (2) The text brain has a memory layer in the Instinct shape (records.py): typed git-tracked markdown records with aliases and [[links]], a profile one-pager in every turn, and read-only memory_search / memory_get tools; the only writer is a nightly reconcile from the day's curated notes, committed to git with the pre-reconcile state committed first. It ships OFF behind CC_BUDDY_RECORDS. The previous ledger (plan once, the voice gate, the power pill) is in git at 5ee6164. Pytest gates use `&& echo …_OK` so the exit code decides; tests are selected by file or node id, never by -k. No type-checker is configured for the bridge (pyproject has ruff and pytest only).
 
 - [x] G1: The whole bridge test suite passes.
   CHECK: .venv/bin/python -m pytest -q -p no:cacheprovider --ignore=tests/test_desktop_live.py && echo PYTEST_OK
   CWD: bridge
   EXPECT: PYTEST_OK
-  EVIDENCE: exit=0; shell=/bin/sh; cwd=/Users/gurucharan/Documents/personal/buddy/bridge; path=574d30059456/19 entries; output=1640 passed, 1 skipped in 68.56s (0:01:08) | PYTEST_OK
+  EVIDENCE: exit=0; shell=/bin/sh; cwd=/Users/gurucharan/Documents/personal/buddy/bridge; path=574d30059456/19 entries; output=1652 passed, 1 skipped in 69.31s (0:01:09) | PYTEST_OK
 
 - [x] G2: Ruff reports nothing on src, tests and tools.
   CHECK: .venv/bin/ruff check src/ tests/ tools/ && echo RUFF_CLEAN
@@ -50,7 +50,7 @@ Scope: The owner can text buddy from Telegram and get an answer, start and stop 
   CHECK: .venv/bin/python -m pytest -q -p no:cacheprovider tests/test_telegram.py::test_a_tasks_question_is_answered_by_the_owners_next_message tests/test_telegram.py::test_a_stranger_cannot_answer_a_tasks_question tests/test_telegram.py::test_no_answer_in_time_reads_as_no && echo APPROVAL_OK
   CWD: bridge
   EXPECT: APPROVAL_OK
-  EVIDENCE: exit=0; shell=/bin/sh; cwd=/Users/gurucharan/Documents/personal/buddy/bridge; path=574d30059456/19 entries; output=3 passed in 0.13s | APPROVAL_OK
+  EVIDENCE: exit=0; shell=/bin/sh; cwd=/Users/gurucharan/Documents/personal/buddy/bridge; path=574d30059456/19 entries; output=3 passed in 0.12s | APPROVAL_OK
 
 - [x] G9: "Send me a photo" sends the picture the robot took as a Telegram photo with its caption, and says why when there is no camera.
   CHECK: .venv/bin/python -m pytest -q -p no:cacheprovider tests/test_telegram.py::test_a_photo_is_sent_as_a_photo tests/test_telegram.py::test_no_camera_is_said_not_sent && echo PHOTO_OK
@@ -74,7 +74,28 @@ Scope: The owner can text buddy from Telegram and get an answer, start and stop 
   CHECK: .venv/bin/python tools/check_telegram_docs.py
   CWD: bridge
   EXPECT: TELEGRAM_DOCS_OK
-  EVIDENCE: exit=0; shell=/bin/sh; cwd=/Users/gurucharan/Documents/personal/buddy/bridge; path=574d30059456/19 entries; output=5 names documented: CC_BUDDY_TELEGRAM, CC_BUDDY_TELEGRAM_EFFORT, CC_BUDDY_TELEGRAM_MODEL, CC_BUDDY_TELEGRAM_OWNER, CC_BUDDY_TELEGRAM_TOKEN | TELEGRAM_DOCS_OK
+  EVIDENCE: exit=0; shell=/bin/sh; cwd=/Users/gurucharan/Documents/personal/buddy/bridge; path=574d30059456/19 entries; output=7 names documented: CC_BUDDY_RECORDS, CC_BUDDY_RECORDS_MODEL, CC_BUDDY_TELEGRAM, CC_BUDDY_TELEGRAM_EFFORT, CC_BUDDY_TELEGRAM_MODEL, CC_BUDDY_TELEGRAM_OWNER, CC_BUDDY_TELEGRAM_TOKEN | TELEGRAM_DOCS_OK
+
+- [x] G14: The records layer ships off, and the text brain is offered the profile and the two memory tools only when there is a profile; neither tool writes.
+  CHECK: .venv/bin/python -m pytest -q -p no:cacheprovider tests/test_records.py::test_it_ships_off tests/test_records.py::test_the_text_brain_gets_the_profile_and_the_two_tools_only_with_records && echo RECORDS_OFF_OK
+  CWD: bridge
+  EXPECT: RECORDS_OFF_OK
+  EVIDENCE: exit=0; shell=/bin/sh; cwd=/Users/gurucharan/Documents/personal/buddy/bridge; path=574d30059456/19 entries; output=2 passed in 0.02s | RECORDS_OFF_OK
+
+- [x] G15: A record round-trips through its file and a hand-edited one still parses; search is keyword over aliases and lines with aliases weighted; the reader re-reads disk so an owner edit counts at once.
+  CHECK: .venv/bin/python -m pytest -q -p no:cacheprovider tests/test_records.py::test_a_record_round_trips_and_a_hand_edited_one_still_parses tests/test_records.py::test_load_skips_the_profile_and_a_file_whose_id_does_not_match_its_name tests/test_records.py::test_search_is_keyword_over_aliases_and_lines_and_aliases_count_more tests/test_records.py::test_the_reader_re_reads_disk_so_an_owner_edit_counts_at_once && echo RECORDS_READ_OK
+  CWD: bridge
+  EXPECT: RECORDS_READ_OK
+  EVIDENCE: exit=0; shell=/bin/sh; cwd=/Users/gurucharan/Documents/personal/buddy/bridge; path=574d30059456/19 entries; output=4 passed in 0.03s | RECORDS_READ_OK
+
+- [x] G16: The reconcile is the only writer: a curated day becomes changed records, a rewritten profile with the record index, and two git commits (as-found, then reconcile) so the replaced fact is in HEAD~1; a forgotten record leaves the tree but stays in history; a bad model result writes nothing and the day stays due; malformed ids never escape the folder; without git the records are still written.
+  CHECK: .venv/bin/python -m pytest -q -p no:cacheprovider tests/test_records.py::test_a_day_is_reconciled_into_records_a_profile_and_one_commit tests/test_records.py::test_forgetting_removes_the_file_and_git_still_has_it tests/test_records.py::test_a_bad_result_writes_nothing_and_the_day_stays_due tests/test_records.py::test_apply_skips_malformed_entries_and_never_escapes_the_folder tests/test_records.py::test_a_day_without_notes_is_nothing_and_the_loop_stops_on_shutdown tests/test_records.py::test_without_git_records_are_still_written && echo RECONCILE_OK
+  CWD: bridge
+  EXPECT: RECONCILE_OK
+  EVIDENCE: exit=0; shell=/bin/sh; cwd=/Users/gurucharan/Documents/personal/buddy/bridge; path=574d30059456/19 entries; output=6 passed in 0.55s | RECONCILE_OK
+
+- [x] G17: MANUAL — the reconcile prompt works on the real model and the real notes: on a scratch copy of this Mac's debrief store, two curated days (2026-09-12, 2026-09-15) reconciled with gpt-5.4-nano into eight typed records with aliases and dated facts, a three-section profile, and the record index; the scratch store received two commits per day.
+  EVIDENCE: manual; run 2026-09-21 in the session's scratchpad (scratchpad/store), output in the session transcript; records included ai-voice-preference (preference), ai-memory-system (project), math-learning-routine (routine), friend-3-crayons (person).
 
 - [ ] G13: MANUAL — a live round trip from the owner's phone: a text is answered, a texted task runs on this Mac and its result arrives, a task question is answered from the phone, a photo arrives, and a message from a second Telegram account gets nothing.
   EVIDENCE: pending

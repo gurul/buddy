@@ -245,7 +245,10 @@ Away from the desk, the same agent can be reached by text: `telegram.py` long-po
 the Telegram Bot API (outbound HTTPS only, no open port) and lets one allowlisted
 numeric Telegram id chat with buddy, start and stop a Mac task, answer a task's
 question and receive a photo from the robot. It is **off by default** and needs a
-switch, a bot token and an owner id together. See [text buddy through Telegram](docs/stackchan/telegram.md).
+switch, a bot token and an owner id together. With `CC_BUDDY_RECORDS=1` the text brain
+also gets a memory layer (`records.py`): typed, git-tracked markdown records the owner
+can edit, a profile one-pager, and a read-only keyword search — written only by a nightly
+reconcile, never by the agent. See [text buddy through Telegram](docs/stackchan/telegram.md).
 
 A [local Laya expression-tuning study](docs/stackchan/laya-emotion/README.md)
 tests context-sensitive eyes and chirps. It includes trained experimental weights,
@@ -266,7 +269,7 @@ Default persistent data lives under `~/.config/cc-buddy-bridge/`:
 |---|---|
 | `env` | API credentials and runtime settings |
 | `notes/` | Diary Markdown, observation JSONL, profiles, highlights and photo records |
-| `debrief/` | Distilled conversation memories and promoted spoken facts |
+| `debrief/` | Distilled conversation memories and promoted spoken facts; with records on, a git repository holding `records/` |
 | `learning/` | `lessons.sqlite3` and saved lesson/whiteboard data |
 | `agent-runs/` | Desktop-task run logs |
 

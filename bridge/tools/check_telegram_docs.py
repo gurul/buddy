@@ -18,7 +18,9 @@ DOC = ROOT / "docs/stackchan/telegram.md"
 
 def main() -> int:
     source, doc, readme = SOURCE.read_text(), DOC.read_text(), (ROOT / "README.md").read_text()
-    names = sorted(set(re.findall(r"CC_BUDDY_TELEGRAM[A-Z_]*", source)))
+    records_source = (ROOT / "bridge/src/cc_buddy_bridge/records.py").read_text()
+    names = sorted(set(re.findall(r"CC_BUDDY_TELEGRAM[A-Z_]*", source))
+                   | set(re.findall(r"CC_BUDDY_RECORDS[A-Z_]*", records_source)))
     problems: list[str] = []
     if len(names) < 3:
         problems.append(f"found only {names} in telegram.py: the reader is broken, not the docs")
@@ -33,6 +35,10 @@ def main() -> int:
         problems.append("telegram.py imports httpx but pyproject.toml does not declare it")
     if not re.search(r"^TELEGRAM_DEFAULT = False\b", source, re.M):
         problems.append("TELEGRAM_DEFAULT is not False: the docs say it ships off")
+    if not re.search(r"^RECORDS_DEFAULT = False\b", records_source, re.M):
+        problems.append("RECORDS_DEFAULT is not False: the docs say it ships off")
+    if "records.py" not in readme or "memory_search" not in doc:
+        problems.append("the records layer is not in README.md / the doc")
     for line in problems:
         print("FAIL:", line)
     if problems:
