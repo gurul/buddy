@@ -27,7 +27,7 @@ async def stop(task):
 
 
 @pytest.mark.parametrize(
-    "muted,phase,chirp", [(False, "speaking", True), (True, "speaking", False), (False, "listening", False)]
+    "muted,phase,chirp", [(False, "speaking", False), (True, "speaking", False), (False, "listening", False)]
 )
 def test_queue_and_arbitration(tmp_path, muted, phase, chirp):
     async def run():
@@ -129,3 +129,27 @@ def test_invalid_results(values):
 
 def test_text_cannot_trigger_startle():
     assert LiveExpressions.label({"probabilities": [0, 0, 0, 0, 0, 1]}) == ("calm", 1)
+
+
+@pytest.mark.parametrize("muted", [False, True])
+def test_laya_keeps_original_caption_chirps(tmp_path, muted):
+    from types import SimpleNamespace
+
+    from cc_buddy_bridge.daemon import Daemon
+
+    async def run():
+        sent = []
+
+        async def send(cmd):
+            sent.append(cmd)
+
+        daemon = SimpleNamespace(
+            ble=SimpleNamespace(connected=True, send=send),
+            _sound=SimpleNamespace(muted=muted),
+            _expressions=SimpleNamespace(enabled=True, ready=True),
+        )
+        Daemon._on_caption(daemon, {"cmd": "caption", "chirp": True, "lines": ["Hello!"]})
+        await asyncio.sleep(0)
+        assert sent[0]["chirp"] is (not muted)
+
+    asyncio.run(run())

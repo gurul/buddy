@@ -1167,9 +1167,6 @@ class Daemon:
         """One page of buddy's reply (or a clear) onto the robot's screen; the pager owns the timing.
         Muted, the page goes without its talk chirp (older firmware has no sound command)."""
         if self.ble.connected:
-            service = getattr(self, "_expressions", None)
-            if service is not None and service.enabled and service.ready:
-                msg = {**msg, "chirp": False}  # Laya owns semantic chirps; no babble on every page.
             asyncio.create_task(self.ble.send(quiet_caption(msg, self._sound.muted)))
 
     def _on_agent_state(self, state: str) -> None:
@@ -1559,7 +1556,7 @@ class Daemon:
                                 self._on_agent_state(previous)
 
                     self._expression_audition = asyncio.create_task(restore_phase(), name="expression-audition")
-                event = service.offer("demo", text, sound=req.get("sound", True) is True)
+                event = service.offer("demo", text)
                 return {"ok": event is not None, "id": event, "expressions": service.status()}
             elif action != "status":
                 return {"ok": False, "error": "unknown expression action"}

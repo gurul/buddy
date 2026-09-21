@@ -127,7 +127,6 @@ static void _applyJson(const char* line, TamaState* out) {
     req.id = doc["id"].as<uint32_t>();
     req.kind = clear ? expression::None : kind;
     req.ttl = doc["ttl_ms"].is<uint32_t>() ? doc["ttl_ms"].as<uint32_t>() : 4000;
-    req.chirp = doc["chirp"].is<bool>() && doc["chirp"].as<bool>();
     out->expressionRequest = req;
     out->expressionPending = true;
     _lastLiveMs = millis();

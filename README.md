@@ -337,4 +337,4 @@ notices for the respective components.
 
 ### Live Laya expressions
 
-Buddy can now use local Laya to choose temporary eye expressions and matching chirps from conversation and diary text, including while speaking. The Mac runs the model and the board renders the cues. This owner-enabled experimental mode uses the original checkpoint because the tuned head performed worse on fresh examples. See [controls, limitations, and device verification](docs/stackchan/laya-expressions/README.md).
+Buddy can now use local Laya to choose temporary eye expressions from conversation and diary text, including while speaking. The Mac runs the model and the board renders the cues. Original chirps and caption babble are preserved; Laya controls eyes only. This owner-enabled experimental mode uses the original checkpoint because the tuned head performed worse on fresh examples. See [controls, limitations, and device verification](docs/stackchan/laya-expressions/README.md).

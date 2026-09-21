@@ -1,10 +1,10 @@
 # Live Laya expressions
 
-The local Laya checkpoint now chooses brief eye expressions and nonverbal sounds for Buddy. It runs in the Mac bridge; the ESP32 renders the eyes and synthesizes chirps. The model does not run on the board.
+Laya controls **eyes only**. Buddy's original chirps, caption babble, sound settings, and phase sounds are preserved. The owner explicitly requested reverting the experimental Laya chirps after trying them.
 
-Spoken user turns, stable clauses in Buddy's streamed replies, and diary thoughts selected for the screen feed a dedicated model worker. One pending event replaces older pending work; inference never runs on the daemon's event loop. The worker sends at most one cue every 1.2 seconds and discards results older than four seconds. The firmware independently expires each cue and restores its normal face. An eye cue works during speaking as well as idle/explore.
+The model runs in the Mac bridge; the ESP32 renders its temporary expression overlay during speech and idle/explore. Spoken user turns, stable clauses in Buddy's streamed replies, and diary thoughts selected for the screen feed one dedicated worker. One pending event replaces older work; inference stays off the daemon event loop. Events are sent at most every 1.2 seconds, discarded after four seconds, and independently expired by the board.
 
-Laya chooses calm, happy, curious, affection, surprised, or startled. Textual startle is reduced to calm because a sentence about an impact is not a physical impact. Happy/affection use smiling eyes and a warble, curiosity uses curious eyes and a question chirp, surprise widens the eyes and chirps, and calm has no chirp. Sounds have an eight-second cooldown and do not interrupt an occupied speaker. Mute, listening, permission prompts, error phases, screen-off, and clock display retain priority. These commands contain no motor targets.
+Laya chooses calm, happy, curious, affection, surprised, or startled. Textual startle becomes calm because a sentence about an impact is not a physical impact. Happy and affection smile; curiosity uses curious eyes; surprise widens the eyes. Listening, permission prompts, error phases, screen-off and clock display retain priority. The firmware expression handler has no sound or motor control. Caption sounds follow their original behavior even while a Laya eye overlay is active.
 
 ## Model and evidence
 
@@ -25,10 +25,6 @@ bridge/.venv/bin/python bridge/tools/expression_live.py off
 
 `react "text"` sends a cue without changing conversation phase. `audition` temporarily uses the speaking phase for six seconds, refuses an active conversation or pending prompt, and restores the previous phase. `--phase listening` checks that listening wins. `cc-buddy-bridge sound off` keeps eyes active and silences sounds.
 
-`--check` exercises the real local model and connected board in speaking, muted-speaking and listening cases. It temporarily toggles sound, restores the original mute choice, and records results in `.test-artifacts/laya-live-device.json`. Board telemetry records actual entry into the eye-render path, speaker activity after chirp start, and expiry. It is not a camera or microphone measurement of human-visible/audible output.
+`--check` exercises the actual local model and board with happy/curious cues during speaking and a suppressed affection cue during listening. It verifies eye application, expiry, no Laya chirp request or playback, and an unchanged sound setting. It does not mute or unmute Buddy. Board telemetry confirms the eye-render path ran; it is not a camera measurement of the screen.
 
-Verification results are recorded in [GATES.md](GATES.md).
-
-## Bench verification — 2026-09-21
-
-The first integrated device run passed all three cases: happy eyes plus an actual speaker-start ACK during speaking; curious eyes with no sound while muted; and an affection proposal suppressed while listening. All three expired. Event-to-command latency was 79.5–100.1 ms (model time 32.5–67.2 ms) with the daemon running; these are three bench samples, not a latency distribution. Host regression coverage passed 204 tests; the acceptance suite passed 108 tests and the C++ firmware arbitration checks. A final clean-build run is retained in `device-results.json`.
+Verification is recorded in [GATES.md](GATES.md) and `device-results.json`. Earlier tests of the superseded sound-enabled build are historical only. The final gate run targets eyes-only behavior and includes regression tests that normal caption chirps are preserved while Laya is enabled.
