@@ -217,3 +217,180 @@ def test_release_inputs_posts_key_and_mouse_ups() -> None:
     assert len(keys) == 128 and all(ev[2] is False for ev in keys) and [ev[1] for ev in keys] == list(range(128))
     assert mice == [("mouse", "lup", (3, 4), 0), ("mouse", "rup", (3, 4), 1), ("mouse", "oup", (3, 4), 2)]
     assert all(tap == "hid" for tap, _ in posted)
+
+
+# ---- settle de-duplication and the timing dict (fast-lane integration) ------------------
+
+class _Clock:
+    def __init__(self) -> None:
+        self.t = 0.0
+
+    def now(self) -> float:
+        return self.t
+
+    def sleep(self, s: float) -> None:
+        self.t = round(self.t + s, 6)
+
+
+def _bench(frames: list, front_app: str = "Calendar", decider=None) -> tuple[Helpers, dict, _Clock, list[float]]:
+    """Helpers on a fake clock that advances with sleep, cycling captures over `frames`,
+    with `front_app` already frontmost; returns the timeouts of every real settle."""
+    clock = _Clock()
+    settles: list[float] = []
+    n = [0]
+
+    def capture() -> Frame:
+        f = frames[n[0] % len(frames)]
+        n[0] += 1
+        return Frame.from_pil(f)
+
+    gui = FakeAutoGUI()
+    h = Helpers(gui, capture=capture, ocr=lambda f, level: [],
+                frontmost_fn=lambda: {"app": front_app, "bundle": "", "title": "x", "pid": 1},
+                run=lambda *a, **k: SimpleNamespace(returncode=0), clock=clock.now, sleep=clock.sleep,
+                now=lambda: datetime(2026, 9, 21, 2, 0), menu_bar_points=0, decider=decider)
+    original = h._settle
+
+    def spy(timeout: float, interval: float = 0.25) -> bool:
+        settles.append(timeout)
+        return original(timeout, interval)
+    h._settle = spy      # type: ignore[method-assign]
+    ns = _ns(gui)
+    h.install(ns)
+    return h, ns, clock, settles
+
+
+def _still() -> Image.Image:
+    return Image.new("RGB", (200, 100), (10, 20, 30))
+
+
+def _moving() -> list[Image.Image]:
+    a = _still()
+    b = a.copy()
+    b.paste((255, 255, 255), (0, 0, 100, 100))
+    return [a, b]
+
+
+def test_open_app_auto_screenshot_settles_once() -> None:
+    h, ns, clock, settles = _bench([_still()])
+    r = dw.execute("open_app('Calendar')", ns, h)
+    assert _kinds(r) == ["input_text", "input_image", "input_text"]          # the reply still carries an image
+    assert settles == [1.5]                                                 # open_app's own settle, nothing after
+    assert clock.t < 0.3, clock.t                                           # one 0.25 s settle interval in total
+    assert r["timing"]["settle"] > 0 and r["timing"]["exec"] >= 0
+
+
+def test_raw_click_still_settles_up_to_1_5s() -> None:
+    h, ns, clock, settles = _bench(_moving())
+    r = dw.execute("pyautogui.click(1, 2)", ns, h)
+    assert _kinds(r) == ["input_image", "input_text"]
+    assert settles == [1.5] and 1.5 <= clock.t < 1.8, clock.t              # the screen never settled: full wait
+
+
+def test_timed_out_settle_still_auto_settles() -> None:
+    h, ns, clock, settles = _bench(_moving())                               # negative control: no reuse
+    r = dw.execute("open_app('Calendar')", ns, h)
+    assert _kinds(r) == ["input_text", "input_image", "input_text"]
+    assert settles == [1.5, 1.5] and 3.0 <= clock.t < 3.4, clock.t         # open_app timed out, the worker settled again
+
+
+def test_settle_is_not_reused_after_a_later_input() -> None:
+    h, ns, clock, settles = _bench([_still()])
+    dw.execute("open_app('Calendar'); pyautogui.click(1, 2)", ns, h)
+    assert settles == [1.5, 1.5]                                            # the click after the settle needs its own
+
+
+def test_reply_carries_timing_with_helpers() -> None:
+    h, ns, _clock, _s = _bench([_still()])
+    r = dw.execute("x = screen_text()", ns, h)
+    t = r["timing"]
+    assert set(t) >= {"capture", "ocr", "encode", "exec"} and all(isinstance(v, float) for v in t.values())
+    assert t["encode"] == 0.0                                               # a text-only call encodes nothing
+    r = dw.execute("pyautogui.click(1, 2)", ns, h)
+    assert r["timing"]["encode"] > 0 and r["timing"]["act"] >= 0 and "settle" in r["timing"]
+    assert "timing" not in dw.execute("log(1)", _ns())                     # no helpers: no timing
+
+
+class _FakeDecider:
+    def __init__(self, p_true: float = 0.8, error: str = "") -> None:
+        self.p_true, self.error = p_true, error
+        self.calls: list[tuple] = []
+
+    def judge(self, question: str, state: dict, criteria=None):
+        self.calls.append((question, state, criteria))
+        return SimpleNamespace(p_true=self.p_true, ms=1.0, error=self.error)
+
+
+def test_verify_operation_answers_from_the_local_decider_and_is_never_terminal(monkeypatch) -> None:
+    decider = _FakeDecider(0.83)
+    h, ns, _clock, _s = _bench([_still()], decider=decider)
+    out: list[dict] = []
+    monkeypatch.setattr(dw, "emit", out.append)
+    dw.serve(ns, iter([json.dumps({"id": 1, "operation": "verify", "goal": "week view", "claim": "It shows the week."}) + "\n",
+                       json.dumps({"id": 2, "operation": "verify", "goal": "x"}) + "\n",
+                       json.dumps({"id": 3, "operation": "execute", "code": "log('still serving')"}) + "\n"]), h)
+    assert out[0]["id"] == 1 and out[0]["verify"]["p_true"] == 0.83 and out[0]["verify"]["ms"] >= 0
+    assert out[0]["verify"]["summary"].startswith("Calendar — 'x'")
+    [(question, state, criteria)] = decider.calls
+    assert state["goal"] == "week view" and state["claim"] == "It shows the week." and state["app"] == "Calendar"
+    assert set(criteria) == {"false", "true"} and "claim" in question
+    assert out[1] == {"id": 2, "verify": {"error": "verify needs string goal and claim"}}
+    assert out[2]["output"][0] == {"type": "input_text", "text": "still serving"}   # a bad verify is not terminal
+
+
+def test_verify_without_a_decider_or_with_a_broken_one_reports_an_error() -> None:
+    h, _ns_, _c, _s = _bench([_still()])
+    assert h.local_verify("g", "c") == {"error": "no local decider (fast lane off)"}
+    h2, _ns2, _c2, _s2 = _bench([_still()], decider=_FakeDecider(error="predict failed"))
+    assert h2.local_verify("g", "c")["error"] == "predict failed"
+
+    class Boom:
+        def judge(self, *a, **k):
+            raise RuntimeError("no metal device")
+    h3, _ns3, _c3, _s3 = _bench([_still()], decider=Boom())
+    assert h3.local_verify("g", "c")["error"] == "RuntimeError: no metal device"
+    assert dw.verify({"goal": "g", "claim": "c"}, None) == {"verify": {"error": "no helpers in this worker"}}
+
+
+# ---- the fast lane's worker wiring ------------------------------------------------------------
+
+def test_start_fast_lane_loads_in_a_thread_and_reports_status() -> None:
+    h, ns, _c, _s = _bench([_still()])
+    assert dw.start_fast_lane(h, {"CC_BUDDY_FAST_LANE": "0"}) == "off (CC_BUDDY_FAST_LANE)" and not h.fast_lane
+    h.install(ns)
+    assert "delegate" not in ns
+    env = {"CC_BUDDY_FAST_LANE": "1", "CC_BUDDY_LAYA_MODEL": "/nonexistent/model"}
+    assert dw.start_fast_lane(h, env).startswith("off (no checkpoint at /nonexistent/model)")
+    calls: list[tuple] = []
+
+    def loader(model: str, style: str):
+        calls.append((model, style))
+        return SimpleNamespace(available=True, load_ms=400.0, warm_ms=1500.0, judge=lambda *a, **k: None)
+    import os
+    env = {"CC_BUDDY_FAST_LANE": "1", "CC_BUDDY_LAYA_MODEL": os.getcwd(), "CC_BUDDY_FAST_LANE_STYLE": "hinted"}
+    status = dw.start_fast_lane(h, env, loader=loader, thread=False)
+    assert status.startswith("ready (load 400 ms, warm 1500 ms, style hinted)") and h.fast_lane and h.decider is not None
+    assert calls == [(os.getcwd(), "hinted")]
+    h.install(ns)
+    assert callable(ns["delegate"])
+    r = dw.execute("x = screen_text()", ns, h)
+    assert r["fast_lane"].startswith("ready (") and "timing" in r
+    # a failing loader is a status line, never an exception, and the reply says so
+
+    def broken(model: str, style: str):
+        raise RuntimeError("no metal device")
+    h2, ns2, _c2, _s2 = _bench([_still()])
+    assert dw.start_fast_lane(h2, env, loader=broken, thread=False) == "failed: RuntimeError: no metal device"
+    h2.install(ns2)
+    assert dw.execute("pass", ns2, h2)["fast_lane"] == "failed: RuntimeError: no metal device"
+
+
+def test_fast_lane_config_defaults_follow_the_eval_decision() -> None:
+    import os
+
+    from cc_buddy_bridge.decider import DEFAULT_MODEL_PATH
+    from cc_buddy_bridge.fast_lane import DEFAULT_STYLE, FAST_LANE_DEFAULT
+    enabled, model, style = dw.fast_lane_config({})
+    assert enabled is FAST_LANE_DEFAULT and model == os.path.expanduser(DEFAULT_MODEL_PATH) and style == DEFAULT_STYLE
+    assert dw.fast_lane_config({"CC_BUDDY_FAST_LANE": "yes", "CC_BUDDY_FAST_LANE_STYLE": "turbo"})[::2] == (True, DEFAULT_STYLE)
+    assert dw.fast_lane_config({"CC_BUDDY_FAST_LANE_STYLE": "jev"})[2] == "jev"

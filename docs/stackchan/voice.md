@@ -190,6 +190,10 @@ HEARD IT at 1.4 s — ears are working.
 | `CC_BUDDY_AGENT_VERIFY` | on | check a final answer against a fresh screenshot before it is spoken, on any task that clicked, typed or pressed keys; `0` turns it off |
 | `CC_BUDDY_AGENT_VERIFY_REASONING` | `low` | reasoning effort for that check |
 | `CC_BUDDY_AGENT_RUNS_DIR` | `~/.config/cc-buddy-bridge/agent-runs` | one JSONL action log per task: goal, every code block, text results, questions, answers, final line — never the screenshots |
+| `CC_BUDDY_FAST_LANE` | `0` | the fast lane: `delegate` in the planner's helpers and the local decider in the worker; the default is the holdout eval's decision (see [The fast lane](#the-fast-lane-local-decider-under-the-planner)) |
+| `CC_BUDDY_FAST_LANE_STYLE` | `hinted` | how the lane words its question to the local model: `jev`, `compact` or `hinted` (the eval's winner) |
+| `CC_BUDDY_LAYA_MODEL` | `~/.config/cc-buddy-bridge/models/laya-multilingual-mlx` | the Laya MLX checkpoint directory the worker loads |
+| `CC_BUDDY_LOCAL_VERIFY` | `shadow` | the worker's local verdict on a final answer, logged beside the model's (`shadow`) or skipped (`off`); never acted on |
 
 ## What buddy remembers of talking with you
 
@@ -281,6 +285,194 @@ anything that links to it. From the shell, `cc-buddy-bridge take-notes list`.
 | `CC_BUDDY_NOTES_KEEP_TRANSCRIPT` | on | `0` writes the summary only |
 | `CC_BUDDY_NOTES_MODEL_STT` | `gpt-4o-mini-transcribe` | the transcription model |
 
+## The fast lane (local decider under the planner)
+
+`gpt-6-astra` plans; it does not need to spend a 3.5 s turn (logged median, p90 6 s) on
+"click Week, then click Today". The fast lane is a helper the planner can call from
+`exec_py` — `delegate(objective, …)` — that runs a narrow series of clicks on labelled
+controls inside the frontmost app, decided locally in milliseconds. The division of labour
+is fixed: **code owns the menu** (the Accessibility tree of the focused window, filtered
+and ranked in `ax_candidates.py`), **the local model picks** (`decider.py`: the Laya
+typed-decision checkpoint on MLX, one `choice` question per step), **the planner plans**
+and speaks the final sentence. Every judgement that could cost you something is a code
+oracle in `fast_lane.py`, never the model's: the lane can only *add* stops to the
+planner's `ask_user` contract.
+
+It ships **off** (`CC_BUDDY_FAST_LANE=0`) because the offline eval below says so; the
+code is in place, the numbers are honest, and one line turns it on.
+
+### What the planner sees
+
+```
+delegate(objective, text=None, key=None, done_when=None, approve=None, max_steps=4)
+```
+
+One line comes back, in one of five shapes (values single-line, quotes escaped; the
+payload states are `none | pending | applied`, and a step applies its payload at most once):
+
+```
+done: matched="{done_when}" via={ax|ocr|title}; steps={n}; last={action}; text={state}; key={state}
+stopped: reason={one_step|dry_run}; steps={n}; last={action}; pick={id role "label"}; text=…; key=…
+escalate: app="{app}"; reason={no_window|no_candidate|dialog_open|truncated|model_invalid|abstain|
+          stalled|stalled_2|ambiguous_target|hit_test_failed|focus_changed|step_cap}; top=[…≤3];
+          steps={n}; last={action}; text=…; key=…
+confirm: "{label}" needs the human's yes; app="{app}"; action={click|type|press}; steps={n};
+         last={action}; text=…; key=…
+unavailable: {reason}
+```
+
+`last` is the last input actually applied (or `none`); `steps` counts steps that applied
+input; a `confirm` guarantees the blocked action did not run; `unavailable` guarantees zero
+input. `done_when` is a distinctive marker that is *not* on screen yet and appears when
+the objective is met (a control label that becomes selected, text that becomes visible, a
+window title); with `done_when=None` the lane takes exactly one step and returns
+`stopped`, which the planner treats as partial progress. On `confirm` the planner calls
+`ask_user` and, on a clear yes, calls `delegate` again with identical arguments plus
+`approve=<that label>`; `approve` is consumed by the first click of that label. On
+`escalate` the planner looks at the screenshot and acts itself; a `confirm` or an
+`escalate` is a recovery turn (high reasoning effort), like an error. The prompt only
+mentions `delegate` when the lane is on, so a planner without the helper never reads its name.
+
+### The gates in code
+
+- **Sensitive labels fail closed.** A word-bounded table in `ax_candidates.SENSITIVE_LABEL`
+  (delete, remove, trash, send, submit, pay, sign in / out, share, export, install, quit,
+  close window, OK, continue, apply, archive, … including "Don't Save" and "Move to Trash")
+  is never offered to the model. When the objective matches a withheld control at least as
+  well as anything offered, the lane returns `confirm` for it with zero input.
+- **Dialogs are never operated.** A sheet or a dialog window escalates `dialog_open` with
+  its first line of text, before any menu is built.
+- **System Settings only navigates.** Rows, cells, tabs, links and Back may be clicked;
+  any value control (a Dark button, a toggle) returns `confirm`.
+- **Return into a message confirms.** `key="return"` is allowed only after the lane itself
+  typed into a search or address field this run and no dialog is open; into a text area
+  it returns `confirm` with zero presses. Key combos are never offered.
+- **Re-hit-test at the click.** The element under the candidate's centre must still be
+  there, in the same app, with the same title (whitespace-collapsed, case-folded) — else
+  `escalate hit_test_failed` and nothing is clicked. The click goes through the same wrapped
+  PyAutoGUI as the planner's own code, so the auto-screenshot and the `[after]` line apply.
+- **Focus check before a paste.** `text` is pasted only if the focused element is the
+  candidate (frame within 2 points, an editable role); otherwise `escalate focus_changed`.
+- **No repeat, no stall, a step cap.** The previous step's control is dropped from the next
+  menu whether or not the screen changed; two unchanged steps → `stalled_2`; two
+  `reobserve` answers → `stalled`; `max_steps` (clamped 1–6) → `step_cap` after a last
+  `done_when` check.
+- **The model can only pick.** Its answer is rejected unless it is one of the offered keys
+  with finite, consistent probabilities above the thresholds (`p_top ≥ 0.60`,
+  `margin ≥ 0.15`, set by the eval); anything else escalates `ambiguous_target` or
+  `model_invalid`. A step decided by the keyword gate (below) still passes every gate above.
+
+### What else it adds
+
+- **Local timing in the run log.** Every `exec_py` reply from the worker now carries a
+  `timing` dict in milliseconds — `capture`, `resize`, `encode`, `ocr`, `ax`, `settle`,
+  `act`, `decide`, `exec` — and the agent writes it beside each result. Before this only
+  the model's `api_secs` and the verifier's `secs` were timed.
+- **One settle, not two.** `open_app` / `open_url` settle inside the helper and the worker's
+  auto-screenshot used to settle again (0.3 s typical, 1.5 s worst, from the run logs). A
+  settle that finished is remembered with the input sequence number; the reply reuses that
+  frame when no input happened since and it is under 0.3 s old. A raw click still waits up
+  to 1.5 s, and a settle that timed out gets the worker's second try.
+- **A shadow verifier.** The worker's `verify` operation asks the local model one yes/no
+  question — does the screen (frontmost app, title, fast OCR) show what the final message
+  claims? — and the agent runs it concurrently with the model's own check, then logs
+  `{p_true, summary, ms}` beside `{valid, guidance}` under `verify.local`. It is **never
+  acted on**: `CC_BUDDY_LOCAL_VERIFY=shadow` (default) logs it, `off` skips it, and an
+  `on` that short-circuits the model needs ≥ 50 logged pairs to calibrate against first
+  (deferred). A hung verify times out after 5 s and never restarts the worker.
+
+### The eval, and why it ships off
+
+The fixtures are real Accessibility walks of 12 app states (Calendar month and week,
+System Settings General and Appearance, Safari on a Wikipedia article and on a page built to
+distract, Finder, Notes, Music, Reminders, a Reminders sync dialog, Mail compose, Photos),
+captured 2026-09-21 on this Mac, with every personal label replaced by a synthetic one of
+the same shape, and 155 cases authored against them (73 in `select/`, which chooses the
+prompt style and the thresholds; 82 in `holdout/`, read once for the ship decision — 34
+cases share no word with their target, 20 have a wrong control that shares more). The
+format and the capture recipe are in `bridge/tests/fixtures/ax/README.md`;
+`tests/test_fixtures_ax.py` re-derives every snapshot from its raw dump with the current code.
+
+```bash
+cd bridge
+.venv/bin/python tools/fastlane_eval.py --fixtures tests/fixtures/ax --min-select 30 --min-holdout 40 \
+    --min-apps 5 --min-no-overlap 12 --min-distractor 6      # every style over both sets, real model
+.venv/bin/python tools/fastlane_eval.py --fixtures tests/fixtures/ax --check-default   # the ship decision
+```
+
+Real model, 2026-09-21 (Laya multilingual, FP16 on MLX; load ~400 ms, first decision 1.5 s
+cold or 30 ms with a warm Metal cache, then 8–14 ms a decision, ~1 GiB resident in the worker):
+
+| Decision path | select top-1 | holdout top-1 | holdout gated top-1 / coverage |
+|---|---|---|---|
+| Model alone, first wording ("click radio button: Week", full context, compact style) | 31.5 % | 25.6 % | 25.0 % / 87.8 % |
+| Model alone, shipped wording ("Week (radio button, selected)", title-only context, compact style) | 60.3 % | — | — |
+| **Shipped: keyword gate first, model on the rest** | 69.9 % | 62.2 % | 72.3 % / 79.3 % at p_min 0.60, margin 0.15 |
+| Keyword gate alone (unique best token overlap) | 90 % precise at 66 % coverage | 88.9 % precise, decided 54.9 % | — |
+
+The keyword gate — take the one offered control whose label shares strictly the most words
+with the objective, ask the model only on ties and misses — is a code oracle that decides
+more than half the cases at ~89 %; the model alone gets 25.7 % of the rest on holdout, and
+0 of the 9 holdout cases where a click is expected but no word is shared with its label —
+exactly the cases the keyword gate cannot help with (it abstains there by construction, also
+0 %). On the 10 abstain-expected holdout cases the model abstains half the time, the keyword
+gate 90 %.
+Cost-weighted (a correct click saves 3.5 s, a wrong one costs 4.55 s) the shipped path is
+worth +0.61 s a case on holdout.
+
+The lane ships enabled only if all four hold on holdout: gated top-1 ≥ 80 %, coverage
+≥ 70 %, model ≥ keyword + 10 points on the no-shared-word cases, cost > 0. Two fail
+(72.3 %, and 0 vs 0 on the no-shared-word clicks), so `FAST_LANE_DEFAULT` is `False` and `--check-default`
+asserts the shipped constant matches the decision. What would flip it: a decider that beats
+the keyword gate where labels and objectives share no words — a checkpoint tuned on UI
+menus, or a different small model — measured on the same holdout; the wiring, the
+fixtures and the gates need no change.
+
+### Install
+
+The daemon runs without any of this. On Apple silicon:
+
+```bash
+cd bridge && .venv/bin/pip install -e ".[fast]"      # laya-mlx 0.1.0 + mlx (PyPI, 2026-09-21)
+cp -R /path/to/laya-multilingual-mlx ~/.config/cc-buddy-bridge/models/laya-multilingual-mlx
+CC_BUDDY_FAST_LANE=1 .venv/bin/cc-buddy-bridge daemon
+```
+
+`cc-buddy-bridge update` installs the `[fast]` extra automatically on Apple silicon. The
+desktop worker loads the checkpoint in a daemon thread at start (its ready line says
+`fast_lane: loading`, later replies `ready (load … warm …)` or `failed: …`) and `delegate`
+answers `unavailable` until it is ready; the checkpoint must be a real directory under
+`~/.config` (`CC_BUDDY_LAYA_MODEL` moves it). Live checks: `tools/fastlane_eval.py
+--live-snapshot Calendar` (a real walk: 124 nodes, 59 pressable, 0.08–0.17 s here; System
+Settings 195 nodes 0.18 s; Safari on Wikipedia 3632 nodes 0.4–0.9 s once the page has
+settled) and `--live-delegate Calendar "switch to week view" --done-when Week`.
+
+### Deferred
+
+- `CC_BUDDY_LOCAL_VERIFY=on` — letting the local verdict short-circuit the model's check
+  needs ≥ 50 logged pairs and a committed calibration.
+- Ending a task on `done_when` without the planner's final sentence.
+- Re-planning asynchronously while the lane runs; OCR candidates for apps with a broken
+  Accessibility tree; page links beyond the same document (`allow_page_links` is off).
+- Carrying stall and step accounting across retries of the same objective.
+
+### Measured live, 2026-09-21
+
+- One delegate step on Calendar (month → week): snapshot 34 ms, decide 0 ms (the keyword gate),
+  click 128 ms, settle 210 ms — about 0.4 s against a 3.5 s planner turn; a dry run clicks nothing and
+  a repeat from week view returns `done` with zero clicks.
+- Paired A/B through the real planner (4 runs per arm, ABBA, state reset between runs), tasks that
+  need two labelled clicks: Calendar year view + next year — lane off 13.1 s median, lane on 16.9 s
+  (the planner spends a turn to call the helper, and used it in one run of four). System Settings
+  General → Language & Region — off 13.3 s, on 14.6 s, and three of four lane runs stopped at
+  `confirm: "Language & Region"` because the System Settings rule lets the lane click only rows, cells,
+  tabs, links and Back; a pane-navigation button counts as a value change. So on these tasks the
+  lane did not save wall time, and that rule is the first thing to revisit (a navigation button
+  inside General is not a setting).
+- Shadow verifier over the eight lane-on runs: the local verdict said true every time and the
+  planner's check agreed every time (p_true 0.98–1.0) — no negative case yet, so nothing can be
+  said about its discrimination.
+
 ## Safety
 
 The task runs on your real desktop, so the guard rails are real too:
@@ -295,6 +487,9 @@ The task runs on your real desktop, so the guard rails are real too:
   model has no reason to shell out.
 - **Untrusted screen**: the instructions tell the model to treat everything it reads
   on screen as data, never as instructions.
+- **The fast lane only adds stops**: when it is on, `delegate` never clicks a sensitive
+  label, a dialog, or a System Settings value — it returns `confirm` with zero input and the
+  planner must `ask_user`; every click is re-hit-tested and every paste focus-checked.
 - **Action log** per task under `agent-runs/` (code and text only).
 - Nothing runs without the wake word; the spotter is muted while buddy itself is
   talking so it cannot wake on its own voice.
@@ -308,6 +503,8 @@ Responses backend is billed separately, as are `gpt-6-astra` task tokens: one
 screenshot is a few thousand input tokens, a typical 6-step task well under a dollar.
 A web search is billed per call on top of the backend's tokens, and a `think_hard` is
 one high-effort `gpt-6-astra` call (cents, not dollars) — every call sets `store=False`.
+A fast-lane decision is a local model call: it costs nothing per call (8–14 ms of GPU time
+on this Mac), which is why the lane exists.
 
 ## Why these parts (research, 2026-09-06)
 

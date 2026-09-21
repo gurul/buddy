@@ -34,7 +34,11 @@ The voice session (voice_agent.py) is the human's handle on a run:
   with no session open the answer is "no".
 
 Every run writes an action log (code, text outputs, asks, final answer —
-never the screenshots) under ~/.config/cc-buddy-bridge/agent-runs/.
+never the screenshots) under ~/.config/cc-buddy-bridge/agent-runs/. Since the
+fast lane (fast_lane.py) each exec result also logs the worker's local timing
+dict, and the final-answer check logs the local shadow verdict (the worker's
+`verify` operation, run concurrently with the model's check, never acted on:
+CC_BUDDY_LOCAL_VERIFY=off|shadow) beside the model's.
 """
 
 from __future__ import annotations
@@ -49,6 +53,8 @@ from dataclasses import dataclass, field
 from datetime import datetime
 from pathlib import Path
 from typing import Any, Awaitable, Callable, Optional
+
+from .fast_lane import FAST_LANE_DEFAULT
 
 log = logging.getLogger(__name__)
 
@@ -67,8 +73,11 @@ DEFAULT_VERIFY_REASONING_EFFORT = "low"
 PROGRESS_SKIP_PREFIXES = ("Traceback", "exec_py", "{", "[", "frontmost:", "screen_text:", "found ", "zoom of")
 DEFAULT_RUNS_DIR = "~/.config/cc-buddy-bridge/agent-runs"
 WORKER_LINE_LIMIT = 32 * 1024 * 1024
+LOCAL_VERIFY_MODES = ("off", "shadow")     # "on" (short-circuiting the model's check) is deferred: needs calibration
+DEFAULT_LOCAL_VERIFY = "shadow"
+VERIFY_WORKER_TIMEOUT_SECS = 5.0
 
-INSTRUCTIONS = """You are buddy, a small desk robot, operating the human's own Mac for them by voice request.
+INSTRUCTIONS_TEMPLATE = """You are buddy, a small desk robot, operating the human's own Mac for them by voice request.
 
 You act through `exec_py`: Python in a persistent session on the real desktop. Nothing is simulated —
 every click and keystroke lands on the human's screen. The first message gives you the screen size, the
@@ -88,7 +97,7 @@ Helpers (each returns a short sentence that the human also sees; use them before
   type_text("café au lait", submit=False)   type any text safely (clipboard paste), enter if submit
   zoom(x, y, w, h)                   a 2x close-up of that region, for small text
   observe()                          a fresh screenshot plus the frontmost app, when you must look again
-Also: pyautogui (hotkey, press, click, scroll), time, log(value), display(image).
+{fast_lane_helper}Also: pyautogui (hotkey, press, click, scroll), time, log(value), display(image).
 
 Rules:
 1. Every exec_py call that clicks, types or presses keys ends with a fresh screenshot automatically,
@@ -121,7 +130,7 @@ Rules:
     sentences, spoken by a robot, under 110 characters) saying what state things are in — that ends the
     task. Report what you verified on screen, not what you attempted; if it did not work, say so. Your
     final message is checked against a fresh screenshot before the human hears it. Do not describe tool
-    mechanics."""
+    mechanics.{fast_lane_rule}"""
 
 # A second, independent look at the screen before a claim is spoken. The agent model has
 # spent the task believing it is close; this call gets no previous_response_id, so it
@@ -146,49 +155,87 @@ VERIFY_SCHEMA: dict[str, Any] = {
     "properties": {"valid": {"type": "boolean"}, "guidance": {"type": "string"}},
 }
 
-TOOLS: list[dict[str, Any]] = [
-    {
-        "type": "function",
-        "name": "exec_py",
-        "strict": True,
-        "description": "Execute Python in the persistent desktop session for this task. Returns every helper "
-                       "sentence and log() line, any image you display(), and — after input actions or errors — "
-                       "a settled screenshot plus an [after] line.",
-        "parameters": {
-            "type": "object",
-            "additionalProperties": False,
-            "required": ["code"],
-            "properties": {
-                "code": {
-                    "type": "string",
-                    "description": "\n".join([
-                        "Python to execute on the local macOS desktop. Globals survive between calls.",
-                        "Available: open_app, open_url, frontmost, screen_text, find_text, click_text, click_element, wait_for, "
-                        "wait_settled, type_text, zoom, observe, pyautogui, time, log(value), display(image).",
-                        "A settled screenshot is appended automatically after any call that clicks, types or "
-                        "presses keys; screenshots use the same coordinates as PyAutoGUI input, including on "
-                        "Retina displays.",
-                        "Use command hotkeys (macOS). Do not change the PyAutoGUI fail-safe setting.",
-                    ]),
-                }
+FAST_LANE_HELPER = """  delegate(objective, text=None, key=None, done_when=None, approve=None, max_steps=4)
+                                     local clicks on labelled controls in the frontmost app (milliseconds a
+                                     step, no vision); returns done / stopped / escalate / confirm / unavailable
+"""
+FAST_LANE_RULE = """
+11. delegate(objective, text=None, key=None, done_when=None, approve=None, max_steps=4) hands a narrow run of
+    clicks on labelled controls inside the frontmost app to a local decider (milliseconds a step, no vision).
+    Prefer it after open_app for menus, tabs, sidebar rows and view switches; use click_text / pyautogui for
+    visual judgements, gestures or ambiguous targets. Supply text and key exactly (it cannot invent them) and
+    done_when: a distinctive marker that is NOT on screen yet and appears when the objective is met; with
+    done_when=None it takes one step and returns "stopped" — treat that as partial progress and verify. End the
+    exec_py call right after delegate returns and read its line: "confirm" names a control that needs the
+    human — call ask_user, and on a clear yes call delegate again with identical arguments plus approve=<that
+    label>; never route around a confirm with another helper. "escalate" lists what it saw — look at the
+    screenshot and act yourself. "unavailable" — ignore the helper. "done" is its evidence, not yours: verify
+    against the goal in the screenshot."""
+
+
+def instructions(fast_lane: bool = False) -> str:
+    """The system prompt: the fast-lane helper and its rule appear only when the lane is on, so
+    a planner without the helper never reads its name."""
+    # str.replace, not format: the template carries literal braces ({"app", "title"} …)
+    return (INSTRUCTIONS_TEMPLATE.replace("{fast_lane_helper}", FAST_LANE_HELPER if fast_lane else "")
+            .replace("{fast_lane_rule}", FAST_LANE_RULE if fast_lane else ""))
+
+
+INSTRUCTIONS = instructions(False)
+
+AVAILABLE_HELPERS = ("open_app, open_url, frontmost, screen_text, find_text, click_text, click_element, wait_for, "
+                     "wait_settled, type_text, zoom, observe")
+
+
+def tools(fast_lane: bool = False) -> list[dict[str, Any]]:
+    """The tool list; the exec_py code description names `delegate` only when the lane is on."""
+    available = AVAILABLE_HELPERS + (", delegate" if fast_lane else "")
+    return [
+        {
+            "type": "function",
+            "name": "exec_py",
+            "strict": True,
+            "description": "Execute Python in the persistent desktop session for this task. Returns every helper "
+                           "sentence and log() line, any image you display(), and — after input actions or errors — "
+                           "a settled screenshot plus an [after] line.",
+            "parameters": {
+                "type": "object",
+                "additionalProperties": False,
+                "required": ["code"],
+                "properties": {
+                    "code": {
+                        "type": "string",
+                        "description": "\n".join([
+                            "Python to execute on the local macOS desktop. Globals survive between calls.",
+                            f"Available: {available}, pyautogui, time, log(value), display(image).",
+                            "A settled screenshot is appended automatically after any call that clicks, types or "
+                            "presses keys; screenshots use the same coordinates as PyAutoGUI input, including on "
+                            "Retina displays.",
+                            "Use command hotkeys (macOS). Do not change the PyAutoGUI fail-safe setting.",
+                        ]),
+                    }
+                },
             },
         },
-    },
-    {
-        "type": "function",
-        "name": "ask_user",
-        "strict": True,
-        "description": "Ask the human a yes/no or short question out loud before a consequential action. "
-                       "Returns their spoken answer.",
-        "parameters": {
-            "type": "object",
-            "additionalProperties": False,
-            "required": ["question"],
-            "properties": {"question": {"type": "string", "description": "One short sentence."}},
-        },
-    },
-]
+        ASK_USER_TOOL,
+    ]
 
+
+ASK_USER_TOOL: dict[str, Any] = {
+    "type": "function",
+    "name": "ask_user",
+    "strict": True,
+    "description": "Ask the human a yes/no or short question out loud before a consequential action. "
+                   "Returns their spoken answer.",
+    "parameters": {
+        "type": "object",
+        "additionalProperties": False,
+        "required": ["question"],
+        "properties": {"question": {"type": "string", "description": "One short sentence."}},
+    },
+}
+
+TOOLS: list[dict[str, Any]] = tools(False)
 
 @dataclass(frozen=True)
 class AgentConfig:
@@ -204,6 +251,8 @@ class AgentConfig:
     max_secs: float = DEFAULT_MAX_SECS
     api_timeout_secs: float = DEFAULT_API_TIMEOUT_SECS
     progress_min_gap_secs: float = 1.5             # the voice session's caption pacing for progress lines
+    local_verify: str = DEFAULT_LOCAL_VERIFY       # off | shadow: the worker's local verdict, logged only
+    fast_lane: bool = FAST_LANE_DEFAULT            # the delegate helper in the prompt and the tool text
 
 
 def _effort(env: Any, key: str, default: str) -> str:
@@ -240,7 +289,15 @@ def configured(environ: Any = None) -> AgentConfig:
         except ValueError:
             log.warning("agent: CC_BUDDY_AGENT_MAX_TURNS=%r is not an integer; using %d", raw_turns, turns)
     runs = Path((env.get("CC_BUDDY_AGENT_RUNS_DIR") or DEFAULT_RUNS_DIR)).expanduser()
+    local_verify = (env.get("CC_BUDDY_LOCAL_VERIFY") or DEFAULT_LOCAL_VERIFY).strip().lower() or DEFAULT_LOCAL_VERIFY
+    if local_verify not in LOCAL_VERIFY_MODES:
+        log.warning("agent: CC_BUDDY_LOCAL_VERIFY=%r is not one of %s; using shadow", local_verify,
+                    "|".join(LOCAL_VERIFY_MODES))
+        local_verify = "shadow"
+    raw_lane = (env.get("CC_BUDDY_FAST_LANE") or "").strip().lower()
+    fast_lane = FAST_LANE_DEFAULT if not raw_lane else raw_lane not in ("0", "false", "no", "off")
     return AgentConfig(
+        local_verify=local_verify, fast_lane=fast_lane,
         enabled=enabled, model=model, max_turns=turns, runs_dir=runs,
         reasoning_effort=_effort(env, "CC_BUDDY_AGENT_REASONING", DEFAULT_REASONING_EFFORT),
         plan_reasoning_effort=_effort(env, "CC_BUDDY_AGENT_PLAN_REASONING", DEFAULT_PLAN_REASONING_EFFORT),
@@ -288,6 +345,8 @@ class WorkerClient:
         self.proc: Optional[asyncio.subprocess.Process] = None
         self.ready: dict[str, Any] = {}
         self.restarts = 0
+        self.last_timing: Optional[dict[str, Any]] = None   # the worker's local ms per sense, from the last reply
+        self._grace = 0.0                                   # extra seconds the next request may wait (stale verify)
         self._id = 0
         self._lock = asyncio.Lock()
 
@@ -319,23 +378,73 @@ class WorkerClient:
     async def execute(self, code: str) -> list[dict[str, Any]]:
         return await self._request({"operation": "execute", "code": code}, timeout=self.timeout_secs)
 
+    async def verify(self, goal: str, claim: str, timeout: float = VERIFY_WORKER_TIMEOUT_SECS) -> dict[str, Any]:
+        """The worker's local shadow verdict: {"p_true", "summary", "ms"} or {"error": …}.
+
+        A slow or hung verify returns {"error": "timeout"} and never restarts the
+        worker — the model's own check is the one that matters; its stale reply is
+        skipped by id when the next request reads the pipe, and that next request
+        gets VERIFY_WORKER_TIMEOUT_SECS of extra patience so a merely slow verdict
+        cannot push it past its own deadline and into a restart.
+        """
+        if self.proc is None or self.proc.stdin is None or self.proc.stdout is None:
+            return {"error": "desktop worker is not running"}
+        try:
+            msg = await self._exchange({"operation": "verify", "goal": goal, "claim": claim}, timeout)
+        except asyncio.TimeoutError:
+            self._grace = VERIFY_WORKER_TIMEOUT_SECS
+            return {"error": "timeout"}
+        except (OSError, ValueError) as e:
+            return {"error": f"{type(e).__name__}: {e}"[:200]}
+        if msg is None:
+            return {"error": "the desktop helper stopped"}
+        verdict = msg.get("verify")
+        if not isinstance(verdict, dict):
+            return {"error": "no verdict in the worker reply"}
+        return verdict
+
+    async def _exchange(self, body: dict[str, Any], timeout: float) -> Optional[dict[str, Any]]:
+        """One request, the reply with the matching id (stale replies from a timed-out
+        verify are skipped). None when the child closed the pipe; asyncio.TimeoutError past
+        `timeout` — the lock is held throughout so requests never interleave."""
+        assert self.proc is not None and self.proc.stdin is not None and self.proc.stdout is not None
+        async with self._lock:
+            self._id += 1
+            rid = self._id
+            req = json.dumps({"id": rid, **body}) + "\n"
+            self.proc.stdin.write(req.encode("utf-8"))
+            await self.proc.stdin.drain()
+            deadline = time.monotonic() + timeout + self._grace
+            self._grace = 0.0
+            while True:
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    raise asyncio.TimeoutError()
+                line = await asyncio.wait_for(self.proc.stdout.readline(), timeout=remaining)
+                if not line:
+                    return None
+                msg = json.loads(line)
+                # the worker answers id-less only for a line it could not parse at all
+                if msg.get("id") == rid or (msg.get("id") is None and "error" in msg):
+                    if isinstance(msg.get("timing"), dict):
+                        self.last_timing = msg["timing"]
+                    return msg
+                log.debug("agent: skipping a stale worker reply (id %s, waiting for %s)", msg.get("id"), rid)
+
     async def _request(self, body: dict[str, Any], timeout: float) -> list[dict[str, Any]]:
         if self.proc is None or self.proc.stdin is None or self.proc.stdout is None:
             raise RuntimeError("desktop worker is not running")
-        async with self._lock:
-            self._id += 1
-            req = json.dumps({"id": self._id, **body}) + "\n"
-            self.proc.stdin.write(req.encode("utf-8"))
-            await self.proc.stdin.drain()
-            try:
-                line = await asyncio.wait_for(self.proc.stdout.readline(), timeout=timeout)
-            except asyncio.TimeoutError:
-                line = None
-        if line is None:
+        try:
+            msg = await self._exchange(body, timeout)
+        except asyncio.TimeoutError:
+            msg = None
+            timed_out = True
+        else:
+            timed_out = False
+        if timed_out:
             return await self._restart(f"exec_py exceeded its {timeout:.0f} s deadline")
-        if not line:
+        if msg is None:
             return await self._restart("the desktop helper stopped (see the daemon log)")
-        msg = json.loads(line)
         if msg.get("error"):
             err = msg["error"]
             if err.get("code") == "failsafe":
@@ -585,7 +694,11 @@ class ComputerAgent:
         factory = self.worker_factory or (lambda: WorkerClient(timeout_secs=self.config.exec_timeout_secs))
         worker = factory()
         try:
-            await worker.start()
+            ready = await worker.start()
+            if isinstance(ready, dict):
+                info = {k: v for k, v in ready.items() if k != "ready"}
+                self._log({"worker": info})
+                log.info("agent: worker ready — fast lane %s", info.get("fast_lane", "off (not reported)"))
             result = await self._loop(goal, worker)
         except Cancelled:
             reason = self._cancel_reason
@@ -654,9 +767,9 @@ class ComputerAgent:
             self.turn = turn
             req: dict[str, Any] = {
                 "model": cfg.model,
-                "instructions": INSTRUCTIONS,
+                "instructions": instructions(cfg.fast_lane),
                 "input": next_input,
-                "tools": TOOLS,
+                "tools": tools(cfg.fast_lane),
                 "parallel_tool_calls": False,
                 "reasoning": {"effort": effort},
                 "truncation": "auto",
@@ -707,9 +820,16 @@ class ComputerAgent:
                     self._log({"turn": turn, "exec": code})
                     out = await self._interruptible(worker.execute(code))
                     texts = [o["text"] for o in out if o.get("type") == "input_text"]
-                    self._log({"turn": turn, "result": texts,
-                               "images": sum(1 for o in out if o.get("type") == "input_image")})
+                    entry = {"turn": turn, "result": texts,
+                             "images": sum(1 for o in out if o.get("type") == "input_image")}
+                    timing = getattr(worker, "last_timing", None)
+                    if isinstance(timing, dict):
+                        entry["timing"] = timing
+                    self._log(entry)
                     if any(("Traceback" in t or "exec_py error" in t or "was restarted" in t) for t in texts):
+                        escalate = True
+                    # the lane handing back (a confirm or an escalate) is a recovery turn too
+                    if any(t.startswith(("delegate escalate", "delegate confirm")) for t in texts):
                         escalate = True
                     after = next((t for t in reversed(texts) if t.startswith("[after")), "")
                     if after:
@@ -770,10 +890,38 @@ class ComputerAgent:
             return None
         return "I couldn't confirm that on screen. " + claim
 
-    async def _verify(self, goal: str, claim: str, turn: int, worker: Any) -> Optional[dict[str, Any]]:
+    async def _shadow_verify(self, goal: str, claim: str, worker: Any) -> dict[str, Any]:
+        """The worker's local verdict, for the log only. Its own try: a worker without
+        `verify`, a timeout or any error becomes {"error": …} and never touches the answer."""
         t0 = self._clock()
         try:
+            result = await asyncio.wait_for(worker.verify(goal, claim), timeout=VERIFY_WORKER_TIMEOUT_SECS + 1.0)
+        except asyncio.CancelledError:
+            raise
+        except Exception as e:  # noqa: BLE001 — shadow only; logged, never raised
+            log.error("agent: local shadow verify failed (%s: %s)", type(e).__name__, e)
+            return {"error": type(e).__name__, "secs": round(self._clock() - t0, 2)}
+        if not isinstance(result, dict):
+            return {"error": "bad reply", "secs": round(self._clock() - t0, 2)}
+        return {**result, "secs": round(self._clock() - t0, 2)}
+
+    async def _shadow_result(self, shadow: Optional[asyncio.Task]) -> Optional[dict[str, Any]]:
+        if shadow is None:
+            return None
+        try:
+            return await shadow
+        except asyncio.CancelledError:
+            return {"error": "cancelled"}
+
+    async def _verify(self, goal: str, claim: str, turn: int, worker: Any) -> Optional[dict[str, Any]]:
+        t0 = self._clock()
+        shadow: Optional[asyncio.Task] = None
+        try:
             items = await self._interruptible(worker.observe())
+            if self.config.local_verify == "shadow":
+                # Started right after the fresh capture, gathered after the model's answer:
+                # it costs the log a field, not the human a second of wait.
+                shadow = asyncio.ensure_future(self._shadow_verify(goal, claim, worker))
             images = [o for o in items if o.get("type") == "input_image"][:1]
             req: dict[str, Any] = {
                 "model": self.config.model,
@@ -791,12 +939,22 @@ class ComputerAgent:
             response = await self._interruptible(self._create(req, turn))
             verdict = _verdict(response)
         except Cancelled:
+            if shadow is not None:
+                shadow.cancel()
             raise
         except Exception as e:  # noqa: BLE001 — a broken check must not eat the answer
             log.warning("agent: final-answer check failed (%s); letting the answer through", e)
-            self._log({"turn": turn, "verify": {"error": type(e).__name__}})
+            entry: dict[str, Any] = {"error": type(e).__name__}
+            local = await self._shadow_result(shadow)
+            if local is not None:
+                entry["local"] = local
+            self._log({"turn": turn, "verify": entry})
             return None
-        self._log({"turn": turn, "verify": {**verdict, "secs": round(self._clock() - t0, 2)}})
+        entry = {**verdict, "secs": round(self._clock() - t0, 2)}
+        local = await self._shadow_result(shadow)
+        if local is not None:
+            entry["local"] = local
+        self._log({"turn": turn, "verify": entry})
         return verdict
 
     def _steer_items(self) -> list[dict[str, Any]]:

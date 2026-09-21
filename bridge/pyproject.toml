@@ -68,6 +68,13 @@ dependencies = [
 
 [project.optional-dependencies]
 dev = ["pytest>=8.0", "ruff>=0.6"]
+# The computer-use fast lane (fast_lane.py, decider.py): laya-mlx runs the Laya
+# typed-decision checkpoint natively on Apple silicon (MLX). 0.1.0 current per
+# PyPI, mlx 0.32.2, 2026-09-21. Apple silicon only; imported lazily by the
+# desktop worker's loader thread, so the daemon runs without it. Install with
+# `pip install -e ".[fast]"` and copy the checkpoint to
+# ~/.config/cc-buddy-bridge/models/laya-multilingual-mlx (see docs/stackchan/voice.md).
+fast = ["laya-mlx>=0.1.0,<0.2; sys_platform == 'darwin' and platform_machine == 'arm64'"]
 
 [project.scripts]
 cc-buddy-bridge = "cc_buddy_bridge.cli:main"

@@ -20,6 +20,9 @@ On top of raw PyAutoGUI the namespace carries the helpers from
 desktop_helpers.py — open_app, open_url, frontmost, screen_text, find_text,
 click_text, wait_for, wait_settled, type_text, zoom, observe — which sense
 the screen locally (CG capture, Vision OCR, AX) and log one sentence each.
+With CC_BUDDY_FAST_LANE on (default: fast_lane.FAST_LANE_DEFAULT) it also
+carries `delegate`, and `start_fast_lane` loads the local decider in a daemon
+thread; the ready line and every reply say where that stands ("fast_lane").
 
 Auto-screenshot rule: when a call clicked, typed or pressed keys (any
 PyAutoGUI input function, type_text, click_text), raised, or produced no
@@ -29,6 +32,11 @@ the frontmost app and whether the screen changed since the previous call.
 Text-only calls (screen_text, find_text) stay cheap: no image.
 
 `{"operation": "observe"}` is `execute("observe()")`: the first turn's picture.
+`{"operation": "verify", "goal": …, "claim": …}` runs the local shadow verifier
+(helpers.local_verify) and replies `{"verify": {"p_true", "summary", "ms"}}` or
+`{"verify": {"error": …}}` — never a terminal error. With helpers, every reply
+also carries `"timing": {…}` in ms (capture, resize, encode, ocr, ax, settle,
+act, decide, exec) so the agent's run log shows where local time goes.
 `python -m cc_buddy_bridge.desktop_worker --release` posts a key-up for every
 key code and a mouse-up for every button, in a fresh process, so the daemon
 can release anything a killed worker left held.
@@ -122,6 +130,8 @@ def execute(code: str, namespace: dict[str, Any], helpers: Any = None) -> dict[s
     output: list[dict[str, Any]] = []
     text_bytes = 0
     image_bytes = 0
+    t_start = time.perf_counter()
+    encode_secs = 0.0
 
     def log(*values: Any) -> None:
         nonlocal text_bytes
@@ -132,11 +142,13 @@ def execute(code: str, namespace: dict[str, Any], helpers: Any = None) -> dict[s
         output.append({"type": "input_text", "text": text})
 
     def display(value: Any) -> None:
-        nonlocal image_bytes
+        nonlocal image_bytes, encode_secs
         if isinstance(value, Image.Image):
+            t0 = time.perf_counter()
             buf = io.BytesIO()
             value.save(buf, format="PNG")
             value = buf.getvalue()
+            encode_secs += time.perf_counter() - t0
         if not isinstance(value, bytes) or not value.startswith(b"\x89PNG\r\n\x1a\n"):
             raise TypeError("display() expects a Pillow image or PNG bytes")
         image_bytes += len(value)
@@ -179,7 +191,85 @@ def execute(code: str, namespace: dict[str, Any], helpers: Any = None) -> dict[s
                 display(helpers.settled_screenshot(1.5 if helpers.acted else 0.0))
         with contextlib.suppress(Exception):
             log(helpers.after_line())
-    return {"output": output or [{"type": "input_text", "text": "exec_py completed with no output."}]}
+    result: dict[str, Any] = {"output": output or [{"type": "input_text", "text": "exec_py completed with no output."}]}
+    if helpers is not None:
+        timing = dict(helpers.timing_ms())
+        timing["encode"] = round(encode_secs * 1000, 2)
+        timing["exec"] = round((time.perf_counter() - t_start) * 1000, 2)
+        result["timing"] = timing
+        if getattr(helpers, "fast_lane", False):
+            result["fast_lane"] = str(helpers.fast_lane_status)
+    return result
+
+
+def fast_lane_config(env: Any) -> tuple[bool, str, str]:
+    """(enabled, model path, style) from CC_BUDDY_FAST_LANE / CC_BUDDY_LAYA_MODEL / CC_BUDDY_FAST_LANE_STYLE.
+    The default for the switch is fast_lane.FAST_LANE_DEFAULT, which the holdout eval sets."""
+    from .decider import DEFAULT_MODEL_PATH, STYLES
+    from .fast_lane import DEFAULT_STYLE, FAST_LANE_DEFAULT
+
+    raw = (env.get("CC_BUDDY_FAST_LANE") or "").strip().lower()
+    enabled = FAST_LANE_DEFAULT if not raw else raw not in ("0", "false", "no", "off")
+    model = os.path.expanduser((env.get("CC_BUDDY_LAYA_MODEL") or DEFAULT_MODEL_PATH).strip() or DEFAULT_MODEL_PATH)
+    style = (env.get("CC_BUDDY_FAST_LANE_STYLE") or "").strip().lower()
+    if style not in STYLES:
+        style = DEFAULT_STYLE                  # the eval's winner (fast_lane.py), "hinted" as of 2026-09-21
+    return enabled, model, style
+
+
+def start_fast_lane(helpers: Any, env: Any, loader: Any = None, thread: bool = True) -> str:
+    """Turn the lane on for `helpers` and load the decider off the critical path.
+
+    Returns the status the ready line carries: "loading" (a daemon thread is running
+    `loader(model, style)`, 0.4 s load + 1.5 s cold warm-up measured 2026-09-21), or
+    "off (<reason>)". Later replies carry `helpers.fast_lane_status`: "ready (load … warm …)"
+    or "failed: <one line>" — the delegate helper answers `unavailable` until ready.
+    """
+    enabled, model, style = fast_lane_config(env)
+    if not enabled:
+        helpers.fast_lane_status = "off (CC_BUDDY_FAST_LANE)"
+        return helpers.fast_lane_status
+    if sys.platform != "darwin":
+        helpers.fast_lane_status = f"off (not macOS: {sys.platform})"
+        return helpers.fast_lane_status
+    if not os.path.isdir(model):
+        helpers.fast_lane_status = f"off (no checkpoint at {model})"
+        return helpers.fast_lane_status
+    helpers.fast_lane = True
+    helpers.fast_lane_status = "loading"
+
+    def load() -> None:
+        try:
+            if loader is not None:
+                decider = loader(model, style)
+            else:
+                from .decider import Decider
+
+                decider = Decider.load(model, style=style)
+            helpers.decider = decider
+            helpers.fast_lane_status = (f"ready (load {getattr(decider, 'load_ms', 0):.0f} ms, "
+                                        f"warm {getattr(decider, 'warm_ms', 0):.0f} ms, style {style})")
+        except Exception as e:  # noqa: BLE001 — the lane stays unavailable; the model keeps its ordinary helpers
+            helpers.fast_lane_status = f"failed: {type(e).__name__}: {e}"[:200]
+
+    if thread:
+        threading.Thread(target=load, name="fast-lane-loader", daemon=True).start()
+    else:
+        load()
+    return helpers.fast_lane_status
+
+
+def verify(req: dict[str, Any], helpers: Any) -> dict[str, Any]:
+    """The `verify` operation: the local shadow verdict on the agent's final claim."""
+    goal, claim = req.get("goal"), req.get("claim")
+    if not isinstance(goal, str) or not isinstance(claim, str) or not claim.strip():
+        return {"verify": {"error": "verify needs string goal and claim"}}
+    if helpers is None:
+        return {"verify": {"error": "no helpers in this worker"}}
+    try:
+        return {"verify": helpers.local_verify(goal[:2000], claim[:2000])}
+    except Exception as e:  # noqa: BLE001 — a shadow verdict never becomes a protocol error
+        return {"verify": {"error": f"{type(e).__name__}: {e}"[:200]}}
 
 
 def serve(namespace: dict[str, Any], stream: Any, helpers: Any = None) -> None:
@@ -202,8 +292,12 @@ def serve(namespace: dict[str, Any], stream: Any, helpers: Any = None) -> None:
             terminal = result.get("error")
             emit({"id": rid, **result})
             continue
+        if isinstance(req, dict) and req.get("operation") == "verify":
+            emit({"id": rid, **verify(req, helpers)})
+            continue
         if not isinstance(req, dict) or req.get("operation") != "execute":
-            emit({"id": rid, "error": {"code": "unsupported", "message": "only execute and observe are supported"}})
+            emit({"id": rid, "error": {"code": "unsupported",
+                                       "message": "only execute, observe and verify are supported"}})
             continue
         code = req.get("code")
         if not isinstance(code, str) or not code.strip() or len(code.encode("utf-8")) > MAX_CODE_BYTES:
@@ -249,8 +343,9 @@ def main() -> None:
     # model has no reason to reach past them.
     namespace: dict[str, Any] = {"__builtins__": __builtins__, "pyautogui": pyautogui, "time": time}
     helpers = Helpers(pyautogui)
+    fast_lane = start_fast_lane(helpers, os.environ)
     helpers.install(namespace)
-    emit({"ready": True, "platform": sys.platform, "width": width, "height": height})
+    emit({"ready": True, "platform": sys.platform, "width": width, "height": height, "fast_lane": fast_lane})
     if "--check" in sys.argv:
         return
     parent = os.getppid()

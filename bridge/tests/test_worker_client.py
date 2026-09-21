@@ -81,3 +81,39 @@ def test_large_reply_line_is_accepted() -> None:
         finally:
             await b.client.close()
     asyncio.run(go())
+
+
+def test_verify_timeout_does_not_restart() -> None:
+    async def go() -> None:
+        b = Bench()
+        await b.client.start()
+        pid = b.client.proc.pid
+        try:
+            assert await b.client.execute("log(1)") == [{"type": "input_text", "text": "ran log(1)"}]
+            assert b.client.last_timing == {"exec": 1.0}                          # every reply's timing is kept
+            verdict = await b.client.verify("goal", "the claim")
+            assert verdict == {"p_true": 0.9, "summary": "Warp — 'zsh'; 1 lines", "ms": 1.5}
+            assert await b.client.verify("goal", "hang", timeout=0.3) == {"error": "timeout"}
+            assert b.client.restarts == 0 and b.client.proc.pid == pid           # no restart, same child
+            assert await b.client.execute("after") == [{"type": "input_text", "text": "ran after"}]
+            items = await b.client.observe()
+            assert b.client.last_timing == {"capture": 1.0, "exec": 2.0} and items[0]["type"] == "input_image"
+        finally:
+            await b.client.close()
+        assert b.released == 1
+    asyncio.run(go())
+
+
+def test_slow_verify_reply_is_skipped_and_the_next_exec_gets_grace() -> None:
+    async def go() -> None:
+        b = Bench()                                          # execute deadline 0.5 s; the slow verify answers at 0.6 s
+        await b.client.start()
+        pid = b.client.proc.pid
+        try:
+            assert await b.client.verify("goal", "slow", timeout=0.2) == {"error": "timeout"}
+            out = await b.client.execute("after")             # would time out at 0.5 s behind the stale reply without grace
+            assert out == [{"type": "input_text", "text": "ran after"}]
+            assert b.client.restarts == 0 and b.client.proc.pid == pid
+        finally:
+            await b.client.close()
+    asyncio.run(go())

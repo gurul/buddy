@@ -457,3 +457,115 @@ def test_focused_pid_prefers_ax_then_window_list_then_workspace(monkeypatch) -> 
     monkeypatch.setattr(dh, "_workspace_pid", lambda: 0)
     assert dh._focused_pid() == 0 and dh.ax_frontmost() == dh.EMPTY_FRONT
 
+
+
+# ---- the fast lane's senses and effectors (delegate adapter) --------------------------------
+
+def _candidate(label: str, role: str = "radio button", frame=(10, 10, 40, 20), app: str = "Calendar", **kw):
+    from cc_buddy_bridge.ax_candidates import Candidate
+
+    base = dict(id="1", role=role, label=label, value="", frame=frame, actions=("AXPress",), enabled=True, app=app,
+                in_content=False, in_dialog=False, secure=False, editable=role in ("text field", "search field"))
+    base.update(kw)
+    return Candidate(**base)
+
+
+def test_install_binds_delegate_only_with_the_fast_lane() -> None:
+    b = Bench()
+    ns: dict = {"pyautogui": b.gui}
+    b.h.install(ns)
+    assert "delegate" not in ns
+    b.h.fast_lane = True
+    b.h.install(ns)
+    assert callable(ns["delegate"])
+    b.h.fast_lane = False
+    b.h.install(ns)
+    assert "delegate" not in ns
+
+
+def test_delegate_without_a_decider_is_unavailable_and_moves_nothing() -> None:
+    b = Bench()
+    line = b.h.delegate("switch to week view")
+    assert line.startswith("unavailable:") and b.gui.clicks == [] and b.h.acted is False
+    assert b.logs[-1].startswith("delegate unavailable:")
+
+
+def test_click_candidate_re_hit_tests_and_refuses_on_every_mismatch() -> None:
+    from cc_buddy_bridge.desktop_helpers import _LaneAdapter
+
+    table = {(30, 20): {"role": "AXRadioButton", "title": "Week", "frame": (10, 10, 40, 20), "app": "Calendar"}}
+    b = Bench()
+    b.h._element_at = lambda x, y: table.get((x, y))
+    b.h.install({"pyautogui": b.gui})
+    a = _LaneAdapter(b.h, None)
+    assert a.click_candidate(_candidate("Week")) == "clicked AXRadioButton 'Week' in Calendar at (30,20)"
+    assert b.gui.clicks == [(30, 20)] and b.h.acted is True and b.h._action_seq == 1
+    assert a.click_candidate(_candidate("Month")).startswith("refused: under (30,20) is AXRadioButton 'Week'")
+    assert a.click_candidate(_candidate("Week", app="Mail")).startswith("refused: (30,20) is in Calendar, not Mail")
+    assert a.click_candidate(_candidate("Week", frame=(100, 100, 10, 10))).startswith("refused: nothing under")
+    table[(30, 20)] = {"role": "AXButton", "title": "Delete Event", "frame": (10, 10, 40, 20), "app": "Calendar"}
+    assert a.click_candidate(_candidate("Delete Event", "button")) == "refused: 'Delete Event' is a sensitive control without approval"
+    approved = _LaneAdapter(b.h, "delete event")
+    assert approved.click_candidate(_candidate("Delete Event", "button")).startswith("clicked AXButton 'Delete Event'")
+    assert b.gui.clicks == [(30, 20), (30, 20)]                            # exactly the two allowed clicks
+    b.h._element_at = lambda x, y: (_ for _ in ()).throw(RuntimeError("ax down"))
+    assert a.click_candidate(_candidate("Week")) == "refused: hit-test failed (RuntimeError)"
+
+
+def test_focus_and_type_pastes_only_into_the_focused_matching_field() -> None:
+    from cc_buddy_bridge.desktop_helpers import _LaneAdapter
+
+    field = _candidate("Search", "search field", frame=(200, 10, 120, 22))
+    b = Bench()
+    b.h._element_at = lambda x, y: {"role": "AXSearchField", "title": "Search", "frame": (200, 10, 120, 22), "app": "Calendar"}
+    b.h._focused_element = lambda: {"role": "AXSearchField", "title": "Search", "frame": (201, 10, 120, 22),
+                                     "app": "Calendar", "editable": True}
+    b.h.install({"pyautogui": b.gui})
+    a = _LaneAdapter(b.h, None)
+    assert a.focus_and_type(field, "cats") == "typed 4 characters"
+    assert b.gui.hotkeys == [("command", "v")] and b.clipboard.history[0] == "cats"
+    b.h._focused_element = lambda: {"role": "AXTextArea", "title": "Message", "frame": (0, 300, 400, 100),
+                                     "app": "Calendar", "editable": True}
+    assert a.focus_and_type(field, "cats").startswith("refused: focus moved to text area 'Message'")
+    b.h._focused_element = lambda: None
+    assert a.focus_and_type(field, "cats").startswith("refused: focus is on nothing")
+    assert b.gui.hotkeys == [("command", "v")]                              # no second paste
+
+
+def test_lane_senses_read_the_screen_and_the_snapshot() -> None:
+    from cc_buddy_bridge.desktop_helpers import _LaneAdapter
+
+    a = img()
+    b = Bench(frames=[a, a, a, with_block(a, 0.3)], ocr=scripted([[ocr_line("Week view")]]),   # two OCR captures first
+              fronts=scripted([front("Calendar", "September", "com.apple.iCal")]))
+    ad = _LaneAdapter(b.h, None)
+    assert ad.frontmost_pid() == 1
+    assert ad.text_visible("week") is True and ad.text_visible("year") is False and ad.text_visible("") is False
+    assert ad.screen_changed() is None                                       # no baseline before a snapshot
+    ad._thumb0 = Frame.from_pil(a).thumb()
+    assert ad.screen_changed() is False
+    assert ad.screen_changed() is True
+    assert ad.press("return") == "pressed return" and b.gui.presses == ["return"] and b.h.acted
+    assert ad.settle(0.5) >= 0.0
+
+
+def test_click_candidate_accepts_a_hit_inside_a_row_labelled_by_its_static_text() -> None:
+    from cc_buddy_bridge.desktop_helpers import _LaneAdapter
+
+    row = _candidate("Recently Added", "row", frame=(20, 100, 200, 24), app="Music")
+    b = Bench()
+    hits = {(120, 112): {"role": "AXStaticText", "title": "Recently Added", "frame": (60, 104, 120, 16), "app": "Music"}}
+    b.h._element_at = lambda x, y: hits.get((x, y))
+    b.h.install({"pyautogui": b.gui})
+    a = _LaneAdapter(b.h, None)
+    assert a.click_candidate(row).startswith("clicked AXStaticText 'Recently Added' in Music")
+    hits[(120, 112)] = {"role": "AXImage", "title": "clock", "frame": (24, 104, 16, 16), "app": "Music"}   # the row's icon
+    assert a.click_candidate(row).startswith("refused: under (120,112) is AXImage 'clock'")            # not in the label
+    hits[(120, 112)] = {"role": "AXRow", "title": "", "frame": (20, 100, 200, 24), "app": "Music"}       # the row itself
+    assert a.click_candidate(row).startswith("clicked AXRow in Music")
+    hits[(120, 112)] = {"role": "AXStaticText", "title": "Albums", "frame": (60, 130, 120, 16), "app": "Music"}  # outside
+    assert a.click_candidate(row).startswith("refused: under (120,112) is AXStaticText 'Albums'")
+    hits[(120, 112)] = {"role": "AXStaticText", "title": "Trash", "frame": (60, 104, 120, 16), "app": "Music"}
+    trash = _candidate("Move to Trash", "row", frame=(20, 100, 200, 24), app="Music")   # matches, but sensitive
+    assert a.click_candidate(trash).startswith("refused: 'Trash' is a sensitive control without approval")
+    assert b.gui.clicks == [(120, 112), (120, 112)]

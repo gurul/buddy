@@ -506,10 +506,11 @@ def test_action_log_records_goal_exec_results_and_final(tmp_path: Path) -> None:
     assert a.run_log is not None and a.run_log.parent == tmp_path / "runs"
     lines = [json.loads(ln) for ln in a.run_log.read_text().splitlines()]
     assert lines[0]["goal"] == "look" and lines[0]["model"] == "gpt-6-astra"
-    assert lines[1] == {"t": 1.0, "turn": 0, "context": "frontmost: Warp — 'zsh'; screen 100x50; 14:02"}
-    assert lines[2] == {"t": 1.0, "turn": 1, "effort": "high", "api_secs": 0.0}
-    assert lines[3]["exec"] == "display(pyautogui.screenshot())"
-    assert lines[4] == {"t": 1.0, "turn": 1, "result": ["hi"], "images": 1}     # no image bytes in the log
+    assert lines[1] == {"t": 1.0, "worker": {"width": 100, "height": 50}}          # the ready line, minus "ready"
+    assert lines[2] == {"t": 1.0, "turn": 0, "context": "frontmost: Warp — 'zsh'; screen 100x50; 14:02"}
+    assert lines[3] == {"t": 1.0, "turn": 1, "effort": "high", "api_secs": 0.0}
+    assert lines[4]["exec"] == "display(pyautogui.screenshot())"
+    assert lines[5] == {"t": 1.0, "turn": 1, "result": ["hi"], "images": 1}     # no image bytes, no timing (fake worker)
     assert lines[-1]["final"] == "all done"
     assert "data:x" not in a.run_log.read_text() and "AAAA" not in a.run_log.read_text()
 
@@ -605,7 +606,8 @@ def test_verifier_failure_lets_the_answer_through(tmp_path: Path) -> None:
     a, _ = _agent(client, FakeWorker({"pyautogui.press('space')": ACTED}), tmp_path)
     assert asyncio.run(a.run("play spotify")) == "Spotify is playing."
     logged = [json.loads(ln) for ln in a.run_log.read_text().splitlines()]
-    assert [ln["verify"] for ln in logged if "verify" in ln] == [{"error": "RuntimeError"}]
+    [entry] = [ln["verify"] for ln in logged if "verify" in ln]
+    assert entry["error"] == "RuntimeError" and entry["local"]["error"] == "AttributeError"   # FakeWorker has no verify
 
 
 def test_verifier_request_shape(tmp_path: Path) -> None:
@@ -625,3 +627,179 @@ def test_verifier_request_shape(tmp_path: Path) -> None:
     assert "Goal: play spotify" in text["text"] and "Spotify is playing." in text["text"]
     assert "[after your input] frontmost: Spotify" in text["text"]
     assert image == IMAGE                                                  # a FRESH observe screenshot
+
+
+# ---- the fast lane's log fields: worker timing and the local shadow verdict --------------
+
+class TimedWorker(FakeWorker):
+    """A FakeWorker that reports a timing dict and answers verify after `verify_secs`."""
+
+    def __init__(self, results=None, verify_secs: float = 0.0, verify_result: dict | None = None) -> None:
+        super().__init__(results)
+        self.last_timing: dict | None = None
+        self.verify_secs = verify_secs
+        self.verify_result = verify_result or {"p_true": 0.91, "summary": "Spotify — 'Spotify'; 12 lines", "ms": 6.0}
+        self.verified: list[tuple[str, str]] = []
+
+    async def execute(self, code: str) -> list[dict]:
+        out = await super().execute(code)
+        self.last_timing = {"capture": 37.0, "settle": 330.0, "exec": 402.5}
+        return out
+
+    async def verify(self, goal: str, claim: str) -> dict:
+        self.verified.append((goal, claim))
+        if self.verify_secs:
+            await asyncio.sleep(self.verify_secs)
+        return dict(self.verify_result)
+
+
+def test_loop_logs_worker_timing(tmp_path: Path) -> None:
+    client = FakeClient([_response("r1", _call("exec_py", "c1", code="log(screen_text())")),
+                         _response("r2", _message("done"))])
+    a, _ = _agent(client, TimedWorker({"log(screen_text())": LOOKED}), tmp_path)
+    asyncio.run(a.run("look"))
+    logged = [json.loads(ln) for ln in a.run_log.read_text().splitlines()]
+    [entry] = [ln for ln in logged if "result" in ln]
+    assert entry["timing"] == {"capture": 37.0, "settle": 330.0, "exec": 402.5}
+
+
+def test_shadow_verify_logged_beside_verdict(tmp_path: Path) -> None:
+    client = FakeClient([_response("r1", _call("exec_py", "c1", code="pyautogui.press('space')")),
+                         _response("r2", _message("Spotify is playing.")),
+                         _verdict("v1", True)])
+    worker = TimedWorker({"pyautogui.press('space')": ACTED})
+    a, _ = _agent(client, worker, tmp_path)
+    assert asyncio.run(a.run("play spotify")) == "Spotify is playing."
+    assert worker.verified == [("play spotify", "Spotify is playing.")]
+    logged = [json.loads(ln) for ln in a.run_log.read_text().splitlines()]
+    [entry] = [ln["verify"] for ln in logged if "verify" in ln]
+    assert entry["valid"] is True and entry["local"]["p_true"] == 0.91 and "secs" in entry["local"]
+    assert entry["local"]["summary"].startswith("Spotify")
+    # off: no verify request, no "local" field
+    client = FakeClient([_response("r1", _call("exec_py", "c1", code="pyautogui.press('space')")),
+                         _response("r2", _message("Spotify is playing.")),
+                         _verdict("v1", True)])
+    worker = TimedWorker({"pyautogui.press('space')": ACTED})
+    cfg = AgentConfig(runs_dir=tmp_path / "runs2", local_verify="off")
+    a, _ = _agent(client, worker, tmp_path, config=cfg)
+    asyncio.run(a.run("play spotify"))
+    assert worker.verified == []
+    logged = [json.loads(ln) for ln in a.run_log.read_text().splitlines()]
+    [entry] = [ln["verify"] for ln in logged if "verify" in ln]
+    assert "local" not in entry
+
+
+def test_shadow_verify_is_concurrent(tmp_path: Path) -> None:
+    """The shadow runs while the model's check is in flight: it adds under 50 ms to the wall time
+    of _verify. The positive control measures the same two waits run one after the other."""
+    import time as _time
+
+    class SlowClient(FakeClient):
+        async def __call__(self, request: dict) -> dict:
+            await asyncio.sleep(0.15)
+            return await super().__call__(request)
+
+    async def wall(local_verify: str) -> float:
+        client = SlowClient([_verdict("v1", True)])
+        worker = TimedWorker(verify_secs=0.15)
+        cfg = AgentConfig(runs_dir=tmp_path / "runs", local_verify=local_verify)
+        a, _ = _agent(client, worker, tmp_path, config=cfg)
+        a._open_log("g")
+        t0 = _time.monotonic()
+        verdict = await a._verify("g", "claim", 1, worker)
+        assert verdict == {"valid": True, "guidance": ""}
+        return _time.monotonic() - t0
+
+    async def sequential() -> float:
+        worker = TimedWorker(verify_secs=0.15)
+        client = SlowClient([_verdict("v1", True)])
+        t0 = _time.monotonic()
+        await worker.verify("g", "claim")
+        await client({})
+        return _time.monotonic() - t0
+
+    async def go() -> None:
+        off = await wall("off")
+        shadow = await wall("shadow")
+        seq = await sequential()
+        assert shadow - off < 0.05, (off, shadow)
+        assert seq >= 0.28 and shadow < seq - 0.1, (shadow, seq)        # the control: sequential is ~2x
+    asyncio.run(go())
+
+
+def test_missing_worker_verify_is_logged_not_fatal(tmp_path: Path, caplog) -> None:
+    client = FakeClient([_response("r1", _call("exec_py", "c1", code="pyautogui.press('space')")),
+                         _response("r2", _message("Spotify is playing.")),
+                         _verdict("v1", True)])
+    a, _ = _agent(client, FakeWorker({"pyautogui.press('space')": ACTED}), tmp_path)   # no verify attribute
+    with caplog.at_level("ERROR"):
+        assert asyncio.run(a.run("play spotify")) == "Spotify is playing."
+    assert "local shadow verify failed (AttributeError" in caplog.text
+    logged = [json.loads(ln) for ln in a.run_log.read_text().splitlines()]
+    [entry] = [ln["verify"] for ln in logged if "verify" in ln]
+    assert entry["valid"] is True and entry["local"]["error"] == "AttributeError"
+
+
+def test_local_verify_knob(caplog) -> None:
+    assert configured({}).local_verify == "shadow"
+    assert configured({"CC_BUDDY_LOCAL_VERIFY": "off"}).local_verify == "off"
+    with caplog.at_level("WARNING"):
+        assert configured({"CC_BUDDY_LOCAL_VERIFY": "on"}).local_verify == "shadow"
+    assert "CC_BUDDY_LOCAL_VERIFY='on'" in caplog.text
+
+
+def test_worker_ready_line_is_logged(tmp_path: Path, caplog) -> None:
+    client = FakeClient([_response("r1", _message("done"))])
+
+    class ReadyWorker(FakeWorker):
+        async def start(self) -> dict:
+            self.started = True
+            return {"ready": True, "width": 100, "height": 50, "fast_lane": "loading"}
+    a, _ = _agent(client, ReadyWorker(), tmp_path)
+    with caplog.at_level("INFO"):
+        asyncio.run(a.run("x"))
+    assert "agent: worker ready — fast lane loading" in caplog.text
+    logged = [json.loads(ln) for ln in a.run_log.read_text().splitlines()]
+    assert logged[1] == {"t": 1.0, "worker": {"width": 100, "height": 50, "fast_lane": "loading"}}
+
+
+# ---- the fast lane in the prompt and the tool text ------------------------------------------
+
+def test_instructions_variants_track_fast_lane_default() -> None:
+    """instructions(False) never names the helper; instructions(True) documents it; the shipped
+    default variant is the one the eval decided (fast_lane.FAST_LANE_DEFAULT)."""
+    from cc_buddy_bridge.fast_lane import FAST_LANE_DEFAULT
+
+    off, on = ca.instructions(False), ca.instructions(True)
+    assert "delegate" not in off and "delegate" not in json.dumps(ca.tools(False))
+    assert "11. delegate(objective" in on and "approve=" in on and "confirm" in on and "escalate" in on
+    assert ", delegate" in ca.tools(True)[0]["parameters"]["properties"]["code"]["description"]
+    assert "{fast_lane" not in on and "{fast_lane" not in off
+    assert ca.AgentConfig().fast_lane is FAST_LANE_DEFAULT and configured({}).fast_lane is FAST_LANE_DEFAULT
+    assert configured({"CC_BUDDY_FAST_LANE": "1"}).fast_lane is True
+    assert configured({"CC_BUDDY_FAST_LANE": "off"}).fast_lane is False
+    assert INSTRUCTIONS == off and TOOLS == ca.tools(False)
+
+
+def test_instructions_tool_text_and_helper_names_agree_in_both_variants() -> None:
+    from cc_buddy_bridge.desktop_helpers import FAST_LANE_HELPERS
+
+    for fast_lane in (False, True):
+        text, code_desc = ca.instructions(fast_lane), ca.tools(fast_lane)[0]["parameters"]["properties"]["code"]["description"]
+        for name in HELPER_NAMES:
+            assert name in text and name in code_desc, name
+        for name in FAST_LANE_HELPERS:
+            assert (name in text) is fast_lane and (name in code_desc) is fast_lane, (name, fast_lane)
+
+
+def test_loop_sends_the_variant_the_config_selects_and_escalates_on_delegate_lines(tmp_path: Path) -> None:
+    line = [{"type": "input_text", "text": 'delegate confirm: "Send" needs the human\'s yes; app="Mail"; action=click; steps=0; last=none; text=none; key=none'}]
+    client = FakeClient([_response("r1", _call("exec_py", "c1", code="delegate('send it')")),
+                         _response("r2", _call("exec_py", "c2", code="log(1)")),
+                         _response("r3", _message("done"))])
+    cfg = AgentConfig(runs_dir=tmp_path / "runs", fast_lane=True)
+    a, _ = _agent(client, FakeWorker({"delegate('send it')": line}), tmp_path, config=cfg)
+    asyncio.run(a.run("send the mail"))
+    assert client.requests[0]["instructions"] == ca.instructions(True) and client.requests[0]["tools"] == ca.tools(True)
+    assert client.requests[1]["reasoning"] == {"effort": "high"}         # the confirm is a recovery turn
+    assert client.requests[2]["reasoning"] == {"effort": "medium"}

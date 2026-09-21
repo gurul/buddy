@@ -3,7 +3,9 @@
 Not a test module (no test_ prefix). Prints a ready line, then answers one
 JSON request per stdin line: observe → an image plus the context line; code
 "hang" → sleeps 100 s; "exit" → writes boom to stderr and exits 3; "big" → a
-100 KB text item; "corner" → the fail-safe error; anything else → "ran <code>".
+100 KB text item; "corner" → the fail-safe error; anything else → "ran <code>". Every reply
+carries a "timing" dict; a verify request answers a fixed verdict, or hangs
+(never replies) when the claim is "hang".
 """
 
 import json
@@ -18,7 +20,13 @@ for line in sys.stdin:
     if req.get("operation") == "observe":
         out = [{"type": "input_image", "detail": "original", "image_url": "data:image/png;base64,AAAA"},
                {"type": "input_text", "text": "frontmost: Warp — 'zsh'; screen 100x50; 14:02"}]
-        reply = {"id": rid, "output": out}
+        reply = {"id": rid, "output": out, "timing": {"capture": 1.0, "exec": 2.0}}
+    elif req.get("operation") == "verify":
+        if req.get("claim") == "hang":
+            continue                                    # never answers: the client must time out
+        if req.get("claim") == "slow":
+            time.sleep(0.6)                             # answers late: the client must skip it as stale
+        reply = {"id": rid, "verify": {"p_true": 0.9, "summary": "Warp — 'zsh'; 1 lines", "ms": 1.5}}
     else:
         code = req.get("code", "")
         if code == "hang":
@@ -33,6 +41,7 @@ for line in sys.stdin:
         elif code == "corner":
             reply = {"id": rid, "error": {"code": "failsafe", "message": "desktop fail-safe: the mouse hit a screen corner"}}
         else:
-            reply = {"id": rid, "output": [{"type": "input_text", "text": f"ran {code}"}]}
+            reply = {"id": rid, "output": [{"type": "input_text", "text": f"ran {code}"}],
+                     "timing": {"exec": 1.0}}
     sys.stdout.write(json.dumps(reply) + "\n")
     sys.stdout.flush()
