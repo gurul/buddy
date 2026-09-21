@@ -69,6 +69,12 @@ python3.12 -m venv .venv
 
 **Windows users:** Replace `.venv/bin/` with `.venv\Scripts\` in the commands above.
 
+**Optional, Apple silicon only — the computer-use fast lane.** `.venv/bin/pip install -e ".[fast]"`
+adds `laya-mlx`, then copy the Laya checkpoint to `~/.config/cc-buddy-bridge/models/laya-multilingual-mlx`
+and start the daemon with `CC_BUDDY_FAST_LANE=1` (it ships off; the daemon runs without any of this).
+`cc-buddy-bridge update` installs the `[fast]` extra automatically on Apple silicon. Details and the
+measured numbers: [docs/stackchan/voice.md](../docs/stackchan/voice.md#the-fast-lane-local-decider-under-the-planner).
+
 Then start any `claude` session. The daemon scans for a BLE device advertising
 a name starting with `Claude`, connects, and begins pushing state.
 

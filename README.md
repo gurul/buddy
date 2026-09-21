@@ -180,7 +180,7 @@ search failures fall back to model-generated problems.
 Host (macOS, Python 3.12):
 
 ```bash
-cd bridge && python3.12 -m venv .venv && .venv/bin/pip install -e .
+cd bridge && python3.12 -m venv .venv && .venv/bin/pip install -e .       # add ".[fast]" on Apple silicon for the local fast lane
 .venv/bin/cc-buddy-bridge install                                              # Claude Code hooks
 .venv/bin/cc-buddy-bridge install --service --serial-port '/dev/cu.usbmodem*'  # the daemon, at login
 mkdir -p ~/.config/cc-buddy-bridge/models && curl -L \
@@ -242,7 +242,7 @@ camera frames ◀──────────────▶ macOS Vision (fac
 
 | | Where | Read |
 |---|---|---|
-| Ears, voice, web search, deep reasoning, computer control | `bridge/src/cc_buddy_bridge/ears.py`, `voice_agent.py`, `think.py`, `computer_agent.py`, `desktop_worker.py` | [voice.md](docs/stackchan/voice.md) |
+| Ears, voice, web search, deep reasoning, computer control, the fast lane | `bridge/src/cc_buddy_bridge/ears.py`, `voice_agent.py`, `think.py`, `computer_agent.py`, `desktop_worker.py`, `fast_lane.py`, `decider.py`, `ax_candidates.py` | [voice.md](docs/stackchan/voice.md) |
 | Seeing, turning its head, goodbye, mute | `bridge/src/cc_buddy_bridge/scene.py`, `head.py`, `intent.py`, `sound.py`; `firmware/claude_pet_stackchan/src/hostlook.h` | [vision.md](docs/stackchan/vision.md) |
 | Feelings, phases, the diary | `firmware/claude_pet_stackchan/src/mood.cpp`, `body.cpp`, `eyes.cpp`; `bridge/src/cc_buddy_bridge/diary.py` | [personality.md](docs/stackchan/personality.md) |
 | Taking notes on the room | `bridge/src/cc_buddy_bridge/notes.py` | [voice.md](docs/stackchan/voice.md#taking-notes-on-the-room) |

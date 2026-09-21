@@ -38,6 +38,15 @@ def package_repo_root() -> Optional[Path]:
     return None
 
 
+
+def install_target(platform: str = sys.platform, machine: Optional[str] = None) -> str:
+    """What `pip install -e` gets: ".[fast]" on Apple silicon (the fast lane's laya-mlx extra,
+    pyproject.toml), plain "." everywhere else."""
+    import platform as _platform
+
+    machine = machine if machine is not None else _platform.machine()
+    return ".[fast]" if platform == "darwin" and machine == "arm64" else "."
+
 def _run(cmd: list[str], *, cwd: Optional[Path] = None) -> tuple[int, str, str]:
     """subprocess.run wrapper that returns (rc, stdout, stderr) instead of
     raising. Streams nothing — caller decides what to print."""
@@ -144,7 +153,7 @@ def run_update(*, yes: bool = False) -> int:
     print(f"Update plan for {repo}:")
     print(f"  Current:  {info.current}  ({branch})")
     print(f"  Target:   {info.latest}")
-    print("  Steps:    git pull → pip install -e .", end="")
+    print(f"  Steps:    git pull → pip install -e {install_target()}", end="")
     print(f"  →  restart via {backend}" if backend else "  →  (no service backend detected)")
 
     if not yes:
@@ -171,8 +180,9 @@ def run_update(*, yes: bool = False) -> int:
         print(f"git pull failed: {err.strip() or 'unknown'}", file=sys.stderr)
         return 2
 
-    print(f"$ {sys.executable} -m pip install -e .")
-    rc, _, err = _run([sys.executable, "-m", "pip", "install", "-e", "."], cwd=repo)
+    target = install_target()
+    print(f"$ {sys.executable} -m pip install -e {target}")
+    rc, _, err = _run([sys.executable, "-m", "pip", "install", "-e", target], cwd=repo)
     if rc != 0:
         print(f"pip install failed: {err.strip() or 'unknown'}", file=sys.stderr)
         print("Repo is updated; only the install step failed. Re-run pip "

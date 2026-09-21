@@ -17,6 +17,19 @@ Perception is local, so it costs 0.04–0.31 s instead of a model turn
   bottom-left origin; `screen_text` maps them to click points.
 - `ax_frontmost`: NSWorkspace frontmost app + the AX focused-window title.
 
+Settle de-duplication: open_app / open_url settle inside the helper, and the
+worker's auto-screenshot used to settle again (0.3 s typical, 1.5 s worst,
+measured over the 2026-09 run logs). Every acted site bumps `_action_seq`; a
+settle that finished records (clock, seq); `settled_screenshot` reuses that
+frame when no input happened since and it is under SETTLE_REUSE_SECS old.
+
+Timing: every sense and effector adds its wall time to `timing` (ms, reset by
+`begin()`), so the worker can attach {"capture", "resize", "ocr", "ax",
+"settle", "act", "decide", ...} to each reply and the agent can log it — before
+this nothing local was timed in production. The keys are not disjoint: "settle"
+is a wall time that contains its own captures, which also count under "capture";
+read "exec" for the total and the others for where it went.
+
 Only desktop_worker.main() and the tests import this module; pyobjc is
 imported lazily inside the three backend functions so the tests run anywhere.
 """
@@ -33,6 +46,8 @@ from urllib.parse import urlsplit
 
 HELPER_NAMES = ("open_app", "open_url", "frontmost", "screen_text", "find_text", "click_text",
                 "click_element", "wait_for", "wait_settled", "type_text", "zoom", "observe")
+FAST_LANE_HELPERS = ("delegate",)   # bound by install() only when the fast lane is on
+SETTLE_REUSE_SECS = 0.3             # a settled frame younger than this, with no input since, is the reply's picture
 # Roles an AX hit-test may climb to before clicking (handyman's snap: coordinates
 # only need to land INSIDE the control; the control absorbs the model's error).
 AX_PRESSABLE_ROLES = frozenset({"AXButton", "AXLink", "AXCheckBox", "AXRadioButton", "AXMenuItem",
@@ -375,19 +390,26 @@ class Helpers:
         ocr: Callable[[Frame, str], list[dict[str, Any]]] = vision_ocr,
         frontmost_fn: Callable[[], dict[str, Any]] = ax_frontmost,
         element_at: Callable[[int, int], Optional[dict[str, Any]]] = ax_element_at,
+        focused_element: Callable[[], Optional[dict[str, Any]]] = None,  # type: ignore[assignment]
         run: Callable[..., Any] = subprocess.run,
         clipboard: Any = None,
         clock: Callable[[], float] = time.monotonic,
         sleep: Callable[[float], None] = time.sleep,
         now: Callable[[], datetime] = datetime.now,
         menu_bar_points: int = MENU_BAR_POINTS,
+        fast_lane: bool = False,
+        decider: Any = None,
     ) -> None:
         self.gui = pyautogui
+        self.fast_lane = fast_lane
+        self.decider = decider                      # the local typed-decision model (decider.Decider), or None
         self._menu_bar_points = menu_bar_points
         self._capture_fn = capture
         self._ocr = ocr
         self._frontmost_fn = frontmost_fn
         self._element_at = element_at
+        self._focused_element = focused_element or ax_focused_element
+        self.fast_lane_status = "off"           # what the worker reports: off | loading | ready (…) | failed: …
         self._run = run
         self._last_click: Optional[str] = None      # "AXButton 'Search'" under the last raw click
         self._clipboard = clipboard
@@ -400,12 +422,20 @@ class Helpers:
         self._frame: Optional[Frame] = None
         self._last_thumb: Any = None
         self._elapsed = 0.0
+        self._action_seq = 0                        # bumped by every acted site
+        self._settled: Optional[tuple[float, int]] = None   # (clock, action_seq) when a settle last finished
+        self.timing: dict[str, float] = {}          # ms per sense/effector for the current exec call
 
     # -- wiring --
     def install(self, namespace: dict[str, Any]) -> None:
         """Bind the helpers into the exec namespace and make every PyAutoGUI input call mark `acted`."""
         for name in HELPER_NAMES:
             namespace[name] = getattr(self, name)
+        for name in FAST_LANE_HELPERS:
+            if self.fast_lane:
+                namespace[name] = getattr(self, name)
+            else:
+                namespace.pop(name, None)
         for name in ACTION_NAMES:
             original = getattr(self.gui, name, None)
             if original is None or getattr(original, "_cc_buddy_wrapped", False):
@@ -416,12 +446,16 @@ class Helpers:
         name = getattr(original, "__name__", "action")
 
         def wrapped(*args: Any, **kwargs: Any) -> Any:
-            self.acted = True
+            self._mark_acted()
             if name in ("click", "doubleClick", "rightClick") and len(args) >= 2:
                 # What is under a raw click, for the [after] line (handyman-style verification
                 # of the model's coordinates — it sees "clicked on AXLink 'Weather'").
                 self._last_click = self._describe_point(int(args[0]), int(args[1]))
-            return original(*args, **kwargs)
+            t0 = self._clock()
+            try:
+                return original(*args, **kwargs)
+            finally:
+                self._add_timing("act", t0)
 
         wrapped._cc_buddy_wrapped = True  # type: ignore[attr-defined]
         wrapped.__name__ = getattr(original, "__name__", "action")
@@ -433,12 +467,36 @@ class Helpers:
     def begin(self) -> None:
         self.acted = False
         self._last_click = None
+        self.timing = {}
+
+    def _mark_acted(self) -> None:
+        """Every site that clicks, types or presses keys: `acted` for the auto-screenshot, the
+        sequence number so a settle from before this input is never reused after it."""
+        self.acted = True
+        self._action_seq += 1
+
+    def _add_timing(self, key: str, t0: float) -> None:
+        self.timing[key] = self.timing.get(key, 0.0) + (self._clock() - t0) * 1000.0
+
+    def timing_ms(self) -> dict[str, float]:
+        """The current call's timing, rounded, for the worker reply."""
+        return {k: round(v, 2) for k, v in self.timing.items()}
+
+    def _front(self) -> dict[str, Any]:
+        t0 = self._clock()
+        try:
+            return self._frontmost_fn()
+        finally:
+            self._add_timing("ax", t0)
 
     def _describe_point(self, x: int, y: int) -> Optional[str]:
+        t0 = self._clock()
         try:
             el = self._element_at(x, y)
-        except Exception:  # noqa: BLE001
+        except Exception:  # noqa: BLE001 — a hit-test failure only costs the [after] detail
             return None
+        finally:
+            self._add_timing("ax", t0)
         if not el:
             return None
         return _what(el)
@@ -448,12 +506,15 @@ class Helpers:
         one you meant. `expect` is a few words from the screenshot ("Sign in button").
         A mismatch does NOT click; it tells you what is there instead."""
         el = None
+        t0 = self._clock()
         try:
             el = self._element_at(int(x), int(y))
-        except Exception:  # noqa: BLE001
+        except Exception:  # noqa: BLE001 — no element means a raw click, reported as such
             el = None
+        finally:
+            self._add_timing("ax", t0)
         if el is None:
-            self.acted = True
+            self._mark_acted()
             self.gui.click(int(x), int(y), clicks=clicks)
             line = f"clicked at ({x},{y}) (no accessibility element there to check)"
             self.log(line)
@@ -468,7 +529,7 @@ class Helpers:
         frame = el.get("frame")
         if frame and frame[2] > 0 and frame[3] > 0:
             cx, cy = int(frame[0] + frame[2] / 2), int(frame[1] + frame[3] / 2)
-        self.acted = True
+        self._mark_acted()
         self._last_click = what
         self.gui.click(cx, cy, clicks=clicks)
         line = f"clicked {what} at ({cx},{cy})"
@@ -478,7 +539,7 @@ class Helpers:
     # -- apps and pages --
     def open_app(self, name: str, wait: float = 8.0) -> str:
         """Launch or focus an app with `open -a`, then wait until it is frontmost."""
-        self.acted = True
+        self._mark_acted()
         if "/" in name or name.startswith("-"):
             raise ValueError(f"open_app: {name!r} must be an app name, not a path or an option")
         result = self._run(["open", "-a", name], capture_output=True, timeout=10)
@@ -486,10 +547,10 @@ class Helpers:
             raise RuntimeError(f"no app called {name!r}")
         wait = min(float(wait), MAX_WAIT_SECS)
         t0 = self._clock()
-        front = self._frontmost_fn()
+        front = self._front()
         while front.get("app", "").casefold() != name.casefold() and self._clock() - t0 < wait:
             self._sleep(0.1)
-            front = self._frontmost_fn()
+            front = self._front()
         elapsed = self._clock() - t0
         if front.get("app", "").casefold() == name.casefold():
             text = f"opened {name} (frontmost after {elapsed:.1f} s)"
@@ -501,12 +562,12 @@ class Helpers:
 
     def open_url(self, url: str, app: Optional[str] = None, wait: float = 8.0) -> str:
         """Open a URL in the default browser (or `app`) and wait for it to come up."""
-        self.acted = True
+        self._mark_acted()
         if urlsplit(url).scheme.lower() not in ("http", "https", "mailto"):
             raise ValueError("open_url: only http, https and mailto URLs")
         if app is not None and ("/" in app or app.startswith("-")):
             raise ValueError(f"open_url: {app!r} must be an app name")
-        before = self._frontmost_fn()
+        before = self._front()
         result = self._run(["open", *(["-a", app] if app else []), url], capture_output=True, timeout=10)
         if result.returncode != 0:
             raise RuntimeError(f"could not open {url!r}" + (f" in {app!r}" if app else ""))
@@ -522,10 +583,10 @@ class Helpers:
                 return True
             return front.get("title", "") != before.get("title", "")
 
-        front = self._frontmost_fn()
+        front = self._front()
         while not arrived(front) and self._clock() - t0 < wait:
             self._sleep(0.2)
-            front = self._frontmost_fn()
+            front = self._front()
         if arrived(front):
             text = f"opened {url} in {front.get('app') or 'the browser'}"
         else:
@@ -535,7 +596,7 @@ class Helpers:
         return text
 
     def frontmost(self) -> dict[str, Any]:
-        front = self._frontmost_fn()
+        front = self._front()
         self.log(f"frontmost: {front.get('app', '')} — {front.get('title', '')!r}")
         return front
 
@@ -562,7 +623,12 @@ class Helpers:
         frame = self._capture()
         w_pts, h_pts = self._size()
         items: list[dict[str, Any]] = []
-        for r in self._ocr(frame, level):
+        t0 = self._clock()
+        try:
+            boxes = self._ocr(frame, level)
+        finally:
+            self._add_timing("ocr", t0)
+        for r in boxes:
             x = round(r["bx"] * w_pts)
             y = round((1.0 - r["by"] - r["bh"]) * h_pts)
             w = round(r["bw"] * w_pts)
@@ -605,7 +671,7 @@ class Helpers:
         item = self._wait_for(text, gone=False, timeout=timeout, interval=0.3, region=region)
         if not isinstance(item, dict):
             raise LookupError(f"{text!r} is not on screen")
-        self.acted = True
+        self._mark_acted()
         self.gui.click(item["cx"], item["cy"], clicks=clicks)
         line = f"clicked {text!r} at ({item['cx']},{item['cy']})"
         self.log(line)
@@ -650,8 +716,17 @@ class Helpers:
         return settled
 
     def _settle(self, timeout: float, interval: float = 0.25) -> bool:
+        """Two captures `interval` apart that look the same; False past `timeout`. A True
+        result is remembered with the action sequence so the worker's auto-screenshot can
+        reuse the frame instead of settling again (see the module docstring)."""
         timeout = min(float(timeout), MAX_WAIT_SECS)
         t0 = self._clock()
+        try:
+            return self._settle_loop(timeout, interval, t0)
+        finally:
+            self._add_timing("settle", t0)
+
+    def _settle_loop(self, timeout: float, interval: float, t0: float) -> bool:
         frame = self._capture()
         a = frame.thumb()
         skip = self._skip_rows(frame)
@@ -663,6 +738,7 @@ class Helpers:
             b = self._capture().thumb()
             self._elapsed = self._clock() - t0
             if change_box(a, b, skip) is None:
+                self._settled = (self._clock(), self._action_seq)
                 return True
             a = b
             if self._clock() - t0 >= timeout:
@@ -671,7 +747,7 @@ class Helpers:
     # -- typing --
     def type_text(self, text: str, submit: bool = False) -> str:
         """Type any text (clipboard paste: emoji and accents survive), optionally pressing enter."""
-        self.acted = True
+        self._mark_acted()
         clipboard = self._clipboard
         if clipboard is None:
             import pyperclip
@@ -682,7 +758,6 @@ class Helpers:
         except Exception:  # noqa: BLE001 — a non-text clipboard is not worth failing over
             old = ""
         clipboard.copy(text)
-        self.acted = True
         self.gui.hotkey("command", "v")
         self._sleep(0.15)
         clipboard.copy(old if isinstance(old, str) else "")
@@ -724,16 +799,74 @@ class Helpers:
         return self._points(self._capture())
 
     def settled_screenshot(self, max_wait: float) -> Any:
-        """Wait (up to max_wait) for the screen to stop changing, then the screenshot of that last frame."""
-        if max_wait > 0:
+        """Wait (up to max_wait) for the screen to stop changing, then the screenshot of that last frame.
+
+        When a helper already settled after the last input (open_app, open_url) and that
+        frame is under SETTLE_REUSE_SECS old, it IS the settled picture: no second wait.
+        """
+        if max_wait > 0 and not self._settle_is_fresh():
             self._settle(max_wait)
-        else:
+        elif max_wait <= 0:
             self._capture()
         assert self._frame is not None
         return self._points(self._frame)
 
+    def _settle_is_fresh(self) -> bool:
+        if self._settled is None or self._frame is None:
+            return False
+        at, seq = self._settled
+        return seq == self._action_seq and 0.0 <= self._clock() - at < SETTLE_REUSE_SECS
+
+    # -- the fast lane --
+    def delegate(self, objective: str, text: Optional[str] = None, key: Optional[str] = None,
+                 done_when: Optional[str] = None, approve: Optional[str] = None, max_steps: int = 4,
+                 dry_run: bool = False) -> str:
+        """Hand a narrow run of clicks on labelled controls in the frontmost app to the local
+        decider (fast_lane.run_delegate). Returns the one-line result the model reads; every
+        step and the final `delegate {status}: …` line are logged for the human."""
+        from .fast_lane import run_delegate
+
+        objective = str(objective or "")[:200]
+        text = str(text)[:200] if text is not None else None
+        max_steps = max(1, min(6, int(max_steps)))
+        adapter = _LaneAdapter(self, approve)
+        result = run_delegate(objective, senses=adapter, effectors=adapter, decider=self.decider, text=text,
+                              key=key, done_when=done_when, approve=approve, max_steps=max_steps,
+                              dry_run=bool(dry_run), clock=self._clock)
+        for step in result.steps:
+            self.timing["decide"] = self.timing.get("decide", 0.0) + float(step.decide_ms)
+        for line in result.log_lines:
+            self.log(line)
+        return result.line
+
+    def local_verify(self, goal: str, claim: str, max_lines: int = 40) -> dict[str, Any]:
+        """The shadow verifier: one local noul over the frontmost app, its title and the fast OCR
+        of the screen — {"p_true", "summary", "ms"} or {"error"}. Logged beside the model's
+        verdict (computer_agent._verify), never acted on: CC_BUDDY_LOCAL_VERIFY=on is deferred
+        until ≥ 50 shadow verdicts exist to calibrate it against."""
+        decider = self.decider
+        if decider is None:
+            return {"error": "no local decider (fast lane off)"}
+        t0 = self._clock()
+        try:
+            front = self._front()
+            lines = [ln["text"] for ln in self._lines(None, "fast")[:max_lines]]
+            state = {"goal": goal, "claim": claim, "app": front.get("app", ""), "title": front.get("title", ""),
+                     "screen_text": lines}
+            judged = decider.judge(
+                "Does the screen now show the state the agent claims?", state,
+                {"false": "the screen does not show the claimed state, or something else is in front",
+                 "true": "the screen shows the state the claim describes"})
+        except Exception as e:  # noqa: BLE001 — a shadow that fails is logged, never raised into the reply
+            return {"error": f"{type(e).__name__}: {e}"[:200], "ms": round((self._clock() - t0) * 1000, 1)}
+        if judged.error:
+            return {"error": judged.error, "ms": round((self._clock() - t0) * 1000, 1)}
+        summary = f"{state['app']} — {state['title']!r}; {len(lines)} lines"
+        return {"p_true": round(float(judged.p_true), 4), "summary": summary,
+                "ms": round((self._clock() - t0) * 1000, 1)}
+
     def context_line(self) -> str:
-        front = self._frontmost_fn()
+        front = self._front()
         w_pts, h_pts = self._size()
         return (f"frontmost: {front.get('app', '')} — {front.get('title', '')!r}; "
                 f"screen {w_pts}x{h_pts}; {self._now():%H:%M}")
@@ -761,7 +894,7 @@ class Helpers:
                 screen = "changed (most of the screen)"
             else:
                 screen = f"changed around ({x},{y},{w},{h})"
-        front = self._frontmost_fn()
+        front = self._front()
         head = "[after your input]" if self.acted else "[after]"
         tail = f"; clicked on {self._last_click}" if self._last_click else ""
         return (f"{head} frontmost: {front.get('app', '')} — {front.get('title', '')!r}; "
@@ -780,7 +913,11 @@ class Helpers:
         return int(self._menu_bar_points / self._thumb_scale(frame)) + 1
 
     def _capture(self) -> Frame:
-        self._frame = self._capture_fn()
+        t0 = self._clock()
+        try:
+            self._frame = self._capture_fn()
+        finally:
+            self._add_timing("capture", t0)
         return self._frame
 
     def _size(self) -> tuple[int, int]:
@@ -790,8 +927,203 @@ class Helpers:
     def _points(self, frame: Frame) -> Any:
         from PIL import Image
 
+        t0 = self._clock()
         img = frame.pil()
         size = self._size()
         if tuple(img.size) != size:
             img = img.resize(size, Image.Resampling.LANCZOS)
+        self._add_timing("resize", t0)
         return img
+
+
+# ---- the fast lane's senses and effectors ---------------------------------------------------
+
+def ax_focused_element() -> Optional[dict[str, Any]]:
+    """The element that has keyboard focus right now: {"role","title","frame","app","editable"},
+    or None. Read fresh every call — the lane checks it right after a click, before pasting."""
+    try:
+        from ApplicationServices import (
+            AXUIElementCopyAttributeValue,
+            AXUIElementCreateSystemWide,
+            AXUIElementGetPid,
+            AXValueGetValue,
+            kAXValueCGPointType,
+            kAXValueCGSizeType,
+        )
+    except Exception:  # noqa: BLE001 — no pyobjc, no focus check (the effector then refuses)
+        return None
+
+    def attr(el: Any, name: str) -> Any:
+        err, val = AXUIElementCopyAttributeValue(el, name, None)
+        return val if err == 0 else None
+
+    err, el = AXUIElementCopyAttributeValue(AXUIElementCreateSystemWide(), "AXFocusedUIElement", None)
+    if err != 0 or el is None:
+        return None
+    role = str(attr(el, "AXRole") or "")
+    title = attr(el, "AXTitle") or attr(el, "AXDescription") or ""
+    frame = None
+    pos, size = attr(el, "AXPosition"), attr(el, "AXSize")
+    if pos is not None and size is not None:
+        ok1, pt = AXValueGetValue(pos, kAXValueCGPointType, None)
+        ok2, sz = AXValueGetValue(size, kAXValueCGSizeType, None)
+        if ok1 and ok2:
+            frame = (int(pt.x), int(pt.y), int(sz.width), int(sz.height))
+    app = ""
+    try:
+        perr, pid = AXUIElementGetPid(el, None)
+        if perr == 0 and pid:
+            app = app_name_for_pid(pid)
+    except Exception:  # noqa: BLE001
+        pass
+    editable = role in ("AXTextField", "AXTextArea", "AXComboBox", "AXSearchField")
+    return {"role": role, "title": str(title), "frame": frame, "app": app, "editable": editable}
+
+
+def _norm(text: str) -> str:
+    return " ".join(str(text or "").split()).casefold()
+
+
+class _LaneAdapter:
+    """fast_lane's senses and effectors over one Helpers (see fast_lane's module docstring for
+    the protocol). Every input goes through the same wrapped PyAutoGUI calls as the model's own
+    code, so `acted`, the timing dict and the auto-screenshot rule all apply."""
+
+    def __init__(self, helpers: "Helpers", approve: Optional[str]) -> None:
+        self.h = helpers
+        self.approve = _norm(approve) if approve else ""
+        self._thumb0: Any = None
+        self._snapshot: Any = None
+        self._seq = 0
+
+    # -- senses --
+    def snapshot(self) -> Any:
+        from .ax_candidates import ax_snapshot
+
+        self._seq += 1
+        t0 = self.h._clock()
+        try:
+            snap = ax_snapshot(None, screen=self.h._size())
+        finally:
+            self.h._add_timing("ax", t0)
+        self._snapshot = snap
+        try:
+            self._thumb0 = self.h._capture().thumb()
+        except Exception:  # noqa: BLE001 — no baseline means screen_changed() answers None
+            self._thumb0 = None
+        return snap
+
+    def text_visible(self, s: str) -> bool:
+        needle = _norm(s)
+        if not needle:
+            return False
+        snap = self._snapshot
+        if snap is not None:
+            for c in snap.elements:
+                if needle in _norm(c.label) or needle in _norm(c.value):
+                    return True
+            if needle in _norm(snap.title):
+                return True
+        try:
+            lines = self.h._lines(None, "fast")
+        except Exception:  # noqa: BLE001 — no OCR, no sighting
+            return False
+        return any(needle in _norm(ln["text"]) for ln in lines)
+
+    def focused(self) -> Optional[Any]:
+        el = self.h._focused_element()
+        if not el:
+            return None
+        from .ax_candidates import Candidate, _role_name
+
+        frame = el.get("frame") or (0, 0, 0, 0)
+        role = _role_name(el.get("role") or "", "")
+        return Candidate(id="focused", role=role, label=el.get("title") or "", value="", frame=tuple(frame),
+                         actions=(), enabled=True, app=el.get("app") or "", in_content=False, in_dialog=False,
+                         secure=False, editable=bool(el.get("editable")))
+
+    def frontmost_pid(self) -> int:
+        try:
+            return int(self.h._front().get("pid") or 0)
+        except Exception:  # noqa: BLE001
+            return 0
+
+    def screen_changed(self) -> Optional[bool]:
+        if self._thumb0 is None:
+            return None
+        try:
+            frame = self.h._capture()
+            return change_box(self._thumb0, frame.thumb(), self.h._skip_rows(frame)) is not None
+        except Exception:  # noqa: BLE001
+            return None
+
+    # -- effectors --
+    def _centre(self, c: Any) -> tuple[int, int]:
+        x, y, w, h = c.frame
+        return int(x + w / 2), int(y + h / 2)
+
+    @staticmethod
+    def _same_control(el: dict[str, Any], c: Any) -> bool:
+        """Is the hit-tested element the candidate? Equal titles, or — for a row / cell / link whose
+        label came from a descendant static text (System Settings, Finder, Music, Photos, Notes
+        sidebars) — an element inside the candidate's frame (± 2 pt) whose own title is empty or
+        part of that label."""
+        title = _norm(el.get("title") or "")
+        label = _norm(c.label)
+        if title and title == label:
+            return True
+        frame = el.get("frame")
+        if not frame or not c.frame:
+            return False
+        fx, fy, fw, fh = frame
+        x, y, w, h = c.frame
+        inside = fx >= x - 2 and fy >= y - 2 and fx + fw <= x + w + 2 and fy + fh <= y + h + 2
+        return inside and (not title or title in label or label in title)
+
+    def click_candidate(self, c: Any) -> str:
+        from .ax_candidates import is_sensitive
+
+        cx, cy = self._centre(c)
+        try:
+            el = self.h._element_at(cx, cy)
+        except Exception as e:  # noqa: BLE001 — a failed hit-test is a refusal, never a click
+            return f"refused: hit-test failed ({type(e).__name__})"
+        if not el:
+            return f"refused: nothing under ({cx},{cy}) any more"
+        title = str(el.get("title") or "")
+        if el.get("app") and c.app and el["app"].casefold() != c.app.casefold():
+            return f"refused: ({cx},{cy}) is in {el['app']}, not {c.app}"
+        if not self._same_control(el, c):
+            return f"refused: under ({cx},{cy}) is {_what(el)}, not {c.label!r}"
+        if (is_sensitive(title) or is_sensitive(c.label)) and self.approve not in (_norm(title), _norm(c.label)):
+            return f"refused: {title or c.label!r} is a sensitive control without approval"
+        self.h._last_click = _what(el)
+        click = self.h.gui.click
+        if not getattr(click, "_cc_buddy_wrapped", False):
+            self.h._mark_acted()
+        click(cx, cy)
+        return f"clicked {_what(el)} at ({cx},{cy})"
+
+    def focus_and_type(self, c: Any, text: str) -> str:
+        line = self.click_candidate(c)
+        if line.startswith("refused:"):
+            return line
+        self.h._sleep(0.1)
+        fe = self.focused()
+        if fe is None or not fe.editable or fe.frame == (0, 0, 0, 0):
+            what = f"{fe.role} {fe.label!r}" if fe is not None else "nothing"
+            return f"refused: focus is on {what}, not the {c.role} {c.label!r}"
+        if any(abs(a - b) > 2 for a, b in zip(fe.frame, c.frame, strict=True)):
+            return f"refused: focus moved to {fe.role} {fe.label!r} at {fe.frame}, not the {c.role} {c.label!r}"
+        return self.h.type_text(text, submit=False)
+
+    def press(self, key: str) -> str:
+        press = self.h.gui.press
+        if not getattr(press, "_cc_buddy_wrapped", False):
+            self.h._mark_acted()
+        press(str(key))
+        return f"pressed {key}"
+
+    def settle(self, secs: float) -> float:
+        self.h._settle(float(secs))
+        return float(self.h._elapsed)
