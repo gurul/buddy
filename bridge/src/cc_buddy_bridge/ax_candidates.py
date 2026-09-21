@@ -124,6 +124,16 @@ _SENSITIVE_PHRASES = (
     "disconnect", "revoke", "eject", "call", "facetime", "decline", "accept", "agree", "continue", "ok",
     "okay", "yes", "apply", "archive", "unsubscribe", "block", "report", "move\\s+to\\s+trash",
     "system\\s+settings", "security",
+    # 2026-09-21: the verbs the request-level gates already knew (task_router.CONSEQUENTIAL, the risky_action
+    # noul) and this table did not. They were masked while the lane only pressed a control the human had named
+    # word for word; a plan executor presses controls nobody named. "Forward" (the browser's and Finder's
+    # navigation button) and "Format" (Notes' toolbar) are left out on purpose: whole phrases cover the risky use.
+    "place\\s+(?:an?\\s+|your\\s+|my\\s+)?order", "order\\s+now", "complete\\s+(?:order|purchase)", "confirm",
+    "book", "publish", "transfer", "clear\\s+(?:history|all|data|cache|browsing\\s+data)",
+    "cancel\\s+(?:subscription|membership|order|plan)", "merge\\s+pull\\s+request", "squash\\s+and\\s+merge",
+    "rebase\\s+and\\s+merge", "format\\s+(?:disk|drive|volume)", "turn\\s+o(?:n|ff)", "approve", "kill",
+    "add\\s+to\\s+(?:cart|bag|basket)", "mark\\s+as\\s+(?:spam|junk)", "spam", "junk", "revert",
+    "sign\\s+up", "signup", "create\\s+(?:an?\\s+)?account", "donate", "withdraw", "deposit", "bid",
 )
 # Word-bounded on both sides so "Postcode", "Composer", "Dispatcher", "Okay dokey"-style prefixes
 # never fire on a fragment, while "Delete Event", "Share…", "OK" and "Don't Save" always do.

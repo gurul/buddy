@@ -314,6 +314,60 @@ def start_fast_lane(helpers: Any, env: Any, loader: Any = None, thread: bool = T
     return helpers.fast_lane_status
 
 
+def start_jev_asker(helpers: Any, env: Any) -> str:
+    """Give `helpers` a Jev step asker when the owner's switches call for one: the lane's "jev" decide mode
+    (CC_BUDDY_FAST_LANE_DECIDE=jev) or the plan executor (CC_BUDDY_PLAN_EXEC=1). Returns a status for the
+    ready line. No request is sent here — the first step pays its own 240 ms — and a route with no key
+    leaves the asker unset, so the keyword gate decides alone rather than the lane going dark."""
+    decide, _first = lane_modes(env)
+    plan_exec = (env.get("CC_BUDDY_PLAN_EXEC") or "").strip().lower() in ("1", "true", "yes", "on")
+    if decide != "jev" and not plan_exec:
+        return "off"
+    import time
+    from functools import partial
+
+    from . import jev
+    from .typed_ask import ask_jev_step
+
+    try:
+        url, key, model = jev.route_config(env)
+    except jev.JevError as e:
+        return f"off ({e})"[:160]
+    seconds = float((env.get("CC_BUDDY_JEV_TIMEOUT") or jev.DEFAULT_TIMEOUT_S))
+    helpers.step_asker = partial(ask_jev_step, jev.make_predict(url, key, model, timeout_s=seconds),
+                                 clock=time.perf_counter)
+    return f"ready ({model})"
+
+
+def outline(req: dict[str, Any], helpers: Any) -> dict[str, Any]:
+    """The `outline` operation: the front window's controls, as the planner is shown them."""
+    if helpers is None:
+        return {"outline": {"app": "", "lines": [], "error": "no helpers in this worker"}}
+    try:
+        return {"outline": dict(helpers.outline())}
+    except Exception as e:  # noqa: BLE001 — no outline means the planner plans blind, never a protocol error
+        return {"outline": {"app": "", "lines": [], "error": f"{type(e).__name__}: {e}"[:200]}}
+
+
+def run_plan(req: dict[str, Any], helpers: Any) -> dict[str, Any]:
+    """The `run_plan` operation: walk a plan with no planner turn between its steps (plan_executor.py)."""
+    plan = req.get("plan")
+    if not isinstance(plan, dict) or helpers is None:
+        return {"run_plan": {"status": "unavailable", "reason": "run_plan needs a plan object"}}
+    lines: list[str] = []
+    helpers.bind(lambda *values: lines.append(" ".join(str(v) for v in values)), lambda _image: None)
+    helpers.begin()
+    try:
+        result = dict(helpers.run_plan(plan, str(req.get("request") or ""), start=int(req.get("start") or 0),
+                                       approved=req.get("approved") if isinstance(req.get("approved"), dict) else None,
+                                       dry_run=bool(req.get("dry_run"))))
+    except Exception as e:  # noqa: BLE001
+        result = {"status": "partial", "next_index": int(req.get("start") or 0), "ledger": [],
+                  "reason": f"error:{type(e).__name__}: {e}"[:200]}
+    result.setdefault("log", lines)
+    return {"run_plan": result, "timing": dict(helpers.timing_ms())}
+
+
 def verify(req: dict[str, Any], helpers: Any) -> dict[str, Any]:
     """The `verify` operation: the local shadow verdict on the agent's final claim."""
     goal, claim = req.get("goal"), req.get("claim")
@@ -373,9 +427,15 @@ def serve(namespace: dict[str, Any], stream: Any, helpers: Any = None) -> None:
         if isinstance(req, dict) and req.get("operation") == "lane_first":
             emit({"id": rid, **lane_first(req, helpers)})
             continue
+        if isinstance(req, dict) and req.get("operation") == "outline":
+            emit({"id": rid, **outline(req, helpers)})
+            continue
+        if isinstance(req, dict) and req.get("operation") == "run_plan":
+            emit({"id": rid, **run_plan(req, helpers)})
+            continue
         if not isinstance(req, dict) or req.get("operation") != "execute":
-            emit({"id": rid, "error": {"code": "unsupported",
-                                       "message": "only execute, observe, verify and lane_first are supported"}})
+            emit({"id": rid, "error": {"code": "unsupported", "message": "only execute, observe, verify, "
+                                       "lane_first, outline and run_plan are supported"}})
             continue
         code = req.get("code")
         if not isinstance(code, str) or not code.strip() or len(code.encode("utf-8")) > MAX_CODE_BYTES:
@@ -422,8 +482,10 @@ def main() -> None:
     namespace: dict[str, Any] = {"__builtins__": __builtins__, "pyautogui": pyautogui, "time": time}
     helpers = Helpers(pyautogui)
     fast_lane = start_fast_lane(helpers, os.environ)
+    jev_asker = start_jev_asker(helpers, os.environ)
     helpers.install(namespace)
-    emit({"ready": True, "platform": sys.platform, "width": width, "height": height, "fast_lane": fast_lane})
+    emit({"ready": True, "platform": sys.platform, "width": width, "height": height, "fast_lane": fast_lane,
+          "jev_asker": jev_asker})
     if "--check" in sys.argv:
         return
     parent = os.getppid()

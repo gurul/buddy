@@ -412,6 +412,7 @@ class Helpers:
         self.fast_lane_status = "off"           # what the worker reports: off | loading | ready (…) | failed: …
         self.lane_decide = "keyword"            # fast_lane.DECIDE_MODES: who picks a step (the worker sets it from env)
         self.decider_remote = False             # a hosted decider (jev.py): never handed the shadow verifier's state
+        self.step_asker: Any = None             # typed_ask.ask_jev_step bound to a predict (the worker sets it), or None
         self.lane_first_on = False              # the router (lane_router.py) may run before the planner
         self._run = run
         self._last_click: Optional[str] = None      # "AXButton 'Search'" under the last raw click
@@ -837,7 +838,7 @@ class Helpers:
             if isinstance(steps, str):
                 steps = [steps]
             script = run_script([str(s)[:200] for s in steps], senses=adapter, effectors=adapter,
-                                decider=self.decider, decide=self.lane_decide, approve=approve,
+                                decider=self.decider, decide=self._script_decide(), approve=approve,
                                 dry_run=bool(dry_run), clock=self._clock)
             for result in script.results:
                 for step in result.steps:
@@ -850,12 +851,62 @@ class Helpers:
         max_steps = max(1, min(6, int(max_steps)))
         result = run_delegate(objective, senses=adapter, effectors=adapter, decider=self.decider, text=text,
                               key=key, done_when=done_when, approve=approve, max_steps=max_steps,
-                              dry_run=bool(dry_run), clock=self._clock, decide=self.lane_decide)
+                              dry_run=bool(dry_run), clock=self._clock, decide=self._lane_decide(),
+                              asker=self.step_asker)
         for step in result.steps:
             self.timing["decide"] = self.timing.get("decide", 0.0) + float(step.decide_ms)
         for line in result.log_lines:
             self.log(line)
         return result.line
+
+    def _lane_decide(self) -> str:
+        """"jev" only while an asker exists: a hosted model that is not configured must not turn the
+        lane off, so the keyword gate decides alone instead."""
+        return "keyword" if self.lane_decide == "jev" and self.step_asker is None else self.lane_decide
+
+    def _script_decide(self) -> str:
+        """A script's steps are exact labels the planner read off the screen: the keyword gate's case."""
+        return "keyword" if self.lane_decide == "jev" else self.lane_decide
+
+    def outline(self, max_lines: int = 80) -> dict[str, Any]:
+        """The front window as the planner is shown it: `label (role, value)` per pressable or editable
+        control, in the lane's own ranking order — never the window title, never a field's contents."""
+        from .ax_candidates import ax_snapshot, is_sensitive, rank_candidates
+        from .decider import render_option
+
+        snap = ax_snapshot(None, screen=self._size())
+        pressable, _ = rank_candidates(snap, "", max_out=max_lines, kinds="pressable", allow_sensitive=True)
+        fields, _ = rank_candidates(snap, "", max_out=10, kinds="editable")
+        lines = [render_option(c) + (" [asks the human first]" if is_sensitive(c.label) else "") for c in pressable]
+        lines += [f"{' '.join(c.label.split())[:40] or 'unlabelled'} ({c.role}, a text field)" for c in fields
+                  if not c.secure]
+        return {"app": snap.app, "lines": lines[:max_lines], "dialog": bool(snap.dialog_text),
+                "truncated": bool(snap.truncated)}
+
+    def run_plan(self, plan: dict[str, Any], request: str, start: int = 0,
+                 approved: Optional[dict[str, str]] = None, dry_run: bool = False) -> dict[str, Any]:
+        """Walk a plan_contract plan over this desktop (plan_executor.run_plan). Never raises."""
+        from .plan_contract import PlanError, parse_plan
+        from .plan_executor import PlanResult
+        from .plan_executor import run_plan as walk
+
+        try:
+            parsed = parse_plan(plan, str(request or "")[:600], source=str(plan.get("source") or "astra"))
+        except PlanError as e:
+            return PlanResult("unavailable", reason=f"bad plan: {e}"[:200]).to_dict()
+        adapter = _LaneAdapter(self, None)
+        try:
+            result = walk(parsed, senses=adapter, effectors=adapter, asker=self.step_asker,
+                          open_app=self.open_app, open_url=self.open_url,
+                          frontmost_app=lambda: str(self._front().get("app") or ""), start=max(0, int(start)),
+                          approved={int(k): str(v) for k, v in (approved or {}).items()},
+                          decide="jev" if self.step_asker is not None else "keyword",
+                          dry_run=bool(dry_run), planned_for=str(plan.get("app") or "")[:80], clock=self._clock)
+        except Exception as e:  # noqa: BLE001 — an executor that fails is "the planner does it", never a dead task
+            result = PlanResult("partial", next_index=max(0, int(start)), reason=f"error:{type(e).__name__}: {e}"[:200])
+        for line in result.log_lines:
+            self.log(line)
+        return result.to_dict()
 
     def lane_first(self, goal: str, dry_run: bool = False) -> dict[str, Any]:
         """The router (lane_router.route) over this desktop: try to finish `goal` with keyword-decided

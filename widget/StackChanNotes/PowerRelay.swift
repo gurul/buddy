@@ -79,6 +79,13 @@ final class PowerRelay {
         guard !switching, let request = BuddyPower.readRequest() else { return }
         let answered = BuddyPower.readState()?.at ?? .distantPast
         guard request.at > answered else { return }
+        if Date.now.timeIntervalSince(request.at) > BuddyPower.requestMaxAge, let state {
+            // Pressed while this helper was not running. Too old to act on: stamp the state past it
+            // so the card stops waiting, and leave buddy as it is.
+            log.info("ignoring a power request from \(request.at, privacy: .public): too old")
+            publish(state, force: true)
+            return
+        }
         if let state, state.on == request.on {
             // Already there (a stale button, or a double press): stamp the state
             // past the request so the card stops showing it as pending.
@@ -91,7 +98,10 @@ final class PowerRelay {
     /// Write power.json for the card; only on a change unless forced, so the
     /// card is not reloaded every 30 seconds for nothing.
     private func publish(_ s: ServiceState, force: Bool) {
-        let next = BuddyPower.State(on: s.on, switchable: s.buttonTitle != nil, line: s.line, at: .now)
+        // Never stamped before the request it answers (a request is stamped a second past the last
+        // state, so it can sit up to a second in the future): the card reads "answered" off this.
+        let stamp = max(Date.now, BuddyPower.readRequest()?.at ?? .distantPast)
+        let next = BuddyPower.State(on: s.on, switchable: s.buttonTitle != nil, line: s.line, at: stamp)
         if !force, var last = lastWritten {
             last.at = next.at
             if last == next { return }

@@ -48,7 +48,7 @@ none | pending | applied and a step applies its payload at most once):
     stopped: reason={one_step|dry_run}; steps={n}; last={action}; pick={id role "label"}; text=…; key=…
     escalate: app="{app}"; reason={no_window|no_candidate|dialog_open|truncated|model_invalid|abstain|
               stalled|stalled_2|ambiguous_target|no_match|uncovered|hit_test_failed|focus_changed|
-              step_cap}; top=[…≤3]; steps={n}; last={action}; text=…; key=…
+              step_cap|jev_error|jev_veto|jev_none}; top=[…≤3]; steps={n}; last={action}; text=…; key=…
     confirm: "{label}" needs the human's yes; app="{app}"; action={click|type|press}; steps={n};
              last={action}; text=…; key=…
     unavailable: {reason}
@@ -79,7 +79,7 @@ from __future__ import annotations
 
 import re
 import time
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from typing import Any, Callable, Optional, Sequence
 
 from .ax_candidates import (
@@ -92,6 +92,7 @@ from .ax_candidates import (
     rank_candidates,
 )
 from .decider import RESERVED, Choice, render_option
+from .typed_ask import JEV_STEP_GATES, StepAnswer, StepGates
 
 # The shipped default for CC_BUDDY_FAST_LANE. The holdout eval (tools/fastlane_eval.py
 # --check-default, gate G6) decides it: enabled only if gated top-1 ≥ 0.80, coverage ≥ 0.70,
@@ -109,7 +110,7 @@ FAST_LANE_DEFAULT: bool = False
 # above 80%. At +3.5 s a right click and −4.55 s a wrong one that is about +2.6 s per
 # keyword-decided step and −2.5 s per model-decided step, so the model is out of the click path
 # until a checkpoint beats the gate where it abstains.
-DECIDE_MODES = ("keyword", "model")
+DECIDE_MODES = ("keyword", "model", "jev")
 DEFAULT_DECIDE = "keyword"
 # The shipped default for CC_BUDDY_LANE_FIRST (lane_router.py: the lane runs before the planner's
 # first turn). tools/fastlane_eval.py --router runs the real router over the fixtures and
@@ -123,6 +124,9 @@ DEFAULT_DECIDE = "keyword"
 # transcribed from speech. tools/fastlane_eval.py --live-route is the check on a real desktop.
 LANE_FIRST_DEFAULT: bool = True
 MAX_SCRIPT_STEPS = 6
+# "jev" mode's menu. Jev reads 255 options, and on select the right control is on a 25-menu in 60 of 69
+# cases against 58 on the 10-menu the local model needed (tools/jev_step_eval.py, 2026-09-21).
+JEV_MAX_OPTIONS = 27               # 25 real options + the two reserved
 DEFAULT_STYLE = "hinted"           # the eval's winner on select (cost-weighted +1.41 vs compact +1.37)
 SYSTEM_SETTINGS_BUNDLE = "com.apple.systempreferences"
 SYSTEM_SETTINGS_NAV_ROLES = frozenset({"row", "cell", "tab", "link"})
@@ -327,6 +331,17 @@ def lane_context(snapshot: Snapshot) -> str:
     return "; ".join(parts)
 
 
+def jev_context(snapshot: Snapshot) -> str:
+    """What a HOSTED model is told besides the step, the app and the menu: the focused control, and
+    never the window title — the one string most likely to be a document's name, a message's subject
+    or a chat's. Measured on select (2026-09-21): top-1 58/69 without the title against 57/69 with it,
+    and the gate-then-veto path identical (49 right, 2 wrong), so the title bought nothing."""
+    f = snapshot.focused
+    if f is not None and (f.label or f.role):
+        return f"focused: {f.role} {' '.join(f.label.split())}".rstrip()
+    return ""
+
+
 def _overlap(c: Candidate, tokens: set[str]) -> int:
     """How many objective tokens the control's label and value carry (the keyword gate's score)."""
     return len(tokens & set(objective_tokens(f"{c.label} {c.value}")))
@@ -394,6 +409,30 @@ def _ax_changed(before: Snapshot, after: Snapshot, chosen: Optional[Candidate]) 
     if len(before.elements) != len(after.elements) or before.truncated != after.truncated:
         return True
     return None
+
+
+def _jev_verdict(answer: StepAnswer, keyword: Optional[MenuItem], gates: StepGates,
+                 options: dict[str, str]) -> tuple[str, Choice, str]:
+    """(via, choice, stop) for one Jev answer. `stop` is "" to go on to the code gate, "confirm", or an
+    escalation reason: jev_error (no usable answer — nothing is pressed on a guess), jev_veto (the
+    keyword gate had a pick and Jev's top control is another one, without clearing its own bar),
+    jev_none (no pick from either)."""
+    empty = Choice("", k=len(options))
+    if answer.error or not answer.target:
+        return "jev", empty, "jev_error"
+    risky = answer.risky >= gates.risky_max          # the pick is still worked out: the human is asked about IT
+    if keyword is not None and answer.target == keyword.key:
+        return "keyword+jev", Choice(keyword.key, p_top=1.0, margin=1.0, confidence=answer.present,
+                                     probabilities={k: (1.0 if k == keyword.key else 0.0) for k in options},
+                                     k=len(options)), "confirm" if risky else ""
+    pick = replace(gates, risky_max=2.0).decide(answer)
+    if pick in options and pick not in RESERVED:
+        return "jev", Choice(pick, p_top=answer.p_target, margin=answer.margin, confidence=answer.present,
+                             probabilities={k: (answer.p_target if k == pick else 0.0) for k in options},
+                             k=len(options)), "confirm" if risky else ""
+    if risky:
+        return "jev", empty, "confirm"
+    return "jev", empty, "jev_veto" if keyword is not None else "jev_none"
 
 
 def _valid_key(key: Optional[str]) -> tuple[Optional[str], str]:
@@ -549,7 +588,8 @@ def run_delegate(objective: str, *, senses: Any, effectors: Any, decider: Any, t
                  allow_page_links: bool = False, max_steps: int = 4, dry_run: bool = False,
                  thresholds: Thresholds = Thresholds(), clock: Callable[[], float] = time.perf_counter,
                  decide: str = DEFAULT_DECIDE, require_cover: bool = False, cover_extra: Sequence[str] = (),
-                 skip_if_selected: bool = False) -> DelegateResult:
+                 skip_if_selected: bool = False, asker: Optional[Callable[..., StepAnswer]] = None,
+                 step_gates: StepGates = JEV_STEP_GATES) -> DelegateResult:
     """The loop of the module docstring. Never raises for a model or sense failure: the status
     says what happened, and every path that could act consequentially returns confirm first.
 
@@ -557,7 +597,13 @@ def run_delegate(objective: str, *, senses: Any, effectors: Any, decider: Any, t
     is the router's rule (lane_router.py): act only on a keyword pick that accounts for every word
     of the objective (uncovered_tokens), else escalate `uncovered` with zero input.
     `skip_if_selected` answers done with zero input when the keyword pick is already selected — a
-    script step that asks for the view the window is in."""
+    script step that asks for the view the window is in.
+
+    In "jev" mode `asker` is typed_ask.ask_jev_step bound to a predict, and the decider is unused. The
+    keyword gate PROPOSES and Jev can REFUSE: a gate pick is pressed only when Jev's own top control is
+    the same one; otherwise the step is Jev's, under `step_gates`. On the read fixtures that took the
+    click path from 40 right / 5 wrong to 43 right / 1 wrong (holdout, tools/jev_step_eval.py). Jev's
+    `risky` noul can only ADD a confirm, and every code gate after the pick applies to its pick too."""
     objective = " ".join(str(objective or "").split())
     text = text if isinstance(text, str) and text != "" else None
     done_when = " ".join(str(done_when).split()) if isinstance(done_when, str) and done_when.strip() else None
@@ -572,9 +618,14 @@ def run_delegate(objective: str, *, senses: Any, effectors: Any, decider: Any, t
         return run.finish("unavailable", format_line("unavailable", reason=f"decide must be one of {DECIDE_MODES}"))
     if decide == "model" and (decider is None or not getattr(decider, "available", False)):
         return run.finish("unavailable", format_line("unavailable", reason="the local decider is not loaded"))
-    if decide == "keyword" and (text is not None or key is not None):
+    if decide == "jev" and asker is None:
+        return run.finish("unavailable", format_line("unavailable", reason="jev is not configured"))
+    if decide in ("keyword", "jev") and (text is not None or key is not None):
         return run.finish("unavailable", format_line(
             "unavailable", reason="the keyword lane only clicks; type with type_text and press keys yourself"))
+    if decide == "jev" and thresholds.max_options < JEV_MAX_OPTIONS:
+        thresholds = replace(thresholds, max_options=JEV_MAX_OPTIONS)
+        run.thresholds = thresholds
     max_steps = max(1, min(6, int(max_steps)))
 
     # step 0: the baseline the ocr and title oracles compare against
@@ -645,11 +696,31 @@ def run_delegate(objective: str, *, senses: Any, effectors: Any, decider: Any, t
             if skip_if_selected and keyword.candidate.value == "selected":
                 run.done_when = keyword.candidate.label
                 return run.done("ax")
-        if keyword is not None:
+        if decide == "jev" and (keyword is not None or not require_cover):
+            assert asker is not None
+            real = {it.key: it.text for it in items if it.kind == "click"}
+            answer = asker(objective, app=snapshot.app, context=jev_context(snapshot), options=real,
+                           recent=tuple(run.recent[-MAX_RECENT:]))
+            via, choice, stop = _jev_verdict(answer, keyword, step_gates, options)
+            run.log_lines.append(_clip(f"delegate jev: target={answer.target or '-'} p={answer.p_target:.2f} "
+                                       f"present={answer.present:.2f} risky={answer.risky:.2f} "
+                                       f"{answer.ms:.0f}ms" + (f" {answer.error}" if answer.error else "")))
+            if stop == "confirm":
+                # Jev read the step as consequential. The human is asked about the control it would press, and
+                # their yes (`approve`, once) is the only thing that lets that control through.
+                named = next((it for it in items if it.key == (choice.id or answer.target)
+                              and it.candidate is not None), None)
+                label = named.candidate.label if named is not None and named.candidate is not None else objective
+                if not (choice.id and approve is not None and not run.approve_used
+                        and label.casefold() == approve.casefold()):
+                    return run.confirm(label, "click")
+            elif stop:
+                return run.escalate(stop)
+        elif keyword is not None:
             via = "keyword"
             choice = Choice(keyword.key, p_top=1.0, margin=1.0, confidence=1.0,
                             probabilities={k: (1.0 if k == keyword.key else 0.0) for k in options}, k=len(options))
-        elif decide == "keyword" or require_cover:
+        elif decide in ("keyword", "jev") or require_cover:
             # The gate abstained and nobody else is asked: a tie is ambiguous, zero shared words
             # is no match. Zero input either way; the planner takes it from here.
             return run.escalate("ambiguous_target" if why_not == "tie" else "no_match")
