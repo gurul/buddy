@@ -61,6 +61,11 @@ static bool               searching = false;
 static bool               locked = false;
 static char               lastSrc = 'M';           // 'F' face blob, 'M' motion
 static GazeObs            obs = {};                // latched for gazeTakeObs()
+// Eye lead (gaze.h): the last reported face's offset from the frame centre, in degrees, and when.
+static constexpr uint32_t kEyeLeadFreshMs = 700;   // ~3 frames at the host's rate; older than this is history
+static constexpr float    kEyeLeadGain    = 2.0f;
+static float              eyeLeadYaw = 0, eyeLeadPitch = 0;
+static uint32_t           eyeLeadMs = 0;
 
 static float clampf(float v, float lo, float hi) { return v < lo ? lo : (v > hi ? hi : v); }
 
@@ -180,6 +185,9 @@ void gazeUpdate(PersonaState active, bool needsAttention, bool listening,
       absYaw = clampf(absYaw, -kYawLimitDeg, kYawLimitDeg);
       absPitch = clampf(absPitch, kPitchMinDeg, kPitchMaxDeg);
       lastBx = host->faceBx; lastBy = host->faceBy; lastSize = host->faceSize;
+      eyeLeadYaw   =  kYawSign  * (host->faceBx / 100.0f) * (kCameraHfovDeg * 0.5f);
+      eyeLeadPitch = -kElevSign * (host->faceBy / 100.0f) * (kCameraVfovDeg * 0.5f);   // +by = down
+      eyeLeadMs    = now ? now : 1;
       obs.faceSeen = true; obs.faceOwner = obs.faceOwner || host->faceOwner;
       if (host->faceOwner) {
         // Owner: LIVE target + memory training.
@@ -323,4 +331,13 @@ void gazeUpdate(PersonaState active, bool needsAttention, bool listening,
       }
     }
   }
+}
+
+int8_t gazeEyeLeadYawDeg() {
+  if (!eyeLeadMs || ticks::elapsedMs(millis(), eyeLeadMs) > kEyeLeadFreshMs) return 0;
+  return (int8_t)clampf(eyeLeadYaw * kEyeLeadGain, -60.0f, 60.0f);
+}
+int8_t gazeEyeLeadPitchDeg() {
+  if (!eyeLeadMs || ticks::elapsedMs(millis(), eyeLeadMs) > kEyeLeadFreshMs) return 0;
+  return (int8_t)clampf(eyeLeadPitch * kEyeLeadGain, -40.0f, 40.0f);
 }

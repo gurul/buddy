@@ -39,9 +39,10 @@ port does **not** reset the sketch, so the daemon can hold it open.
 | FQBN | `esp32:esp32:m5stack_cores3:PartitionScheme=huge_app,PSRAM=enabled` | `tools/flash_stackchan.sh` |
 | M5Unified | 0.2.21 | Library Manager |
 | M5GFX | 0.2.28 | Library Manager |
-| StackChan-BSP | 1.1.0 | symlink `~/Documents/Arduino/libraries/M5StackChan` → `vendor/stackchan/StackChan-BSP` |
+| StackChan-BSP | 1.1.0 **at main, commit `8d4d6fc` (2026-08-28)** — not the `1.1.0` tag, which predates `TouchSensor.recalibrate()` and does not compile this firmware | symlink `~/Documents/Arduino/libraries/M5StackChan` → `vendor/stackchan/StackChan-BSP` |
 | FluxGarage RoboEyes | 1.1.2 | symlink `~/Documents/Arduino/libraries/FluxGarage_RoboEyes` → `vendor/stackchan/RoboEyes` |
-| IRremoteESP8266, M5Unit-NFC | — | BSP dependencies, Library Manager |
+| IRremoteESP8266 2.9.0, M5Unit-NFC 0.1.1 | — | BSP dependencies, Library Manager |
+| AnimatedGIF | 2.2.0 | Library Manager (`character.cpp`); was missing from this table until a clean machine needed it, 2026-09-21 |
 
 Re-clone the vendored repos with the loop in [repos.md](repos.md#re-clone).
 

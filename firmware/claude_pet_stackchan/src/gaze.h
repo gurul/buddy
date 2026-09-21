@@ -49,3 +49,11 @@ bool gazeTakeObs(GazeObs* out);
 // A touch on the pet is an owner observation (weight 2 at yaw ±28, pitch
 // level). Called from bodyNoteToucher().
 void gazeNoteTouch(int8_t side);
+
+// The eyes lead the head. The host reports where a face is in each camera frame; the neck takes about a
+// second to act on that (follow.py waits for the glide and the frame pipeline), the eyes need not. These
+// are the degrees to ADD to the head's own angles when aiming the eyes: twice the face's offset from the
+// centre of the frame, so a person 10 degrees off-centre already crosses the eyes' +-20 band and gets a
+// glance; 0 when no face has been reported for kEyeLeadFreshMs. Any face, owner or guest.
+int8_t gazeEyeLeadYawDeg();
+int8_t gazeEyeLeadPitchDeg();

@@ -858,7 +858,13 @@ void loop() {
             tama.agentState, moodExprForEyes);
     // A caption page (y >= 112) owns the lower band: the eyes park on the N row.
     eyesCardUp(captionUp);
-    eyesLookAt((int8_t)bodyYawDeg(), (int8_t)bodyPitchDeg());
+    // The eyes lead the head toward a face the host just reported (gaze.h): they glance at once, the neck
+    // follows about a second later and the lead falls back to zero as the face comes to the centre.
+    {
+      int ey = bodyYawDeg() + gazeEyeLeadYawDeg();
+      int ep = bodyPitchDeg() + gazeEyeLeadPitchDeg();
+      eyesLookAt((int8_t)(ey < -120 ? -120 : ey > 120 ? 120 : ey), (int8_t)(ep < 0 ? 0 : ep > 90 ? 90 : ep));
+    }
     eyesTick(now);
     static uint32_t captionSeenAt = 0;
     if (captionUp && tama.captionAtMs != captionSeenAt) {
