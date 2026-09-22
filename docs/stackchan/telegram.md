@@ -113,6 +113,21 @@ token without an owner id is off. A door with no allowlist never opens.
   and `go_explore` refuse ("stealth mode: the robot is playing asleep"); the
   camera may still `look`, tasks and files still work. Zero model calls to
   enter or leave it.
+- **`claude on` / `claude off`** — the Claude Code relay, explicit only. While
+  on: what Claude says in the terminal is forwarded ("Claude: …", the daemon
+  already tails the transcripts), "Claude is waiting on you" arrives when a
+  session blocks on you, and a **permission prompt becomes a yes/no in the
+  chat**: "Claude in repo wants to run Bash: rm -rf build/ — yes / no?". Your
+  next message answers it, exactly like a task question; a stranger's cannot;
+  four minutes of silence defers to Claude Code's own permission flow, never
+  denies. **`claude: <text>`** (or `> <text>`) raises that session's terminal
+  (`focus_terminal.py`) and types the line with Return through System Events,
+  so you can drive a session from the phone. Off by default and off again
+  after "claude off": nothing from the terminal leaves the Mac until you ask.
+- **No emoji, no dashes.** Every outgoing message is stripped in code
+  (`telegram.plain`): emoji blocks and their joiners go, an em or en dash
+  between words becomes a comma. The prompt says so too; the code makes it
+  true.
 - **An answer.** When a task needs a yes before something consequential, the
   question arrives in the chat. Your next message is the answer, and only the
   answer. No reply in three minutes reads as no.

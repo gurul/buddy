@@ -855,6 +855,139 @@ def test_the_robot_shows_what_the_chat_does_unless_stealth(tmp_path: Path) -> No
     assert len(rig.create.requests) == 3                                       # task, then the refused look-left turn
 
 
+# ---- "claude on" / "claude off": the terminal relay ----------------------------------------------------
+
+def test_the_claude_relay_is_off_until_said_and_forwards_only_while_on() -> None:
+    typed: list[tuple[str, str]] = []
+
+    async def terminal(cwd: str, text: str) -> str:
+        typed.append((cwd, text))
+        return "Typed into the terminal."
+
+    api = FakeApi([update("claude: run the tests", update_id=1)])
+    rig = Rig(api, FakeCreate(), terminal=terminal)
+
+    async def during() -> None:
+        inlet = rig.inlet
+        assert inlet.claude is False and api.sent == [(OWNER, telegram.CLAUDE_NOT_ON_LINE)] and typed == []
+        await inlet.relay_text("I fixed the bug.", "/Users/g/repo")             # off: nothing forwarded
+        await inlet.relay_notification("permission_prompt", "Bash needs approval", True)
+        assert len(api.sent) == 1
+        api.feed(update("claude on", update_id=2))
+        await settle()
+        assert inlet.claude is True and api.sent[-1] == (OWNER, telegram.CLAUDE_ON_LINE)
+        await inlet.relay_text("  I fixed\n the bug. " + "x" * 3000, "/Users/g/repo")
+        assert api.sent[-1][1].startswith("Claude: I fixed the bug.") and len(api.sent[-1][1]) <= telegram.MAX_RELAY_CHARS + 8
+        await inlet.relay_notification("idle_reminder", "still here", False)      # not waiting: not news
+        assert api.sent[-1][1].startswith("Claude:")
+        await inlet.relay_notification("permission_prompt", "Bash needs approval", True)
+        assert api.sent[-1] == (OWNER, "Claude is waiting on you: Bash needs approval")
+        api.feed(update("> git status", update_id=3), update("claude: make it green", update_id=4))
+        await settle()
+        assert typed == [("/Users/g/repo", "git status"), ("/Users/g/repo", "make it green")]
+        api.feed(update("claude off", update_id=5))
+        await settle()
+        assert inlet.claude is False and api.sent[-1] == (OWNER, telegram.CLAUDE_OFF_LINE)
+
+    run_rig(rig, during)
+    assert rig.create.requests == []                                   # all of it is code, no model call
+
+
+def test_a_permission_prompt_is_answered_from_the_phone_and_silence_defers() -> None:
+    api = FakeApi([update("claude on", update_id=1)])
+    rig = Rig(api, FakeCreate(), permission_timeout_secs=0.05)
+
+    async def during() -> None:
+        inlet = rig.inlet
+        ask = asyncio.ensure_future(inlet.decide_permission("Bash", "rm -rf build/", "/Users/g/repo"))
+        await settle()
+        assert api.sent[-1][1].startswith("Claude in repo wants to run Bash: rm -rf build/")
+        api.feed(update("yes", uid=STRANGER, update_id=2))            # a stranger cannot approve
+        await settle()
+        assert not ask.done()
+        api.feed(update("no, leave it", update_id=3))
+        assert await ask == "deny"
+        ask = asyncio.ensure_future(inlet.decide_permission("Bash", "pytest -q"))
+        await settle()
+        api.feed(update("yes go", update_id=4))
+        assert await ask == "allow"
+        assert await inlet.decide_permission("Bash", "sleep 1") is None                # silence: defer
+        assert rig.create.requests == []                               # yes/no never became a chat turn
+
+    run_rig(rig, during)
+
+
+def test_the_daemon_honours_the_phones_decision_and_defers_without_one() -> None:
+    from types import MethodType
+
+    class Inlet:
+        def __init__(self, decision):
+            self.claude, self.decision, self.asked = True, decision, []
+
+        async def decide_permission(self, tool, hint, cwd=""):
+            self.asked.append((tool, hint, cwd))
+            return self.decision
+
+    class Audit:
+        def __init__(self):
+            self.rows = []
+
+        def record(self, **kw):
+            self.rows.append(kw)
+
+    def daemon_with(inlet):
+        d = SimpleNamespace(_telegram=inlet, audit=Audit(), matchers=SimpleNamespace(),
+                            state=SimpleNamespace(note_tool=lambda *a: None, pending_count=0),
+                            ble=SimpleNamespace(connected=False), _ensure_session=lambda req: None)
+        d._handle_pretooluse = MethodType(Daemon._handle_pretooluse, d)
+        return d
+
+    req = {"tool_use_id": "t1", "session_id": "s1", "tool_name": "Bash", "hint": "rm -rf build/", "cwd": "/r"}
+    import cc_buddy_bridge.daemon as dm
+    original = dm.classify_command
+    dm.classify_command = lambda hint, matchers: "default"
+    try:
+        for decision, expect in (("allow", {"ok": True, "decision": "allow"}), ("deny", {"ok": True, "decision": "deny"}),
+                                 (None, {"ok": True})):
+            d = daemon_with(Inlet(decision))
+            assert asyncio.run(d._handle_pretooluse(req)) == expect
+            assert d._telegram.asked == [("Bash", "rm -rf build/", "/r")]
+            assert d.audit.rows[-1]["source"] == ("telegram" if decision else "ble_disconnected")   # deferred
+        off = Inlet("allow")
+        off.claude = False
+        d = daemon_with(off)
+        assert asyncio.run(d._handle_pretooluse(req)) == {"ok": True} and off.asked == []
+    finally:
+        dm.classify_command = original
+
+
+def test_no_emoji_leaves_the_mac() -> None:
+    assert telegram.plain("On it! \U0001F680\U0001F4BB Done \u2705 ok \U0001F44D\U0001F3FD") == "On it! Done ok"
+    assert telegram.plain("plain words, 3 + 4 = 7, café, 日本語") == "plain words, 3 + 4 = 7, café, 日本語"
+    assert telegram.plain("keycap 1\ufe0f\u20e3 flag \U0001F1FA\U0001F1F8") == "keycap 1 flag"
+    assert telegram.plain("On it \u2014 the result comes later") == "On it, the result comes later"
+    assert telegram.plain("Done \u2013 both of them.") == "Done, both of them."
+    assert telegram.plain("It worked\u2014.") == "It worked." and telegram.plain("well-known") == "well-known"
+
+    async def go() -> list[str]:
+        bodies: list[str] = []
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            body = request.read()
+            bodies.append(json.loads(body)["text"] if request.headers.get("content-type", "").startswith("application/json")
+                          else body.decode(errors="replace"))
+            return httpx.Response(200, json={"ok": True, "result": {}})
+
+        api = BotApi(TOKEN, client=httpx.AsyncClient(transport=httpx.MockTransport(handler)))
+        await api.send_message(OWNER, "Calculator is open \U0001F9EE\u2728")
+        await api.send_document(OWNER, Path(__file__), "here \U0001F4CE")
+        await api.close()
+        return bodies
+
+    sent, doc = asyncio.run(go())
+    assert sent == "Calculator is open" and "\U0001F4CE" not in doc and "here" in doc
+
+
 # ---- G10: the poll loop -----------------------------------------------------------------------
 
 def test_an_update_is_handled_once() -> None:
