@@ -238,6 +238,9 @@ lane (`decider.py`, the `[fast]` extra) are **off by default**. Optional typed-d
 via MLX** on Apple silicon and **hosted Jev**. Jev can also be enabled for narrowly
 scoped launch routing and spoken head movements. These options have different
 capabilities and data flows; they are not required for the default setup.
+A **browser lane** (`browser_lane.py`, off by default) gives web goals a better body: Playwright
+drives buddy's own Chromium, the page's controls become the candidates, and the same
+plan executor, keyword gate and Jev decide each step ([routing](docs/stackchan/routing.md#the-browser-lane-playwright-as-the-hands-jev-as-the-judge)).
 See [routing](docs/stackchan/routing.md) for the switches and measured evaluations,
 and [voice and computer control](docs/stackchan/voice.md) for worker details.
 

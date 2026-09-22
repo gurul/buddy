@@ -287,8 +287,8 @@ over IPC (`{"evt":"explore","action":"start|stop|status"}`), or say
 *"hey buddy, go explore"* — the voice tool `go_explore` ends the conversation and the daemon
 starts the explore once the board has left the conversation pose. A manual
 explore ignores the idle clock; a touch, the listen key, the next wake
-word, a disconnect or `explore stop` ends it. `CC_BUDDY_EXPLORE=0` only turns
-off the idle start.
+word, a disconnect or `explore stop` ends it. Exploring is explicit: the idle
+start is **off** unless `CC_BUDDY_EXPLORE=1` (owner decision, 2026-09-21).
 
 When a view scores high on the cool factor the daemon sends `{"cmd":"snap"}` and
 keeps the 320x240 frame the board answers with as a photo under

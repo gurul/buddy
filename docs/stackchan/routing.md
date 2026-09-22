@@ -214,6 +214,56 @@ turn-by-turn loop **and** against plan-once with the keyword gate alone (`plan_l
 arm), is what may flip `PLAN_EXEC_DEFAULT`. The plan call is now the whole cost, and `low` is the lowest
 reasoning effort `gpt-6-astra` accepts.
 
+## The browser lane: Playwright as the hands, Jev as the judge
+
+The lane's ceiling on the Mac is the Accessibility tree over web content:
+nameless buttons, stale frames, coordinate clicks. `browser_lane.py` gives web
+goals a better body. Playwright drives **buddy's own Chromium** (a persistent
+profile at `~/.config/cc-buddy-bridge/browser`, headed so you and the phone's
+screenshot see it, signed in once by you), and the page supplies the
+candidates: every visible control with its role, accessible name, state and
+box, from one JavaScript evaluate. A click lands on the element, not on a
+point. "Did it work" is a DOM question: the URL, the title, the text now on
+the page, what is typed in a field.
+
+Nothing about the brain changes. The page is presented as the same
+`ax_candidates.Snapshot` of `Candidate`s the window walk produces, so
+`plan_executor.run_plan` — astra's one plan, the keyword gate, Jev's typed step
+answer, the sensitive-label table, "only the human approves" — runs unchanged
+on top of it. The lane implements the nine-method senses/effectors contract
+(`snapshot`, `text_visible`, `focused`, `frontmost_pid`, `screen_changed`,
+`click_candidate`, `focus_and_type`, `press`, `settle`) and nothing else. It
+never attaches to your Chrome: that needs a debugging port, a consent prompt
+per session, and your live cookies under the daemon.
+
+```
+goal ── is_web_goal? (a URL, a site, "the browser", or the router's search) ──▶ browser lane
+   no │                                                                          │ outline: role + label per control
+      ▼                                                                          ▼
+ reflex → lane → plan-once → planner (the Mac tiers)          astra plans once (plan_contract, "Frontmost app: browser")
+                                                                                 │
+                                                                                 ▼
+                                             run_plan: per step the page's candidates → gate + Jev → Playwright → expect
+                                                                                 │
+                                                        complete → one sentence · partial/failed → the screenshot planner
+```
+
+A web search ("search the web for ramen near me") is one navigation with zero
+model calls. When the lane takes a goal the Mac tiers stand down, so the URL
+is never also opened in Safari.
+
+Measured on this Mac, 2026-09-21: Chromium up in 0.19 s, a page in 0.52 s, a
+full control snapshot in 40 ms. A four-step plan (open, tick a checkbox, type,
+Return) ran through the real executor against a local page in the tests in
+under 3 s including launch, every step `confirmed` by its oracle; a sensitive
+control (`Place Order`) stopped for the human and a yes let exactly that
+through.
+
+Ships **off**. No evaluation set of recorded page snapshots exists yet; the
+same `fastlane_eval.py` replay applies once one is recorded (a page snapshot
+is a `Snapshot`, so the fixture format is unchanged). Install:
+`pip install -e ".[browser]"` then `python -m playwright install chromium`.
+
 ## Knobs
 
 | Variable | Default | What it does |
@@ -226,6 +276,10 @@ reasoning effort `gpt-6-astra` accepts.
 | `CC_BUDDY_PLAN_EXEC` | `0` | `1`: the planner plans once and `plan_executor.py` walks the plan with no planner turn between steps or at the end ([above](#plan-once-execute-with-jev)). Uses Jev for grounding when a route is configured, the keyword gate alone otherwise |
 | `CC_BUDDY_PLAN_EXEC_REASONING` | `low` | the plan call's reasoning effort |
 | `CC_BUDDY_DECIDER` | `laya` | the lane's model in `model` mode: `laya` or `jev` |
+| `CC_BUDDY_BROWSER_LANE` | `0` | `1`: web goals go to buddy's own Chromium through Playwright ([above](#the-browser-lane-playwright-as-the-hands-jev-as-the-judge)); Jev grounds each step when `CC_BUDDY_JEV_STEP=1` and a route is configured, the keyword gate alone otherwise |
+| `CC_BUDDY_BROWSER_PROFILE` | `~/.config/cc-buddy-bridge/browser` | the persistent Chromium profile (sign in here once) |
+| `CC_BUDDY_BROWSER_HEADLESS` | `0` | `1` hides the window (benches); you should see it |
+| `CC_BUDDY_EXPLORE` | `0` | `1`: buddy starts exploring on its own after ten idle minutes. Off: exploring is explicit only ("go explore", a text, `cc-buddy-bridge explore`) — owner decision, 2026-09-21 |
 
 Every routing decision is in the task's run log (`{"route": …}`, `{"reflex": …}`, `{"lane_first": …}`),
 so a wrong route can be read after the fact.

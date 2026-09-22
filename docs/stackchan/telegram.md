@@ -16,8 +16,9 @@ your phone ── Telegram ──▶ api.telegram.org ◀── long poll (outbo
                                                                                    ▼
                                                         text brain: gpt-6-astra, Responses API, store=False
                                                           tools: start_task · steer_task · stop_task · take_photo ·
-                                                                 screenshot · send_file · list_files · think_hard ·
-                                                                 web_search (+ memory_search · memory_get)
+                                                                 screenshot · send_file · list_files · look · look_around ·
+                                                                 find · move_head · go_explore · set_sound · take_notes ·
+                                                                 remember · think_hard · web_search (+ memory_search · memory_get)
                                                                                    │ start_task
                                                                                    ▼
                                               computer_agent.py — the same agent, tiers and approval rules as the voice
@@ -97,6 +98,21 @@ token without an owner id is off. A door with no allowlist never opens.
   `~/.aws` and every dotfile are refused after symlinks are followed, and
   nothing outside your home can be named at all. The log gets the size, never
   the name.
+- **The robot itself.** A text is a word said to buddy: "look left", "look at
+  me", "what do you see", "find my mug", "look around", "start taking notes" /
+  "stop taking notes", "go explore", "mute", "remember that …" each go straight
+  to the same tool the voice has (`move_head`, `look`, `find`, `look_around`,
+  `take_notes`, `go_explore`, `set_sound`, `remember`). Only `lesson` (the
+  learning workspace, bound to the microphone) stays voice-only.
+- **What the robot shows.** While the chat drives a task the robot acts it
+  out as it does for the voice: the phase on its face, each progress line and
+  the result as a caption on its screen.
+- **`stealth mode`** — a code word (also "play dead", "act asleep"); "wake
+  up" / "stealth off" ends it. Asleep, the robot's face goes idle and stays
+  there, nothing is shown on its screen, and the head, `find`, `look_around`
+  and `go_explore` refuse ("stealth mode: the robot is playing asleep"); the
+  camera may still `look`, tasks and files still work. Zero model calls to
+  enter or leave it.
 - **An answer.** When a task needs a yes before something consequential, the
   question arrives in the chat. Your next message is the answer, and only the
   answer. No reply in three minutes reads as no.
