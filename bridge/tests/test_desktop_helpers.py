@@ -223,6 +223,29 @@ def test_click_text_clicks_centre_and_raises_when_absent() -> None:
     assert b.clock.t == pytest.approx(3.0) and b.gui.clicks == []
 
 
+def test_click_text_finds_a_label_that_fast_ocr_misses_without_waiting() -> None:
+    levels: list[str] = []
+
+    def ocr(frame, level):
+        levels.append(level)
+        return [ocr_line("Odetari x 9lives - | LOVE YOU HOE")] if level == "accurate" else []
+
+    b = Bench(ocr=ocr)
+    label = "Odetari x 9lives - | LOVE YOU HOE"
+    assert b.h.find_text(label, level="fast") is None  # reproduce the old polling miss
+    assert b.h.screen_text()[0]["text"] == label
+    levels.clear()
+    b.h.click_text(label)
+    assert b.gui.clicks == [(20, 7)]
+    assert levels == ["accurate"] and b.clock.sleeps == []
+
+
+def test_click_text_waits_for_accurate_label_and_respects_region_and_clicks() -> None:
+    b = Bench(ocr=scripted([[], [ocr_line("Play", by=0.1)], [ocr_line("Play")]]))
+    b.h.click_text("Play", region=(0, 0, 50, 20), clicks=2)
+    assert b.gui.clicks == [(20, 7, 2)] and b.clock.t == pytest.approx(0.6)
+
+
 # ---- wait_for / wait_settled --------------------------------------------------------
 
 

@@ -20,8 +20,9 @@ Perception is local, so it costs 0.04–0.31 s instead of a model turn
 Settle de-duplication: open_app / open_url settle inside the helper, and the
 worker's auto-screenshot used to settle again (0.3 s typical, 1.5 s worst,
 measured over the 2026-09 run logs). Every acted site bumps `_action_seq`; a
-settle that finished records (clock, seq); `settled_screenshot` reuses that
-frame when no input happened since and it is under SETTLE_REUSE_SECS old.
+settle attempt that finished records (clock, seq), including a timeout on an
+animated screen; `settled_screenshot` reuses that frame when no input happened
+since and it is under SETTLE_REUSE_SECS old. Reuse does not claim it settled.
 
 Timing: every sense and effector adds its wall time to `timing` (ms, reset by
 `begin()`), so the worker can attach {"capture", "resize", "ocr", "ax",
@@ -671,8 +672,13 @@ class Helpers:
 
     def click_text(self, text: str, region: Optional[tuple[int, int, int, int]] = None,
                    timeout: float = 3.0, clicks: int = 1) -> str:
-        """Find `text` on screen (waiting up to `timeout`) and click its centre."""
-        item = self._wait_for(text, gone=False, timeout=timeout, interval=0.3, region=region)
+        """Find `text` with accurate OCR (waiting up to `timeout`) and click its centre.
+
+        Fast OCR can miss a label that screen_text() just read, so it must not
+        gate a click behind repeated false negatives and another planner turn.
+        """
+        item = self._wait_for(text, gone=False, timeout=timeout, interval=0.3, region=region,
+                              level="accurate")
         if not isinstance(item, dict):
             raise LookupError(f"{text!r} is not on screen")
         self._mark_acted()
@@ -696,16 +702,16 @@ class Helpers:
         return result
 
     def _wait_for(self, text: str, *, gone: bool, timeout: float, interval: float,
-                  region: Optional[tuple[int, int, int, int]]) -> Any:
+                  region: Optional[tuple[int, int, int, int]], level: str = "fast") -> Any:
         timeout = min(float(timeout), MAX_WAIT_SECS)
         t0 = self._clock()
         while True:
-            item = self._find(text, region, "fast")
+            item = self._find(text, region, level)
             self._elapsed = self._clock() - t0
             if gone and item is None:
                 return True
             if not gone and item is not None:
-                return self._find(text, region, "accurate") or item
+                return (self._find(text, region, "accurate") or item) if level == "fast" else item
             if self._clock() - t0 >= timeout:
                 return False if gone else None
             self._sleep(interval)
@@ -720,9 +726,9 @@ class Helpers:
         return settled
 
     def _settle(self, timeout: float, interval: float = 0.25) -> bool:
-        """Two captures `interval` apart that look the same; False past `timeout`. A True
-        result is remembered with the action sequence so the worker's auto-screenshot can
-        reuse the frame instead of settling again (see the module docstring)."""
+        """Two captures `interval` apart that look the same; False past `timeout`.
+        Remember a completed attempt, including timeout, for the auto-screenshot.
+        """
         timeout = min(float(timeout), MAX_WAIT_SECS)
         t0 = self._clock()
         try:
@@ -746,6 +752,7 @@ class Helpers:
                 return True
             a = b
             if self._clock() - t0 >= timeout:
+                self._settled = (self._clock(), self._action_seq)
                 return False
 
     # -- typing --
@@ -805,8 +812,9 @@ class Helpers:
     def settled_screenshot(self, max_wait: float) -> Any:
         """Wait (up to max_wait) for the screen to stop changing, then the screenshot of that last frame.
 
-        When a helper already settled after the last input (open_app, open_url) and that
-        frame is under SETTLE_REUSE_SECS old, it IS the settled picture: no second wait.
+        When a helper already waited after the last input (open_app, open_url,
+        wait_settled) and that frame is under SETTLE_REUSE_SECS old, reuse it even
+        if animation exhausted the wait. A timeout still returns False to its caller.
         """
         if max_wait > 0 and not self._settle_is_fresh():
             self._settle(max_wait)
