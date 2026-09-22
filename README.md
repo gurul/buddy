@@ -179,11 +179,18 @@ tail -f ~/Library/Logs/cc-buddy-bridge.log
 
 The speaker amplifier stays off between chirps to prevent idle hiss or whine.
 If an older build makes noise between beeps, reflash with the command above.
+Quiet is the default: the external 5 V supply stays off after boot to eliminate
+the confirmed idle whine. This disables the rear LEDs and top touch sensor;
+the screen and head motors retain their separate supplies.
+For noise that persists while muted, the [build guide](docs/stackchan/build.md)
+describes timed screen, motor, and power-output isolation tests.
 
 Try “hey buddy, what time is it?”, “hey buddy, open Safari”, or “hey buddy, go
 explore.” For the desktop widget and diary app, follow the separate
 [widget build and signing instructions](docs/stackchan/widget.md) (macOS 14+).
 If buddy wakes but stalls, see the [voice troubleshooting guide](docs/stackchan/voice.md#when-buddy-hears-you-and-then-sits-still).
+If it sees camera frames but stops following faces, see the
+[face-tracking troubleshooting notes](docs/stackchan/vision.md#following-whoever-is-talking).
 
 ## Technical summary
 
@@ -258,7 +265,8 @@ reconcile, never by the agent. With `CC_BUDDY_COMPOSIO=1` the owner's apps (Gmai
 the calendar writable, Drive and the rest asked first) are reachable by API through Composio
 (`composio_tools.py`), and with `CC_BUDDY_SECOND_BRAIN=1` a text becomes a note in a local
 markdown vault Obsidian opens (`second_brain.py`, [docs](docs/stackchan/second-brain.md)).
-Every brain that searches the web does it through OpenRouter's Exa engine (`websearch.py`).
+Voice, text and deep reasoning use OpenAI's built-in GPT web search by default (`websearch.py`); Exa is opt-in.
+They also receive a local clock snapshot and the owner's configured location/timezone in system context; see the [voice settings](docs/stackchan/voice.md#knobs).
 While the Claude relay is on, Jev judges each relayed shell command for risk before it runs
 (`typed_ask.py`; shadow by default). See [text buddy through Telegram](docs/stackchan/telegram.md).
 

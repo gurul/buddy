@@ -1267,14 +1267,14 @@ def test_composio_tools_are_offered_and_executed_through_the_session() -> None:
     assert api.sent == [(OWNER, telegram.FAILED_LINE)]
 
 
-def test_web_search_is_a_function_tool_answered_by_exa_when_openrouter_is_set(monkeypatch: Any) -> None:
+def test_web_search_is_a_function_tool_answered_by_exa_when_explicitly_selected(monkeypatch: Any) -> None:
     from cc_buddy_bridge import websearch
 
     seen: list[str] = []
     monkeypatch.setattr(websearch, "search", lambda query, cfg: (seen.append(query) or {"ok": True, "answer": "112 to 104",
                                                                                           "sources": [{"url": "https://espn.com"}]}))
     cfg = telegram.configured({"CC_BUDDY_TELEGRAM": "1", "CC_BUDDY_TELEGRAM_TOKEN": "t", "CC_BUDDY_TELEGRAM_OWNER": str(OWNER),
-                               "OPENROUTER_API_KEY": "r"})
+                               "OPENROUTER_API_KEY": "r", "CC_BUDDY_WEB_SEARCH": "openrouter-exa"})
     assert cfg.search.engine == "openrouter-exa"
     api = FakeApi([update("who won the lakers game", update_id=1)])
     rig = Rig(api, FakeCreate(call("web_search", {"query": "lakers score"}), say("Lakers lost, 104 to 112.")), config=cfg)

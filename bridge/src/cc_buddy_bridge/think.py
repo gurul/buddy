@@ -7,11 +7,9 @@ comparison — deserves more than that, so the backend's ``think_hard`` tool
 hands it here: one Responses call at high effort, with web search available,
 that may take tens of seconds while the voice keeps the owner company.
 
-Web search is buddy's own ``web_search`` function tool (websearch.py: one
-OpenRouter call with the web plugin on Exa, the owner's must of 2026-09-21),
-so a think may take a few rounds: the model asks, this module searches off the
-loop, the sources go back, the model answers. With no OpenRouter key the
-hosted OpenAI search is offered instead and it stays one round.
+Web search uses OpenAI's hosted tool by default. Explicitly selecting Exa in
+websearch.py enables function-call rounds: the model asks, this module searches
+off the loop, the sources go back, and the model answers.
 
 Two halves, as in scene.py: a pure core (``request`` builds the exact body,
 ``parse_answer`` reads it, ``parse_calls`` finds the searches) that runs in
@@ -30,7 +28,7 @@ import os
 from dataclasses import dataclass, field
 from typing import Any, Awaitable, Callable, Optional
 
-from . import websearch
+from . import system_context, websearch
 
 log = logging.getLogger(__name__)
 
@@ -91,7 +89,7 @@ def request(config: ThinkConfig, items: list[dict[str, Any]]) -> dict[str, Any]:
     `items` is the question, then, on a later round, the carried reasoning, the calls and their outputs."""
     return {
         "model": config.model,
-        "instructions": INSTRUCTIONS,
+        "instructions": INSTRUCTIONS + system_context.context(),
         "input": items,
         "reasoning": {"effort": config.effort},
         "tools": websearch.tools_for(config.search),

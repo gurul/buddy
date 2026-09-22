@@ -30,7 +30,7 @@ def test_request_reasons_hard_searches_the_web_and_keeps_nothing() -> None:
     assert body["store"] is False and body["include"] == ["reasoning.encrypted_content"]
     assert body["input"] == [{"type": "message", "role": "user",
                               "content": [{"type": "input_text", "text": "what is the answer"}]}]
-    assert body["instructions"] == INSTRUCTIONS and "spoken" in INSTRUCTIONS
+    assert body["instructions"].startswith(INSTRUCTIONS) and "spoken" in INSTRUCTIONS
     # without an OpenRouter key the hosted search is offered, so nothing goes dark
     hosted = request(ThinkConfig(model="m", search=websearch.SearchConfig(engine="openai")), question_items("q"))
     assert hosted["tools"] == [{"type": "web_search"}]
@@ -76,7 +76,7 @@ def test_configured_defaults_to_the_voice_backend_model_at_high_effort() -> None
     cfg = configured({}, backend_model="gpt-6-astra")
     assert cfg == ThinkConfig(enabled=True, model="gpt-6-astra", effort="high", timeout_secs=90.0,
                               search=websearch.SearchConfig(engine="openai"))
-    assert configured({"OPENROUTER_API_KEY": "r"}, backend_model="m").search.engine == "openrouter-exa"
+    assert configured({"OPENROUTER_API_KEY": "r"}, backend_model="m").search.engine == "openai"
     cfg = configured({"CC_BUDDY_THINK_MODEL": "gpt-5.5", "CC_BUDDY_THINK_EFFORT": "xhigh",
                       "CC_BUDDY_THINK_TIMEOUT_SECS": "120"}, backend_model="gpt-6-astra")
     assert (cfg.model, cfg.effort, cfg.timeout_secs) == ("gpt-5.5", "xhigh", 120.0)

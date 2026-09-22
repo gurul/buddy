@@ -25,6 +25,8 @@ past-experiments/firmware/**/build/
 debrief/
 
 # local agent tooling — never committed
+.unlazy/
+.unlazy-hook-state.json
 .era/
 .opencode/
 .claude/

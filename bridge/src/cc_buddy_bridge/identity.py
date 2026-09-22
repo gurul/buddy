@@ -412,7 +412,9 @@ def vision_feature_print(frame: Frame, face: Rect) -> Optional[Vector]:
             return None
         request = Vision.VNGenerateImageFeaturePrintRequest.alloc().init()
         request.setRevision_(Vision.VNGenerateImageFeaturePrintRequestRevision2)
-        handler = Vision.VNImageRequestHandler.alloc().initWithCGImage_options_(crop, {})
+        # Keep options native/nil; the Python dict bridge can throw on an
+        # absent Vision option instead of returning nil.
+        handler = Vision.VNImageRequestHandler.alloc().initWithCGImage_options_(crop, None)
         ok, err = handler.performRequests_error_([request], None)
         if not ok:
             raise RuntimeError(f"Vision feature print failed: {err}")

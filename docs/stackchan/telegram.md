@@ -61,7 +61,7 @@ token without an owner id is off. A door with no allowlist never opens.
 | `CC_BUDDY_TELEGRAM_MODEL` | `gpt-6-astra` | The text brain. |
 | `CC_BUDDY_TELEGRAM_ASK` | `0` | `1`: with the Claude relay on, every tool call is asked in the chat, not only the always-ask ones (never in bypass mode). |
 | `CC_BUDDY_TELEGRAM_EFFORT` | `low` | Its reasoning effort (`low`, `medium`, `high`, `xhigh`, `max`). Hard questions go to `think_hard` instead. |
-| `CC_BUDDY_WEB_SEARCH` | `openrouter-exa` with an `OPENROUTER_API_KEY`, else `openai` | How every brain searches the web ([below](#web-search-exa-through-openrouter)): `openrouter-exa`, `openai` (the hosted tool), `off`. |
+| `CC_BUDDY_WEB_SEARCH` | `openai` | How every brain searches the web ([below](#web-search)): `openrouter-exa`, `openai` (the hosted tool), `off`. |
 | `CC_BUDDY_WEB_SEARCH_MODEL` | `openai/gpt-5.4-nano` | The OpenRouter model that carries the Exa results back (the cheapest with the web plugin, 2026-09-21). |
 | `CC_BUDDY_WEB_SEARCH_RESULTS` | `5` | Results per search, 1 to 10 (Exa's first price tier). |
 | `CC_BUDDY_COMPOSIO` | `0` | `1`: the owner's apps through Composio ([below](#the-apps-composio)). Needs `COMPOSIO_API_KEY` in the env file. |
@@ -72,19 +72,18 @@ token without an owner id is off. A door with no allowlist never opens.
 | `CC_BUDDY_VAULT` | `~/Documents/Second Brain` | The vault's folder (open it in Obsidian). |
 | `CC_BUDDY_COMMAND_RISK` | `shadow` | The Auto Mode gate behind the Claude relay ([below](#the-auto-mode-gate-jev-judges-a-relayed-command)): `off`, `shadow` (judged and logged, never acted on), `ask` (a risky verdict is your yes/no). |
 
-## Web search: Exa through OpenRouter
+## Web search
 
-Owner's decision, 2026-09-21: "use openrouter exa, this is a must". Wherever buddy
-searched the web with OpenAI's hosted tool (this text brain, `think_hard`, the
-voice backend's delegation) it now offers its own `web_search` function tool
-(`websearch.py`). A call is one OpenRouter chat completion on a cheap model with
-the `web` plugin on the `exa` engine; the reply's `url_citation` annotations come
-back as sources (title, url, snippet) beside a four-sentence answer, and the model
-quotes from those. Exa is $0.007 a search for up to ten results plus the small
-model's tokens (openrouter.ai/docs/features/web-search, 2026-09-21). Without an
-OpenRouter key the hosted OpenAI search is offered instead, so nothing goes dark.
-`think_hard` may search, read and search again, three rounds at most, before it
-answers.
+Voice, Telegram and `think_hard` use OpenAI's built-in `web_search` tool by
+default, including when an OpenRouter key is present. This restores the GPT
+search behavior from before commit `881fa36`, at the owner's request after
+Exa could not provide a live Seattle time reading.
+
+`CC_BUDDY_WEB_SEARCH=openai` explicitly selects hosted GPT search; `off`
+disables search. Exa remains an opt-in through `openrouter-exa`, which also
+requires `OPENROUTER_API_KEY`. Only that mode uses the search model/results
+settings above and returns a summarized answer through a function tool.
+Restart the daemon after changing the setting so new voice sessions pick it up.
 
 ## The apps: Composio
 

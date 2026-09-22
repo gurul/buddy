@@ -125,8 +125,30 @@ After flashing, listen through a chirp and the following idle interval, and
 check that mute stops an active chirp and unmute allows the next one. If noise
 continues with the amplifier off, the source needs separate hardware diagnosis.
 
-Top touch is armed 3 s after boot: the Si12T baseline is stale while the servo
-rail comes up (the middle zone read pressed at boot, a phantom hold).
+Quiet is the default as of the 2026-09-22 bench test: the owner confirmed that
+turning off external 5 V stopped the continuous tone, and it returned when the
+45-second test restored power. `halBegin()` now calls `M5.Power.setExtOutput(false)`
+on every boot, with `[power] quiet default: external_5v=0` as readback.
+The rear LEDs and top Si12T touch sensor share this supply and are unavailable;
+top touch polling/calibration is skipped. The screen and the head motors have
+separate power supplies. The owner chose silence over those auxiliary features.
+
+For bench isolation, send `{"cmd":"noise_test","target":"screen"}` over
+serial. Targets are `screen` (backlight off), `motors` (servo rail off),
+`external` (external 5 V output off), and `speaker` (force the speaker driver
+off). Only one target is active at a time. Switching targets first restores the
+previous one; `restore` ends a test immediately, and every test expires after
+45 seconds. The board acknowledges `noise_test` and logs `[noise] restored`.
+Keep the robot on a stable surface: the head can relax with motor power off.
+The screen brightness and external-output setting are restored; motor power
+returns on, and the speaker stays in its normal idle-off state until a chirp.
+These tests do not persist settings. Listen during each test and its restored
+baseline before choosing a fix; an acknowledged command does not prove the
+physical noise stopped. External output may power attached accessories.
+
+When auxiliary power is enabled in a custom build, top touch calibration must
+wait 3 s after boot: the Si12T baseline is stale while the servo rail comes up
+(the middle zone read pressed at boot, a phantom hold). Quiet mode leaves it off.
 
 ## Controls
 
