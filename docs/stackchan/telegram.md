@@ -59,6 +59,7 @@ token without an owner id is off. A door with no allowlist never opens.
 | `CC_BUDDY_TELEGRAM_TOKEN` | unset | The bot token from @BotFather. Never logged. |
 | `CC_BUDDY_TELEGRAM_OWNER` | unset | Numeric user ids allowed to text buddy, comma-separated. A `@username` is ignored: it can be changed and re-registered, a number cannot. |
 | `CC_BUDDY_TELEGRAM_MODEL` | `gpt-6-astra` | The text brain. |
+| `CC_BUDDY_TELEGRAM_ASK` | `0` | `1`: with the Claude relay on, a permission prompt is asked in the chat (never in bypass mode). |
 | `CC_BUDDY_TELEGRAM_EFFORT` | `low` | Its reasoning effort (`low`, `medium`, `high`, `xhigh`, `max`). Hard questions go to `think_hard` instead. |
 
 ## What you can text
@@ -114,16 +115,20 @@ token without an owner id is off. A door with no allowlist never opens.
   camera may still `look`, tasks and files still work. Zero model calls to
   enter or leave it.
 - **`claude on` / `claude off`** — the Claude Code relay, explicit only. While
-  on: what Claude says in the terminal is forwarded ("Claude: …", the daemon
-  already tails the transcripts), "Claude is waiting on you" arrives when a
-  session blocks on you, and a **permission prompt becomes a yes/no in the
-  chat**: "Claude in repo wants to run Bash: rm -rf build/ — yes / no?". Your
-  next message answers it, exactly like a task question; a stranger's cannot;
-  four minutes of silence defers to Claude Code's own permission flow, never
-  denies. **`claude: <text>`** (or `> <text>`) raises that session's terminal
-  (`focus_terminal.py`) and types the line with Return through System Events,
-  so you can drive a session from the phone. Off by default and off again
-  after "claude off": nothing from the terminal leaves the Mac until you ask.
+  on: the chat shows what the terminal shows, as it happens. Every tool call
+  ("> Bash: pytest -q", from the pretooluse hook), the tail of its result
+  (from the posttooluse hook), and what Claude says ("Claude: …", from the
+  transcript tailer), batched every 1.2 s into one message so a burst of
+  calls is one text. "Claude is waiting on you" arrives when a
+  session blocks on you, and **what you text goes into the session's
+  terminal**: the chat is the terminal. Plain text is raised into that
+  session (`focus_terminal.py`) and typed with Return through System Events;
+  `buddy: <text>` talks to buddy instead, and buddy's code words (`stop`,
+  `screenshot`, `stealth mode`, `claude off`) still work. Off by default and
+  off again after "claude off": nothing from the terminal leaves the Mac
+  until you ask. With `CC_BUDDY_TELEGRAM_ASK=1` (off by default, and never in
+  bypass mode) a permission prompt also becomes a yes/no in the chat that only
+  your next message answers; silence defers to Claude Code's own flow.
 - **No emoji, no dashes.** Every outgoing message is stripped in code
   (`telegram.plain`): emoji blocks and their joiners go, an em or en dash
   between words becomes a comma. The prompt says so too; the code makes it

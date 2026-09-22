@@ -865,7 +865,8 @@ def test_the_claude_relay_is_off_until_said_and_forwards_only_while_on() -> None
         return "Typed into the terminal."
 
     api = FakeApi([update("claude: run the tests", update_id=1)])
-    rig = Rig(api, FakeCreate(), terminal=terminal)
+    rig = Rig(api, FakeCreate(call("move_head", {"yaw": -60, "pitch": None, "relative": False, "hold_secs": None}),
+                              say("Looking left."), say("On it.")), terminal=terminal, head=FakeHead())
 
     async def during() -> None:
         inlet = rig.inlet
@@ -877,25 +878,45 @@ def test_the_claude_relay_is_off_until_said_and_forwards_only_while_on() -> None
         await settle()
         assert inlet.claude is True and api.sent[-1] == (OWNER, telegram.CLAUDE_ON_LINE)
         await inlet.relay_text("  I fixed\n the bug. " + "x" * 3000, "/Users/g/repo")
+        await settle()
         assert api.sent[-1][1].startswith("Claude: I fixed the bug.") and len(api.sent[-1][1]) <= telegram.MAX_RELAY_CHARS + 8
+        # what the terminal shows: tool calls and result tails, a burst batched into one message
+        inlet.relay_tool_call("Bash", "pytest -q")
+        inlet.relay_tool_result("Bash", "3 passed in 0.2s")
+        inlet.relay_tool_call("Edit", "src/app.py")
+        await settle()
+        assert api.sent[-1][1] == "> Bash: pytest -q\n3 passed in 0.2s\n> Edit: src/app.py"
+        before = len(api.sent)
         await inlet.relay_notification("idle_reminder", "still here", False)      # not waiting: not news
-        assert api.sent[-1][1].startswith("Claude:")
+        await settle()
+        assert len(api.sent) == before
         await inlet.relay_notification("permission_prompt", "Bash needs approval", True)
         assert api.sent[-1] == (OWNER, "Claude is waiting on you: Bash needs approval")
-        api.feed(update("> git status", update_id=3), update("claude: make it green", update_id=4))
+        api.feed(update("> git status", update_id=3), update("claude: make it green", update_id=4),
+                 update("now run the tests please", update_id=5))             # relay on: plain text is for Claude
         await settle()
-        assert typed == [("/Users/g/repo", "git status"), ("/Users/g/repo", "make it green")]
-        api.feed(update("claude off", update_id=5))
+        assert typed == [("/Users/g/repo", "git status"), ("/Users/g/repo", "make it green"),
+                         ("/Users/g/repo", "now run the tests please")]
+        api.feed(update("buddy: look left", update_id=6))                       # for buddy, by prefix
+        await settle()
+        assert typed[-1] == ("/Users/g/repo", "now run the tests please") and len(rig.create.requests) == 2
+        api.feed(update("stealth mode", update_id=7), update("screenshot", update_id=8))   # buddy's code words still
+        await settle()
+        assert inlet.stealth and typed[-1][1] == "now run the tests please" and len(rig.create.requests) == 2
+        api.feed(update("claude off", update_id=9))
         await settle()
         assert inlet.claude is False and api.sent[-1] == (OWNER, telegram.CLAUDE_OFF_LINE)
+        api.feed(update("run the tests", update_id=10))                         # off: a chat turn again
+        await settle()
+        assert typed[-1][1] == "now run the tests please" and len(rig.create.requests) == 3
 
     run_rig(rig, during)
-    assert rig.create.requests == []                                   # all of it is code, no model call
 
 
 def test_a_permission_prompt_is_answered_from_the_phone_and_silence_defers() -> None:
     api = FakeApi([update("claude on", update_id=1)])
-    rig = Rig(api, FakeCreate(), permission_timeout_secs=0.05)
+    asking = TelegramConfig(enabled=True, token=TOKEN, owner_ids=frozenset({OWNER}), ask_permissions=True)
+    rig = Rig(api, FakeCreate(), config=asking, permission_timeout_secs=0.05)
 
     async def during() -> None:
         inlet = rig.inlet
@@ -913,6 +934,12 @@ def test_a_permission_prompt_is_answered_from_the_phone_and_silence_defers() -> 
         assert await ask == "allow"
         assert await inlet.decide_permission("Bash", "sleep 1") is None                # silence: defer
         assert rig.create.requests == []                               # yes/no never became a chat turn
+        # the shipped default: the phone never asks (owner, 2026-09-21); CC_BUDDY_TELEGRAM_ASK=1 turns it on
+        quiet = Rig(FakeApi(), FakeCreate())
+        quiet.inlet.claude = True
+        assert await quiet.inlet.decide_permission("Bash", "rm -rf /") is None and quiet.api.sent == []
+        assert configured({}).ask_permissions is False
+        assert configured({"CC_BUDDY_TELEGRAM_ASK": "1"}).ask_permissions is True
 
     run_rig(rig, during)
 
@@ -922,7 +949,10 @@ def test_the_daemon_honours_the_phones_decision_and_defers_without_one() -> None
 
     class Inlet:
         def __init__(self, decision):
-            self.claude, self.decision, self.asked = True, decision, []
+            self.claude, self.decision, self.asked, self.lines = True, decision, [], []
+
+        def relay_tool_call(self, tool, hint):
+            self.lines.append(f"> {tool}: {hint}")
 
         async def decide_permission(self, tool, hint, cwd=""):
             self.asked.append((tool, hint, cwd))
@@ -957,6 +987,11 @@ def test_the_daemon_honours_the_phones_decision_and_defers_without_one() -> None
         off.claude = False
         d = daemon_with(off)
         assert asyncio.run(d._handle_pretooluse(req)) == {"ok": True} and off.asked == []
+        # bypass mode: Claude Code will not prompt, so neither does the phone (live 2026-09-21)
+        bypass = Inlet("allow")
+        d = daemon_with(bypass)
+        assert asyncio.run(d._handle_pretooluse({**req, "permission_mode": "bypassPermissions"})) == {"ok": True}
+        assert bypass.asked == [] and bypass.lines == ["> Bash: rm -rf build/"]     # still shown, like the terminal
     finally:
         dm.classify_command = original
 

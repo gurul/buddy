@@ -47,6 +47,9 @@ def main() -> int:
         "tool_name": payload.get("tool_name", ""),
         "hint": _summarize(payload.get("tool_input")),
         "cwd": payload.get("cwd", ""),
+        # Claude Code's permission mode for this session ("default", "acceptEdits", "plan",
+        # "bypassPermissions"): a phone that is asked in bypass mode is asking for nothing.
+        "permission_mode": payload.get("permission_mode", ""),
     }
     resp = post(event, timeout=BLOCK_TIMEOUT_SECS)
     if resp is None or not resp.get("ok"):

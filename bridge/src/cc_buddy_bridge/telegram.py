@@ -77,12 +77,14 @@ STEALTH_OFF = ("stealth off", "wake up", "/wake", "stop stealth", "end stealth",
 CLAUDE_ON = ("claude on", "/claude on", "claude relay on", "relay claude")
 CLAUDE_OFF = ("claude off", "/claude off", "claude relay off", "stop relaying claude")
 CLAUDE_PREFIX = re.compile(r"^(claude|>)\s*:?\s+(.+)$", re.I | re.S)     # "claude: fix the tests" → typed into the terminal
-CLAUDE_ON_LINE = ("Claude relay on: I'll forward what Claude Code says and its permission prompts here, and "
-                  "\"claude: <text>\" types into its terminal. \"claude off\" ends it.")
+BUDDY_PREFIX = re.compile(r"^(hey )?buddy\s*[,:]\s*(.+)$", re.I | re.S)   # while relaying: this one is for buddy
+CLAUDE_ON_LINE = ("Claude relay on: what you text now goes into Claude Code's terminal, and what it says and asks "
+                  "comes back here. \"buddy: ...\" talks to me instead. \"claude off\" ends it.")
 CLAUDE_OFF_LINE = "Claude relay off."
 CLAUDE_NOT_ON_LINE = "The Claude relay is off. Say \"claude on\" first."
 DEFAULT_PERMISSION_TIMEOUT_SECS = 240.0    # the hook blocks 320 s at most; a silence defers, it never denies
 MAX_RELAY_CHARS = 1500
+RELAY_BATCH_SECS = 1.2                     # tool lines are batched this long into one message (Telegram: ~1 msg/s)
 STEALTH_ON_LINE = "Stealth mode: I'll act asleep at the desk until you say wake up."
 STEALTH_OFF_LINE = "Awake again."
 FATAL_CODES = (401, 404, 409)       # bad token, malformed token, another poller on this token
@@ -277,6 +279,7 @@ class TelegramConfig:
     stale_secs: float = DEFAULT_STALE_SECS
     ask_timeout_secs: float = DEFAULT_ASK_TIMEOUT_SECS
     idle_close_secs: float = DEFAULT_IDLE_CLOSE_SECS
+    ask_permissions: bool = False          # the phone asks about Claude Code's tool calls: off (owner, 2026-09-21)
 
     def __repr__(self) -> str:       # a config can end up in a log line or a traceback: never the token
         return (f"TelegramConfig(enabled={self.enabled}, token={'set' if self.token else 'unset'}, "
@@ -311,12 +314,14 @@ def configured(environ: Any = None) -> TelegramConfig:
         log.warning("telegram: CC_BUDDY_TELEGRAM_EFFORT=%r is not a reasoning effort; using %s",
                     effort, DEFAULT_EFFORT)
         effort = DEFAULT_EFFORT
+    ask = (env.get("CC_BUDDY_TELEGRAM_ASK") or "0").strip().lower() in ("1", "true", "yes", "on")
     enabled = wanted and bool(token) and bool(owners)
     if wanted and not enabled:
         missing = [name for name, have in (("CC_BUDDY_TELEGRAM_TOKEN", token),
                                            ("CC_BUDDY_TELEGRAM_OWNER", owners)) if not have]
         log.warning("telegram: asked for (CC_BUDDY_TELEGRAM=1) but off: %s not set", " and ".join(missing))
-    return TelegramConfig(enabled=enabled, token=token, owner_ids=owners, model=model, effort=effort)
+    return TelegramConfig(enabled=enabled, token=token, owner_ids=owners, model=model, effort=effort,
+                          ask_permissions=ask)
 
 
 # ---- who may speak ----------------------------------------------------------------------------
@@ -748,6 +753,8 @@ class TelegramInlet:
         self.claude = False                               # the terminal relay
         self._chat_id: Optional[int] = next(iter(sorted(config.owner_ids)), None)   # a private chat's id is the user's
         self._relay_cwd: str = ""                          # the session Claude last spoke from
+        self._relay_lines: list[str] = []                  # tool lines waiting for the next batch
+        self._relay_flush: Optional[asyncio.Task] = None
         self._clock, self._wall, self._sleep = clock, wall, sleep
         self.turns: list[tuple[str, str]] = []           # ("user" | "buddy", text): this chat, until it goes quiet
         self._last_turn_at: Optional[float] = None
@@ -847,6 +854,18 @@ class TelegramInlet:
             self._note("user", inbound.text)
             self._spawn(self._type_to_claude(inbound.chat_id, typed.group(2).strip()), "telegram-claude")
             return
+        if word in STEALTH_ON or word in STEALTH_OFF or SCREEN_NOW.match(inbound.text):
+            pass                                          # buddy's own code words, relay or not
+        elif self.claude and not (self._pending_answer is not None and not self._pending_answer.done()):
+            # Relay on: the chat IS the terminal. A yes/no while Claude is asking answers Claude (below);
+            # "buddy: ..." is for buddy; everything else is typed into the session.
+            for_buddy = BUDDY_PREFIX.match(inbound.text)
+            if for_buddy is None:
+                self._note("user", inbound.text)
+                self._spawn(self._type_to_claude(inbound.chat_id, inbound.text), "telegram-claude")
+                return
+            inbound = Inbound(chat_id=inbound.chat_id, user_id=inbound.user_id, text=for_buddy.group(2).strip())
+            word = inbound.text.lower().rstrip(".! ")
         if word in STEALTH_ON or word in STEALTH_OFF:
             self.stealth = word in STEALTH_ON
             self._note("user", inbound.text)
@@ -895,6 +914,32 @@ class TelegramInlet:
             said = "I couldn't type that into the terminal."
         await self._say(chat_id, said)
 
+    def relay_line(self, line: str) -> None:
+        """One line of what the terminal shows (a tool call, a result tail), batched with its neighbours
+        into one message so a burst of ten tool calls is one text, not ten."""
+        if not self.claude or self._chat_id is None:
+            return
+        line = " ".join(str(line).split())
+        if not line:
+            return
+        self._relay_lines.append(line[:MAX_RELAY_CHARS])
+        if self._relay_flush is None or self._relay_flush.done():
+            self._relay_flush = self._spawn(self._flush_relay(), "telegram-relay")
+
+    async def _flush_relay(self) -> None:
+        await self._sleep(RELAY_BATCH_SECS)
+        lines, self._relay_lines = self._relay_lines, []
+        body = "\n".join(lines)
+        if body and self._chat_id is not None:
+            await self._say(self._chat_id, body)
+
+    def relay_tool_call(self, tool: str, hint: str) -> None:
+        self.relay_line(f"> {tool}: {hint}" if hint else f"> {tool}")
+
+    def relay_tool_result(self, tool: str, tail: str) -> None:
+        if tail:
+            self.relay_line(f"  {tail}")
+
     async def relay_text(self, text: str, cwd: str = "") -> None:
         """What Claude Code just said, when the relay is on. Never logged here either."""
         if not self.claude or self._chat_id is None:
@@ -905,7 +950,7 @@ class TelegramInlet:
         if len(body) > MAX_RELAY_CHARS:
             body = body[:MAX_RELAY_CHARS - 1].rstrip() + "…"
         if body:
-            await self._say(self._chat_id, "Claude: " + body)
+            self.relay_line("Claude: " + body)
 
     async def relay_notification(self, kind: str, message: str, waits: bool) -> None:
         if not self.claude or self._chat_id is None or not waits:
@@ -915,8 +960,8 @@ class TelegramInlet:
     async def decide_permission(self, tool: str, hint: str, cwd: str = "") -> Optional[str]:
         """A permission prompt as a question in the chat. "allow" | "deny" | None (no answer: Claude Code's
         own flow decides). Only the owner's next message answers, exactly as a task question."""
-        if not self.claude or self._chat_id is None:
-            return None
+        if not self.claude or self._chat_id is None or not self.config.ask_permissions:
+            return None                                   # off by default: Claude Code's own flow decides
         if self._pending_answer is not None and not self._pending_answer.done():
             return None                                   # one question at a time; this one defers
         if cwd:
