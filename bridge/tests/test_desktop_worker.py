@@ -287,11 +287,37 @@ def test_raw_click_still_settles_up_to_1_5s() -> None:
     assert settles == [1.5] and 1.5 <= clock.t < 1.8, clock.t              # the screen never settled: full wait
 
 
-def test_timed_out_settle_still_auto_settles() -> None:
-    h, ns, clock, settles = _bench(_moving())                               # negative control: no reuse
+def test_timed_out_settle_reuses_the_latest_frame_without_a_second_wait() -> None:
+    h, ns, clock, settles = _bench(_moving())
     r = dw.execute("open_app('Calendar')", ns, h)
     assert _kinds(r) == ["input_text", "input_image", "input_text"]
-    assert settles == [1.5, 1.5] and 3.0 <= clock.t < 3.4, clock.t         # open_app timed out, the worker settled again
+    assert settles == [1.5] and clock.t == 1.5
+    png = base64.b64decode(r["output"][1]["image_url"].split(",", 1)[1])
+    assert Image.open(io.BytesIO(png)).getpixel((20, 20)) == (10, 20, 30)
+
+
+def test_explicit_settle_timeout_is_false_and_does_not_wait_again_for_video() -> None:
+    h, ns, clock, settles = _bench(_moving())
+    r = dw.execute("pyautogui.click(1, 2); log(wait_settled())", ns, h)
+    texts = [o["text"] for o in r["output"] if o["type"] == "input_text"]
+    assert "False" in texts and "screen still changing after 5.0 s" in texts
+    assert "input_image" in _kinds(r) and settles == [5.0] and clock.t == 5.0
+
+
+def test_timed_out_settle_is_not_reused_after_a_later_input() -> None:
+    h, ns, clock, settles = _bench(_moving())
+    dw.execute("open_app('Calendar'); pyautogui.click(1, 2)", ns, h)
+    assert settles == [1.5, 1.5] and clock.t == 3.0
+
+
+def test_timed_out_settle_is_not_reused_when_the_frame_is_stale() -> None:
+    from cc_buddy_bridge.desktop_helpers import SETTLE_REUSE_SECS
+
+    h, ns, clock, settles = _bench(_moving())
+    ns["pause"] = lambda: clock.sleep(SETTLE_REUSE_SECS)
+    dw.execute("open_app('Calendar'); pause()", ns, h)
+    assert settles == [1.5, 1.5]
+    assert 3.0 + SETTLE_REUSE_SECS <= clock.t <= 3.25 + SETTLE_REUSE_SECS
 
 
 def test_settle_is_not_reused_after_a_later_input() -> None:

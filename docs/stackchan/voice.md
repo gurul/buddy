@@ -572,7 +572,12 @@ mentions `delegate` when the lane is on, so a planner without the helper never r
   auto-screenshot used to settle again (0.3 s typical, 1.5 s worst, from the run logs). A
   settle that finished is remembered with the input sequence number; the reply reuses that
   frame when no input happened since and it is under 0.3 s old. A raw click still waits up
-  to 1.5 s, and a settle that timed out gets the worker's second try.
+  to 1.5 s. A timed-out wait also reuses its last fresh frame, so video and animation
+  do not trigger a second wait. `wait_settled()` still returns false on timeout;
+  new input or a frame older than the reuse window requires another wait.
+- **Accurate OCR for clicks.** `click_text` polls accurate OCR directly. Fast OCR can
+  miss a label that `screen_text` already read; previously that meant a three-second
+  timeout and another model turn. `wait_for` retains its fast polling path.
 - **A shadow verifier.** The worker's `verify` operation asks the local model one yes/no
   question — does the screen (frontmost app, title, fast OCR) show what the final message
   claims? — and the agent runs it concurrently with the model's own check, then logs
