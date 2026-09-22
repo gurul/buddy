@@ -177,7 +177,7 @@ class Rig:
 
         lent: dict[str, Any] = dict(agent_factory=factory, memory=lambda: "", on_state=self.states.append,
                                     on_closed=self.closed.append, clock=lambda: self.now["t"], wall=lambda: NOW,
-                                    sleep=no_sleep)
+                                    sleep=no_sleep, screen=lambda: None)
         lent.update(kw)
         self.inlet = TelegramInlet(config, api, create, **lent)
 
@@ -615,6 +615,129 @@ def test_no_camera_is_said_not_sent() -> None:
         run_rig(rig)
         assert rig.api.photos == [] and rig.api.sent == [(OWNER, "My camera's off right now.")]
         assert json.loads(rig.create.requests[1]["input"][-1]["output"])["ok"] is False
+
+
+# ---- G9b: the visual verification layer ------------------------------------------------------
+
+def test_a_task_that_was_asked_to_show_something_arrives_with_the_screen_it_left(tmp_path: Path) -> None:
+    shots: list[Path] = []
+
+    def screen() -> Path:
+        path = tmp_path / f"screen-{len(shots)}.jpg"
+        path.write_bytes(b"\xff\xd8shot")
+        shots.append(path)
+        return path
+
+    goal = "show me the top headline on Google News"
+    rig = Rig(FakeApi([update(goal)]), FakeCreate(call("start_task", {"goal": goal})), screen=screen)
+
+    async def during() -> None:
+        rig.agents[0].release.set()
+
+    run_rig(rig, during)
+    assert rig.api.sent == [(OWNER, ON_IT_LINE), (OWNER, "Calculator is open.")]
+    assert len(rig.api.photos) == 1 and rig.api.photos[0][0] == OWNER and "task ended" in rig.api.photos[0][2]
+    assert shots and not shots[0].exists()                # the temp file is gone once it is sent
+    # a request that did not ask to see anything gets the words only (owner, 2026-09-21)
+    rig = Rig(FakeApi([update("open the calculator")]), FakeCreate(call("start_task", {"goal": "open the calculator"})),
+              screen=screen)
+    run_rig(rig, during)
+    assert rig.api.photos == [] and rig.api.sent[-1] == (OWNER, "Calculator is open.")
+    for asks in ("give me a screenshot of the headline", "send me a picture of the screen", "what does my calendar look like"):
+        assert telegram.WANTS_SCREEN.search(asks), asks
+    for plain in ("open the calculator", "play some music", "pause"):
+        assert not telegram.WANTS_SCREEN.search(plain), plain
+
+
+def test_the_owner_can_ask_for_the_screen_and_a_failed_capture_is_said(tmp_path: Path) -> None:
+    shot = tmp_path / "s.jpg"
+    shot.write_bytes(b"\xff\xd8shot")
+    rig = Rig(FakeApi([update("show me the screen")]),
+              FakeCreate(call("screenshot", {"caption": "Here's your screen"}), say("Sent!")), screen=lambda: shot)
+    run_rig(rig)
+    assert rig.api.photos == [(OWNER, str(shot), "Here's your screen")] and rig.api.sent == [(OWNER, "Sent!")]
+    rig = Rig(FakeApi([update("show me the screen")]),
+              FakeCreate(call("screenshot", {"caption": "x"}), say("I couldn't grab the screen.")), screen=lambda: None)
+    run_rig(rig)
+    assert rig.api.photos == []
+    assert "Screen Recording" in json.loads(rig.create.requests[1]["input"][-1]["output"])["reason"]
+    # a stopped task sends neither a result line nor a screen
+    rig = Rig(FakeApi([update("open mail", update_id=1)]), FakeCreate(call("start_task", {"goal": "open mail"})),
+              screen=lambda: shot)
+
+    async def during() -> None:
+        rig.api.feed(update("stop", update_id=2))
+
+    run_rig(rig, during)
+    assert rig.api.photos == [] and rig.api.sent == [(OWNER, ON_IT_LINE), (OWNER, STOPPED_LINE)]
+
+
+# ---- files -----------------------------------------------------------------------------------
+
+def test_files_leave_only_from_the_owners_home_and_never_from_a_hidden_folder(tmp_path: Path) -> None:
+    home = tmp_path / "home"
+    (home / "Desktop").mkdir(parents=True)
+    (home / ".ssh").mkdir()
+    (home / ".ssh" / "id_ed25519").write_text("SECRET")
+    (home / "Desktop" / "report.pdf").write_bytes(b"%PDF")
+    (home / "Desktop" / ".hidden.txt").write_text("x")
+    (tmp_path / "outside.txt").write_text("x")
+    (home / "Desktop" / "link").symlink_to(tmp_path / "outside.txt")
+    (home / "Desktop" / "sshlink").symlink_to(home / ".ssh" / "id_ed25519")
+    ok, why = telegram.resolve_owner_path(str(home / "Desktop" / "report.pdf"), home)
+    assert ok == (home / "Desktop" / "report.pdf").resolve() and why == ""
+    for bad, reason in ((str(home / ".ssh" / "id_ed25519"), "hidden"), (str(home / "Desktop" / ".hidden.txt"), "hidden"),
+                        (str(tmp_path / "outside.txt"), "home folder"), (str(home / "Desktop" / "link"), "home folder"),
+                        (str(home / "Desktop" / "sshlink"), "hidden"), ("../../etc/passwd", "home folder"),
+                        ("", "no path"), (str(home / "nope.txt"), "no such")):
+        real, why = telegram.resolve_owner_path(bad, home)
+        assert real is None and reason in why, (bad, why)
+    listing = telegram.list_files(str(home / "Desktop"), home)
+    assert [f["name"] for f in listing["files"]] and ".hidden.txt" not in [f["name"] for f in listing["files"]]
+    assert telegram.list_files(str(home / ".ssh"), home)["ok"] is False
+    assert telegram.list_files(str(home / "Desktop" / "report.pdf"), home)["ok"] is False
+
+
+def test_send_file_sends_a_document_and_refuses_folders_and_big_files(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    home = tmp_path / "home"
+    (home / "Documents").mkdir(parents=True)
+    doc = home / "Documents" / "notes.txt"
+    doc.write_text("hello")
+    big = home / "Documents" / "big.bin"
+    big.write_bytes(b"0")
+    monkeypatch.setattr(Path, "home", classmethod(lambda cls: home))
+    sent: list[tuple[int, str, str]] = []
+
+    class Api(FakeApi):
+        async def send_document(self, chat_id: int, path: Path, caption: str = "") -> None:
+            sent.append((chat_id, str(path), caption))
+
+    rig = Rig(Api([update("send me my notes")]),
+              FakeCreate(call("send_file", {"path": "~/Documents/notes.txt", "caption": "Your notes"}), say("Sent.")))
+    run_rig(rig)
+    assert sent == [(OWNER, str(doc.resolve()), "Your notes")]
+    assert json.loads(rig.create.requests[1]["input"][-1]["output"]) == {"ok": True, "sent": "notes.txt", "bytes": 5}
+    monkeypatch.setattr(telegram, "MAX_DOCUMENT_BYTES", 0)
+    for path, reason in (("~/Documents", "folder"), ("~/Documents/big.bin", "too big"), ("~/.ssh/x", "hidden")):
+        rig = Rig(Api([update("send it")]), FakeCreate(call("send_file", {"path": path, "caption": ""}), say("No.")))
+        run_rig(rig)
+        assert reason in json.loads(rig.create.requests[1]["input"][-1]["output"])["reason"], path
+    assert len(sent) == 1
+
+    async def upload() -> dict[str, Any]:
+        seen: dict[str, Any] = {}
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            seen["url"], seen["body"] = str(request.url), request.read()
+            return httpx.Response(200, json={"ok": True, "result": {}})
+
+        api = BotApi(TOKEN, client=httpx.AsyncClient(transport=httpx.MockTransport(handler)))
+        await api.send_document(OWNER, doc, "c")
+        await api.close()
+        return seen
+
+    seen = asyncio.run(upload())
+    assert seen["url"].endswith("/sendDocument") and b'filename="notes.txt"' in seen["body"] and b"hello" in seen["body"]
 
 
 # ---- G10: the poll loop -----------------------------------------------------------------------

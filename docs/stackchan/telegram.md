@@ -15,8 +15,9 @@ your phone ── Telegram ──▶ api.telegram.org ◀── long poll (outbo
                                                                                    │ fresh, your own words — or dropped
                                                                                    ▼
                                                         text brain: gpt-6-astra, Responses API, store=False
-                                                          tools: start_task · steer_task · stop_task ·
-                                                                 take_photo · think_hard · web_search
+                                                          tools: start_task · steer_task · stop_task · take_photo ·
+                                                                 screenshot · send_file · list_files · think_hard ·
+                                                                 web_search (+ memory_search · memory_get)
                                                                                    │ start_task
                                                                                    ▼
                                               computer_agent.py — the same agent, tiers and approval rules as the voice
@@ -74,6 +75,19 @@ token without an owner id is off. A door with no allowlist never opens.
   code, not a model call: it works when the model is down or mid-turn.
 - **A photo** — "send me a picture of my desk". The robot snaps, the diary keeps
   and captions it as it does for the voice, and the picture arrives in the chat.
+- **The screen** — "show me the screen", "screenshot". macOS `screencapture`
+  (the same call PyAutoGUI makes), sent as a photo. A task whose request asked
+  to *see* something ("give me a screenshot of the headline") arrives with the
+  screen it left, so you can check the result; a task that did not ask gets
+  the words only. Needs Screen Recording for the daemon's python, which the
+  desktop worker already has.
+- **A file** — "send me the report on my Desktop", "what's the newest thing in
+  Downloads". `send_file` sends any regular file under your home folder as a
+  Telegram document (50 MB limit); `list_files` lists a folder newest first so
+  buddy can find the one you mean. Never a hidden path: `~/.ssh`, `~/.config`,
+  `~/.aws` and every dotfile are refused after symlinks are followed, and
+  nothing outside your home can be named at all. The log gets the size, never
+  the name.
 - **An answer.** When a task needs a yes before something consequential, the
   question arrives in the chat. Your next message is the answer, and only the
   answer. No reply in three minutes reads as no.
@@ -167,6 +181,7 @@ instruction; each is a branch in `telegram.accept` or the inlet, with a test.
 | A message older than two minutes when it arrives is dropped. | Telegram holds undelivered messages for a day. A task texted while the daemon was down must not run when it comes back. |
 | Only your next message can answer a task's question. | "Only the human approves" ([routing](routing.md)) has to hold over chat too. |
 | Edited messages, channel posts, other bots, stickers and voice notes reach no model. | Only new text from the owner is a request. |
+| A file leaves only from your home folder, never from a hidden path, symlinks followed first. | A chat that can reach a Mac must never be a way to read its secrets. |
 | What you wrote is never logged; neither is the token. | The log gets counts, seconds and numeric ids. The token is part of every Bot API URL, so HTTP errors are rewritten before they are raised (`BotApiError` never carries a URL) and every log record in the process is checked for the token as it is made (`hide_token`) — httpx logs each request line at INFO. |
 | `401`, `404` or `409` from Telegram stops the door with one log line. | A wrong token or a second poller will not fix itself; spinning on it helps nobody. Anything else backs off (1 s doubling to 60 s) and resumes. |
 
