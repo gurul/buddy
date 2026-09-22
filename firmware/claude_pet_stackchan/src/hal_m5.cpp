@@ -19,6 +19,10 @@ void halBegin() {
   // touch, speaker, RTC, power), then brings up the PY32 expander (servo
   // rail on, 12 LEDs), the Feetech bus + Motion task, and the INA226.
   M5StackChan.begin();
+  // Quiet by default: the CoreS3 external 5 V converter whines at idle on
+  // this robot. Its rail supplies rear LEDs / top touch, not the head motors.
+  M5.Power.setExtOutput(false);
+  Serial.printf("[power] quiet default: external_5v=%d\n", M5.Power.getExtOutput());
   // begin() enables the CoreS3 amplifier. Keep it off through setup and
   // between chirps; playRaw() starts the speaker again on demand.
   M5.Speaker.end();
@@ -31,7 +35,76 @@ void halBegin() {
   M5.Speaker.setVolume(96);
 }
 
-void halUpdate() { M5StackChan.update(); }
+// The top Si12T sensor is on the disabled auxiliary rail. Keep updating
+// CoreS3 screen touch/buttons without polling that unpowered sensor.
+void halUpdate() {
+  M5.update();
+  if (M5.Power.getExtOutput()) M5StackChan.TouchSensor.update();
+}
+
+namespace {
+enum class NoiseTest { None, Screen, Motors, External, Speaker };
+NoiseTest noiseTest = NoiseTest::None;
+uint32_t noiseUntil = 0;
+uint8_t savedBrightness = 0;
+bool savedExternal = false;
+
+void restoreNoiseTest() {
+  switch (noiseTest) {
+    case NoiseTest::Screen: M5.Display.setBrightness(savedBrightness); break;
+    case NoiseTest::Motors: M5StackChan.setServoPowerEnabled(true); break;
+    case NoiseTest::External: M5.Power.setExtOutput(savedExternal); break;
+    // Speaker.end() is the normal idle state; the next chirp restarts it.
+    default: break;
+  }
+  if (noiseTest != NoiseTest::None) Serial.println("[noise] restored");
+  noiseTest = NoiseTest::None;
+}
+}
+
+bool halNoiseTest(const char* target) {
+  NoiseTest next;
+  if (!strcmp(target, "restore")) next = NoiseTest::None;
+  else if (!strcmp(target, "screen")) next = NoiseTest::Screen;
+  else if (!strcmp(target, "motors")) next = NoiseTest::Motors;
+  else if (!strcmp(target, "external")) next = NoiseTest::External;
+  else if (!strcmp(target, "speaker")) next = NoiseTest::Speaker;
+  else return false;
+  restoreNoiseTest();
+  noiseTest = next;
+  noiseUntil = millis() + 45000;
+  switch (next) {
+    case NoiseTest::Screen:
+      savedBrightness = M5.Display.getBrightness();
+      M5.Display.setBrightness(0);
+      break;
+    case NoiseTest::Motors:
+      M5StackChan.Motion.setTorqueEnabled(false);
+      M5StackChan.setServoPowerEnabled(false);
+      break;
+    case NoiseTest::External:
+      savedExternal = M5.Power.getExtOutput();
+      M5.Power.setExtOutput(false);
+      Serial.printf("[noise] external before=%d after=%d\n", savedExternal, M5.Power.getExtOutput());
+      break;
+    case NoiseTest::Speaker:
+      M5.Speaker.end();
+      break;
+    default: break;
+  }
+  Serial.printf("[noise] target=%s timeout_ms=%u\n", target, next == NoiseTest::None ? 0 : 45000);
+  return true;
+}
+
+bool halNoiseMotorsOff() { return noiseTest == NoiseTest::Motors; }
+
+void halNoiseTestUpdate() {
+  if (noiseTest == NoiseTest::None) return;
+  if ((int32_t)(millis() - noiseUntil) >= 0) { restoreNoiseTest(); return; }
+  // A wake gesture or brightness policy must not invalidate a screen test.
+  if (noiseTest == NoiseTest::Screen && M5.Display.getBrightness()) M5.Display.setBrightness(0);
+  if (noiseTest == NoiseTest::Speaker && M5.Speaker.isRunning()) M5.Speaker.end();
+}
 
 M5GFX& halDisplay() { return M5.Display; }
 

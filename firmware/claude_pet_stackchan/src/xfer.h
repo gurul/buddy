@@ -3,6 +3,7 @@
 #include <LittleFS.h>
 #include "ble_bridge.h"
 #include "diag.h"
+#include "hal_m5.h"
 #include <mbedtls/base64.h>
 #include <ArduinoJson.h>
 
@@ -112,6 +113,12 @@ inline bool xferCommand(JsonDocument& doc) {
     const char* n = doc["name"];
     if (n) ownerSet(n);
     _xAck("owner", n != nullptr);
+    return true;
+  }
+
+  // Timed bench isolation; does not change persisted user settings.
+  if (strcmp(cmd, "noise_test") == 0) {
+    _xAck("noise_test", halNoiseTest(doc["target"] | ""));
     return true;
   }
 

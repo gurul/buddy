@@ -988,6 +988,7 @@ void loop() {
     screenOff = true;
   }
 
+  halNoiseTestUpdate();
   diagPhase(DP_IDLE);   // reached the end cleanly — a hang here is the delay
   delay(screenOff ? 100 : 16);
 }

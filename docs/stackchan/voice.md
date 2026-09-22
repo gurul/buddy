@@ -253,8 +253,18 @@ tells buddy that other voices are background.
 
 ## Knobs
 
+Voice (including its backend), Telegram and deep reasoning receive a system
+context with the configured location, timezone and local clock snapshot. Set
+`CC_BUDDY_LOCATION` and `CC_BUDDY_TIMEZONE` in `~/.config/cc-buddy-bridge/env`
+and restart the daemon. The location is a user-supplied default, not GPS.
+Timezone conversion accounts for daylight saving. Context refreshes for each
+new voice session and each text/reasoning request; during a voice session,
+Buddy uses a fresh lookup for current time instead of reusing its start time.
+
 | Variable | Default | Purpose |
 |---|---|---|
+| `CC_BUDDY_LOCATION` | unset | Owner's default location for local questions; kept in the local env file |
+| `CC_BUDDY_TIMEZONE` | Mac's timezone | IANA timezone, such as `America/Los_Angeles`; invalid values fall back to the Mac's timezone |
 | `CC_BUDDY_VOICE` | on | `0` disables the microphone and the wake word entirely |
 | `CC_BUDDY_WAKE_WORD` | `hey buddy` | any short English phrase; it is tokenised into the spotter's keywords file at startup (no training) |
 | `CC_BUDDY_WAKE_THRESHOLD` | `0.25` | spotter threshold; lower = more sensitive (bench: 0.25 fired on a synthesized clip, stayed quiet on a control sentence) |

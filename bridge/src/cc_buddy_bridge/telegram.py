@@ -48,7 +48,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Awaitable, Callable, Collection, Optional, Sequence
 
-from . import composio_tools, second_brain, websearch
+from . import composio_tools, second_brain, system_context, websearch
 from .computer_agent import AgentEvent
 from .records import MEMORY_TOOLS
 
@@ -452,7 +452,7 @@ def request(config: TelegramConfig, items: list[dict[str, Any]], memory: str = "
     instructions and the memory tools are offered."""
     from .voice_agent import memory_block
 
-    instructions = INSTRUCTIONS + memory_block(memory)
+    instructions = INSTRUCTIONS + system_context.context() + memory_block(memory)
     if profile:
         instructions += PROFILE_HEADER + "\n" + profile
     if vault:

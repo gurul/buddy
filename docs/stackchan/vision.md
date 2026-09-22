@@ -98,6 +98,13 @@ table for "look to your left", "turn around", "look at me"; the classifier's `lo
 
 ## Following whoever is talking
 
+Face detection runs on the Mac; camera frames and head motion run on the robot.
+If frames arrive but every detection logs `NSInvalidArgumentException - key does
+not exist`, update the bridge and restart its daemon. The 2026-09-22 fix passes
+native `nil` options to Vision for both face detection and owner feature prints;
+an empty Python dictionary triggered this exception on the current Mac.
+`tests/test_vision_native.py` exercises both real Vision requests on macOS.
+
 In a conversation buddy keeps its eyes on the person it is talking with, and works out where they
 went when it loses them (`follow.py`). Before 2026-09-21 it did neither: the board live-tracks only
 the **owner**, only in its attention and dictation states, and in a conversation it went to one

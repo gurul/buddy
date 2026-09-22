@@ -16,8 +16,12 @@ using M5GFX = m5gfx::M5GFX;
 // Serial buffers + Serial.begin + M5StackChan.begin() (which calls M5.begin()
 // once). Forces the display to landscape. Call once from setup().
 void   halBegin();
-// M5StackChan.update(): M5.update() (touch, buttons) + the top touch sensor.
+// M5.update(): screen touch and buttons; top touch is unpowered in quiet mode.
 void   halUpdate();
+// Temporary bench isolation, restored after 45 seconds or target="restore".
+bool   halNoiseTest(const char* target);
+void   halNoiseTestUpdate();
+bool   halNoiseMotorsOff();
 // The CoreS3 panel (M5.Display). Valid to take the reference before begin().
 M5GFX& halDisplay();
 

@@ -77,7 +77,7 @@ from dataclasses import dataclass, field
 from typing import Any, Awaitable, Callable, Optional
 
 from . import head as head_mod
-from . import websearch
+from . import system_context, websearch
 from .caption_pager import CaptionPager, Event, PagerConfig, caption_instructions
 from .computer_agent import AgentConfig, AgentEvent, ComputerAgent
 from .intent import LEAVE, LESSON, LOOK, MUTE, REMEMBER, UNMUTE, fast_intent, normalize
@@ -415,9 +415,10 @@ def session_config(config: VoiceConfig, memory: str = "",
     """
     captions = config.output == "captions"
     listening = think_aloud is not None
+    context = system_context.context()
     return {
         "model": config.model,
-        "instructions": INSTRUCTIONS + memory_block(memory)
+        "instructions": INSTRUCTIONS + context + memory_block(memory)
                         + (caption_instructions(PagerConfig(read_cps=config.caption_cps))
                            if captions else "")
                         + (think_aloud_mod.voice_instructions(think_aloud) if listening else ""),
@@ -429,7 +430,7 @@ def session_config(config: VoiceConfig, memory: str = "",
             "type": "responses",
             "responses": {
                 "model": config.backend_model,
-                "instructions": BACKEND_INSTRUCTIONS
+                "instructions": BACKEND_INSTRUCTIONS + context
                                 + (think_aloud_mod.backend_instructions(think_aloud) if listening else ""),
                 "tools": TOOLS + (websearch.tools_for(config.search) if config.web_search else []),
                 "tool_choice": "auto",
@@ -847,7 +848,8 @@ class VoiceSession:
         await self._quiet(think_aloud_mod.voice_instructions(lesson))
         try:
             await self.conn.session.update(session={"delegation": {"type": "responses", "responses": {
-                "instructions": BACKEND_INSTRUCTIONS + think_aloud_mod.backend_instructions(lesson)}}})
+                "instructions": BACKEND_INSTRUCTIONS + system_context.context()
+                                + think_aloud_mod.backend_instructions(lesson)}}})
         except Exception as e:  # noqa: BLE001
             # The voice still has the rules; the backend keeps its lesson rules from BACKEND_INSTRUCTIONS.
             log.warning("voice: could not give the backend the listening rules (%s)", type(e).__name__)

@@ -2,6 +2,7 @@
 // M5StackChan.h (and through it M5Unified's global `M5`); must never include
 // board_compat.h — see hal_m5.h. The face lives in eyes.cpp.
 #include "body.h"
+#include "hal_m5.h"
 #include "chirp.h"
 #include "gaze.h"
 #include "hostlook.h"
@@ -718,13 +719,14 @@ void bodyListen(bool on) {
 static void updateInner(PersonaState active, bool needsAttention, uint32_t now);
 
 void bodyUpdate(PersonaState active, bool needsAttention, uint32_t now) {
+  if (halNoiseMotorsOff()) return;
   updateInner(active, needsAttention, now);
   driftOn = active != P_SLEEP;
   stepTween(now);                           // every loop, regardless of the early returns above
 }
 
 static void updateInner(PersonaState active, bool needsAttention, uint32_t now) {
-  if (!touchArmed && (int32_t)(now - touchArmAt) >= 0) {
+  if (!touchArmed && (int32_t)(now - touchArmAt) >= 0 && M5.Power.getExtOutput()) {
     M5StackChan.TouchSensor.recalibrate();
     touchArmed = true;
     Serial.println("[body] top touch armed");

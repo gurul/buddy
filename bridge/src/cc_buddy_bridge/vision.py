@@ -518,7 +518,9 @@ def vision_detect(frame: Frame) -> list[Rect]:
         width = float(Quartz.CGImageGetWidth(image))
         height = float(Quartz.CGImageGetHeight(image))
         request = Vision.VNDetectFaceRectanglesRequest.alloc().init()
-        handler = Vision.VNImageRequestHandler.alloc().initWithCGImage_options_(image, {})
+        # nil selects Vision's defaults. A bridged Python dict can raise
+        # "key does not exist" during option lookup on current macOS.
+        handler = Vision.VNImageRequestHandler.alloc().initWithCGImage_options_(image, None)
         ok, err = handler.performRequests_error_([request], None)
         if not ok:
             raise RuntimeError(f"Vision request failed: {err}")

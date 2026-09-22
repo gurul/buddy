@@ -40,20 +40,22 @@ PAYLOAD = {
 }
 
 
-def test_configured_picks_openrouter_exa_with_a_key_and_the_hosted_tool_without() -> None:
-    cfg = ws.configured({"OPENROUTER_API_KEY": "r"})
+def test_configured_uses_hosted_search_unless_exa_is_explicit() -> None:
+    for env in ({}, {"OPENROUTER_API_KEY": "r"},
+                {"OPENROUTER_API_KEY": "r", "CC_BUDDY_WEB_SEARCH": "bing"}):
+        cfg = ws.configured(env)
+        assert cfg.engine == "openai"
+        assert ws.tools_for(cfg) == [{"type": "web_search"}]
+    cfg = ws.configured({"OPENROUTER_API_KEY": "r", "CC_BUDDY_WEB_SEARCH": "openrouter-exa"})
     assert cfg == ws.SearchConfig(engine="openrouter-exa", model="openai/gpt-5.4-nano", max_results=5)
-    assert ws.tools_for(cfg) == [ws.WEB_SEARCH_TOOL] and ws.WEB_SEARCH_TOOL["name"] == "web_search"
-    assert ws.WEB_SEARCH_TOOL["strict"] is True and ws.WEB_SEARCH_TOOL["parameters"]["additionalProperties"] is False
-    hosted = ws.configured({})
-    assert hosted.engine == "openai" and ws.tools_for(hosted) == [{"type": "web_search"}]
+    assert ws.tools_for(cfg) == [ws.WEB_SEARCH_TOOL]
+    assert ws.WEB_SEARCH_TOOL["strict"] is True
+    assert ws.WEB_SEARCH_TOOL["parameters"]["additionalProperties"] is False
     assert ws.tools_for(ws.configured({"CC_BUDDY_WEB_SEARCH": "off", "OPENROUTER_API_KEY": "r"})) == []
-    # asked for exa without a key: the hosted tool, not a dead function
     assert ws.configured({"CC_BUDDY_WEB_SEARCH": "openrouter-exa"}).engine == "openai"
-    tuned = ws.configured({"OPENROUTER_API_KEY": "r", "CC_BUDDY_WEB_SEARCH_MODEL": "openai/gpt-5.6-luna",
-                           "CC_BUDDY_WEB_SEARCH_RESULTS": "40"})
-    assert tuned.model == "openai/gpt-5.6-luna" and tuned.max_results == 10          # clamped to Exa's first tier
-    assert ws.configured({"OPENROUTER_API_KEY": "r", "CC_BUDDY_WEB_SEARCH": "bing"}).engine == "openrouter-exa"
+    tuned = ws.configured({"OPENROUTER_API_KEY": "r", "CC_BUDDY_WEB_SEARCH": "openrouter-exa",
+                           "CC_BUDDY_WEB_SEARCH_MODEL": "openai/gpt-5.6-luna", "CC_BUDDY_WEB_SEARCH_RESULTS": "40"})
+    assert tuned.model == "openai/gpt-5.6-luna" and tuned.max_results == 10
 
 
 def test_the_request_is_one_chat_call_with_the_web_plugin_on_exa() -> None:

@@ -1,20 +1,9 @@
-"""Web search for every brain that searches: one OpenRouter call with the web plugin on Exa.
+"""Shared web-search configuration for voice, text and deep reasoning.
 
-Until 2026-09-21 three places searched the web with OpenAI's hosted `web_search` tool: the text brain
-(telegram.py), the slow brain (think.py) and the voice backend's delegation (voice_agent.py). The owner's
-decision (2026-09-21): "use openrouter exa, this is a must". OpenRouter's `web` plugin with `engine: exa`
-fetches Exa results and folds them into one chat completion, and the reply carries every source as a
-`url_citation` annotation. So `web_search` is now a FUNCTION tool the model calls with a query, answered
-here by one cheap OpenRouter completion, and the sources come back as a list the model can quote.
-
-One module, three callers; the same tool definition, the same result shape, the same fallback: with no
-OpenRouter key the hosted OpenAI tool is offered instead (`tools_for`), so nothing goes dark.
-
-Grounded 2026-09-21: openrouter.ai/docs/features/web-search (plugin id "web", engines native | exa |
-firecrawl | parallel | perplexity, `max_results` default 5, Exa "$0.007 per request" up to 10 results then
-$0.001 each, plus the model's tokens); openrouter.ai/api/v1/models lists `openai/gpt-5.4-nano` at $0.20 /
-$1.25 per million in / out. The reply is read with `annotations[].url_citation` (`url`, `title`,
-`content`). Everything network-side goes through `opener`, so the tests run without a socket.
+OpenAI's hosted ``web_search`` is the default, restoring the pre-Exa behavior.
+Exa through OpenRouter remains available only with an explicit
+``CC_BUDDY_WEB_SEARCH=openrouter-exa`` setting. Its function tool returns
+an answer and source annotations from one OpenRouter completion.
 """
 
 from __future__ import annotations
@@ -32,7 +21,7 @@ log = logging.getLogger(__name__)
 
 URL = "https://openrouter.ai/api/v1/chat/completions"
 ENGINES = ("openrouter-exa", "openai", "off")
-DEFAULT_ENGINE = "openrouter-exa"          # what `configured` picks with an OpenRouter key; "openai" without one
+DEFAULT_ENGINE = "openai"                 # hosted GPT search, independent of other provider credentials
 DEFAULT_MODEL = "openai/gpt-5.4-nano"      # the cheapest OpenRouter model that carries the web plugin, 2026-09-21
 DEFAULT_RESULTS = 5
 DEFAULT_TIMEOUT_SECS = 20.0
@@ -50,7 +39,7 @@ WEB_SEARCH_TOOL: dict[str, Any] = {
                    "properties": {"query": {"type": "string",
                                             "description": "What to look up, as a search query in plain words."}}},
 }
-HOSTED_TOOL: dict[str, Any] = {"type": "web_search"}      # OpenAI's own, the fallback without an OpenRouter key
+HOSTED_TOOL: dict[str, Any] = {"type": "web_search"}      # OpenAI's own, the default
 
 SYSTEM = ("You are a search engine's answer box. Using only the web results provided, answer the query in at most "
           "four plain sentences with the concrete facts (numbers, names, dates) and say which source each comes "
@@ -59,22 +48,22 @@ SYSTEM = ("You are a search engine's answer box. Using only the web results prov
 
 @dataclass(frozen=True)
 class SearchConfig:
-    engine: str = "openai"                 # a bare config is the hosted tool; `configured` picks Exa when the key is there
+    engine: str = DEFAULT_ENGINE
     model: str = DEFAULT_MODEL
     max_results: int = DEFAULT_RESULTS
     timeout_secs: float = DEFAULT_TIMEOUT_SECS
 
 
 def configured(environ: Any = None) -> SearchConfig:
-    """CC_BUDDY_WEB_SEARCH = openrouter-exa | openai | off. Unset: openrouter-exa when OPENROUTER_API_KEY is
-    set, openai otherwise. CC_BUDDY_WEB_SEARCH_MODEL and CC_BUDDY_WEB_SEARCH_RESULTS tune the call."""
+    """CC_BUDDY_WEB_SEARCH = openrouter-exa | openai | off. Unset: openai, even when OPENROUTER_API_KEY is
+    set. CC_BUDDY_WEB_SEARCH_MODEL and CC_BUDDY_WEB_SEARCH_RESULTS tune the call."""
     env = os.environ if environ is None else environ
     key = (env.get("OPENROUTER_API_KEY") or "").strip()
     raw = (env.get("CC_BUDDY_WEB_SEARCH") or "").strip().lower()
     if raw and raw not in ENGINES:
         log.warning("web search: CC_BUDDY_WEB_SEARCH=%r is not one of %s; using the default", raw, ENGINES)
         raw = ""
-    engine = raw or (DEFAULT_ENGINE if key else "openai")
+    engine = raw or DEFAULT_ENGINE
     if engine == "openrouter-exa" and not key:
         log.warning("web search: asked for openrouter-exa but OPENROUTER_API_KEY is not set; the hosted search is offered")
         engine = "openai"
