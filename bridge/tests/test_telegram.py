@@ -649,14 +649,39 @@ def test_a_task_that_was_asked_to_show_something_arrives_with_the_screen_it_left
         assert not telegram.WANTS_SCREEN.search(plain), plain
 
 
+def test_a_plain_screenshot_request_is_answered_by_code_even_mid_task(tmp_path: Path) -> None:
+    shot = tmp_path / "s.jpg"
+    shot.write_bytes(b"\xff\xd8shot")
+    api = FakeApi([update("open mail", update_id=1)])
+    rig = Rig(api, FakeCreate(call("start_task", {"goal": "open mail"})), screen=lambda: shot)
+
+    async def during() -> None:
+        assert rig.inlet.task_running
+        api.feed(update("screenshot", update_id=2), update("show me the screen", update_id=3))
+        await settle()
+        assert len(api.photos) == 2 and rig.inlet.task_running          # sent, and the task is untouched
+        rig.agents[0].release.set()
+
+    run_rig(rig, during)
+    assert len(rig.create.requests) == 1                                  # zero model calls for the two screens
+    assert ("user", "screenshot") in rig.closed[0]
+    for asks in ("send me a screenshot", "what's on the screen?", "Show me your screen please"):
+        assert telegram.SCREEN_NOW.match(asks), asks
+    for goes_to_the_model in ("screenshot the headline on google news", "show me the top headline", "open mail"):
+        assert not telegram.SCREEN_NOW.match(goes_to_the_model), goes_to_the_model
+    rig = Rig(FakeApi([update("screenshot")]), FakeCreate(), screen=lambda: None)
+    run_rig(rig)
+    assert rig.api.sent and "couldn't grab the screen" in rig.api.sent[0][1]
+
+
 def test_the_owner_can_ask_for_the_screen_and_a_failed_capture_is_said(tmp_path: Path) -> None:
     shot = tmp_path / "s.jpg"
     shot.write_bytes(b"\xff\xd8shot")
-    rig = Rig(FakeApi([update("show me the screen")]),
+    rig = Rig(FakeApi([update("how does the calendar look right now?")]),
               FakeCreate(call("screenshot", {"caption": "Here's your screen"}), say("Sent!")), screen=lambda: shot)
     run_rig(rig)
     assert rig.api.photos == [(OWNER, str(shot), "Here's your screen")] and rig.api.sent == [(OWNER, "Sent!")]
-    rig = Rig(FakeApi([update("show me the screen")]),
+    rig = Rig(FakeApi([update("how does the calendar look right now?")]),
               FakeCreate(call("screenshot", {"caption": "x"}), say("I couldn't grab the screen.")), screen=lambda: None)
     run_rig(rig)
     assert rig.api.photos == []

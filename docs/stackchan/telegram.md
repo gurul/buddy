@@ -75,8 +75,10 @@ token without an owner id is off. A door with no allowlist never opens.
   code, not a model call: it works when the model is down or mid-turn.
 - **A photo** — "send me a picture of my desk". The robot snaps, the diary keeps
   and captions it as it does for the voice, and the picture arrives in the chat.
-- **The screen** — "show me the screen", "screenshot". macOS `screencapture`
-  (the same call PyAutoGUI makes), sent as a photo. A task whose request asked
+- **The screen** — "screenshot", "show me the screen", "what's on the screen".
+  A message that is only that is answered by code, no model call, mid-task or
+  not (like `stop`): macOS `screencapture` (the same call PyAutoGUI makes),
+  sent as a photo. Longer requests go through the brain's `screenshot` tool. A task whose request asked
   to *see* something ("give me a screenshot of the headline") arrives with the
   screen it left, so you can check the result; a task that did not ask gets
   the words only. Needs Screen Recording for the daemon's python, which the
