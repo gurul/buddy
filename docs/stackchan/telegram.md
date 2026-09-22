@@ -208,8 +208,11 @@ Flip it to `ask` if two seconds a command is a price you will pay.
   enter or leave it.
 - **`claude on` / `claude off`** — the Claude Code relay, explicit only. While
   on: the chat shows what the terminal prints in white, as it happens: what
-  Claude says ("Claude: …", the text blocks of each assistant message, from
-  the transcript tailer), batched every 1.2 s into one message. The gray
+  Claude says (the text blocks of each assistant message, from the transcript
+  tailer, under a bold "Claude" title with the repo's folder name beneath it,
+  its paragraphs, bullets and code kept), batched every 1.2 s into one message;
+  a message over 1500 characters is cut at a paragraph and says the rest is in
+  the terminal. The gray
   lines stay on the Mac: thinking is never read, and a tool call and the tail
   of its result are not forwarded (owner, 2026-09-21). "Claude is waiting on
   you" arrives when a session blocks on you, and **what you text goes into
@@ -220,17 +223,31 @@ Flip it to `ask` if two seconds a command is a price you will pay.
   bypass**: while it is on, the daemon's pretooluse hook allows a tool call
   (and an out-of-repo Read) without asking, the way `bypassPermissions` would,
   because a prompt on the Mac has nobody at it. What Claude needs from you
-  still arrives: a question it asks (`AskUserQuestion`, shown as "Claude asks:
-  Which database? (Postgres / SQLite)"), and a command on your own always-ask
-  list (`rm`, `sudo`; `matchers.py`) as a yes/no that only your next message
-  answers; silence there defers to Claude Code's own flow, never denies. With
+  still arrives: a question it asks (`AskUserQuestion`, under a "Claude asks"
+  title: "Which database? (Postgres / SQLite)"), and a command on your own
+  always-ask list (`rm`, `sudo`; `matchers.py`) as a yes/no that only your next
+  message answers, titled "Claude asks to run Bash" with the command as a code
+  block; silence there defers to Claude Code's own flow, never denies. With
   `CC_BUDDY_TELEGRAM_ASK=1` every call is asked that way. Off by default and
   off again after "claude off": nothing from the terminal leaves the Mac
   until you ask, and the Mac asks as it always did.
+- **One shape for every message** (`telegram_format.py`). A message that is
+  not buddy's own reply opens with a bold title that says whose it is or what
+  it is: "Task done" or "Task failed" with the goal in italics under it, "The
+  task asks", "Before I do that" (an app action to confirm), "Claude" with the
+  repo under it, "Claude asks", "Claude is waiting on you", "Claude asks to
+  run Bash". Then a blank line, then the body in short paragraphs: a model's
+  markdown becomes Telegram's own bold, italics, `•` bullets, `code` and code
+  blocks, never raw stars and hashes. Everything goes in HTML parse mode with
+  `&`, `<` and `>` escaped in content; a message over 4096 characters is split
+  on a paragraph boundary with its tags closed and reopened at the cut; a
+  piece Telegram refuses to parse is sent again as plain text, so nothing is
+  lost to markup. Buddy's own replies and one-liners ("Stopped.", "On it.")
+  carry no title: in a private chat they are already buddy's.
 - **No emoji, no dashes.** Every outgoing message is stripped in code
-  (`telegram.plain`): emoji blocks and their joiners go, an em or en dash
-  between words becomes a comma. The prompt says so too; the code makes it
-  true.
+  (`telegram_format.plain`): emoji blocks and their joiners go, an em or en
+  dash between words becomes a comma. The prompt says so too; the code makes
+  it true.
 - **An answer.** When a task needs a yes before something consequential, the
   question arrives in the chat. Your next message is the answer, and only the
   answer. No reply in three minutes reads as no.
