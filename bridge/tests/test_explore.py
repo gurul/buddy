@@ -102,7 +102,9 @@ def test_build_mode() -> None:
 
 def test_configured_defaults() -> None:
     c = configured({})
-    assert c.enabled and c.after_secs == 600.0 and c.notes_per_hour == 6.0
+    # Exploring is explicit: the idle start ships off (owner, 2026-09-21); CC_BUDDY_EXPLORE=1 turns it on.
+    assert not c.enabled and c.after_secs == 600.0 and c.notes_per_hour == 6.0
+    assert configured({"CC_BUDDY_EXPLORE": "1"}).enabled
     assert c.model == "gpt-5-mini" and c.cycle_wait_secs == 900.0
     assert c.notes_dir == Path("~/.config/cc-buddy-bridge/notes").expanduser()
 

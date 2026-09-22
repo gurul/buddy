@@ -136,7 +136,7 @@ PROMPT = (
 
 @dataclass(frozen=True)
 class ExploreConfig:
-    enabled: bool = True
+    enabled: bool = False          # the idle start; explore itself always works when asked
     after_secs: float = DEFAULT_AFTER_MIN * 60.0
     notes_per_hour: float = DEFAULT_NOTES_PER_HOUR
     model: str = DEFAULT_MODEL
@@ -162,7 +162,9 @@ def _env_float(name: str, default: float, environ: Any) -> float:
 def configured(environ: Any = None) -> ExploreConfig:
     """Build the config from CC_BUDDY_EXPLORE* / CC_BUDDY_NOTES* env vars."""
     env = os.environ if environ is None else environ
-    enabled = (env.get("CC_BUDDY_EXPLORE") or "1").strip().lower() not in ("0", "false", "no", "off")
+    # Exploring is explicit — "go explore", the CLI, a text — never something buddy starts on its own from
+    # the idle clock (owner, 2026-09-21). CC_BUDDY_EXPLORE=1 turns the idle start back on.
+    enabled = (env.get("CC_BUDDY_EXPLORE") or "0").strip().lower() in ("1", "true", "yes", "on")
     notes_dir = (env.get("CC_BUDDY_NOTES_DIR") or "").strip() or DEFAULT_NOTES_DIR
     return ExploreConfig(
         enabled=enabled,

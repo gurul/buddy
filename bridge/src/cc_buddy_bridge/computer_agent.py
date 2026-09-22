@@ -53,8 +53,9 @@ from dataclasses import dataclass, field
 from datetime import datetime
 from pathlib import Path
 from typing import Any, Awaitable, Callable, Optional
+from urllib.parse import quote_plus
 
-from . import task_router
+from . import browser_lane, task_router
 from .fast_lane import DECIDE_MODES, DEFAULT_DECIDE, FAST_LANE_DEFAULT, LANE_FIRST_DEFAULT
 
 log = logging.getLogger(__name__)
@@ -739,9 +740,11 @@ class ComputerAgent:
         ask_user: Optional[Callable[[str], Awaitable[str]]] = None,
         clock: Callable[[], float] = time.monotonic,
         sleep: Callable[[float], Awaitable[None]] = asyncio.sleep,
+        browser: Any = None,                        # browser_lane.BrowserLane, when CC_BUDDY_BROWSER_LANE is on
     ) -> None:
         self.create_response = create_response
         self.worker_factory = worker_factory
+        self.browser = browser
         self.config = config or AgentConfig()
         self.on_event = on_event or (lambda _e: None)
         self.ask_user = ask_user
@@ -853,6 +856,7 @@ class ComputerAgent:
         previous: Optional[str] = None
         lane_note = ""
         lane_clicked = False
+        web = False                              # the browser lane took this goal: the Mac tiers stand down
         plan = None
         if cfg.reflexes:
             # In a thread: the rules are microseconds, but a hosted model is a network call, and the
@@ -861,12 +865,20 @@ class ComputerAgent:
                 task_router.classify, goal, apps=task_router.installed_apps(), model=self._router_asker()))
             self._log({"turn": 0, "route": {"kind": plan.kind, "tiers": list(plan.tiers), "app": plan.app,
                                             "query": plan.query, "reasons": list(plan.reasons)}})
+        if self.browser is not None and browser_lane.is_web_goal(goal, plan.kind if plan is not None else ""):
+            # The browser lane: buddy's own Chromium, the page as the snapshot, the same plan executor.
+            # A web reflex (search, open a URL) is one navigation there; the rest is planned once.
+            answer, lane_note = await self._browser_first(goal, plan)
+            if answer:
+                self._emit("final", answer, 0)
+                return answer
+            plan, web = None, True               # the Mac reflexes must not also open the URL in Safari
         if plan is not None and "reflex" in plan.tiers:
             done, lane_note = await self._reflex(plan, worker)
             if done:
                 self._emit("final", done, 0)
                 return done
-        if cfg.lane_first and (plan is None or "lane" in plan.tiers):
+        if cfg.lane_first and not web and (plan is None or "lane" in plan.tiers):
             routed = await self._lane_first(goal, worker)
             if routed.get("status") == "complete" and routed.get("sentence"):
                 answer = str(routed["sentence"])
@@ -882,7 +894,7 @@ class ComputerAgent:
                              "Start from the screenshot; do not repeat those clicks.")
         # A launch reflex before this point is what the plan wants: the outline is then the right app's
         # window. Lane clicks are not — the screen has moved under a request that is half done.
-        if cfg.plan_exec and not lane_clicked and not task_router.TELL_ME.search(goal):
+        if cfg.plan_exec and not web and not lane_clicked and not task_router.TELL_ME.search(goal):
             answer, plan_note = await self._plan_once(goal, worker)
             if answer:
                 self._emit("final", answer, 0)
@@ -1089,7 +1101,32 @@ class ComputerAgent:
             self._emit("progress", str(line), 0)
         return routed
 
-    async def _plan_once(self, goal: str, worker: Any) -> tuple[str, str]:
+    async def _browser_first(self, goal: str, route: Any) -> tuple[str, str]:
+        """The browser lane's turn: a search or URL reflex is one navigation; then one plan, executed
+        against the page. Returns (answer, "") when done, ("", note) for the turn-by-turn loop — the
+        floor, as always: the planner then works the Chromium window from screenshots."""
+        t0 = self._clock()
+        note = ""
+        try:
+            if route is not None and route.kind == "search" and route.query:
+                url = task_router.SEARCH_URL + quote_plus(route.query)
+                said = await self._interruptible(self.browser.open_url(url))
+                self._acted = True
+                self._emit("progress", said, 0)
+                if not route.rest:
+                    self._log({"turn": 0, "browser": {"reflex": "search", "secs": round(self._clock() - t0, 2)}})
+                    return route.sentence(), ""
+                note = f"\n\n[note] The browser already opened {url}. Start from the page; do not open it again."
+            answer, plan_note = await self._plan_once(goal, self.browser, lane="browser")
+        except (Cancelled, FailSafe):
+            raise
+        except Exception as e:  # noqa: BLE001 — a browser that fails is "today's loop", never a failed task
+            log.warning("agent: browser lane failed (%s: %s); the planner takes over", type(e).__name__, e)
+            self._log({"turn": 0, "browser": {"error": f"{type(e).__name__}: {e}"[:200]}})
+            return "", note
+        return answer, (plan_note or note)
+
+    async def _plan_once(self, goal: str, worker: Any, lane: str = "") -> tuple[str, str]:
         """Plan once, execute without a planner turn between steps or at the end.
 
         Returns (what to say, "") when the plan ran to a code-checked finish or the human said no, and
@@ -1101,7 +1138,7 @@ class ComputerAgent:
 
         t0 = self._clock()
         outline = await self._interruptible(worker.outline())
-        named = task_router.find_app_mention(goal, task_router.installed_apps())
+        named = "" if lane == "browser" else task_router.find_app_mention(goal, task_router.installed_apps())
         if named and named.casefold() != str(outline.get("app") or "").casefold():
             # The request names an app that is not in front: the planner would plan blind (live, 2026-09-21: a
             # checkpoint instead of a click). Open it first, in the worker, and read ITS window.
@@ -1115,7 +1152,8 @@ class ComputerAgent:
                 log.info("agent: could not open %s before planning (%s)", named, type(e).__name__)
         req = pc.plan_request(self.config.model, goal, app=str(outline.get("app") or ""),
                               outline=[str(x) for x in outline.get("lines") or []],
-                              apps=task_router.installed_apps(), effort=self.config.plan_exec_effort,
+                              apps=[] if lane == "browser" else task_router.installed_apps(),
+                              effort=self.config.plan_exec_effort,
                               timeout=self.config.api_timeout_secs)
         try:
             response = await self._interruptible(self._create(req, 0))

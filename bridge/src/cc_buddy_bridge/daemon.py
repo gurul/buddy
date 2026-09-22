@@ -13,6 +13,7 @@ from typing import TYPE_CHECKING, Any, Optional
 if TYPE_CHECKING:
     from .key_tap import KeyTapper
 
+from . import browser_lane as browser_lane_mod
 from . import follow as follow_mod
 from . import photos, voice_agent
 from . import recall as recall_mod
@@ -254,6 +255,8 @@ class Daemon:
         self._active_agent: Optional[ComputerAgent] = None
         # The text door (telegram.py). None unless CC_BUDDY_TELEGRAM is on with a token and an owner id.
         self._telegram: Optional[telegram_mod.TelegramInlet] = None
+        # The browser lane (browser_lane.py): buddy's own Chromium for web goals. None unless CC_BUDDY_BROWSER_LANE.
+        self._browser: Optional[browser_lane_mod.BrowserLane] = None
         # "hey buddy, go explore": the voice tool sets this; the explore
         # starts when the conversation has closed, so the board is never
         # asked to hold a conversation pose and pan the room at once.
@@ -381,6 +384,7 @@ class Daemon:
         # record without waiting for a human to run anything.
         tasks.append(asyncio.create_task(self._chat_memory.curate_loop(self._shutdown),
                                          name="chat-memory-curate"))
+        self._browser = browser_lane_mod.make_lane(browser_lane_mod.configured())
         self._telegram = self._make_telegram()
         if self._telegram is not None:
             tasks.append(asyncio.create_task(self._telegram.run(), name="telegram"))
@@ -390,8 +394,8 @@ class Daemon:
         if self._reconciler is not None:
             tasks.append(asyncio.create_task(self._reconciler.loop(self._shutdown), name="records-reconcile"))
         if not self._explore_cfg.enabled:
-            log.info("explore: idle start disabled (CC_BUDDY_EXPLORE=0); "
-                     "`cc-buddy-bridge explore` and \"go explore\" still work")
+            log.info("explore: buddy explores only when asked (`cc-buddy-bridge explore`, \"go explore\", a text); "
+                     "CC_BUDDY_EXPLORE=1 turns the idle start on")
         try:
             await self._shutdown.wait()
         finally:
@@ -404,6 +408,8 @@ class Daemon:
                 await asyncio.gather(self._expression_audition, return_exceptions=True)
             await self._send_cam(False)
             self._vision.stop()
+            if self._browser is not None:
+                await self._browser.close()
             for t in tasks:
                 t.cancel()
             for pend in list(self._pending_turn_ends.values()):
@@ -1043,10 +1049,14 @@ class Daemon:
             memory=lambda: recall_mod.opening_brief(self._recall_cfg),
             on_photo=self._photo_for_owner, thinker=self._thinker,
             on_state=self._on_agent_state, on_closed=self._remember_conversation,
+            scene=self._scene, head=self._head, on_explore=lambda: self._request_explore("requested from Telegram"),
+            on_sound=self._set_sound, on_star=self._star_by_voice, on_caption=self._on_caption,
+            notes=lambda: self._room_notes_taker(),
             records=records_mod.RecordsReader(self._recall_cfg) if records_mod.configured().enabled else None)
 
     def _make_agent(self, on_event: Any, ask_user: Any) -> ComputerAgent:
-        agent = ComputerAgent(make_response_creator(), config=self._agent_cfg, on_event=on_event, ask_user=ask_user)
+        agent = ComputerAgent(make_response_creator(), config=self._agent_cfg, on_event=on_event, ask_user=ask_user,
+                              browser=getattr(self, "_browser", None))
         self._active_agent = agent
         return agent
 

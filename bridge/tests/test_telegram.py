@@ -236,8 +236,10 @@ def test_no_owner_id_means_no_inlet() -> None:
 
 def _bare_daemon() -> SimpleNamespace:
     return SimpleNamespace(_make_agent=lambda *a: None, _agent_cfg=SimpleNamespace(enabled=True),
-                           _recall_cfg=None, _photo_for_owner=None, _thinker=None,
-                           _on_agent_state=lambda s: None, _remember_conversation=lambda t: None)
+                           _recall_cfg=None, _photo_for_owner=None, _thinker=None, _scene=None, _head=None,
+                           _on_agent_state=lambda s: None, _remember_conversation=lambda t: None,
+                           _request_explore=None, _set_sound=lambda on: None, _star_by_voice=lambda c: None,
+                           _on_caption=lambda m: None, _room_notes_taker=lambda: None)
 
 
 def test_the_daemon_builds_no_inlet_when_off(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -763,6 +765,94 @@ def test_send_file_sends_a_document_and_refuses_folders_and_big_files(tmp_path: 
 
     seen = asyncio.run(upload())
     assert seen["url"].endswith("/sendDocument") and b'filename="notes.txt"' in seen["body"] and b"hello" in seen["body"]
+
+
+# ---- the robot over text, and stealth -------------------------------------------------------------
+
+class FakeHead:
+    def __init__(self) -> None:
+        self.moves: list[tuple] = []
+
+    async def move(self, yaw, pitch, relative=False, hold_secs=15.0):
+        self.moves.append((yaw, pitch, relative, hold_secs))
+        return {"ok": True, "yaw": yaw, "pitch": pitch}
+
+
+class FakeNotes:
+    def __init__(self) -> None:
+        self.calls: list[str] = []
+
+    def start(self) -> dict:
+        self.calls.append("start")
+        return {"ok": True, "started": True}
+
+    async def stop(self, reason: str = "asked") -> dict:
+        self.calls.append(f"stop:{reason}")
+        return {"ok": True, "minutes": 3}
+
+    def status(self) -> dict:
+        return {"active": False}
+
+
+def test_a_text_is_a_word_said_to_the_robot() -> None:
+    head, notes, sounds, stars = FakeHead(), FakeNotes(), [], []
+
+    async def look() -> dict:
+        return {"ok": True, "view": "a desk with a mug"}
+
+    api = FakeApi([update("look left", update_id=1)], [update("start taking notes", update_id=2)],
+                  [update("mute yourself", update_id=3)], [update("remember that I like ramen", update_id=4)],
+                  [update("what do you see?", update_id=5)])
+    rig = Rig(api, FakeCreate(call("move_head", {"yaw": -60, "pitch": None, "relative": False, "hold_secs": None}), say("Looking left."),
+                              call("take_notes", {"action": "start"}, "c2"), say("Taking notes."),
+                              call("set_sound", {"on": False}, "c3"), say("Muted."),
+                              call("remember", {"claim": "I like ramen"}, "c4"), say("Noted for good."),
+                              call("look", {}, "c5"), say("A desk with a mug.")),
+              head=head, scene=SimpleNamespace(look=look), notes=lambda: notes, on_sound=sounds.append,
+              on_star=lambda c: (stars.append(c), "kept")[1])
+    run_rig(rig)
+    assert head.moves == [(-60.0, None, False, 15.0)] and notes.calls == ["start"]
+    assert sounds == [False] and stars == ["I like ramen"]
+    assert [t for _, t in rig.api.sent] == ["Looking left.", "Taking notes.", "Muted.", "Noted for good.", "A desk with a mug."]
+    assert json.loads(rig.create.requests[9]["input"][-1]["output"])["view"] == "a desk with a mug"
+    for name in ("look", "look_around", "find", "move_head", "go_explore", "set_sound", "remember", "take_notes"):
+        assert any(t.get("name") == name for t in telegram.TOOLS), name
+
+
+def test_the_robot_shows_what_the_chat_does_unless_stealth(tmp_path: Path) -> None:
+    captions: list[dict] = []
+    head = FakeHead()
+    api = FakeApi([update("open the calculator", update_id=1)])
+    rig = Rig(api, FakeCreate(call("start_task", {"goal": "open the calculator"}),
+                              call("move_head", {"yaw": -60, "pitch": None, "relative": False, "hold_secs": None}, "c2"),
+                              say("Can't, I'm asleep.")),
+              on_caption=captions.append, head=head)
+
+    async def during() -> None:
+        rig.agents[0].on_event(AgentEvent("progress", "opened Calculator", 1))
+        await settle()
+        assert rig.states == ["working"] and captions and captions[-1]["lines"] == ["opened Calculator"]
+        assert captions[-1]["chirp"] is False
+        rig.agents[0].release.set()
+        await settle()
+        assert captions[-1]["lines"] == ["Calculator is", "open."] and "done" in rig.states
+        # stealth: a code word, no model call; the face goes idle and stays there
+        api.feed(update("stealth mode", update_id=2))
+        await settle()
+        assert rig.inlet.stealth and rig.states[-1] == "idle" and rig.api.sent[-1] == (OWNER, telegram.STEALTH_ON_LINE)
+        before = (len(captions), len(rig.states))
+        api.feed(update("look left", update_id=3))
+        await settle()
+        assert head.moves == []                                            # asleep robots do not move
+        refusal = json.loads(rig.create.requests[-1]["input"][-1]["output"])
+        assert refusal["ok"] is False and "stealth" in refusal["reason"]
+        assert (len(captions), len(rig.states)) == before                 # and show nothing
+        api.feed(update("wake up", update_id=4))
+        await settle()
+        assert not rig.inlet.stealth and rig.api.sent[-1] == (OWNER, telegram.STEALTH_OFF_LINE)
+
+    run_rig(rig, during)
+    assert len(rig.create.requests) == 3                                       # task, then the refused look-left turn
 
 
 # ---- G10: the poll loop -----------------------------------------------------------------------

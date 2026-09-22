@@ -73,6 +73,10 @@ dependencies = [
 
 [project.optional-dependencies]
 dev = ["pytest>=8.0", "ruff>=0.6"]
+# The browser lane (browser_lane.py): Playwright drives buddy's own Chromium for web goals. 1.63.0 current
+# per PyPI, 2026-09-21, Python >=3.10. Imported lazily; the daemon runs without it. Install with
+# `pip install -e ".[browser]"` then `python -m playwright install chromium` (~95 MB).
+browser = ["playwright>=1.63,<2"]
 # The computer-use fast lane (fast_lane.py, decider.py): laya-mlx runs the Laya
 # typed-decision checkpoint natively on Apple silicon (MLX). 0.1.0 current per
 # PyPI, mlx 0.32.2, 2026-09-21. Apple silicon only; imported lazily by the
