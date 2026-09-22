@@ -880,12 +880,17 @@ def test_the_claude_relay_is_off_until_said_and_forwards_only_while_on() -> None
         await inlet.relay_text("  I fixed\n the bug. " + "x" * 3000, "/Users/g/repo")
         await settle()
         assert api.sent[-1][1].startswith("Claude: I fixed the bug.") and len(api.sent[-1][1]) <= telegram.MAX_RELAY_CHARS + 8
-        # what the terminal shows: tool calls and result tails, a burst batched into one message
+        # the terminal's gray lines, a tool call and its result tail, never leave the Mac (owner, 2026-09-21):
+        # only what it prints in white does, plus a question for the owner
+        before = len(api.sent)
         inlet.relay_tool_call("Bash", "pytest -q")
-        inlet.relay_tool_result("Bash", "3 passed in 0.2s")
         inlet.relay_tool_call("Edit", "src/app.py")
         await settle()
-        assert api.sent[-1][1] == "> Bash: pytest -q\n3 passed in 0.2s\n> Edit: src/app.py"
+        assert len(api.sent) == before
+        await inlet.relay_text("All green.", "/Users/g/repo")
+        inlet.relay_tool_call("AskUserQuestion", "Ship it now? (yes / no)")
+        await settle()
+        assert api.sent[-1][1] == "Claude: All green.\nClaude asks: Ship it now? (yes / no)"
         before = len(api.sent)
         await inlet.relay_notification("idle_reminder", "still here", False)      # not waiting: not news
         await settle()

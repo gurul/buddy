@@ -115,13 +115,13 @@ token without an owner id is off. A door with no allowlist never opens.
   camera may still `look`, tasks and files still work. Zero model calls to
   enter or leave it.
 - **`claude on` / `claude off`** — the Claude Code relay, explicit only. While
-  on: the chat shows what the terminal shows, as it happens. Every tool call
-  ("> Bash: pytest -q", from the pretooluse hook), the tail of its result
-  (from the posttooluse hook), and what Claude says ("Claude: …", from the
-  transcript tailer), batched every 1.2 s into one message so a burst of
-  calls is one text. "Claude is waiting on you" arrives when a
-  session blocks on you, and **what you text goes into the session's
-  terminal**: the chat is the terminal. Plain text is raised into that
+  on: the chat shows what the terminal prints in white, as it happens: what
+  Claude says ("Claude: …", the text blocks of each assistant message, from
+  the transcript tailer), batched every 1.2 s into one message. The gray
+  lines stay on the Mac: thinking is never read, and a tool call and the tail
+  of its result are not forwarded (owner, 2026-09-21). "Claude is waiting on
+  you" arrives when a session blocks on you, and **what you text goes into
+  the session's terminal**: the chat is the terminal. Plain text is raised into that
   session (`focus_terminal.py`) and typed with Return through System Events;
   `buddy: <text>` talks to buddy instead, and buddy's code words (`stop`,
   `screenshot`, `stealth mode`, `claude off`) still work. **The relay is

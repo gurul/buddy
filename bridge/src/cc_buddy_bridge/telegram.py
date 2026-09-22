@@ -79,13 +79,13 @@ CLAUDE_OFF = ("claude off", "/claude off", "claude relay off", "stop relaying cl
 CLAUDE_PREFIX = re.compile(r"^(claude|>)\s*:?\s+(.+)$", re.I | re.S)     # "claude: fix the tests" → typed into the terminal
 BUDDY_PREFIX = re.compile(r"^(hey )?buddy\s*[,:]\s*(.+)$", re.I | re.S)   # while relaying: this one is for buddy
 CLAUDE_ON_LINE = ("Claude relay on: this chat is the terminal. What you text is typed into Claude Code; what it "
-                  "runs, says and asks comes back here, and its tool calls go through without asking, as in "
+                  "says and asks comes back here, and its tool calls go through without asking, as in "
                   "bypass mode. \"buddy: ...\" talks to me instead. \"claude off\" ends it.")
 CLAUDE_OFF_LINE = "Claude relay off."
 CLAUDE_NOT_ON_LINE = "The Claude relay is off. Say \"claude on\" first."
 DEFAULT_PERMISSION_TIMEOUT_SECS = 240.0    # the hook blocks 320 s at most; a silence defers, it never denies
 MAX_RELAY_CHARS = 1500
-RELAY_BATCH_SECS = 1.2                     # tool lines are batched this long into one message (Telegram: ~1 msg/s)
+RELAY_BATCH_SECS = 1.2                     # relay lines are batched this long into one message (Telegram: ~1 msg/s)
 STEALTH_ON_LINE = "Stealth mode: I'll act asleep at the desk until you say wake up."
 STEALTH_OFF_LINE = "Awake again."
 FATAL_CODES = (401, 404, 409)       # bad token, malformed token, another poller on this token
@@ -704,10 +704,10 @@ class TelegramInlet:
     * ``terminal``      — (cwd, text) -> str: type a line into the Claude Code terminal for that session
 
     "claude on" / "claude off" is the terminal relay, explicit only (owner, 2026-09-21): while on, the chat
-    is the terminal. What Claude Code runs (``relay_tool_call`` / ``relay_tool_result``), says
-    (``relay_text``), asks (an AskUserQuestion call, shown as a question) and waits on
-    (``relay_notification``) is forwarded here, and plain text is typed into its terminal; "buddy: <text>"
-    is for buddy. The relay is bypass: the daemon allows a tool call without asking (daemon.py), and only
+    is the terminal. What Claude Code says (``relay_text``), asks (an AskUserQuestion call, shown as a
+    question by ``relay_tool_call``) and waits on (``relay_notification``) is forwarded here, and plain
+    text is typed into its terminal; "buddy: <text>" is for buddy. Only what the terminal shows in white
+    travels: no thinking, no tool calls, no result tails (owner, 2026-09-21, "the gray stuff"). The relay is bypass: the daemon allows a tool call without asking (daemon.py), and only
     the owner's always_ask commands (rm, sudo) become a yes/no here (``decide_permission``; silence defers
     to Claude Code's own flow, never denies).
 
@@ -919,8 +919,8 @@ class TelegramInlet:
         await self._say(chat_id, said)
 
     def relay_line(self, line: str) -> None:
-        """One line of what the terminal shows (a tool call, a result tail), batched with its neighbours
-        into one message so a burst of ten tool calls is one text, not ten."""
+        """One line for the phone (what Claude said, a question it asks), batched with its neighbours
+        into one message so a burst of short messages is one text, not ten."""
         if not self.claude or self._chat_id is None:
             return
         line = " ".join(str(line).split())
@@ -938,14 +938,10 @@ class TelegramInlet:
             await self._say(self._chat_id, body)
 
     def relay_tool_call(self, tool: str, hint: str) -> None:
-        if tool == "AskUserQuestion":                     # a request for the owner, not a tool line
+        """A tool call the daemon saw. Only a question for the owner (AskUserQuestion) reaches the phone:
+        the terminal's gray lines, the call itself and its result tail, stay on the Mac (owner, 2026-09-21)."""
+        if tool == "AskUserQuestion":
             self.relay_line("Claude asks: " + (hint or "(see the terminal)"))
-            return
-        self.relay_line(f"> {tool}: {hint}" if hint else f"> {tool}")
-
-    def relay_tool_result(self, tool: str, tail: str) -> None:
-        if tail:
-            self.relay_line(f"  {tail}")
 
     async def relay_text(self, text: str, cwd: str = "") -> None:
         """What Claude Code just said, when the relay is on. Never logged here either."""

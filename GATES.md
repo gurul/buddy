@@ -127,11 +127,11 @@ Scope: The owner can text buddy from Telegram and get an answer, start and stop 
   EXPECT: ROBOT_OVER_TEXT_OK
   EVIDENCE: exit=0; shell=/bin/sh; cwd=/Users/gurucharan/Documents/personal/buddy/bridge; path=574d30059456/19 entries; output=3 passed in 0.09s | ROBOT_OVER_TEXT_OK
 
-- [x] G23: The Claude relay is off until "claude on" and forwards only while on (words, tool calls and result tails, waiting, a question shown as a question, never idle reminders); while on, plain text is typed into the session's terminal and "buddy:" reaches buddy; the relay is bypass: a tool call and an out-of-cwd Read are allowed by the daemon without asking, an always-ask command (rm, sudo) is a yes/no on the phone that only the owner answers and silence defers, CC_BUDDY_TELEGRAM_ASK=1 asks every call, and nothing is asked in bypass mode; no emoji or dash ever leaves in a message or a caption.
+- [x] G23: The Claude relay is off until "claude on" and forwards only while on (what the terminal shows in white: Claude's words, a question shown as a question, waiting; never a tool call, a result tail, thinking or an idle reminder); while on, plain text is typed into the session's terminal and "buddy:" reaches buddy; the relay is bypass: a tool call and an out-of-cwd Read are allowed by the daemon without asking, an always-ask command (rm, sudo) is a yes/no on the phone that only the owner answers and silence defers, CC_BUDDY_TELEGRAM_ASK=1 asks every call, and nothing is asked in bypass mode; no emoji or dash ever leaves in a message or a caption.
   CHECK: .venv/bin/python -m pytest -q -p no:cacheprovider tests/test_telegram.py::test_the_claude_relay_is_off_until_said_and_forwards_only_while_on tests/test_telegram.py::test_a_permission_prompt_is_answered_from_the_phone_and_silence_defers tests/test_telegram.py::test_the_daemon_honours_the_phones_decision_and_defers_without_one tests/test_telegram.py::test_a_question_for_the_owner_is_streamed_as_a_question tests/test_telegram.py::test_no_emoji_leaves_the_mac && echo CLAUDE_RELAY_OK
   CWD: bridge
   EXPECT: CLAUDE_RELAY_OK
-  EVIDENCE: exit=0; shell=/bin/sh; cwd=/Users/gurucharan/Documents/personal/buddy/bridge; output=5 passed in 0.15s | CLAUDE_RELAY_OK
+  EVIDENCE: exit=0; shell=/bin/sh; cwd=/Users/gurucharan/Documents/personal/buddy/bridge; output=5 passed in 0.16s | CLAUDE_RELAY_OK (2026-09-21, white-only relay)
 
 - [ ] G13: MANUAL — a live round trip from the owner's phone: a text is answered, a texted task runs on this Mac and its result arrives, a task question is answered from the phone, a photo arrives, and a message from a second Telegram account gets nothing.
   EVIDENCE: pending
