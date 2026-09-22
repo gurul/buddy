@@ -74,6 +74,15 @@ DONE_HOLD_SECS = 3.0                # the board shows "done" this long after a t
 STOP_WORDS = ("stop", "/stop", "cancel", "/cancel")
 STEALTH_ON = ("stealth mode", "stealth", "stealth on", "go stealth", "/stealth", "play dead", "act asleep")
 STEALTH_OFF = ("stealth off", "wake up", "/wake", "stop stealth", "end stealth", "you can wake up")
+CLAUDE_ON = ("claude on", "/claude on", "claude relay on", "relay claude")
+CLAUDE_OFF = ("claude off", "/claude off", "claude relay off", "stop relaying claude")
+CLAUDE_PREFIX = re.compile(r"^(claude|>)\s*:?\s+(.+)$", re.I | re.S)     # "claude: fix the tests" → typed into the terminal
+CLAUDE_ON_LINE = ("Claude relay on: I'll forward what Claude Code says and its permission prompts here, and "
+                  "\"claude: <text>\" types into its terminal. \"claude off\" ends it.")
+CLAUDE_OFF_LINE = "Claude relay off."
+CLAUDE_NOT_ON_LINE = "The Claude relay is off. Say \"claude on\" first."
+DEFAULT_PERMISSION_TIMEOUT_SECS = 240.0    # the hook blocks 320 s at most; a silence defers, it never denies
+MAX_RELAY_CHARS = 1500
 STEALTH_ON_LINE = "Stealth mode: I'll act asleep at the desk until you say wake up."
 STEALTH_OFF_LINE = "Awake again."
 FATAL_CODES = (401, 404, 409)       # bad token, malformed token, another poller on this token
@@ -88,8 +97,8 @@ FAILED_LINE = "Something went wrong on my side. Try me again in a moment."
 
 INSTRUCTIONS = """You are buddy, a small desk robot with a cheerful, curious personality. Your owner is texting
 you from their phone, so they are probably not at the desk and cannot see the Mac's screen or hear you.
-Answer the way a friend texts: one to three short sentences, plain text, no markdown, no lists, no offers of
-things you "can help with" — you are a pet, not an assistant menu.
+Answer the way a friend texts: one to three short sentences, plain text, no markdown, no lists, no emoji
+ever, no dashes as punctuation (use a comma or a full stop), no offers of things you "can help with" — you are a pet, not an assistant menu.
 
 You can operate your owner's Mac for them, but only when they ask for something the Mac must do or show:
 open, play, send, find a file, read the screen. Then start the task at once with the owner's request in
@@ -368,6 +377,25 @@ def sender_id(update: Any) -> Optional[int]:
     return None
 
 
+# No emoji, ever (owner, 2026-09-21). Stripped in code from every outgoing message, prompt or not: the
+# pictographic blocks, the variation selectors and joiners that build them, and the keycap combiner.
+_EMOJI = re.compile("[\U0001F000-\U0001FAFF\U00002600-\U000027BF\U00002B00-\U00002BFF\U0001F900-\U0001F9FF"
+                    "\U0000FE0F\U0000200D\U000020E3\U0001F1E6-\U0001F1FF\U0000231A-\U0000231B\U000023E9-\U000023FA"
+                    "\U000025AA-\U000025FE\U00002934-\U00002935\U00003030\U0000303D\U00003297\U00003299]")
+
+
+_DASH = re.compile(r"\s*[\u2014\u2013]\s*")      # em dash, en dash (owner, 2026-09-21): a comma or a full stop instead
+
+
+def plain(text: str) -> str:
+    """The text without emoji or dashes, and without the doubled spaces they leave behind. A dash between
+    words becomes a comma; one that ends a sentence-like run becomes a full stop."""
+    out = _EMOJI.sub("", text)
+    out = _DASH.sub(", ", out)
+    out = re.sub(r", (?=[,.!?]|$)", "", out)            # a dash right before punctuation just goes
+    return re.sub(r"[ \t]{2,}", " ", out).strip() if out != text else text
+
+
 def chunks(text: str, limit: int = MAX_MESSAGE_CHARS) -> list[str]:
     """Split for sendMessage without losing a character: at a newline or a space when one is near the end
     of the window, mid-word otherwise. ``"".join(chunks(t)) == t`` always."""
@@ -619,18 +647,18 @@ class BotApi:
         return [u for u in result if isinstance(u, dict)] if isinstance(result, list) else []
 
     async def send_message(self, chat_id: int, text: str) -> None:
-        for piece in chunks(text):
+        for piece in chunks(plain(text)):
             if piece.strip():
                 await self._call("sendMessage", {"chat_id": chat_id, "text": piece})
 
     async def send_photo(self, chat_id: int, path: Path, caption: str = "") -> None:
         blob = await asyncio.to_thread(Path(path).read_bytes)
-        await self._call("sendPhoto", {"chat_id": str(chat_id), "caption": caption[:MAX_CAPTION_CHARS]},
+        await self._call("sendPhoto", {"chat_id": str(chat_id), "caption": plain(caption)[:MAX_CAPTION_CHARS]},
                          files={"photo": (Path(path).name, blob, "image/jpeg")})
 
     async def send_document(self, chat_id: int, path: Path, caption: str = "") -> None:
         blob = await asyncio.to_thread(Path(path).read_bytes)
-        await self._call("sendDocument", {"chat_id": str(chat_id), "caption": caption[:MAX_CAPTION_CHARS]},
+        await self._call("sendDocument", {"chat_id": str(chat_id), "caption": plain(caption)[:MAX_CAPTION_CHARS]},
                          files={"document": (Path(path).name, blob, "application/octet-stream")})
 
     async def typing(self, chat_id: int) -> None:
@@ -667,6 +695,12 @@ class TelegramInlet:
     * ``on_star``       — (claim) -> str | None: star a fact for good (daemon._star_by_voice)
     * ``on_caption``    — (dict) -> None: a page on the robot's screen (daemon._on_caption)
     * ``notes``         — () -> RoomNotes: the room note-taker (daemon._room_notes_taker), for take_notes
+    * ``terminal``      — (cwd, text) -> str: type a line into the Claude Code terminal for that session
+
+    "claude on" / "claude off" is the terminal relay, explicit only (owner, 2026-09-21): while on, what
+    Claude Code says (``relay_text``) and when it waits on the human (``relay_notification``) are forwarded
+    here, a permission prompt becomes a yes/no in the chat (``decide_permission``; silence defers to Claude
+    Code's own flow, never denies), and "claude: <text>" goes into its terminal.
 
     The robot shows what the chat is doing — the phase on its face, a caption for each task step and the
     result — unless the owner has said "stealth mode": then it acts asleep (idle, no captions, no head)
@@ -688,6 +722,8 @@ class TelegramInlet:
                  on_star: Optional[Callable[[str], Optional[str]]] = None,
                  on_caption: Optional[Callable[[dict[str, Any]], None]] = None,
                  notes: Optional[Callable[[], Any]] = None,
+                 terminal: Optional[Callable[[str, str], Awaitable[str]]] = None,
+                 permission_timeout_secs: float = DEFAULT_PERMISSION_TIMEOUT_SECS,
                  clock: Callable[[], float] = time.monotonic, wall: Callable[[], float] = time.time,
                  sleep: Callable[[float], Awaitable[None]] = asyncio.sleep) -> None:
         self.config = config
@@ -706,7 +742,12 @@ class TelegramInlet:
         self._scene, self._head = scene, head
         self._on_explore, self._on_sound, self._on_star, self._on_caption = on_explore, on_sound, on_star, on_caption
         self._notes = notes
+        self._terminal = terminal
+        self._permission_timeout = permission_timeout_secs
         self.stealth = False
+        self.claude = False                               # the terminal relay
+        self._chat_id: Optional[int] = next(iter(sorted(config.owner_ids)), None)   # a private chat's id is the user's
+        self._relay_cwd: str = ""                          # the session Claude last spoke from
         self._clock, self._wall, self._sleep = clock, wall, sleep
         self.turns: list[tuple[str, str]] = []           # ("user" | "buddy", text): this chat, until it goes quiet
         self._last_turn_at: Optional[float] = None
@@ -794,6 +835,18 @@ class TelegramInlet:
         if word in STOP_WORDS:
             self._spawn(self._stop(inbound.chat_id), "telegram-stop")
             return
+        self._chat_id = inbound.chat_id
+        if word in CLAUDE_ON or word in CLAUDE_OFF:
+            self.claude = word in CLAUDE_ON
+            self._note("user", inbound.text)
+            log.info("telegram: claude relay %s", "on" if self.claude else "off")
+            self._spawn(self._say(inbound.chat_id, CLAUDE_ON_LINE if self.claude else CLAUDE_OFF_LINE), "telegram-say")
+            return
+        typed = CLAUDE_PREFIX.match(inbound.text)
+        if typed:
+            self._note("user", inbound.text)
+            self._spawn(self._type_to_claude(inbound.chat_id, typed.group(2).strip()), "telegram-claude")
+            return
         if word in STEALTH_ON or word in STEALTH_OFF:
             self.stealth = word in STEALTH_ON
             self._note("user", inbound.text)
@@ -826,6 +879,66 @@ class TelegramInlet:
         result = await self._send_screen(chat_id, "")
         if not result.get("ok"):
             await self._say(chat_id, "I couldn't grab the screen: " + str(result.get("reason")))
+
+    # -- the Claude Code relay --
+    async def _type_to_claude(self, chat_id: int, text: str) -> None:
+        if not self.claude:
+            await self._say(chat_id, CLAUDE_NOT_ON_LINE)
+            return
+        if self._terminal is None or not text:
+            await self._say(chat_id, "I can't reach a terminal on this computer.")
+            return
+        try:
+            said = await self._terminal(self._relay_cwd, text)
+        except Exception as e:  # noqa: BLE001
+            log.warning("telegram: typing to the terminal failed (%s)", type(e).__name__)
+            said = "I couldn't type that into the terminal."
+        await self._say(chat_id, said)
+
+    async def relay_text(self, text: str, cwd: str = "") -> None:
+        """What Claude Code just said, when the relay is on. Never logged here either."""
+        if not self.claude or self._chat_id is None:
+            return
+        if cwd:
+            self._relay_cwd = cwd
+        body = " ".join(str(text).split())
+        if len(body) > MAX_RELAY_CHARS:
+            body = body[:MAX_RELAY_CHARS - 1].rstrip() + "…"
+        if body:
+            await self._say(self._chat_id, "Claude: " + body)
+
+    async def relay_notification(self, kind: str, message: str, waits: bool) -> None:
+        if not self.claude or self._chat_id is None or not waits:
+            return
+        await self._say(self._chat_id, "Claude is waiting on you" + (f": {message.strip()}" if message.strip() else "."))
+
+    async def decide_permission(self, tool: str, hint: str, cwd: str = "") -> Optional[str]:
+        """A permission prompt as a question in the chat. "allow" | "deny" | None (no answer: Claude Code's
+        own flow decides). Only the owner's next message answers, exactly as a task question."""
+        if not self.claude or self._chat_id is None:
+            return None
+        if self._pending_answer is not None and not self._pending_answer.done():
+            return None                                   # one question at a time; this one defers
+        if cwd:
+            self._relay_cwd = cwd
+        where = f" in {Path(cwd).name}" if cwd else ""
+        question = f"Claude{where} wants to run {tool}: {hint.strip()[:300]}\nyes / no?"
+        loop = asyncio.get_running_loop()
+        self._pending_answer = loop.create_future()
+        self._note("buddy", question)
+        try:
+            await self._say(self._chat_id, question)
+            answer = await asyncio.wait_for(self._pending_answer, timeout=self._permission_timeout)
+        except asyncio.TimeoutError:
+            return None
+        finally:
+            self._pending_answer = None
+        word = answer.strip().lower()
+        if word.startswith(("yes", "y", "ok", "sure", "go", "allow", "approve", "do it")):
+            return "allow"
+        if word.startswith(("no", "n", "deny", "stop", "don't", "dont", "block")):
+            return "deny"
+        return None
 
     async def _stop(self, chat_id: int) -> None:
         if self._agent is not None and self.task_running:

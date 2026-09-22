@@ -1026,6 +1026,21 @@ class Daemon:
         _converse once the conversation has closed."""
         self._explore_after_conversation = "requested by voice"
 
+    @staticmethod
+    async def _type_into_terminal(cwd: str, text: str) -> str:
+        """"claude: <text>" from the phone: raise the session's terminal (focus_terminal.py) and type the
+        line with Return, through System Events. Real keystrokes into whatever is then frontmost — which is
+        why it only runs while the owner has said "claude on"."""
+        from .focus_terminal import _osascript, focus_session_terminal
+
+        await focus_session_terminal(cwd or "")
+        await asyncio.sleep(0.3)
+        escaped = text.replace("\\", "\\\\").replace('"', '\\"')
+        script = f'tell application "System Events" to keystroke "{escaped}"\ntell application "System Events" to keystroke return'
+        if await _osascript(script) is None:
+            return "I couldn't type into the terminal (System Events refused — check Automation permissions)."
+        return "Typed into the terminal."
+
     def _texted_task_running(self) -> bool:
         inlet = getattr(self, "_telegram", None)
         return inlet is not None and inlet.task_running
@@ -1051,7 +1066,7 @@ class Daemon:
             on_state=self._on_agent_state, on_closed=self._remember_conversation,
             scene=self._scene, head=self._head, on_explore=lambda: self._request_explore("requested from Telegram"),
             on_sound=self._set_sound, on_star=self._star_by_voice, on_caption=self._on_caption,
-            notes=lambda: self._room_notes_taker(),
+            notes=lambda: self._room_notes_taker(), terminal=Daemon._type_into_terminal,
             records=records_mod.RecordsReader(self._recall_cfg) if records_mod.configured().enabled else None)
 
     def _make_agent(self, on_event: Any, ask_user: Any) -> ComputerAgent:
@@ -1874,6 +1889,9 @@ class Daemon:
                      (req.get("session_id") or "?")[:8],
                      kind or "?", "attention" if waits else "not waiting")
             await self._push_heartbeat()
+            inlet = getattr(self, "_telegram", None)
+            if inlet is not None and inlet.claude:
+                asyncio.create_task(inlet.relay_notification(kind or "", msg if isinstance(msg, str) else "", waits))
             return {"ok": True}
 
         return {"ok": False, "error": f"unknown evt: {evt!r}"}
@@ -1905,6 +1923,16 @@ class Daemon:
             log.info("pretooluse for %s (%s): auto_allow match → allow", tool_name, hint[:60])
             self.audit.record(**audit_kwargs, decision="allow", source="auto_allow")
             return {"ok": True, "decision": "allow"}
+
+        # The phone is a decision surface (before the robot check: the phone is for when the owner is away) when the owner has said "claude on" (telegram.py): the prompt
+        # goes to the chat and only the owner's next message answers it. Silence defers, never denies.
+        inlet = getattr(self, "_telegram", None)
+        if inlet is not None and inlet.claude:
+            decision = await inlet.decide_permission(tool_name, hint, str(req.get("cwd") or ""))
+            if decision in ("allow", "deny"):
+                log.info("pretooluse for %s (%s): answered from Telegram → %s", tool_name, hint[:60], decision)
+                self.audit.record(**audit_kwargs, decision=decision, source="telegram")
+                return {"ok": True, "decision": decision}
 
         # If BLE isn't connected, skip the round-trip and return no decision so
         # Claude Code's normal flow runs (respects user's auto/allow settings).
@@ -2193,6 +2221,11 @@ class Daemon:
         log.info("tailer: new assistant text → entry added (state.entries=%d)",
                  len(self.state.entries))
         await self._push_heartbeat(force=True)
+        inlet = getattr(self, "_telegram", None)
+        if inlet is not None and inlet.claude:
+            cwd = next((s.cwd for s in self.state.sessions.values()
+                        if s.transcript_path == _transcript_path and s.cwd), "")
+            asyncio.create_task(inlet.relay_text(text, cwd or ""))
 
     async def _turn_end_side_effects(self, celebrate_secs: float) -> None:
         """Post-response work for a turn_end event, run as a background task.
