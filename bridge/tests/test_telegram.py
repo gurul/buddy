@@ -954,8 +954,8 @@ def test_the_daemon_honours_the_phones_decision_and_defers_without_one() -> None
         def relay_tool_call(self, tool, hint):
             self.lines.append(f"> {tool}: {hint}")
 
-        async def decide_permission(self, tool, hint, cwd=""):
-            self.asked.append((tool, hint, cwd))
+        async def decide_permission(self, tool, hint, cwd="", *, always=False):
+            self.asked.append((tool, hint, cwd, always))
             return self.decision
 
     class Audit:
@@ -975,14 +975,27 @@ def test_the_daemon_honours_the_phones_decision_and_defers_without_one() -> None
     req = {"tool_use_id": "t1", "session_id": "s1", "tool_name": "Bash", "hint": "rm -rf build/", "cwd": "/r"}
     import cc_buddy_bridge.daemon as dm
     original = dm.classify_command
-    dm.classify_command = lambda hint, matchers: "default"
+    dm.classify_command = lambda hint, matchers: "ask"          # the owner's always_ask list: rm, sudo
     try:
         for decision, expect in (("allow", {"ok": True, "decision": "allow"}), ("deny", {"ok": True, "decision": "deny"}),
                                  (None, {"ok": True})):
             d = daemon_with(Inlet(decision))
             assert asyncio.run(d._handle_pretooluse(req)) == expect
-            assert d._telegram.asked == [("Bash", "rm -rf build/", "/r")]
+            assert d._telegram.asked == [("Bash", "rm -rf build/", "/r", True)]
             assert d.audit.rows[-1]["source"] == ("telegram" if decision else "ble_disconnected")   # deferred
+        # the relay is bypass (owner, 2026-09-21): anything else is allowed without a question,
+        # on the phone or on the Mac, where nobody is
+        dm.classify_command = lambda hint, matchers: "default"
+        quiet = Inlet(None)
+        d = daemon_with(quiet)
+        assert asyncio.run(d._handle_pretooluse({**req, "hint": "pytest -q"})) == {"ok": True, "decision": "allow"}
+        assert quiet.asked == [] and d.audit.rows[-1]["source"] == "telegram_relay"
+        # CC_BUDDY_TELEGRAM_ASK=1: every call is asked, and silence still defers
+        asks = Inlet(None)
+        asks.config = SimpleNamespace(ask_permissions=True)
+        d = daemon_with(asks)
+        assert asyncio.run(d._handle_pretooluse({**req, "hint": "pytest -q"})) == {"ok": True}
+        assert asks.asked == [("Bash", "pytest -q", "/r", True)] and d.audit.rows[-1]["source"] == "ble_disconnected"
         off = Inlet("allow")
         off.claude = False
         d = daemon_with(off)
@@ -992,8 +1005,41 @@ def test_the_daemon_honours_the_phones_decision_and_defers_without_one() -> None
         d = daemon_with(bypass)
         assert asyncio.run(d._handle_pretooluse({**req, "permission_mode": "bypassPermissions"})) == {"ok": True}
         assert bypass.asked == [] and bypass.lines == ["> Bash: rm -rf build/"]     # still shown, like the terminal
+        # an out-of-cwd Read is a prompt on the Mac too: with the relay on it is allowed the same way
+        d = daemon_with(Inlet(None))
+        d._read_scopes = set()
+        d._handle_read_pretooluse = MethodType(Daemon._handle_read_pretooluse, d)
+        read = {"tool_use_id": "t2", "session_id": "s1", "tool_name": "Read", "hint": "/etc/hosts", "cwd": "/r"}
+        assert asyncio.run(d._handle_pretooluse(read)) == {"ok": True, "decision": "allow"}
+        assert d.audit.rows[-1]["source"] == "telegram_relay"
+        d._telegram.claude = False
+        assert asyncio.run(d._handle_pretooluse(read)) == {"ok": True}
     finally:
         dm.classify_command = original
+
+
+def test_a_question_for_the_owner_is_streamed_as_a_question() -> None:
+    from cc_buddy_bridge.hooks.pretooluse import _summarize
+
+    asked = _summarize({"questions": [
+        {"question": "Which database?", "header": "DB",
+         "options": [{"label": "Postgres", "description": "x"}, {"label": "SQLite", "description": "y"}]},
+        {"question": "Ship it now?", "options": []},
+    ]})
+    assert asked == "Which database? (Postgres / SQLite) | Ship it now?"
+    assert _summarize({"questions": "nope", "command": "ls"}) == "ls"
+    api = FakeApi()
+    rig = Rig(api, FakeCreate())
+
+    async def during() -> None:
+        rig.inlet.claude, rig.inlet._chat_id = True, OWNER
+        rig.inlet.relay_tool_call("AskUserQuestion", asked)
+        rig.inlet.relay_tool_call("AskUserQuestion", "")
+        await settle()
+        assert api.sent[-1][1] == ("Claude asks: Which database? (Postgres / SQLite) | Ship it now?\n"
+                                   "Claude asks: (see the terminal)")
+
+    run_rig(rig, during)
 
 
 def test_no_emoji_leaves_the_mac() -> None:

@@ -59,7 +59,7 @@ token without an owner id is off. A door with no allowlist never opens.
 | `CC_BUDDY_TELEGRAM_TOKEN` | unset | The bot token from @BotFather. Never logged. |
 | `CC_BUDDY_TELEGRAM_OWNER` | unset | Numeric user ids allowed to text buddy, comma-separated. A `@username` is ignored: it can be changed and re-registered, a number cannot. |
 | `CC_BUDDY_TELEGRAM_MODEL` | `gpt-6-astra` | The text brain. |
-| `CC_BUDDY_TELEGRAM_ASK` | `0` | `1`: with the Claude relay on, a permission prompt is asked in the chat (never in bypass mode). |
+| `CC_BUDDY_TELEGRAM_ASK` | `0` | `1`: with the Claude relay on, every tool call is asked in the chat, not only the always-ask ones (never in bypass mode). |
 | `CC_BUDDY_TELEGRAM_EFFORT` | `low` | Its reasoning effort (`low`, `medium`, `high`, `xhigh`, `max`). Hard questions go to `think_hard` instead. |
 
 ## What you can text
@@ -124,11 +124,17 @@ token without an owner id is off. A door with no allowlist never opens.
   terminal**: the chat is the terminal. Plain text is raised into that
   session (`focus_terminal.py`) and typed with Return through System Events;
   `buddy: <text>` talks to buddy instead, and buddy's code words (`stop`,
-  `screenshot`, `stealth mode`, `claude off`) still work. Off by default and
+  `screenshot`, `stealth mode`, `claude off`) still work. **The relay is
+  bypass**: while it is on, the daemon's pretooluse hook allows a tool call
+  (and an out-of-repo Read) without asking, the way `bypassPermissions` would,
+  because a prompt on the Mac has nobody at it. What Claude needs from you
+  still arrives: a question it asks (`AskUserQuestion`, shown as "Claude asks:
+  Which database? (Postgres / SQLite)"), and a command on your own always-ask
+  list (`rm`, `sudo`; `matchers.py`) as a yes/no that only your next message
+  answers; silence there defers to Claude Code's own flow, never denies. With
+  `CC_BUDDY_TELEGRAM_ASK=1` every call is asked that way. Off by default and
   off again after "claude off": nothing from the terminal leaves the Mac
-  until you ask. With `CC_BUDDY_TELEGRAM_ASK=1` (off by default, and never in
-  bypass mode) a permission prompt also becomes a yes/no in the chat that only
-  your next message answers; silence defers to Claude Code's own flow.
+  until you ask, and the Mac asks as it always did.
 - **No emoji, no dashes.** Every outgoing message is stripped in code
   (`telegram.plain`): emoji blocks and their joiners go, an em or en dash
   between words becomes a comma. The prompt says so too; the code makes it

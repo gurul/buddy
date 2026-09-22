@@ -247,8 +247,10 @@ and [voice and computer control](docs/stackchan/voice.md) for worker details.
 Away from the desk, the same agent can be reached by text: `telegram.py` long-polls
 the Telegram Bot API (outbound HTTPS only, no open port) and lets one allowlisted
 numeric Telegram id chat with buddy, start and stop a Mac task, answer a task's
-question and receive a photo from the robot. It is **off by default** and needs a
-switch, a bot token and an owner id together. With `CC_BUDDY_RECORDS=1` the text brain
+question and receive a photo from the robot. "claude on" turns the chat into a Claude
+Code terminal: what it runs, says and asks streams to the phone, what you text is typed
+in, and tool calls go through without asking, as in bypass mode. It is **off by
+default** and needs a switch, a bot token and an owner id together. With `CC_BUDDY_RECORDS=1` the text brain
 also gets a memory layer (`records.py`): typed, git-tracked markdown records the owner
 can edit, a profile one-pager, and a read-only keyword search — written only by a nightly
 reconcile, never by the agent. See [text buddy through Telegram](docs/stackchan/telegram.md).
