@@ -7,18 +7,30 @@ comparison — deserves more than that, so the backend's ``think_hard`` tool
 hands it here: one Responses call at high effort, with web search available,
 that may take tens of seconds while the voice keeps the owner company.
 
+Web search is buddy's own ``web_search`` function tool (websearch.py: one
+OpenRouter call with the web plugin on Exa, the owner's must of 2026-09-21),
+so a think may take a few rounds: the model asks, this module searches off the
+loop, the sources go back, the model answers. With no OpenRouter key the
+hosted OpenAI search is offered instead and it stays one round.
+
 Two halves, as in scene.py: a pure core (``request`` builds the exact body,
-``parse_answer`` reads it) that runs in tests, and ``OpenAIThinker``, the only
-part that touches the network. ``store=False`` on every call: the question
-and the answer are not kept on OpenAI's side.
+``parse_answer`` reads it, ``parse_calls`` finds the searches) that runs in
+tests, and ``OpenAIThinker``, the only part that touches the network.
+``store=False`` on every call: the question and the answer are not kept on
+OpenAI's side, so each round resends the items with the reasoning's
+``encrypted_content`` (the same shape as telegram.py's turn).
 """
 
 from __future__ import annotations
 
+import asyncio
+import json
 import logging
 import os
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Any, Awaitable, Callable, Optional
+
+from . import websearch
 
 log = logging.getLogger(__name__)
 
@@ -27,6 +39,7 @@ DEFAULT_TIMEOUT_SECS = 90.0
 MAX_OUTPUT_TOKENS = 1200
 ANSWER_MAX_CHARS = 700          # spoken, then paged 4 lines at a time: keep it short
 EFFORTS = ("none", "minimal", "low", "medium", "high", "xhigh")
+MAX_SEARCH_ROUNDS = 3           # a think may search, read, search again; then it answers with what it has
 
 INSTRUCTIONS = (
     "You are the slow, careful brain of buddy, a small desk robot that talks with its owner by voice. "
@@ -45,6 +58,7 @@ class ThinkConfig:
     model: str = ""                 # "" → the voice backend's model
     effort: str = DEFAULT_EFFORT
     timeout_secs: float = DEFAULT_TIMEOUT_SECS
+    search: websearch.SearchConfig = field(default_factory=websearch.SearchConfig)
 
 
 def configured(environ: Any = None, backend_model: str = "") -> ThinkConfig:
@@ -63,21 +77,53 @@ def configured(environ: Any = None, backend_model: str = "") -> ThinkConfig:
             timeout = min(300.0, max(10.0, float(raw)))
         except ValueError:
             log.warning("think: CC_BUDDY_THINK_TIMEOUT_SECS=%r is not a number; using %s", raw, timeout)
-    return ThinkConfig(enabled=enabled, model=model, effort=effort, timeout_secs=timeout)
+    return ThinkConfig(enabled=enabled, model=model, effort=effort, timeout_secs=timeout,
+                       search=websearch.configured(env))
 
 
-def request(config: ThinkConfig, question: str) -> dict[str, Any]:
-    """The exact Responses body (tests check store=False, the effort and web search)."""
+def question_items(question: str) -> list[dict[str, Any]]:
+    return [{"type": "message", "role": "user",
+             "content": [{"type": "input_text", "text": " ".join(question.split())}]}]
+
+
+def request(config: ThinkConfig, items: list[dict[str, Any]]) -> dict[str, Any]:
+    """The exact Responses body for one round (tests check store=False, the effort and the search tool).
+    `items` is the question, then, on a later round, the carried reasoning, the calls and their outputs."""
     return {
         "model": config.model,
         "instructions": INSTRUCTIONS,
-        "input": " ".join(question.split()),
+        "input": items,
         "reasoning": {"effort": config.effort},
-        "tools": [{"type": "web_search"}],
+        "tools": websearch.tools_for(config.search),
         "tool_choice": "auto",
+        "include": ["reasoning.encrypted_content"],
         "max_output_tokens": MAX_OUTPUT_TOKENS,
         "store": False,
     }
+
+
+def parse_calls(output: Any) -> tuple[list[dict[str, Any]], str, list[dict[str, Any]]]:
+    """→ (web_search calls, the answer text, the items to carry into the next round)."""
+    calls: list[dict[str, Any]] = []
+    texts: list[str] = []
+    carry: list[dict[str, Any]] = []
+    for item in output if isinstance(output, list) else []:
+        item = item if isinstance(item, dict) else getattr(item, "model_dump", lambda **k: {})(exclude_none=True)
+        kind = item.get("type")
+        if kind == "function_call" and item.get("name") == websearch.TOOL_NAME:
+            try:
+                args = json.loads(item.get("arguments") or "{}")
+            except ValueError:
+                args = {}
+            calls.append({"call_id": item.get("call_id", ""), "query": str((args or {}).get("query") or "")})
+            carry.append(item)
+        elif kind == "reasoning":
+            carry.append(item)
+        elif kind == "message":
+            for part in item.get("content") or []:
+                if part.get("type") == "output_text" and part.get("text"):
+                    texts.append(part["text"])
+    return calls, "\n".join(texts), carry
 
 
 def parse_answer(text: str) -> str:
@@ -90,20 +136,39 @@ def parse_answer(text: str) -> str:
 
 
 class OpenAIThinker:
-    """One high-effort Responses call per question, no retries: the voice is
-    waiting, and a second attempt would double the wait."""
+    """One high-effort Responses round per question, no retries: the voice is waiting, and a second attempt
+    would double the wait. A round that only searched is followed by another, at most MAX_SEARCH_ROUNDS."""
 
-    def __init__(self, config: ThinkConfig, api_key: Optional[str] = None) -> None:
-        from openai import AsyncOpenAI
-
+    def __init__(self, config: ThinkConfig, api_key: Optional[str] = None,
+                 create: Optional[Callable[[dict[str, Any]], Awaitable[Any]]] = None,
+                 search: Optional[Callable[[str], dict[str, Any]]] = None) -> None:
         self.config = config
-        self._client = AsyncOpenAI(api_key=api_key, timeout=config.timeout_secs, max_retries=0)
+        if create is None:
+            from openai import AsyncOpenAI
+
+            client = AsyncOpenAI(api_key=api_key, timeout=config.timeout_secs, max_retries=0)
+
+            async def create(req: dict[str, Any]) -> Any:
+                r = await client.responses.create(**req)
+                return r.model_dump(exclude_none=True)
+        self._create = create
+        self._search = search or (lambda q: websearch.search(q, config.search))
 
     async def __call__(self, question: str) -> dict[str, Any]:
-        resp = await self._client.responses.create(**request(self.config, question))
-        text = resp.output_text or ""
+        items = question_items(question)
+        text = ""
+        for _round in range(MAX_SEARCH_ROUNDS + 1):
+            resp = await self._create(request(self.config, items))
+            body = resp if isinstance(resp, dict) else resp.model_dump(exclude_none=True)
+            calls, text, carry = parse_calls(body.get("output"))
+            if not calls or _round == MAX_SEARCH_ROUNDS:
+                break
+            items = items + carry
+            for call in calls:
+                result = await asyncio.to_thread(self._search, call["query"])
+                items.append({"type": "function_call_output", "call_id": call["call_id"], "output": json.dumps(result)})
         if not text.strip():
-            raise RuntimeError(f"empty answer (status={resp.status}, incomplete={resp.incomplete_details})")
+            raise RuntimeError(f"empty answer (status={body.get('status')}, incomplete={body.get('incomplete_details')})")
         return {"ok": True, "answer": parse_answer(text)}
 
 
@@ -125,6 +190,6 @@ def make_thinker(config: ThinkConfig, environ: Any = None) -> Optional[Thinker]:
     except ImportError as e:
         log.warning("think: openai SDK not importable (%s) — no deep reasoning", e)
         return None
-    log.info("think: hard questions go to %s at %s effort (up to %.0f s)",
-             config.model, config.effort, config.timeout_secs)
+    log.info("think: hard questions go to %s at %s effort (up to %.0f s); web search %s",
+             config.model, config.effort, config.timeout_secs, config.search.engine)
     return thinker

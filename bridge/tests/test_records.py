@@ -142,9 +142,9 @@ def test_the_reader_re_reads_disk_so_an_owner_edit_counts_at_once(tmp_path: Path
 def test_the_text_brain_gets_the_profile_and_the_two_tools_only_with_records() -> None:
     cfg = telegram.TelegramConfig(enabled=True, token="t", owner_ids=frozenset({1}))
     plain = telegram.request(cfg, [], profile="")
-    assert plain["tools"] == telegram.TOOLS and "memory_search" not in json.dumps(plain["tools"])
+    assert plain["tools"] == telegram.TOOLS + [{"type": "web_search"}] and "memory_search" not in json.dumps(plain["tools"])
     with_profile = telegram.request(cfg, [], profile="# The owner\n- Loves pasta")
-    assert with_profile["tools"] == telegram.TOOLS + MEMORY_TOOLS
+    assert with_profile["tools"] == telegram.TOOLS + MEMORY_TOOLS + [{"type": "web_search"}]
     assert with_profile["instructions"].endswith("- Loves pasta") and "read it before answering" in with_profile["instructions"]
     assert all(name in telegram.TOOL_NAMES for name in ("memory_search", "memory_get"))
     assert not any(t.get("name", "").startswith("memory_") and "write" in t["name"] for t in MEMORY_TOOLS)

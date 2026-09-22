@@ -111,3 +111,30 @@ def test_estimate_cost_realistic_record():
         + 11714 * 30.0
     ) / 1_000_000.0
     assert abs(cost - expected) < 1e-9
+
+
+# ---- OpenAI Responses and Jev (the bill per task) ----
+
+def test_openai_responses_usage_is_priced_at_the_grounded_rates():
+    from cc_buddy_bridge.pricing import estimate_openai_cost, openai_rates, responses_tokens
+
+    usage = {"input_tokens": 1_000_000, "input_tokens_details": {"cached_tokens": 200_000}, "output_tokens": 100_000}
+    # astra: 800k uncached at $10 + 200k cached at $1 + 100k out at $50 = 8 + 0.2 + 5
+    assert abs(estimate_openai_cost("gpt-6-astra", usage) - 13.2) < 1e-9
+    assert abs(estimate_openai_cost("gpt-5.4-nano", usage) - (0.8 * 0.20 + 0.2 * 0.02 + 0.1 * 1.25)) < 1e-9
+    assert responses_tokens(usage) == {"in": 1_000_000, "cached": 200_000, "out": 100_000}
+    assert responses_tokens({}) == {"in": 0, "cached": 0, "out": 0}
+    assert estimate_openai_cost("gpt-6-astra", {}) == 0.0
+    # a pinned or routed id still finds its row; a similar-looking other model does not
+    assert openai_rates("openai/gpt-5.4-nano") is openai_rates("gpt-5.4-nano") is not None
+    assert openai_rates("gpt-6-astra-2026-08-01")["input"] == 10.0
+    assert openai_rates("gpt-6-astra-pro") is None and openai_rates("gpt-5.6-luna-pro") is None
+
+
+def test_jev_input_is_priced_and_unknown_models_are_none():
+    from cc_buddy_bridge.pricing import estimate_jev_cost, estimate_openai_cost
+
+    assert abs(estimate_jev_cost(1_000_000) - 0.042) < 1e-12
+    assert estimate_jev_cost(0) == 0.0 and estimate_jev_cost(-5) == 0.0
+    assert estimate_openai_cost("gpt-9-unknown", {"input_tokens": 10}) is None
+    assert estimate_openai_cost("", {"input_tokens": 10}) is None

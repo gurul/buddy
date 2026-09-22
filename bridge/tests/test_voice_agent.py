@@ -250,10 +250,22 @@ def test_session_config_shape() -> None:
         "go_explore", "end_conversation", "look", "move_head", "look_around", "find",
         "take_photo", "set_sound", "think_hard", "web_search"]
     assert all(t["type"] == "function" for t in TOOLS)
-    # web search is a built-in Responses tool, on by default and switchable off
+    # web search: the hosted Responses tool without an OpenRouter key, on by default and switchable off
     assert d["responses"]["tools"][-1] == {"type": "web_search"}
     off = session_config(VoiceConfig(output="audio", web_search=False))
     assert all(t["type"] == "function" for t in off["delegation"]["responses"]["tools"])
+
+
+def test_session_config_offers_web_search_through_exa_or_the_hosted_tool() -> None:
+    from cc_buddy_bridge import websearch
+
+    exa = session_config(VoiceConfig(output="audio", search=websearch.SearchConfig(engine="openrouter-exa")))
+    tools = exa["delegation"]["responses"]["tools"]
+    assert tools[-1] == websearch.WEB_SEARCH_TOOL and tools[-1]["name"] == "web_search"     # Exa via OpenRouter
+    hosted = session_config(VoiceConfig(output="audio", search=websearch.SearchConfig(engine="openai")))
+    assert hosted["delegation"]["responses"]["tools"][-1] == {"type": "web_search"}
+    assert configured({"OPENROUTER_API_KEY": "r"}).search.engine == "openrouter-exa"
+    assert configured({}).search.engine == "openai"
 
 
 # ---- the conversation ------------------------------------------------------------------------

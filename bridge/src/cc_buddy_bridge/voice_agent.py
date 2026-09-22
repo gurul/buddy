@@ -73,10 +73,11 @@ import os
 import re
 import threading
 import time
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Any, Awaitable, Callable, Optional
 
 from . import head as head_mod
+from . import websearch
 from .caption_pager import CaptionPager, Event, PagerConfig, caption_instructions
 from .computer_agent import AgentConfig, AgentEvent, ComputerAgent
 from .intent import LEAVE, LESSON, LOOK, MUTE, REMEMBER, UNMUTE, fast_intent, normalize
@@ -344,7 +345,7 @@ TOOLS: list[dict[str, Any]] = [
                     "description": "The question in the owner's own words, with any detail they gave."}},
                     "required": ["question"], "additionalProperties": False}},
 ]
-WEB_SEARCH_TOOL: dict[str, Any] = {"type": "web_search"}   # server-side; nothing to answer on our end
+WEB_SEARCH_TOOL: dict[str, Any] = {"type": "web_search"}   # OpenAI's hosted search: the fallback without an OpenRouter key
 
 DEFAULT_CAPTION_CPS = PagerConfig().read_cps
 
@@ -359,7 +360,8 @@ class VoiceConfig:
     max_session_secs: float = DEFAULT_MAX_SESSION_SECS
     output: str = "captions"      # "captions" (text → robot screen + beeps) or "audio" (Mac speaker)
     caption_cps: float = DEFAULT_CAPTION_CPS   # reading rate the caption page holds derive from (5..30)
-    web_search: bool = True       # the backend may search the web (a built-in Responses tool)
+    web_search: bool = True       # the backend may search the web
+    search: websearch.SearchConfig = field(default_factory=websearch.SearchConfig)   # Exa via OpenRouter, or hosted
 
 
 def configured(environ: Any = None) -> VoiceConfig:
@@ -395,7 +397,8 @@ def configured(environ: Any = None) -> VoiceConfig:
         except ValueError:
             log.warning("voice: CC_BUDDY_CAPTION_CPS=%r is not a number; using %s", raw, cps)
     return VoiceConfig(model=model, backend_model=backend, backend_effort=effort, voice=voice,
-                       idle_timeout_secs=idle, output=out, caption_cps=cps, web_search=web)
+                       idle_timeout_secs=idle, output=out, caption_cps=cps, web_search=web,
+                       search=websearch.configured(env))
 
 
 def session_config(config: VoiceConfig, memory: str = "",
@@ -428,7 +431,7 @@ def session_config(config: VoiceConfig, memory: str = "",
                 "model": config.backend_model,
                 "instructions": BACKEND_INSTRUCTIONS
                                 + (think_aloud_mod.backend_instructions(think_aloud) if listening else ""),
-                "tools": TOOLS + ([WEB_SEARCH_TOOL] if config.web_search else []),
+                "tools": TOOLS + (websearch.tools_for(config.search) if config.web_search else []),
                 "tool_choice": "auto",
                 "reasoning": {"effort": config.backend_effort},
                 "parallel_tool_calls": False,
@@ -1228,7 +1231,7 @@ class VoiceSession:
                 result = {"ok": True, "sound": "on" if on else "off"}
             else:
                 result = {"ok": False, "reason": "on must be true or false"}
-        elif name in ("look", "look_around", "find", "think_hard", "lesson", "take_photo"):
+        elif name in ("look", "look_around", "find", "think_hard", "lesson", "take_photo", websearch.TOOL_NAME):
             # Seconds (or a minute, for think_hard) of camera, head or model work:
             # answered from a background task, so Live events (the owner talking,
             # captions) keep flowing meanwhile.
@@ -1301,6 +1304,9 @@ class VoiceSession:
                     result = await self._look_around()
                 elif name == "think_hard":
                     result = await self._think_hard(str(args.get("question", "")))
+                elif name == websearch.TOOL_NAME:
+                    # Exa through OpenRouter (websearch.py), off the loop: a second or two of network
+                    result = await asyncio.to_thread(websearch.search, str(args.get("query", "")), self.config.search)
                 elif name == "take_photo":
                     result = await self._take_photo(str(args.get("note", "")))
                 else:

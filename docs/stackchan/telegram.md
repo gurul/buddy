@@ -61,6 +61,99 @@ token without an owner id is off. A door with no allowlist never opens.
 | `CC_BUDDY_TELEGRAM_MODEL` | `gpt-6-astra` | The text brain. |
 | `CC_BUDDY_TELEGRAM_ASK` | `0` | `1`: with the Claude relay on, every tool call is asked in the chat, not only the always-ask ones (never in bypass mode). |
 | `CC_BUDDY_TELEGRAM_EFFORT` | `low` | Its reasoning effort (`low`, `medium`, `high`, `xhigh`, `max`). Hard questions go to `think_hard` instead. |
+| `CC_BUDDY_WEB_SEARCH` | `openrouter-exa` with an `OPENROUTER_API_KEY`, else `openai` | How every brain searches the web ([below](#web-search-exa-through-openrouter)): `openrouter-exa`, `openai` (the hosted tool), `off`. |
+| `CC_BUDDY_WEB_SEARCH_MODEL` | `openai/gpt-5.4-nano` | The OpenRouter model that carries the Exa results back (the cheapest with the web plugin, 2026-09-21). |
+| `CC_BUDDY_WEB_SEARCH_RESULTS` | `5` | Results per search, 1 to 10 (Exa's first price tier). |
+| `CC_BUDDY_COMPOSIO` | `0` | `1`: the owner's apps through Composio ([below](#the-apps-composio)). Needs `COMPOSIO_API_KEY` in the env file. |
+| `CC_BUDDY_COMPOSIO_POLICY` | `gmail=read,googlecalendar=write,googledrive=ask` | What a WRITING app call may do, per toolkit: `read` refuses it, `write` runs it, `ask` is your yes/no in the chat (the default for any toolkit not named). Reads always run. |
+| `CC_BUDDY_COMPOSIO_STATE` | `~/.config/cc-buddy-bridge/composio.json` | Where the session id is kept between restarts. |
+| `CC_BUDDY_COMPOSIO_TIMEOUT_SECS` | `60` | One app call's timeout. |
+| `CC_BUDDY_SECOND_BRAIN` | `0` | `1`: your own notes, todos and journals as a local markdown vault, captured from this chat ([second-brain.md](second-brain.md)). |
+| `CC_BUDDY_VAULT` | `~/Documents/Second Brain` | The vault's folder (open it in Obsidian). |
+| `CC_BUDDY_COMMAND_RISK` | `shadow` | The Auto Mode gate behind the Claude relay ([below](#the-auto-mode-gate-jev-judges-a-relayed-command)): `off`, `shadow` (judged and logged, never acted on), `ask` (a risky verdict is your yes/no). |
+
+## Web search: Exa through OpenRouter
+
+Owner's decision, 2026-09-21: "use openrouter exa, this is a must". Wherever buddy
+searched the web with OpenAI's hosted tool (this text brain, `think_hard`, the
+voice backend's delegation) it now offers its own `web_search` function tool
+(`websearch.py`). A call is one OpenRouter chat completion on a cheap model with
+the `web` plugin on the `exa` engine; the reply's `url_citation` annotations come
+back as sources (title, url, snippet) beside a four-sentence answer, and the model
+quotes from those. Exa is $0.007 a search for up to ten results plus the small
+model's tokens (openrouter.ai/docs/features/web-search, 2026-09-21). Without an
+OpenRouter key the hosted OpenAI search is offered instead, so nothing goes dark.
+`think_hard` may search, read and search again, three rounds at most, before it
+answers.
+
+## The apps: Composio
+
+Owner's decision, 2026-09-21: Gmail, Google Calendar, Google Drive and the rest
+are reachable by API through [Composio](https://composio.dev) in seconds, where a
+Mac task drives the screen for minutes. `composio_tools.py` keeps one Composio
+*session* per owner (its user id is `telegram-<your id>`, so the connected
+accounts are yours, never a chat's; the session id is persisted and resumed on
+restart) and lends the session's meta tools to the text brain beside buddy's own:
+`COMPOSIO_SEARCH_TOOLS` finds the right tool for a use case,
+`COMPOSIO_MULTI_EXECUTE_TOOL` runs it, `COMPOSIO_MANAGE_CONNECTIONS` hands you a
+sign-in link for an app you have not connected. The brain is told: a job inside
+one of your apps is done there, not on the Mac.
+
+**What may run, by code, before any call (`composio_tools.decide`):** a call that
+only reads (`GMAIL_FETCH_EMAILS`, `GOOGLECALENDAR_EVENTS_LIST_ALL_CALENDARS`,
+`GOOGLEDRIVE_FIND_FILE`: a reading verb among the slug's words and no writing
+verb) runs at once. A call that writes follows its toolkit's policy: **Gmail is
+read only** (a send, reply, label or delete is refused, never asked; the brain
+says so), **the calendar may write** (an event is created without a question),
+and **everything else asks you first** in this chat, as a one-line "Run
+SLACK_SEND_MESSAGE with to: …, subject: …? yes / no?" that only your next message
+answers. A call mixing toolkits takes the strictest. `CC_BUDDY_COMPOSIO_POLICY`
+changes any of this. The remote code tools (Composio's sandbox bash and
+workbench) always ask.
+
+Proven live 2026-09-21 from this code path: Gmail, Google Calendar and Google
+Drive connected; `GMAIL_FETCH_EMAILS`, `GOOGLECALENDAR_EVENTS_LIST_ALL_CALENDARS`
+and `GOOGLEDRIVE_FIND_FILE` each returned a real result with a Composio log id.
+Install: `pip install -e ".[composio]"` (composio 0.22.0, composio-openai 0.22.0;
+`composio-core` is deprecated). The key lives in the env file, never in source.
+
+## The second brain
+
+Owner's decision, 2026-09-21: "the second brain system is for my personal notes
+and things of that sort I'll text to Telegram". A text is a note in seconds, in a
+local markdown vault Obsidian opens, organised PARA+, with agent workflows (plan
+my day, weekly review, triage my inbox, distill this) and context packs compiled
+from it. The whole design, the capture rules and the pack format are in
+[second-brain.md](second-brain.md). Ships off behind `CC_BUDDY_SECOND_BRAIN`.
+
+## The Auto Mode gate: Jev judges a relayed command
+
+While the Claude relay is on the daemon is bypass, and the regex list
+(`matchers.py`) was the only thing that could stop a Bash command; on the owner's
+Mac that list is empty (`matchers.toml`, 2026-09-05), so nothing could. The Jev
+Engineering article (0xmovez, 2026-09-18) names the missing piece: a cheap
+classifier that judges every tool call for risk before it runs. `typed_ask.py`
+asks Jev four absolute yes/no questions about the command in one request, in its
+own idiom: does it destroy existing data, does it leave the project or change the
+system, does it publish or send, does it read secrets. Obvious secrets (a bearer
+token, an `sk-`/`ak_`/`ghp_` key, a `KEY=value`, a `--password`) are redacted
+before the command leaves, and the folder's name goes, never its path.
+
+`CC_BUDDY_COMMAND_RISK`: `off` is the relay as it was; `shadow` (the default)
+judges every relayed Bash command and writes the verdict beside the regex class
+in the audit log (`source: jev_shadow`) without acting on it; `ask` turns a risky
+verdict into your yes/no in the chat with Jev's reason ("[Jev: destroys data,
+publishes or sends]"), allows a safe one, and allows a failed one (logged as
+`jev_error`). Silence still defers to Claude Code's own flow, never denies. The
+regex always-ask class is asked first and never sent to Jev.
+
+The ship decision is `tools/command_risk_eval.py --check-default` on
+`tests/fixtures/commands/` (74 tuning commands, 59 holdout, both author-written
+so the holdout is a tuning set by this project's own rule). 2026-09-21: the
+judgement held (0 risky commands judged safe on both sets; 1 of 39 and 2 of 29
+harmless ones judged risky) and the clock did not (p50 1.5 s, p90 2.1 s through
+OpenRouter's alpha endpoint against a one-second bar), so it ships `shadow`.
+Flip it to `ask` if two seconds a command is a price you will pay.
 
 ## What you can text
 

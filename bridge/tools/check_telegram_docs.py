@@ -19,11 +19,18 @@ DOC = ROOT / "docs/stackchan/telegram.md"
 def main() -> int:
     source, doc, readme = SOURCE.read_text(), DOC.read_text(), (ROOT / "README.md").read_text()
     records_source = (ROOT / "bridge/src/cc_buddy_bridge/records.py").read_text()
-    names = sorted(set(re.findall(r"CC_BUDDY_TELEGRAM[A-Z_]*", source))
-                   | set(re.findall(r"CC_BUDDY_RECORDS[A-Z_]*", records_source)))
+    names = set(re.findall(r"CC_BUDDY_TELEGRAM[A-Z_]*", source)) | set(re.findall(r"CC_BUDDY_RECORDS[A-Z_]*", records_source))
+    # the door's companions (2026-09-21): the apps, the search engine, the Auto Mode gate, the second brain
+    for module, prefix in (("composio_tools.py", r"CC_BUDDY_COMPOSIO[A-Z_]*"), ("websearch.py", r"CC_BUDDY_WEB_SEARCH[A-Z_]*"),
+                           ("daemon.py", r"CC_BUDDY_COMMAND_RISK[A-Z_]*"),
+                           ("second_brain.py", r"CC_BUDDY_(?:SECOND_BRAIN|VAULT)[A-Z_]*")):
+        path = ROOT / "bridge/src/cc_buddy_bridge" / module
+        if path.exists():
+            names |= set(re.findall(prefix, path.read_text()))
+    names = sorted(names)
     problems: list[str] = []
-    if len(names) < 3:
-        problems.append(f"found only {names} in telegram.py: the reader is broken, not the docs")
+    if len(names) < 8:
+        problems.append(f"found only {names}: the reader is broken, not the docs")
     problems += [f"{name} is read by telegram.py but not documented in {DOC.name}" for name in names
                  if not re.search(rf"`{name}`", doc)]
     if "telegram.py" not in readme or "docs/stackchan/telegram.md" not in readme:

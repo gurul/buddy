@@ -282,7 +282,13 @@ is a `Snapshot`, so the fixture format is unchanged). Install:
 | `CC_BUDDY_EXPLORE` | `0` | `1`: buddy starts exploring on its own after ten idle minutes. Off: exploring is explicit only ("go explore", a text, `cc-buddy-bridge explore`) — owner decision, 2026-09-21 |
 
 Every routing decision is in the task's run log (`{"route": …}`, `{"reflex": …}`, `{"lane_first": …}`),
-so a wrong route can be read after the fact.
+so a wrong route can be read after the fact. Since 2026-09-21 the log ends with the **bill** (`{"bill": …}`):
+the model's tokens in, cached and out and their USD at the grounded rates (`pricing.py`: gpt-6-astra
+$10 / $1 cached / $50 per million, developers.openai.com, 2026-09-21), the Jev calls, input tokens and USD
+made during the run ($0.042 per million, output free), and the wall seconds. `usd` is null for a model the
+table does not know, never a guess. `tools/bill_report.py` sums a runs directory, one row per task and a
+total. The Jev Engineering article's rule: "track the bill per completed task", so a cheap decision that
+sent a worker down the wrong branch shows up as what it cost.
 
 ## How the evidence was kept honest
 

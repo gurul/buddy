@@ -388,6 +388,7 @@ class Daemon:
         self._telegram = self._make_telegram()
         if self._telegram is not None:
             tasks.append(asyncio.create_task(self._telegram.run(), name="telegram"))
+            self._command_risk()                     # one log line at start: the Auto Mode gate's mode
         # The records layer (records.py): CC_BUDDY_RECORDS=1 reconciles each curated day into typed,
         # git-tracked records and the profile the text brain reads. The agent never writes them.
         self._reconciler = records_mod.make_reconciler(records_mod.configured(), self._recall_cfg)
@@ -1054,11 +1055,44 @@ class Daemon:
         spoken_task = agent is not None and agent.running and not (inlet is not None and inlet.task_running)
         return (conversation is not None and not conversation.done()) or spoken_task
 
+    def _make_apps(self, owner_ids: frozenset[int]) -> Optional[Any]:
+        """CC_BUDDY_COMPOSIO=1 with a key: the owner's Composio session (composio_tools.py), started on a
+        thread so a slow or down Composio never holds the daemon; the text brain offers its tools once it is
+        up. None otherwise. Gmail read only, the calendar writable, the rest asked first (the module)."""
+        from . import composio_tools
+
+        cfg = composio_tools.configured(os.environ, owner_ids)
+        if not cfg.enabled:
+            log.info("apps: off (CC_BUDDY_COMPOSIO)")
+            return None
+        bridge = composio_tools.ComposioBridge(cfg)
+
+        def start() -> None:
+            try:
+                bridge.start()
+                log.info("apps: Composio session up for %s; policy %s", cfg.user_id, composio_tools.toolkit_policy())
+            except Exception as e:  # noqa: BLE001 — the text brain simply has no app tools this run
+                log.warning("apps: Composio did not start (%s: %s)", type(e).__name__, e)
+
+        threading.Thread(target=start, name="composio-start", daemon=True).start()
+        return bridge
+
     def _make_telegram(self) -> Optional["telegram_mod.TelegramInlet"]:
         """CC_BUDDY_TELEGRAM=1 with a token and an owner id: the inlet, lent the same agent factory, camera,
-        slow brain and conversation memory the voice session gets. None — today's behaviour — otherwise."""
+        slow brain and conversation memory the voice session gets, the owner's apps (Composio) and their
+        second brain (the vault). None — today's behaviour — otherwise."""
+        from . import second_brain
+
+        tg = telegram_mod.configured()
+        if tg.enabled:
+            log.info("telegram: web search %s", tg.search.engine)
+        vault = second_brain.configured()
+        if tg.enabled:
+            log.info("second brain: %s", f"on at {vault.root}" if vault.enabled else "off (CC_BUDDY_SECOND_BRAIN)")
         return telegram_mod.make_inlet(
-            telegram_mod.configured(),
+            tg,
+            apps=Daemon._make_apps(self, tg.owner_ids) if tg.enabled else None,
+            vault=vault if tg.enabled and vault.enabled else None,
             agent_factory=self._make_agent, agent_enabled=self._agent_cfg.enabled,
             busy=lambda: Daemon._desk_has_the_mac(self),
             memory=lambda: recall_mod.opening_brief(self._recall_cfg),
@@ -1935,10 +1969,45 @@ class Daemon:
         # Decided before the robot check: the phone is for when the owner is away.
         inlet = getattr(self, "_telegram", None)
         mode = str(req.get("permission_mode") or "")
+        cwd = str(req.get("cwd") or "")
+        # The Auto Mode gate (typed_ask.py, the Jev Engineering article): a Bash command the regex list did
+        # not stop is judged by Jev before it runs, in EVERY permission mode, because bypass is exactly when
+        # nothing else would stop it. "shadow" only logs the verdict; "ask" turns a risky one into the
+        # phone's yes/no; "off" is the relay of 2026-09-21. A safe verdict or an error changes nothing.
+        risk = self._command_risk() if inlet is not None and inlet.claude and tool_name == "Bash" and hint else None
+        if risk is not None and decision_class != "ask":
+            risk_mode, ask_cmd = risk
+            if risk_mode == "shadow":
+                asyncio.create_task(self._shadow_command_risk(ask_cmd, tool_name, hint, cwd, audit_kwargs),
+                                    name="command-risk-shadow")
+            elif risk_mode == "ask":
+                verdict = await asyncio.to_thread(ask_cmd, tool_name, hint, cwd)
+                jev = {"verdict": verdict.decision, "why": verdict.why, **{k: round(v, 3) for k, v in
+                       verdict.answer.nouls().items()}, "ms": round(verdict.answer.ms)}
+                if verdict.decision == "risky":
+                    log.info("pretooluse for %s (%s): Jev says risky (%s) → asking the phone", tool_name,
+                             hint[:60], verdict.why)
+                    decision = await inlet.decide_permission(tool_name, f"{hint} [Jev: {verdict.why}]", cwd,
+                                                             always=True)
+                    if decision in ("allow", "deny"):
+                        self.audit.record(**audit_kwargs, decision=decision, source="telegram", jev=jev)
+                        return {"ok": True, "decision": decision}
+                    log.info("pretooluse for %s (%s): no answer from Telegram → defer", tool_name, hint[:60])
+                    self.audit.record(**audit_kwargs, decision=None, source="jev_risky_deferred", jev=jev)
+                    return {"ok": True}
+                source = "jev_safe" if verdict.decision == "safe" else "jev_error"
+                if verdict.decision != "safe":
+                    log.warning("pretooluse for %s: the risk model failed (%s); allowed as before", tool_name,
+                                verdict.why)
+                if mode in ("bypassPermissions", "dontAsk"):
+                    self.audit.record(**audit_kwargs, decision=None, source=source, jev=jev)
+                    return {"ok": True}                       # bypass: Claude Code allows on its own
+                self.audit.record(**audit_kwargs, decision="allow", source=source, jev=jev)
+                return {"ok": True, "decision": "allow"}
         if inlet is not None and inlet.claude and mode not in ("bypassPermissions", "dontAsk"):
             asks_all = bool(getattr(getattr(inlet, "config", None), "ask_permissions", False))
             if decision_class == "ask" or asks_all:
-                decision = await inlet.decide_permission(tool_name, hint, str(req.get("cwd") or ""), always=True)
+                decision = await inlet.decide_permission(tool_name, hint, cwd, always=True)
                 if decision in ("allow", "deny"):
                     log.info("pretooluse for %s (%s): answered from Telegram → %s", tool_name, hint[:60], decision)
                     self.audit.record(**audit_kwargs, decision=decision, source="telegram")
@@ -1967,6 +2036,49 @@ class Daemon:
         log.info("pretooluse for %s (%s): no card → defer to default", tool_name, hint[:60])
         self.audit.record(**audit_kwargs, decision=None, source="defer")
         return {"ok": True}
+
+    def _command_risk(self) -> Optional[tuple[str, Any]]:
+        """(mode, asker) for the Auto Mode gate, or None when it is off or cannot be built. Built once.
+        CC_BUDDY_COMMAND_RISK is off | shadow | ask (typed_ask.COMMAND_RISK_DEFAULT when unset); a route
+        without a key is "off" with one log line, never an error on the hook path."""
+        cached = getattr(self, "_command_risk_cache", None)
+        if cached is not None:
+            return cached or None
+        from . import typed_ask
+        raw = (os.environ.get("CC_BUDDY_COMMAND_RISK") or typed_ask.COMMAND_RISK_DEFAULT).strip().lower()
+        if raw not in typed_ask.COMMAND_RISK_MODES:
+            log.warning("command risk: CC_BUDDY_COMMAND_RISK=%r is not one of %s; off", raw, typed_ask.COMMAND_RISK_MODES)
+            raw = "off"
+        built: Any = False
+        if raw != "off":
+            try:
+                from . import jev
+                url, key, model = jev.route_config(os.environ)
+                seconds = float(os.environ.get("CC_BUDDY_JEV_TIMEOUT") or jev.DEFAULT_TIMEOUT_S)
+                asker = typed_ask.make_jev_command_asker(jev.make_predict(url, key, model, timeout_s=seconds),
+                                                         time.perf_counter)
+                built = (raw, asker)
+                log.info("command risk: %s (Jev %s judges a relayed Bash command: destroys, escapes, publishes, "
+                         "secrets; obvious secrets redacted first)", raw, model)
+            except Exception as e:  # noqa: BLE001
+                log.warning("command risk: off (%s: %s)", type(e).__name__, e)
+        else:
+            log.info("command risk: off (the relay allows what the regex list does not stop)")
+        self._command_risk_cache = built
+        return built or None
+
+    async def _shadow_command_risk(self, ask_cmd: Any, tool_name: str, hint: str, cwd: str,
+                                   audit_kwargs: dict[str, Any]) -> None:
+        """Shadow mode: the verdict is logged beside the regex class and never acted on."""
+        try:
+            verdict = await asyncio.to_thread(ask_cmd, tool_name, hint, cwd)
+        except Exception as e:  # noqa: BLE001 — shadow: nothing may reach the hook path
+            log.warning("command risk (shadow): %s", type(e).__name__)
+            return
+        self.audit.record(**audit_kwargs, decision=None, source="jev_shadow",
+                          jev={"verdict": verdict.decision, "why": verdict.why,
+                               **{k: round(v, 3) for k, v in verdict.answer.nouls().items()},
+                               "ms": round(verdict.answer.ms)})
 
     def _ensure_session(self, req: dict[str, Any]) -> None:
         """Register the session behind a hook event if we've never seen it.

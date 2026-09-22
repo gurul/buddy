@@ -390,7 +390,7 @@ def test_a_text_turn_is_answered_with_memory_and_history() -> None:
     assert first["store"] is False and first["include"] == ["reasoning.encrypted_content"]
     assert "previous_response_id" not in first
     assert first["model"] == "gpt-6-astra" and first["reasoning"] == {"effort": "low"}
-    assert first["tools"] == telegram.TOOLS and {"type": "web_search"} in first["tools"]
+    assert first["tools"] == telegram.TOOLS + [{"type": "web_search"}]       # no OpenRouter key in CFG: the hosted search
     assert [i["role"] for i in first["input"]] == ["user"]
     # the second turn sees the first: the owner's words as input_text, buddy's as output_text
     assert [(i["role"], i["content"][0]["type"], i["content"][0]["text"]) for i in second["input"]] == [
@@ -973,7 +973,8 @@ def test_the_daemon_honours_the_phones_decision_and_defers_without_one() -> None
     def daemon_with(inlet):
         d = SimpleNamespace(_telegram=inlet, audit=Audit(), matchers=SimpleNamespace(),
                             state=SimpleNamespace(note_tool=lambda *a: None, pending_count=0),
-                            ble=SimpleNamespace(connected=False), _ensure_session=lambda req: None)
+                            ble=SimpleNamespace(connected=False), _ensure_session=lambda req: None,
+                            _command_risk=lambda: None)              # the Auto Mode gate off: tests/test_command_risk.py
         d._handle_pretooluse = MethodType(Daemon._handle_pretooluse, d)
         return d
 
@@ -1182,3 +1183,131 @@ def test_the_setup_check_prints_ids_never_words(capsys: pytest.CaptureFixture) -
     assert f"user id {STRANGER}" in out and "secret" not in out and TOKEN not in out
     assert api.offsets == [None]                          # read without acknowledging
     assert telegram.diagnose({}) == 1
+
+
+# ---- the apps (composio_tools.py) and the search engine (websearch.py) ------------------------------------
+
+class FakeApps:
+    """A ComposioBridge stand-in: one meta tool, every call recorded, a canned result."""
+
+    def __init__(self, started: bool = True) -> None:
+        self.started = started
+        self.executed: list[tuple[str, dict[str, Any]]] = []
+        self.names = frozenset({"COMPOSIO_MULTI_EXECUTE_TOOL", "COMPOSIO_SEARCH_TOOLS"})
+
+    def tools(self) -> list[dict[str, Any]]:
+        return [{"type": "function", "name": "COMPOSIO_MULTI_EXECUTE_TOOL", "strict": False,
+                 "parameters": {"type": "object", "properties": {"tools": {"type": "array"}}}},
+                {"type": "function", "name": "COMPOSIO_SEARCH_TOOLS", "strict": True,
+                 "parameters": {"type": "object", "properties": {"queries": {"type": "array"}}}}]
+
+    def execute(self, name: str, args: dict[str, Any]) -> dict[str, Any]:
+        self.executed.append((name, args))
+        return {"ok": True, "data": {"results": [{"tool_slug": t["tool_slug"], "successful": True}
+                                                 for t in args.get("tools", [])]}, "log_id": "log_1"}
+
+
+def multi(*slugs: str) -> dict[str, Any]:
+    return {"tools": [{"tool_slug": s, "arguments": {"to": "ana@example.com", "subject": "Lunch"}} for s in slugs],
+            "thought": "t", "sync_response_to_workbench": False, "current_step": "GO"}
+
+
+def test_composio_tools_are_offered_and_executed_through_the_session() -> None:
+    apps = FakeApps()
+    # 1. a reading call runs at once and its result goes back to the model
+    api = FakeApi([update("any mail from Sam?", update_id=1)])
+    rig = Rig(api, FakeCreate(call("COMPOSIO_MULTI_EXECUTE_TOOL", multi("GMAIL_FETCH_EMAILS")), say("Two from Sam today.")),
+              apps=apps)
+    run_rig(rig)
+    first = rig.create.requests[0]
+    assert [t["name"] for t in first["tools"] if t.get("name", "").startswith("COMPOSIO")] == [
+        "COMPOSIO_MULTI_EXECUTE_TOOL", "COMPOSIO_SEARCH_TOOLS"]
+    assert first["tools"][:len(telegram.TOOLS)] == telegram.TOOLS and telegram.APPS_BLOCK in first["instructions"]
+    assert "Gmail is read only" in first["instructions"]
+    assert [n for n, _ in apps.executed] == ["COMPOSIO_MULTI_EXECUTE_TOOL"]
+    output = json.loads(rig.create.requests[1]["input"][-1]["output"])
+    assert output["ok"] and output["log_id"] == "log_1"
+    assert api.sent[-1] == (OWNER, "Two from Sam today.")
+    # 2. Gmail is read only: a send is refused with no call and no question (owner, 2026-09-21)
+    apps = FakeApps()
+    api = FakeApi([update("email Ana about lunch", update_id=1)])
+    rig = Rig(api, FakeCreate(call("COMPOSIO_MULTI_EXECUTE_TOOL", multi("GMAIL_SEND_EMAIL")),
+                              say("I can only read mail here, not send it.")), apps=apps)
+    run_rig(rig)
+    assert apps.executed == []
+    refused = json.loads(rig.create.requests[1]["input"][-1]["output"])
+    assert refused["ok"] is False and "gmail is read only here" in refused["reason"]
+    assert api.sent == [(OWNER, "I can only read mail here, not send it.")]        # no yes/no was asked
+    # 3. the calendar may write without asking
+    apps = FakeApps()
+    api = FakeApi([update("lunch with Ana Friday noon", update_id=1)])
+    rig = Rig(api, FakeCreate(call("COMPOSIO_MULTI_EXECUTE_TOOL", multi("GOOGLECALENDAR_CREATE_EVENT")), say("Booked.")),
+              apps=apps)
+    run_rig(rig)
+    assert [n for n, _ in apps.executed] == ["COMPOSIO_MULTI_EXECUTE_TOOL"] and api.sent == [(OWNER, "Booked.")]
+    # 4. any other app's write is the owner's yes/no first; "no" refuses without a call, "yes" runs it
+    for answer, executed, last in (("no", 0, "Okay, not sent."), ("yes", 1, "Sent.")):
+        apps = FakeApps()
+        api = FakeApi([update("tell the team lunch is at noon", update_id=1)])
+        rig = Rig(api, FakeCreate(call("COMPOSIO_MULTI_EXECUTE_TOOL", multi("SLACK_SEND_MESSAGE")), say(last)), apps=apps)
+
+        async def during(api: FakeApi = api, apps: FakeApps = apps, answer: str = answer) -> None:
+            question = api.sent[0][1]                    # the answer arrives after the question, as on a phone
+            assert question.startswith("Run SLACK_SEND_MESSAGE") and "yes / no?" in question and "ana@example.com" in question
+            assert apps.executed == []
+            api.feed(update(answer, update_id=2))
+
+        run_rig(rig, during)
+        assert len(apps.executed) == executed and api.sent[-1] == (OWNER, last)
+    # 5. a tool nobody offered is still rejected, and the apps' tools are not offered before the session is up
+    api = FakeApi([update("hi", update_id=1)])
+    rig = Rig(api, FakeCreate(call("COMPOSIO_MULTI_EXECUTE_TOOL", multi("GMAIL_FETCH_EMAILS")), say("x")), apps=FakeApps(started=False))
+    run_rig(rig)
+    assert not any(t.get("name", "").startswith("COMPOSIO") for t in rig.create.requests[0]["tools"])
+    assert api.sent == [(OWNER, telegram.FAILED_LINE)]
+
+
+def test_web_search_is_a_function_tool_answered_by_exa_when_openrouter_is_set(monkeypatch: Any) -> None:
+    from cc_buddy_bridge import websearch
+
+    seen: list[str] = []
+    monkeypatch.setattr(websearch, "search", lambda query, cfg: (seen.append(query) or {"ok": True, "answer": "112 to 104",
+                                                                                          "sources": [{"url": "https://espn.com"}]}))
+    cfg = telegram.configured({"CC_BUDDY_TELEGRAM": "1", "CC_BUDDY_TELEGRAM_TOKEN": "t", "CC_BUDDY_TELEGRAM_OWNER": str(OWNER),
+                               "OPENROUTER_API_KEY": "r"})
+    assert cfg.search.engine == "openrouter-exa"
+    api = FakeApi([update("who won the lakers game", update_id=1)])
+    rig = Rig(api, FakeCreate(call("web_search", {"query": "lakers score"}), say("Lakers lost, 104 to 112.")), config=cfg)
+    run_rig(rig)
+    first = rig.create.requests[0]
+    assert websearch.WEB_SEARCH_TOOL in first["tools"] and {"type": "web_search"} not in first["tools"]
+    assert seen == ["lakers score"]
+    assert json.loads(rig.create.requests[1]["input"][-1]["output"])["sources"] == [{"url": "https://espn.com"}]
+    assert api.sent[-1] == (OWNER, "Lakers lost, 104 to 112.")
+
+
+
+def test_the_second_brain_is_offered_and_captures_from_the_chat(tmp_path: Path) -> None:
+    from cc_buddy_bridge import second_brain
+
+    vault = second_brain.VaultConfig(enabled=True, root=tmp_path / "vault")
+    api = FakeApi([update("note: the pasta place on 5th is great", update_id=1)])
+    rig = Rig(api, FakeCreate(call("capture_note", {"text": "the pasta place on 5th is great", "kind": "note"}),
+                              say("Saved to your inbox.")), vault=vault)
+    run_rig(rig)
+    first = rig.create.requests[0]
+    assert [t["name"] for t in first["tools"] if t.get("name") in second_brain.SECOND_BRAIN_TOOL_NAMES] == \
+        list(second_brain.SECOND_BRAIN_TOOL_NAMES)
+    assert second_brain.INSTRUCTIONS_BLOCK in first["instructions"]
+    out = json.loads(rig.create.requests[1]["input"][-1]["output"])
+    assert out["ok"] and out["path"].startswith("01-inbox/") and "pasta" in out["path"]
+    assert (tmp_path / "vault" / out["path"]).read_text().rstrip().endswith("the pasta place on 5th is great")
+    assert api.sent[-1] == (OWNER, "Saved to your inbox.")
+    # off: the tools are not offered and a stray call is told why
+    api = FakeApi([update("note: x", update_id=1)])
+    rig = Rig(api, FakeCreate(say("ok")))
+    run_rig(rig)
+    assert not any(t.get("name") in second_brain.SECOND_BRAIN_TOOL_NAMES for t in rig.create.requests[0]["tools"])
+    assert second_brain.INSTRUCTIONS_BLOCK not in rig.create.requests[0]["instructions"]
+    result = asyncio.run(rig.inlet._tool("capture_note", {"text": "x", "kind": "note"}, OWNER))
+    assert result == {"ok": False, "reason": "the second brain is off on this computer (CC_BUDDY_SECOND_BRAIN)"}
