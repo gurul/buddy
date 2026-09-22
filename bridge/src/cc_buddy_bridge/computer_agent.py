@@ -140,7 +140,12 @@ Rules:
     sentences, spoken by a robot, under 110 characters) saying what state things are in — that ends the
     task. Report what you verified on screen, not what you attempted; if it did not work, say so. Your
     final message is checked against a fresh screenshot before the human hears it. Do not describe tool
-    mechanics.{fast_lane_rule}"""
+    mechanics.
+11. The goal, as given, is the whole task: do not extend it into what the human might also want. When
+    the goal is ambiguous about what to do — which item, which account, what to look for — or when
+    finishing it would mean paging through content with no end in sight, do not guess and do not keep
+    scrolling: call `ask_user` with one short question and act on the answer. "Open Amazon" ends when
+    Amazon is open.{fast_lane_rule}"""
 
 # A second, independent look at the screen before a claim is spoken. The agent model has
 # spent the task believing it is close; this call gets no previous_response_id, so it
