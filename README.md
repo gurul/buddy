@@ -262,7 +262,9 @@ numeric Telegram id chat with buddy, start and stop a Mac task, answer a task's
 question and receive a photo from the robot. "claude on" turns the chat into a Claude
 Code terminal: what it says and asks streams to the phone (the white text, never the gray
 tool lines or thinking), what you text is typed in, and tool calls go through without
-asking, as in bypass mode. It is **off by
+asking, as in bypass mode. Every message is shaped for the phone by `telegram_format.py`:
+a bold title where the voice is not buddy's own, short paragraphs, markdown turned into
+Telegram HTML, split at 4096 on a paragraph boundary. It is **off by
 default** and needs a switch, a bot token and an owner id together. With `CC_BUDDY_RECORDS=1` the text brain
 also gets a memory layer (`records.py`): typed, git-tracked markdown records the owner
 can edit, a profile one-pager, and a read-only keyword search — written only by a nightly

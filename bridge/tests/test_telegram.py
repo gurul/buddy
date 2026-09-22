@@ -13,6 +13,7 @@ import httpx
 import pytest
 
 from cc_buddy_bridge import telegram
+from cc_buddy_bridge import telegram_format as fmt
 from cc_buddy_bridge.computer_agent import AgentEvent
 from cc_buddy_bridge.daemon import Daemon
 from cc_buddy_bridge.telegram import (
@@ -32,7 +33,6 @@ from cc_buddy_bridge.telegram import (
     TelegramConfig,
     TelegramInlet,
     accept,
-    chunks,
     configured,
 )
 
@@ -74,6 +74,7 @@ class FakeApi:
         self.batches = list(batches)
         self.offsets: list[Optional[int]] = []
         self.sent: list[tuple[int, str]] = []
+        self.titled: list[tuple[Optional[str], Optional[str], str]] = []    # (title, subtitle, body) as passed
         self.photos: list[tuple[int, str, str]] = []
         self.polls = 0
         self._more: Optional[asyncio.Event] = None
@@ -95,8 +96,10 @@ class FakeApi:
             raise batch
         return batch
 
-    async def send_message(self, chat_id: int, text: str) -> None:
+    async def send_message(self, chat_id: int, text: str, title: Optional[str] = None,
+                           subtitle: Optional[str] = None) -> None:
         self.sent.append((chat_id, text))
+        self.titled.append((title, subtitle, text))
 
     async def send_photo(self, chat_id: int, path: Path, caption: str = "") -> None:
         self.photos.append((chat_id, str(path), caption))
@@ -399,28 +402,62 @@ def test_a_text_turn_is_answered_with_memory_and_history() -> None:
         ("user", "input_text", "why?")]
 
 
-def test_a_long_answer_is_split_without_losing_a_character() -> None:
-    for text in ("word " * 3000, "x" * 10000, "line\n" * 2500, "short", "", "a" * MAX_MESSAGE_CHARS,
-                 "a" * (MAX_MESSAGE_CHARS + 1)):
-        parts = chunks(text)
-        assert "".join(parts) == text
-        assert all(len(p) <= MAX_MESSAGE_CHARS for p in parts)
-    assert len(chunks("word " * 3000)) == 4 and all(p.endswith(" ") for p in chunks("word " * 3000))
+def test_a_long_answer_is_sent_as_html_pieces_under_the_limit_and_nothing_is_lost() -> None:
+    """The real request path: every piece is HTML (parse_mode set), at most 4096 characters, cut on a
+    paragraph boundary, and what the pieces show adds up to the whole answer."""
+    paragraphs = [f"Paragraph {i}: " + "word " * 120 + "**end**" for i in range(20)]
+    answer = "\n\n".join(paragraphs)
 
-    async def go() -> list[str]:
-        bodies: list[str] = []
+    async def go() -> list[dict[str, Any]]:
+        bodies: list[dict[str, Any]] = []
 
         def handler(request: httpx.Request) -> httpx.Response:
-            bodies.append(json.loads(request.content)["text"])
+            bodies.append(json.loads(request.content))
             return httpx.Response(200, json={"ok": True, "result": {}})
 
         api = BotApi(TOKEN, client=httpx.AsyncClient(transport=httpx.MockTransport(handler)))
-        await api.send_message(OWNER, "word " * 3000)
+        await api.send_message(OWNER, answer, title="Task done", subtitle="the goal")
         await api.close()
         return bodies
 
     bodies = asyncio.run(go())
-    assert "".join(bodies) == "word " * 3000 and len(bodies) == 4
+    assert len(bodies) >= 3 and all(b["parse_mode"] == "HTML" and b["chat_id"] == OWNER for b in bodies)
+    assert all(len(b["text"]) <= MAX_MESSAGE_CHARS for b in bodies)
+    assert bodies[0]["text"].startswith("<b>Task done</b>\n<i>the goal</i>\n\nParagraph 0: ")
+    for b in bodies:                                       # cut on a paragraph: a piece starts at one
+        assert b["text"].startswith(("<b>Task done</b>", "Paragraph ")) and b["text"].endswith("<b>end</b>")
+    shown = "\n\n".join(fmt.visible(b["text"]) for b in bodies)
+    assert shown == "Task done\nthe goal\n\n" + "\n\n".join(p.replace("**", "").rstrip() for p in paragraphs)
+
+
+def test_a_message_telegram_cannot_parse_is_sent_again_as_plain_text() -> None:
+    """A 400 "can't parse entities" is Telegram's way of refusing markup: the same piece goes again without
+    a parse mode, so a message is never lost to its formatting. Any other error still raises."""
+    async def go() -> list[dict[str, Any]]:
+        bodies: list[dict[str, Any]] = []
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            body = json.loads(request.content)
+            bodies.append(body)
+            if body.get("parse_mode") == "HTML" and "odd" in body["text"]:
+                return httpx.Response(400, json={"ok": False, "error_code": 400,
+                                                 "description": "Bad Request: can't parse entities: Unsupported start tag"})
+            if "forbidden" in body["text"]:
+                return httpx.Response(403, json={"ok": False, "error_code": 403, "description": "Forbidden: bot was blocked"})
+            return httpx.Response(200, json={"ok": True, "result": {}})
+
+        api = BotApi(TOKEN, client=httpx.AsyncClient(transport=httpx.MockTransport(handler)))
+        await api.send_message(OWNER, "an **odd** one <tag>", title="Claude")
+        with pytest.raises(BotApiError) as caught:
+            await api.send_message(OWNER, "forbidden")
+        await api.close()
+        assert caught.value.code == 403
+        return bodies
+
+    bodies = asyncio.run(go())
+    assert [b.get("parse_mode") for b in bodies] == ["HTML", None, "HTML"]
+    assert bodies[0]["text"] == "<b>Claude</b>\n\nan <b>odd</b> one &lt;tag&gt;"
+    assert bodies[1]["text"] == "Claude\n\nan odd one <tag>"
 
 
 def test_a_model_failure_is_answered_not_swallowed() -> None:
@@ -877,9 +914,15 @@ def test_the_claude_relay_is_off_until_said_and_forwards_only_while_on() -> None
         api.feed(update("claude on", update_id=2))
         await settle()
         assert inlet.claude is True and api.sent[-1] == (OWNER, telegram.CLAUDE_ON_LINE)
+        assert api.titled[-1][0] == telegram.CLAUDE_ON_TITLE
         await inlet.relay_text("  I fixed\n the bug. " + "x" * 3000, "/Users/g/repo")
         await settle()
-        assert api.sent[-1][1].startswith("Claude: I fixed the bug.") and len(api.sent[-1][1]) <= telegram.MAX_RELAY_CHARS + 8
+        # Claude's words under a "Claude" title with the repo under it; its line breaks kept; a message over
+        # the cap is cut at a line or a space and says the rest is on the Mac
+        title, subtitle, body = api.titled[-1]
+        assert (title, subtitle) == (telegram.CLAUDE_TITLE, "repo")
+        assert body.startswith("I fixed\n the bug. xxx") and body.endswith("…\n\n" + telegram.RELAY_CUT_LINE)
+        assert len(body) <= telegram.MAX_RELAY_CHARS + len(telegram.RELAY_CUT_LINE) + 4
         # the terminal's gray lines, a tool call and its result tail, never leave the Mac (owner, 2026-09-21):
         # only what it prints in white does, plus a question for the owner
         before = len(api.sent)
@@ -888,15 +931,18 @@ def test_the_claude_relay_is_off_until_said_and_forwards_only_while_on() -> None
         await settle()
         assert len(api.sent) == before
         await inlet.relay_text("All green.", "/Users/g/repo")
+        await inlet.relay_text("Two tests\nfixed.", "/Users/g/repo")
         inlet.relay_tool_call("AskUserQuestion", "Ship it now? (yes / no)")
         await settle()
-        assert api.sent[-1][1] == "Claude: All green.\nClaude asks: Ship it now? (yes / no)"
+        # one batch: what Claude said under one title, as paragraphs; its question as its own message
+        assert api.titled[-2:] == [(telegram.CLAUDE_TITLE, "repo", "All green.\n\nTwo tests\nfixed."),
+                                   (telegram.CLAUDE_ASKS_TITLE, None, "Ship it now? (yes / no)")]
         before = len(api.sent)
         await inlet.relay_notification("idle_reminder", "still here", False)      # not waiting: not news
         await settle()
         assert len(api.sent) == before
         await inlet.relay_notification("permission_prompt", "Bash needs approval", True)
-        assert api.sent[-1] == (OWNER, "Claude is waiting on you: Bash needs approval")
+        assert api.titled[-1] == (telegram.CLAUDE_WAITS_TITLE, None, "Bash needs approval")
         api.feed(update("> git status", update_id=3), update("claude: make it green", update_id=4),
                  update("now run the tests please", update_id=5))             # relay on: plain text is for Claude
         await settle()
@@ -927,7 +973,10 @@ def test_a_permission_prompt_is_answered_from_the_phone_and_silence_defers() -> 
         inlet = rig.inlet
         ask = asyncio.ensure_future(inlet.decide_permission("Bash", "rm -rf build/", "/Users/g/repo"))
         await settle()
-        assert api.sent[-1][1].startswith("Claude in repo wants to run Bash: rm -rf build/")
+        # the command as a code block under a title that names the tool, the repo under it
+        assert api.titled[-1] == ("Claude asks to run Bash", "repo", "```\nrm -rf build/\n```\n\nyes / no?")
+        assert fmt.compose(*api.sent[-1][1:], "Claude asks to run Bash", "repo").startswith(
+            "<b>Claude asks to run Bash</b>\n<i>repo</i>\n\n<pre>rm -rf build/</pre>\n\nyes / no?")
         api.feed(update("yes", uid=STRANGER, update_id=2))            # a stranger cannot approve
         await settle()
         assert not ask.done()
@@ -1042,8 +1091,8 @@ def test_a_question_for_the_owner_is_streamed_as_a_question() -> None:
         rig.inlet.relay_tool_call("AskUserQuestion", asked)
         rig.inlet.relay_tool_call("AskUserQuestion", "")
         await settle()
-        assert api.sent[-1][1] == ("Claude asks: Which database? (Postgres / SQLite) | Ship it now?\n"
-                                   "Claude asks: (see the terminal)")
+        assert api.titled[-1] == (telegram.CLAUDE_ASKS_TITLE, None,
+                                  "Which database? (Postgres / SQLite) | Ship it now?\n\n(see the terminal)")
 
     run_rig(rig, during)
 

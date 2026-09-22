@@ -27,9 +27,15 @@ they are code, not prompt:
   raised, and every log record in the process is checked as it is made (``hide_token``).
 
 Three halves, as in think.py: a pure core (``configured``, ``accept``,
-``chunks``, ``request``, ``parse_response``) that runs in tests, ``BotApi``
+``request``, ``parse_response``) that runs in tests, ``BotApi``
 which is the only part that touches Telegram, and ``TelegramInlet`` which ties
 them to what the daemon lends it. It ships OFF (``TELEGRAM_DEFAULT``).
+
+Every message leaves through ``BotApi.send_message``, which composes it with
+telegram_format.py (one shape: a bold title where the voice is not buddy's own,
+a blank line, short paragraphs as Telegram HTML, split at 4096 on a paragraph
+boundary). A message kind is a ``title`` the inlet passes; the body stays plain
+text here, so the tests read what was said, not its markup.
 """
 
 from __future__ import annotations
@@ -49,8 +55,10 @@ from pathlib import Path
 from typing import Any, Awaitable, Callable, Collection, Optional, Sequence
 
 from . import composio_tools, second_brain, system_context, websearch
+from . import telegram_format as fmt
 from .computer_agent import AgentEvent
 from .records import MEMORY_TOOLS
+from .telegram_format import MAX_MESSAGE_CHARS, plain  # noqa: F401 — the names other modules and tests use
 
 log = logging.getLogger(__name__)
 
@@ -60,7 +68,6 @@ DEFAULT_EFFORT = "low"              # a text is a chat turn; think_hard is there
 EFFORTS = ("low", "medium", "high", "xhigh", "max")   # what gpt-6-astra accepts (probed 2026-09-21)
 API_ROOT = "https://api.telegram.org"
 POLL_TIMEOUT_SECS = 50              # long poll: Telegram holds the request open this long
-MAX_MESSAGE_CHARS = 4096            # Bot API limit on sendMessage text
 MAX_CAPTION_CHARS = 1024            # Bot API limit on a photo caption
 MAX_DOCUMENT_BYTES = 50 * 1024 * 1024   # Bot API limit on sendDocument
 MAX_LISTING = 40
@@ -79,11 +86,23 @@ CLAUDE_ON = ("claude on", "/claude on", "claude relay on", "relay claude")
 CLAUDE_OFF = ("claude off", "/claude off", "claude relay off", "stop relaying claude")
 CLAUDE_PREFIX = re.compile(r"^(claude|>)\s*:?\s+(.+)$", re.I | re.S)     # "claude: fix the tests" → typed into the terminal
 BUDDY_PREFIX = re.compile(r"^(hey )?buddy\s*[,:]\s*(.+)$", re.I | re.S)   # while relaying: this one is for buddy
-CLAUDE_ON_LINE = ("Claude relay on: this chat is the terminal. What you text is typed into Claude Code; what it "
-                  "says and asks comes back here, and its tool calls go through without asking, as in "
-                  "bypass mode. \"buddy: ...\" talks to me instead. \"claude off\" ends it.")
+CLAUDE_ON_TITLE = "Claude relay on"
+CLAUDE_ON_LINE = ("This chat is the terminal now. What you text is typed into Claude Code; what it says and asks "
+                  "comes back here, and its tool calls go through without asking, as in bypass mode.\n\n"
+                  "\"buddy: ...\" talks to me instead. \"claude off\" ends it.")
 CLAUDE_OFF_LINE = "Claude relay off."
 CLAUDE_NOT_ON_LINE = "The Claude relay is off. Say \"claude on\" first."
+# The titles: a message that is not buddy's own voice says whose it is, or what it is, in bold on its
+# first line (telegram_format.compose). Buddy's own replies and one-liners carry none.
+TASK_DONE_TITLE = "Task done"
+TASK_FAILED_TITLE = "Task failed"
+TASK_ASKS_TITLE = "The task asks"
+APP_ASKS_TITLE = "Before I do that"
+CLAUDE_TITLE = "Claude"
+CLAUDE_ASKS_TITLE = "Claude asks"
+CLAUDE_WAITS_TITLE = "Claude is waiting on you"
+CLAUDE_PERMISSION_TITLE = "Claude asks to run {tool}"
+RELAY_CUT_LINE = "_the rest is in the terminal_"
 DEFAULT_PERMISSION_TIMEOUT_SECS = 240.0    # the hook blocks 320 s at most; a silence defers, it never denies
 MAX_RELAY_CHARS = 1500
 RELAY_BATCH_SECS = 1.2                     # relay lines are batched this long into one message (Telegram: ~1 msg/s)
@@ -408,40 +427,6 @@ def sender_id(update: Any) -> Optional[int]:
     return None
 
 
-# No emoji, ever (owner, 2026-09-21). Stripped in code from every outgoing message, prompt or not: the
-# pictographic blocks, the variation selectors and joiners that build them, and the keycap combiner.
-_EMOJI = re.compile("[\U0001F000-\U0001FAFF\U00002600-\U000027BF\U00002B00-\U00002BFF\U0001F900-\U0001F9FF"
-                    "\U0000FE0F\U0000200D\U000020E3\U0001F1E6-\U0001F1FF\U0000231A-\U0000231B\U000023E9-\U000023FA"
-                    "\U000025AA-\U000025FE\U00002934-\U00002935\U00003030\U0000303D\U00003297\U00003299]")
-
-
-_DASH = re.compile(r"\s*[\u2014\u2013]\s*")      # em dash, en dash (owner, 2026-09-21): a comma or a full stop instead
-
-
-def plain(text: str) -> str:
-    """The text without emoji or dashes, and without the doubled spaces they leave behind. A dash between
-    words becomes a comma; one that ends a sentence-like run becomes a full stop."""
-    out = _EMOJI.sub("", text)
-    out = _DASH.sub(", ", out)
-    out = re.sub(r", (?=[,.!?]|$)", "", out)            # a dash right before punctuation just goes
-    return re.sub(r"[ \t]{2,}", " ", out).strip() if out != text else text
-
-
-def chunks(text: str, limit: int = MAX_MESSAGE_CHARS) -> list[str]:
-    """Split for sendMessage without losing a character: at a newline or a space when one is near the end
-    of the window, mid-word otherwise. ``"".join(chunks(t)) == t`` always."""
-    out: list[str] = []
-    rest = text
-    while len(rest) > limit:
-        cut = max(rest.rfind("\n", 0, limit), rest.rfind(" ", 0, limit))
-        cut = cut + 1 if cut >= limit // 2 else limit
-        out.append(rest[:cut])
-        rest = rest[cut:]
-    if rest or not out:
-        out.append(rest)
-    return out
-
-
 # ---- the text brain ---------------------------------------------------------------------------
 
 def request(config: TelegramConfig, items: list[dict[str, Any]], memory: str = "",
@@ -682,10 +667,20 @@ class BotApi:
         result = await self._call("getUpdates", data)
         return [u for u in result if isinstance(u, dict)] if isinstance(result, list) else []
 
-    async def send_message(self, chat_id: int, text: str) -> None:
-        for piece in chunks(plain(text)):
-            if piece.strip():
-                await self._call("sendMessage", {"chat_id": chat_id, "text": piece})
+    async def send_message(self, chat_id: int, text: str, title: Optional[str] = None,
+                           subtitle: Optional[str] = None) -> None:
+        """One message, composed by telegram_format (a bold ``title`` when the voice is not buddy's, an
+        italic ``subtitle`` when an identifier helps, the body as HTML paragraphs) and sent in pieces
+        under the Bot API limit. A piece Telegram will not parse goes again as plain text: a message is
+        never lost to markup."""
+        for piece in fmt.split(fmt.compose(text, title, subtitle)):
+            try:
+                await self._call("sendMessage", {"chat_id": chat_id, "text": piece, "parse_mode": fmt.PARSE_MODE})
+            except BotApiError as e:
+                if e.code != 400 or "parse" not in e.description.lower():
+                    raise
+                log.warning("telegram: Telegram would not parse a message (%s); sent as plain text", e.description[:80])
+                await self._call("sendMessage", {"chat_id": chat_id, "text": fmt.visible(piece)})
 
     async def send_photo(self, chat_id: int, path: Path, caption: str = "") -> None:
         blob = await asyncio.to_thread(Path(path).read_bytes)
@@ -794,7 +789,7 @@ class TelegramInlet:
         self.claude = False                               # the terminal relay
         self._chat_id: Optional[int] = next(iter(sorted(config.owner_ids)), None)   # a private chat's id is the user's
         self._relay_cwd: str = ""                          # the session Claude last spoke from
-        self._relay_lines: list[str] = []                  # tool lines waiting for the next batch
+        self._relay_lines: list[tuple[str, str, str]] = []   # (title, subtitle, body) waiting for the next batch
         self._relay_flush: Optional[asyncio.Task] = None
         self._clock, self._wall, self._sleep = clock, wall, sleep
         self.turns: list[tuple[str, str]] = []           # ("user" | "buddy", text): this chat, until it goes quiet
@@ -888,7 +883,8 @@ class TelegramInlet:
             self.claude = word in CLAUDE_ON
             self._note("user", inbound.text)
             log.info("telegram: claude relay %s", "on" if self.claude else "off")
-            self._spawn(self._say(inbound.chat_id, CLAUDE_ON_LINE if self.claude else CLAUDE_OFF_LINE), "telegram-say")
+            self._spawn(self._say(inbound.chat_id, CLAUDE_ON_LINE if self.claude else CLAUDE_OFF_LINE,
+                                  title=CLAUDE_ON_TITLE if self.claude else None), "telegram-say")
             return
         typed = CLAUDE_PREFIX.match(inbound.text)
         if typed:
@@ -929,9 +925,11 @@ class TelegramInlet:
             return
         self._spawn(self._turn(inbound), "telegram-turn")
 
-    async def _say(self, chat_id: int, text: str) -> None:
+    async def _say(self, chat_id: int, text: str, title: Optional[str] = None, subtitle: Optional[str] = None) -> None:
+        """Send one message. ``title`` names the voice or the event when it is not buddy's own reply
+        (telegram_format.compose); ``subtitle`` is an identifier that helps a person, or nothing."""
         try:
-            await self.api.send_message(chat_id, text)
+            await self.api.send_message(chat_id, text, title=title, subtitle=subtitle)
         except BotApiError as e:
             log.warning("telegram: could not send (%s)", e)
 
@@ -955,47 +953,61 @@ class TelegramInlet:
             said = "I couldn't type that into the terminal."
         await self._say(chat_id, said)
 
-    def relay_line(self, line: str) -> None:
-        """One line for the phone (what Claude said, a question it asks), batched with its neighbours
-        into one message so a burst of short messages is one text, not ten."""
+    def relay_line(self, body: str, title: str = CLAUDE_TITLE, subtitle: str = "") -> None:
+        """One message for the phone (what Claude said, a question it asks), batched with its neighbours:
+        a burst of short messages under the same title is one text, not ten (``_flush_relay``)."""
         if not self.claude or self._chat_id is None:
             return
-        line = " ".join(str(line).split())
-        if not line:
+        body = body.strip()
+        if not body:
             return
-        self._relay_lines.append(line[:MAX_RELAY_CHARS])
+        self._relay_lines.append((title, subtitle, body))
         if self._relay_flush is None or self._relay_flush.done():
             self._relay_flush = self._spawn(self._flush_relay(), "telegram-relay")
 
     async def _flush_relay(self) -> None:
         await self._sleep(RELAY_BATCH_SECS)
-        lines, self._relay_lines = self._relay_lines, []
-        body = "\n".join(lines)
-        if body and self._chat_id is not None:
-            await self._say(self._chat_id, body)
+        entries, self._relay_lines = self._relay_lines, []
+        # Neighbours under one title become one message, their bodies as paragraphs; a change of title
+        # (Claude said, then Claude asks) starts the next.
+        groups: list[tuple[str, str, list[str]]] = []
+        for title, subtitle, body in entries:
+            if groups and groups[-1][0] == title and groups[-1][1] == subtitle:
+                groups[-1][2].append(body)
+            else:
+                groups.append((title, subtitle, [body]))
+        for title, subtitle, bodies in groups:
+            if self._chat_id is not None:
+                await self._say(self._chat_id, "\n\n".join(bodies), title=title, subtitle=subtitle or None)
 
     def relay_tool_call(self, tool: str, hint: str) -> None:
         """A tool call the daemon saw. Only a question for the owner (AskUserQuestion) reaches the phone:
         the terminal's gray lines, the call itself and its result tail, stay on the Mac (owner, 2026-09-21)."""
         if tool == "AskUserQuestion":
-            self.relay_line("Claude asks: " + (hint or "(see the terminal)"))
+            self.relay_line(" ".join(str(hint).split()) or "(see the terminal)", title=CLAUDE_ASKS_TITLE)
 
     async def relay_text(self, text: str, cwd: str = "") -> None:
-        """What Claude Code just said, when the relay is on. Never logged here either."""
+        """What Claude Code just said, when the relay is on, with its paragraphs and lists as it wrote
+        them (telegram_format turns the markdown into Telegram's own bold, bullets and code). Never
+        logged here either."""
         if not self.claude or self._chat_id is None:
             return
         if cwd:
             self._relay_cwd = cwd
-        body = " ".join(str(text).split())
+        body = str(text).strip()
         if len(body) > MAX_RELAY_CHARS:
-            body = body[:MAX_RELAY_CHARS - 1].rstrip() + "…"
+            # Cut on a paragraph, else a line, else a space near the cap, and say the rest is on the Mac.
+            window = body[:MAX_RELAY_CHARS]
+            cut = next((at for at in (window.rfind("\n\n"), window.rfind("\n"), window.rfind(" "))
+                        if at >= MAX_RELAY_CHARS // 2), MAX_RELAY_CHARS)
+            body = window[:cut].rstrip() + "…\n\n" + RELAY_CUT_LINE
         if body:
-            self.relay_line("Claude: " + body)
+            self.relay_line(body, subtitle=Path(self._relay_cwd).name if self._relay_cwd else "")
 
     async def relay_notification(self, kind: str, message: str, waits: bool) -> None:
         if not self.claude or self._chat_id is None or not waits:
             return
-        await self._say(self._chat_id, "Claude is waiting on you" + (f": {message.strip()}" if message.strip() else "."))
+        await self._say(self._chat_id, message.strip(), title=CLAUDE_WAITS_TITLE)
 
     async def decide_permission(self, tool: str, hint: str, cwd: str = "", *, always: bool = False) -> Optional[str]:
         """A permission prompt as a question in the chat. "allow" | "deny" | None (no answer: Claude Code's
@@ -1008,13 +1020,14 @@ class TelegramInlet:
             return None                                   # one question at a time; this one defers
         if cwd:
             self._relay_cwd = cwd
-        where = f" in {Path(cwd).name}" if cwd else ""
-        question = f"Claude{where} wants to run {tool}: {hint.strip()[:300]}\nyes / no?"
+        # The command as code, so nothing in it is read as markup; the repo under the title.
+        question = "```\n" + hint.strip()[:300] + "\n```\n\nyes / no?"
+        title = CLAUDE_PERMISSION_TITLE.format(tool=tool)
         loop = asyncio.get_running_loop()
         self._pending_answer = loop.create_future()
-        self._note("buddy", question)
+        self._note("buddy", f"{title}: {hint.strip()[:300]}")
         try:
-            await self._say(self._chat_id, question)
+            await self._say(self._chat_id, question, title=title, subtitle=Path(cwd).name if cwd else None)
             answer = await asyncio.wait_for(self._pending_answer, timeout=self._permission_timeout)
         except asyncio.TimeoutError:
             return None
@@ -1175,8 +1188,8 @@ class TelegramInlet:
             log.info("telegram: apps: refused %s (%s)", name, ", ".join(decision.slugs))
             return {"ok": False, "reason": decision.why}
         if decision.action == "ask":
-            question = composio_tools.describe_for_confirmation(name, args) + "\nyes / no?"
-            answer = (await self._ask_user(question, chat_id)).strip().lower()
+            question = composio_tools.describe_for_confirmation(name, args) + "\n\nyes / no?"
+            answer = (await self._ask_user(question, chat_id, title=APP_ASKS_TITLE)).strip().lower()
             if not answer.startswith(("yes", "y", "ok", "sure", "go", "do it", "allow", "approve")):
                 return {"ok": False, "reason": "the owner said no; do not retry it"}
         return await asyncio.to_thread(self._apps.execute, name, args)
@@ -1206,11 +1219,15 @@ class TelegramInlet:
             log.warning("telegram: task failed: %s", type(e).__name__)
             self._on_state("error")
             final = "That task failed on my side."
+            failed = True
+        else:
+            failed = False
         final = str(final or "").strip() or "The task ended without a result."
         self._note("buddy", final)
         self._show(None, final)
         if not self._stopped_from_chat:
-            await self._say(chat_id, final)
+            # The result arrives minutes after the request: the goal under the title says which one.
+            await self._say(chat_id, final, title=TASK_FAILED_TITLE if failed else TASK_DONE_TITLE, subtitle=goal)
             if WANTS_SCREEN.search(goal):
                 # They asked to see something. A task cannot send pictures, so the screen it left goes with
                 # the result (live gap 2026-09-21: a headline was on screen and never reached the phone).
@@ -1242,12 +1259,12 @@ class TelegramInlet:
         elif state is not None:
             self._show(state)
 
-    async def _ask_user(self, question: str, chat_id: int) -> str:
+    async def _ask_user(self, question: str, chat_id: int, title: str = TASK_ASKS_TITLE) -> str:
         loop = asyncio.get_running_loop()
         self._pending_answer = loop.create_future()
         self._note("buddy", question)
         try:
-            await self._say(chat_id, question)
+            await self._say(chat_id, question, title=title)
             return await asyncio.wait_for(self._pending_answer, timeout=self.config.ask_timeout_secs)
         except asyncio.TimeoutError:
             await self._say(chat_id, "No answer, so I took that as a no.")
