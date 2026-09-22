@@ -8,7 +8,7 @@ Scope: The owner can text buddy from Telegram and get an answer, start and stop 
   CHECK: .venv/bin/python -m pytest -q -p no:cacheprovider --ignore=tests/test_desktop_live.py && echo PYTEST_OK
   CWD: bridge
   EXPECT: PYTEST_OK
-  EVIDENCE: exit=0; shell=/bin/sh; cwd=/Users/gurucharan/Documents/personal/buddy/bridge; path=574d30059456/19 entries; output=1656 passed, 1 skipped in 68.99s (0:01:08) | PYTEST_OK
+  EVIDENCE: exit=0; shell=/bin/sh; cwd=/Users/gurucharan/Documents/personal/buddy/bridge; path=574d30059456/19 entries; output=1657 passed, 1 skipped in 68.79s (0:01:08) | PYTEST_OK
 
 - [x] G2: Ruff reports nothing on src, tests and tools.
   CHECK: .venv/bin/ruff check src/ tests/ tools/ && echo RUFF_CLEAN
@@ -20,13 +20,13 @@ Scope: The owner can text buddy from Telegram and get an answer, start and stop 
   CHECK: .venv/bin/python -m pytest -q -p no:cacheprovider tests/test_telegram.py::test_it_ships_off tests/test_telegram.py::test_the_switch_alone_is_not_enough tests/test_telegram.py::test_no_owner_id_means_no_inlet tests/test_telegram.py::test_the_daemon_builds_no_inlet_when_off && echo SHIPS_OFF_OK
   CWD: bridge
   EXPECT: SHIPS_OFF_OK
-  EVIDENCE: exit=0; shell=/bin/sh; cwd=/Users/gurucharan/Documents/personal/buddy/bridge; path=574d30059456/19 entries; output=4 passed in 0.44s | SHIPS_OFF_OK
+  EVIDENCE: exit=0; shell=/bin/sh; cwd=/Users/gurucharan/Documents/personal/buddy/bridge; path=574d30059456/19 entries; output=4 passed in 0.32s | SHIPS_OFF_OK
 
 - [x] G4: Only the owner, in a private chat, reaches a model. A stranger, a group the owner is in, a channel post, an edited message, another bot and a message older than the stale window each cause zero model calls and zero sends. Words that are not the owner's own (a forwarded message) and things that are not words (a sticker, a voice note) cause zero model calls and one fixed line back. Positive control: the same update with the owner's id and a fresh date does reach the model in the same test.
   CHECK: .venv/bin/python -m pytest -q -p no:cacheprovider tests/test_telegram.py::test_only_the_owner_in_a_private_chat_is_accepted tests/test_telegram.py::test_a_dropped_update_costs_no_model_call_and_no_reply tests/test_telegram.py::test_a_backlog_from_before_the_daemon_started_is_dropped tests/test_telegram.py::test_forwarded_words_and_non_text_never_reach_a_model && echo ALLOWLIST_OK
   CWD: bridge
   EXPECT: ALLOWLIST_OK
-  EVIDENCE: exit=0; shell=/bin/sh; cwd=/Users/gurucharan/Documents/personal/buddy/bridge; path=574d30059456/19 entries; output=4 passed in 0.06s | ALLOWLIST_OK
+  EVIDENCE: exit=0; shell=/bin/sh; cwd=/Users/gurucharan/Documents/personal/buddy/bridge; path=574d30059456/19 entries; output=4 passed in 0.07s | ALLOWLIST_OK
 
 - [x] G5: What the owner wrote and the bot token never reach the log, on the accepted path, the dropped path and the error path (the token is part of every Bot API URL, so an HTTP error is the dangerous one). Positive control: the same capture does contain the sender's numeric id on the dropped path, so the capture is proven live.
   CHECK: .venv/bin/python -m pytest -q -p no:cacheprovider tests/test_telegram.py::test_words_and_the_token_never_reach_the_log && echo PRIVACY_OK
@@ -50,13 +50,13 @@ Scope: The owner can text buddy from Telegram and get an answer, start and stop 
   CHECK: .venv/bin/python -m pytest -q -p no:cacheprovider tests/test_telegram.py::test_a_tasks_question_is_answered_by_the_owners_next_message tests/test_telegram.py::test_a_stranger_cannot_answer_a_tasks_question tests/test_telegram.py::test_no_answer_in_time_reads_as_no && echo APPROVAL_OK
   CWD: bridge
   EXPECT: APPROVAL_OK
-  EVIDENCE: exit=0; shell=/bin/sh; cwd=/Users/gurucharan/Documents/personal/buddy/bridge; path=574d30059456/19 entries; output=3 passed in 0.13s | APPROVAL_OK
+  EVIDENCE: exit=0; shell=/bin/sh; cwd=/Users/gurucharan/Documents/personal/buddy/bridge; path=574d30059456/19 entries; output=3 passed in 0.12s | APPROVAL_OK
 
 - [x] G9: "Send me a photo" sends the picture the robot took as a Telegram photo with its caption, and says why when there is no camera.
   CHECK: .venv/bin/python -m pytest -q -p no:cacheprovider tests/test_telegram.py::test_a_photo_is_sent_as_a_photo tests/test_telegram.py::test_no_camera_is_said_not_sent && echo PHOTO_OK
   CWD: bridge
   EXPECT: PHOTO_OK
-  EVIDENCE: exit=0; shell=/bin/sh; cwd=/Users/gurucharan/Documents/personal/buddy/bridge; path=574d30059456/19 entries; output=2 passed in 0.07s | PHOTO_OK
+  EVIDENCE: exit=0; shell=/bin/sh; cwd=/Users/gurucharan/Documents/personal/buddy/bridge; path=574d30059456/19 entries; output=2 passed in 0.06s | PHOTO_OK
 
 - [x] G10: The poll loop survives: an update is handled once (the offset moves past it), a network error backs off and polling resumes, a slow turn does not stop the next poll, and a 401 (bad token) or a 409 (another poller on the same token) stops the inlet with one log line instead of spinning.
   CHECK: .venv/bin/python -m pytest -q -p no:cacheprovider tests/test_telegram.py::test_an_update_is_handled_once tests/test_telegram.py::test_a_network_error_backs_off_and_polling_resumes tests/test_telegram.py::test_a_slow_turn_does_not_stop_the_next_poll tests/test_telegram.py::test_a_bad_token_or_a_second_poller_stops_the_inlet && echo POLL_OK
@@ -76,8 +76,8 @@ Scope: The owner can text buddy from Telegram and get an answer, start and stop 
   EXPECT: TELEGRAM_DOCS_OK
   EVIDENCE: exit=0; shell=/bin/sh; cwd=/Users/gurucharan/Documents/personal/buddy/bridge; path=574d30059456/19 entries; output=7 names documented: CC_BUDDY_RECORDS, CC_BUDDY_RECORDS_MODEL, CC_BUDDY_TELEGRAM, CC_BUDDY_TELEGRAM_EFFORT, CC_BUDDY_TELEGRAM_MODEL, CC_BUDDY_TELEGRAM_OWNER, CC_BUDDY_TELEGRAM_TOKEN | TELEGRAM_DOCS_OK
 
-- [x] G18: The owner can see the Mac and receive files: "show me the screen" sends a screenshot; a task whose request asked to see something arrives with the screen it left and one that did not gets words only; a failed capture is said; a file leaves only from the owner's home, never from a hidden path even through a symlink, never a folder, never over the Bot API limit; the document really goes out as multipart.
-  CHECK: .venv/bin/python -m pytest -q -p no:cacheprovider tests/test_telegram.py::test_a_task_that_was_asked_to_show_something_arrives_with_the_screen_it_left tests/test_telegram.py::test_the_owner_can_ask_for_the_screen_and_a_failed_capture_is_said tests/test_telegram.py::test_files_leave_only_from_the_owners_home_and_never_from_a_hidden_folder tests/test_telegram.py::test_send_file_sends_a_document_and_refuses_folders_and_big_files && echo SEE_AND_SEND_OK
+- [x] G18: The owner can see the Mac and receive files: "screenshot" / "show me the screen" is answered by code with zero model calls, mid-task too; a task whose request asked to see something arrives with the screen it left and one that did not gets words only; a failed capture is said; a file leaves only from the owner's home, never from a hidden path even through a symlink, never a folder, never over the Bot API limit; the document really goes out as multipart.
+  CHECK: .venv/bin/python -m pytest -q -p no:cacheprovider tests/test_telegram.py::test_a_task_that_was_asked_to_show_something_arrives_with_the_screen_it_left tests/test_telegram.py::test_a_plain_screenshot_request_is_answered_by_code_even_mid_task tests/test_telegram.py::test_the_owner_can_ask_for_the_screen_and_a_failed_capture_is_said tests/test_telegram.py::test_files_leave_only_from_the_owners_home_and_never_from_a_hidden_folder tests/test_telegram.py::test_send_file_sends_a_document_and_refuses_folders_and_big_files && echo SEE_AND_SEND_OK
   CWD: bridge
   EXPECT: SEE_AND_SEND_OK
   EVIDENCE: exit=0; shell=/bin/sh; cwd=/Users/gurucharan/Documents/personal/buddy/bridge; path=574d30059456/19 entries; output=4 passed in 0.09s | SEE_AND_SEND_OK
@@ -92,13 +92,13 @@ Scope: The owner can text buddy from Telegram and get an answer, start and stop 
   CHECK: .venv/bin/python -m pytest -q -p no:cacheprovider tests/test_records.py::test_a_record_round_trips_and_a_hand_edited_one_still_parses tests/test_records.py::test_load_skips_the_profile_and_a_file_whose_id_does_not_match_its_name tests/test_records.py::test_search_is_keyword_over_aliases_and_lines_and_aliases_count_more tests/test_records.py::test_the_reader_re_reads_disk_so_an_owner_edit_counts_at_once && echo RECORDS_READ_OK
   CWD: bridge
   EXPECT: RECORDS_READ_OK
-  EVIDENCE: exit=0; shell=/bin/sh; cwd=/Users/gurucharan/Documents/personal/buddy/bridge; path=574d30059456/19 entries; output=4 passed in 0.10s | RECORDS_READ_OK
+  EVIDENCE: exit=0; shell=/bin/sh; cwd=/Users/gurucharan/Documents/personal/buddy/bridge; path=574d30059456/19 entries; output=4 passed in 0.02s | RECORDS_READ_OK
 
 - [x] G16: The reconcile is the only writer: a curated day becomes changed records, a rewritten profile with the record index, and two git commits (as-found, then reconcile) so the replaced fact is in HEAD~1; a forgotten record leaves the tree but stays in history; a bad model result writes nothing and the day stays due; malformed ids never escape the folder; without git the records are still written.
   CHECK: .venv/bin/python -m pytest -q -p no:cacheprovider tests/test_records.py::test_a_day_is_reconciled_into_records_a_profile_and_one_commit tests/test_records.py::test_forgetting_removes_the_file_and_git_still_has_it tests/test_records.py::test_a_bad_result_writes_nothing_and_the_day_stays_due tests/test_records.py::test_apply_skips_malformed_entries_and_never_escapes_the_folder tests/test_records.py::test_a_day_without_notes_is_nothing_and_the_loop_stops_on_shutdown tests/test_records.py::test_without_git_records_are_still_written && echo RECONCILE_OK
   CWD: bridge
   EXPECT: RECONCILE_OK
-  EVIDENCE: exit=0; shell=/bin/sh; cwd=/Users/gurucharan/Documents/personal/buddy/bridge; path=574d30059456/19 entries; output=6 passed in 0.43s | RECONCILE_OK
+  EVIDENCE: exit=0; shell=/bin/sh; cwd=/Users/gurucharan/Documents/personal/buddy/bridge; path=574d30059456/19 entries; output=6 passed in 0.49s | RECONCILE_OK
 
 - [x] G17: MANUAL — the reconcile prompt works on the real model and the real notes: on a scratch copy of this Mac's debrief store, two curated days (2026-09-12, 2026-09-15) reconciled with gpt-5.4-nano into eight typed records with aliases and dated facts, a three-section profile, and the record index; the scratch store received two commits per day.
   EVIDENCE: manual; run 2026-09-21 in the session's scratchpad (scratchpad/store), output in the session transcript; records included ai-voice-preference (preference), ai-memory-system (project), math-learning-routine (routine), friend-3-crayons (person).

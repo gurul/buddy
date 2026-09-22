@@ -95,10 +95,12 @@ Starting a task is not finishing it. Its result arrives in this chat on its own 
   NOT: "It's playing now."   INSTEAD: "On it."
   NOT: "Done, it's open!"    INSTEAD: "Working on it, I'll text you the result."
 
-They cannot see the screen. When they want to see the Mac — a page, a result, "show me", "screenshot" —
-use screenshot: it sends a picture of the screen to this chat. A task cannot send pictures; if something
-must happen on the Mac first, start the task with their words, including that they want to see it: a
-task whose request asks to see something arrives with a screenshot of the screen it left. To send them a
+They cannot see the screen. When they want to see the Mac — a page, a result, "show me", "screenshot",
+"send it" — call screenshot: it sends a picture of the screen to this chat, at once, whether or not a task
+is running. A picture is never a task: do not start or steer a task to take one. A task cannot send
+pictures; if something must happen on the Mac first, start the task with their words, including that they
+want to see it: a task whose request asks to see something arrives with a screenshot of the screen it
+left. While a task runs and they ask how it is going, screenshot shows them. To send them a
 file, use send_file with its path; list_files finds it when they only know roughly where it is ("the latest
 thing on my Desktop"). take_photo is the robot's camera pointed at the room, not the screen. If a task asks
 them a question, it reaches them in this chat by itself; you do not need to relay it.
@@ -169,6 +171,11 @@ TOOL_NAMES = ("start_task", "steer_task", "stop_task", "take_photo", "screenshot
               "think_hard", "memory_search", "memory_get")
 # A request that asks to SEE something: its task's result comes with the screen it left. Only then — the
 # owner wants a picture when they ask for one, not with every result (owner, 2026-09-21).
+# The whole message is a request for the screen: answered by code, no model call, mid-task or not — like
+# "stop". Live 2026-09-21: five such texts during a task each cost three model calls and sent nothing.
+SCREEN_NOW = re.compile(r"^(please |can you |could you )?(send( me)?( a| the)? |show( me)?( the)? |take( a)? |give( me)?( a)? )?"
+                        r"(screen ?shot|screen|screen ?grab|your screen|the mac|mac screen|what('s| is) on (the |my )?screen)"
+                        r"( now| please| pls)?[\s.!?]*$", re.I)
 WANTS_SCREEN = re.compile(r"\b(screen ?shots?|screen ?grab|show me|send me (a |the )?(picture|screen|image)|"
                           r"picture of (the|my) (screen|mac)|what does .{0,40}look like)\b", re.I)
 
@@ -696,6 +703,10 @@ class TelegramInlet:
         if word in STOP_WORDS:
             self._spawn(self._stop(inbound.chat_id), "telegram-stop")
             return
+        if SCREEN_NOW.match(inbound.text):
+            self._note("user", inbound.text)
+            self._spawn(self._screen_now(inbound.chat_id), "telegram-screen")
+            return
         if self._pending_answer is not None and not self._pending_answer.done():
             # A task is waiting on the human. This message is the answer, and only the answer.
             self._pending_answer.set_result(inbound.text)
@@ -711,6 +722,11 @@ class TelegramInlet:
             await self.api.send_message(chat_id, text)
         except BotApiError as e:
             log.warning("telegram: could not send (%s)", e)
+
+    async def _screen_now(self, chat_id: int) -> None:
+        result = await self._send_screen(chat_id, "")
+        if not result.get("ok"):
+            await self._say(chat_id, "I couldn't grab the screen: " + str(result.get("reason")))
 
     async def _stop(self, chat_id: int) -> None:
         if self._agent is not None and self.task_running:
