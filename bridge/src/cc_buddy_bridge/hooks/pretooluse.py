@@ -22,9 +22,30 @@ from ._client import post, read_hook_input
 BLOCK_TIMEOUT_SECS = 320.0
 
 
+def _question(tool_input: dict) -> str:
+    """An AskUserQuestion call as one line the owner can answer from the phone: each question with its
+    options in parentheses. Empty when the input is not that shape."""
+    questions = tool_input.get("questions")
+    if not isinstance(questions, list):
+        return ""
+    lines = []
+    for q in questions:
+        if not isinstance(q, dict):
+            continue
+        text = str(q.get("question") or "").strip()
+        labels = [str(o.get("label") or "").strip() for o in (q.get("options") or []) if isinstance(o, dict)]
+        labels = [x for x in labels if x]
+        if text:
+            lines.append(text + (f" ({' / '.join(labels)})" if labels else ""))
+    return " | ".join(lines)
+
+
 def _summarize(tool_input: object) -> str:
     """Short human-readable hint from a tool_input dict."""
     if isinstance(tool_input, dict):
+        asked = _question(tool_input)
+        if asked:
+            return asked
         # Bash: command; Edit/Write: file_path; fallback: first string value.
         for key in ("command", "file_path", "path", "url"):
             v = tool_input.get(key)

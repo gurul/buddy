@@ -78,8 +78,9 @@ CLAUDE_ON = ("claude on", "/claude on", "claude relay on", "relay claude")
 CLAUDE_OFF = ("claude off", "/claude off", "claude relay off", "stop relaying claude")
 CLAUDE_PREFIX = re.compile(r"^(claude|>)\s*:?\s+(.+)$", re.I | re.S)     # "claude: fix the tests" → typed into the terminal
 BUDDY_PREFIX = re.compile(r"^(hey )?buddy\s*[,:]\s*(.+)$", re.I | re.S)   # while relaying: this one is for buddy
-CLAUDE_ON_LINE = ("Claude relay on: what you text now goes into Claude Code's terminal, and what it says and asks "
-                  "comes back here. \"buddy: ...\" talks to me instead. \"claude off\" ends it.")
+CLAUDE_ON_LINE = ("Claude relay on: this chat is the terminal. What you text is typed into Claude Code; what it "
+                  "runs, says and asks comes back here, and its tool calls go through without asking, as in "
+                  "bypass mode. \"buddy: ...\" talks to me instead. \"claude off\" ends it.")
 CLAUDE_OFF_LINE = "Claude relay off."
 CLAUDE_NOT_ON_LINE = "The Claude relay is off. Say \"claude on\" first."
 DEFAULT_PERMISSION_TIMEOUT_SECS = 240.0    # the hook blocks 320 s at most; a silence defers, it never denies
@@ -702,10 +703,13 @@ class TelegramInlet:
     * ``notes``         — () -> RoomNotes: the room note-taker (daemon._room_notes_taker), for take_notes
     * ``terminal``      — (cwd, text) -> str: type a line into the Claude Code terminal for that session
 
-    "claude on" / "claude off" is the terminal relay, explicit only (owner, 2026-09-21): while on, what
-    Claude Code says (``relay_text``) and when it waits on the human (``relay_notification``) are forwarded
-    here, a permission prompt becomes a yes/no in the chat (``decide_permission``; silence defers to Claude
-    Code's own flow, never denies), and "claude: <text>" goes into its terminal.
+    "claude on" / "claude off" is the terminal relay, explicit only (owner, 2026-09-21): while on, the chat
+    is the terminal. What Claude Code runs (``relay_tool_call`` / ``relay_tool_result``), says
+    (``relay_text``), asks (an AskUserQuestion call, shown as a question) and waits on
+    (``relay_notification``) is forwarded here, and plain text is typed into its terminal; "buddy: <text>"
+    is for buddy. The relay is bypass: the daemon allows a tool call without asking (daemon.py), and only
+    the owner's always_ask commands (rm, sudo) become a yes/no here (``decide_permission``; silence defers
+    to Claude Code's own flow, never denies).
 
     The robot shows what the chat is doing — the phase on its face, a caption for each task step and the
     result — unless the owner has said "stealth mode": then it acts asleep (idle, no captions, no head)
@@ -934,6 +938,9 @@ class TelegramInlet:
             await self._say(self._chat_id, body)
 
     def relay_tool_call(self, tool: str, hint: str) -> None:
+        if tool == "AskUserQuestion":                     # a request for the owner, not a tool line
+            self.relay_line("Claude asks: " + (hint or "(see the terminal)"))
+            return
         self.relay_line(f"> {tool}: {hint}" if hint else f"> {tool}")
 
     def relay_tool_result(self, tool: str, tail: str) -> None:
@@ -957,10 +964,12 @@ class TelegramInlet:
             return
         await self._say(self._chat_id, "Claude is waiting on you" + (f": {message.strip()}" if message.strip() else "."))
 
-    async def decide_permission(self, tool: str, hint: str, cwd: str = "") -> Optional[str]:
+    async def decide_permission(self, tool: str, hint: str, cwd: str = "", *, always: bool = False) -> Optional[str]:
         """A permission prompt as a question in the chat. "allow" | "deny" | None (no answer: Claude Code's
-        own flow decides). Only the owner's next message answers, exactly as a task question."""
-        if not self.claude or self._chat_id is None or not self.config.ask_permissions:
+        own flow decides). Only the owner's next message answers, exactly as a task question. Asked only
+        with ``always`` (the daemon's always_ask class) or CC_BUDDY_TELEGRAM_ASK=1; otherwise the relay
+        allows without asking and this is never reached."""
+        if not self.claude or self._chat_id is None or not (always or self.config.ask_permissions):
             return None                                   # off by default: Claude Code's own flow decides
         if self._pending_answer is not None and not self._pending_answer.done():
             return None                                   # one question at a time; this one defers

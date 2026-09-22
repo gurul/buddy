@@ -1930,16 +1930,27 @@ class Daemon:
             self.audit.record(**audit_kwargs, decision="allow", source="auto_allow")
             return {"ok": True, "decision": "allow"}
 
-        # The phone is a decision surface (before the robot check: the phone is for when the owner is away) when the owner has said "claude on" (telegram.py): the prompt
-        # goes to the chat and only the owner's next message answers it. Silence defers, never denies.
+        # "claude on" (telegram.py): the owner is on the phone, so a prompt on the Mac has nobody at it.
+        # The relay is bypass (owner, 2026-09-21): a call is allowed here without asking, as
+        # bypassPermissions would. The owner's own always_ask list (rm, sudo: matchers.py) is the one
+        # exception, asked in the chat as a yes/no that only the owner's next message answers; silence
+        # there defers to Claude Code's own flow, never denies. CC_BUDDY_TELEGRAM_ASK=1 asks every call.
+        # Decided before the robot check: the phone is for when the owner is away.
         inlet = getattr(self, "_telegram", None)
         mode = str(req.get("permission_mode") or "")
         if inlet is not None and inlet.claude and mode not in ("bypassPermissions", "dontAsk"):
-            decision = await inlet.decide_permission(tool_name, hint, str(req.get("cwd") or ""))
-            if decision in ("allow", "deny"):
-                log.info("pretooluse for %s (%s): answered from Telegram → %s", tool_name, hint[:60], decision)
-                self.audit.record(**audit_kwargs, decision=decision, source="telegram")
-                return {"ok": True, "decision": decision}
+            asks_all = bool(getattr(getattr(inlet, "config", None), "ask_permissions", False))
+            if decision_class == "ask" or asks_all:
+                decision = await inlet.decide_permission(tool_name, hint, str(req.get("cwd") or ""), always=True)
+                if decision in ("allow", "deny"):
+                    log.info("pretooluse for %s (%s): answered from Telegram → %s", tool_name, hint[:60], decision)
+                    self.audit.record(**audit_kwargs, decision=decision, source="telegram")
+                    return {"ok": True, "decision": decision}
+                log.info("pretooluse for %s (%s): no answer from Telegram → defer", tool_name, hint[:60])
+            else:
+                log.info("pretooluse for %s (%s): claude relay on → allow", tool_name, hint[:60])
+                self.audit.record(**audit_kwargs, decision="allow", source="telegram_relay")
+                return {"ok": True, "decision": "allow"}
 
         # If BLE isn't connected, skip the round-trip and return no decision so
         # Claude Code's normal flow runs (respects user's auto/allow settings).
@@ -2002,6 +2013,12 @@ class Daemon:
         if scope is not None and scope in self._read_scopes:
             log.info("read under approved scope %s → allow (%s)", scope, path)
             self.audit.record(**audit_kwargs, decision="allow", source="read_scope")
+            return {"ok": True, "decision": "allow"}
+        inlet = getattr(self, "_telegram", None)
+        if inlet is not None and inlet.claude and str(req.get("permission_mode") or "") not in ("bypassPermissions", "dontAsk"):
+            # The Claude relay is bypass (see _handle_pretooluse): a read is allowed, not carded.
+            log.info("read %s: claude relay on → allow", path)
+            self.audit.record(**audit_kwargs, decision="allow", source="telegram_relay")
             return {"ok": True, "decision": "allow"}
         if not self.ble.connected:
             self.audit.record(**audit_kwargs, decision=None, source="ble_disconnected")
