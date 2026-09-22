@@ -65,7 +65,14 @@ token without an owner id is off. A door with no allowlist never opens.
 - **Anything you would say at the desk.** Buddy answers in a line or three, with
   what it remembers of your conversations in its prompt (`recall.opening_brief`)
   and the earlier turns of this chat as context (the last 24).
-- **A task for the Mac** — "open the calculator", "play my focus playlist". It
+- **A task for the Mac** — "open the calculator", "play my focus playlist". When
+  the request is ambiguous (which account, what to look for once the page is
+  open), buddy asks one question in the chat first and starts nothing on a
+  guess; the planner has the same rule (`computer_agent.py` rule 11: the goal
+  as given is the whole task, and a scan with no end in sight becomes a
+  question, not more scrolling — live 2026-09-21, "open Amazon" turned into
+  2.5 minutes of reading orders). While a task runs, your messages about it
+  steer it. It
   runs the same `ComputerAgent` the voice starts, through the same reflex → lane
   → planner tiers ([routing](routing.md)). Buddy replies "On it" at once and
   texts the result when there is one. Starting a task costs one model call, not
