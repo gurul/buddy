@@ -55,7 +55,8 @@ from pathlib import Path
 from typing import Any, Awaitable, Callable, Optional
 from urllib.parse import quote_plus
 
-from . import browser_lane, task_router
+from . import browser_lane, pricing, task_router
+from . import jev as jev_mod
 from .fast_lane import DECIDE_MODES, DEFAULT_DECIDE, FAST_LANE_DEFAULT, LANE_FIRST_DEFAULT
 
 log = logging.getLogger(__name__)
@@ -796,6 +797,9 @@ class ComputerAgent:
         self._acted = False
         self._last_after = ""
         self._verify_retried = False
+        self._bill_tokens = {"in": 0, "cached": 0, "out": 0}
+        self._bill_calls = 0
+        self._jev_before = jev_mod.METER.snapshot()
         self._open_log(goal)
         self._emit("started", goal)
         factory = self.worker_factory or (lambda: WorkerClient(timeout_secs=self.config.exec_timeout_secs))
@@ -824,7 +828,32 @@ class ComputerAgent:
             self.running = False
         self.final = result
         self._log({"final": result})
+        self._log({"bill": self.bill()})
         return result
+
+    # -- the bill per task (the Jev Engineering article: "track the bill per completed task") --
+    def _meter(self, response: Any) -> None:
+        """Count one Responses call's usage towards this run's bill. Every model call goes through here."""
+        usage = response.get("usage") if isinstance(response, dict) else None
+        self._bill_calls += 1
+        if isinstance(usage, dict):
+            t = pricing.responses_tokens(usage)
+            for k in self._bill_tokens:
+                self._bill_tokens[k] += t[k]
+
+    def bill(self) -> dict[str, Any]:
+        """Model tokens and USD at the grounded rates (pricing.py), Jev calls, tokens and USD since the run
+        began, and the wall seconds. `usd` is null for a model the table does not know: never a guess."""
+        usd = pricing.estimate_openai_cost(self.config.model, {
+            "input_tokens": self._bill_tokens["in"], "output_tokens": self._bill_tokens["out"],
+            "input_tokens_details": {"cached_tokens": self._bill_tokens["cached"]}})
+        jev_d = jev_mod.Meter.delta(self._jev_before, jev_mod.METER.snapshot())
+        jev_usd = pricing.estimate_jev_cost(jev_d["input_tokens"])
+        total = None if usd is None else round(usd + jev_usd, 6)
+        return {"model": self.config.model, "calls": self._bill_calls, "tokens": dict(self._bill_tokens),
+                "usd": None if usd is None else round(usd, 6),
+                "jev": {**jev_d, "usd": round(jev_usd, 6)},
+                "total_usd": total, "secs": round(self._clock() - self._t0, 2)}
 
     async def _interruptible(self, aw: Awaitable[Any]) -> Any:
         """Await `aw`, but let cancel() win at once (the SDK's own timeout is long)."""
@@ -933,6 +962,7 @@ class ComputerAgent:
                 req["previous_response_id"] = previous
             t_req = self._clock()
             response = await self._interruptible(self._create(req, turn))
+            self._meter(response)
             entry: dict[str, Any] = {"turn": turn, "effort": effort, "api_secs": round(self._clock() - t_req, 2)}
             usage = response.get("usage")
             if isinstance(usage, dict):
@@ -1157,6 +1187,7 @@ class ComputerAgent:
                               timeout=self.config.api_timeout_secs)
         try:
             response = await self._interruptible(self._create(req, 0))
+            self._meter(response)
             plan = pc.parse_plan(json.loads(classify_response(response).text), goal)
         except (Cancelled, FailSafe):
             raise

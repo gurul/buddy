@@ -22,7 +22,12 @@ Fields:
               "stick"      — user pressed A/B on the buddy
               "timeout"    — stick didn't respond within PERMISSION_WAIT_SECS
               "defer"      — bridge returned no opinion (Claude Code's flow ran)
+              "telegram_relay" — the Claude relay is on: allowed without asking
+              "jev_shadow" — a second line: Jev's risk verdict for a relayed command, logged only
+              "jev_safe" / "jev_error" — the relay allowed after Jev judged the command safe / failed
+              "jev_risky_deferred" — Jev judged it risky, the phone did not answer: Claude Code's flow ran
   elapsed_s elapsed seconds for the round-trip (omitted on short-circuits)
+  jev       {"verdict","why","destroys","escapes","publishes","secrets","ms"} when Jev judged the command
 
 Append failures are logged once and don't propagate; the daemon must never
 crash because of audit IO.
@@ -78,6 +83,7 @@ class AuditLog:
         decision: Optional[str],
         source: str,
         elapsed_s: Optional[float] = None,
+        jev: Optional[dict[str, Any]] = None,
     ) -> None:
         entry: dict[str, Any] = {
             "ts": datetime.now().astimezone().isoformat(timespec="milliseconds"),
@@ -90,6 +96,8 @@ class AuditLog:
         }
         if elapsed_s is not None:
             entry["elapsed_s"] = round(elapsed_s, 3)
+        if jev:
+            entry["jev"] = jev              # the command-risk verdict beside the regex class (typed_ask.py)
         line = json.dumps(entry, ensure_ascii=False) + "\n"
         try:
             self.path.parent.mkdir(parents=True, exist_ok=True)

@@ -319,7 +319,7 @@ def test_cancel_interrupts_an_inflight_request(tmp_path: Path) -> None:
     assert asyncio.run(go()) == "Stopped: hushed by a touch."
     assert worker.closed and events[-1].kind == "cancelled"
     lines = [json.loads(ln) for ln in a.run_log.read_text().splitlines()]
-    assert {"cancelled": "hushed by a touch"}.items() <= lines[-2].items()
+    assert {"cancelled": "hushed by a touch"}.items() <= lines[-3].items()      # then final, then the bill
 
 
 def test_cancel_interrupts_a_running_exec(tmp_path: Path) -> None:
@@ -515,7 +515,7 @@ def test_action_log_records_goal_exec_results_and_final(tmp_path: Path) -> None:
     assert lines[3] == {"t": 1.0, "turn": 1, "effort": "high", "api_secs": 0.0}
     assert lines[4]["exec"] == "display(pyautogui.screenshot())"
     assert lines[5] == {"t": 1.0, "turn": 1, "result": ["hi"], "images": 1}     # no image bytes, no timing (fake worker)
-    assert lines[-1]["final"] == "all done"
+    assert lines[-2]["final"] == "all done" and "bill" in lines[-1]              # the bill closes every log
     assert "data:x" not in a.run_log.read_text() and "AAAA" not in a.run_log.read_text()
 
 
@@ -810,3 +810,80 @@ def test_loop_sends_the_variant_the_config_selects_and_escalates_on_delegate_lin
     assert client.requests[0]["instructions"] == ca.instructions(True) and client.requests[0]["tools"] == ca.tools(True)
     assert client.requests[1]["reasoning"] == {"effort": "high"}         # the confirm is a recovery turn
     assert client.requests[2]["reasoning"] == {"effort": "medium"}
+
+
+# ---- the bill per task (the Jev Engineering article: "track the bill per completed task") ----
+
+def test_the_run_log_ends_with_the_bill(tmp_path: Path) -> None:
+    from cc_buddy_bridge import jev
+
+    usage = {"input_tokens": 1_000_000, "input_tokens_details": {"cached_tokens": 200_000}, "output_tokens": 100_000}
+    client = FakeClient([_response("r1", _message("ok"), usage=usage)])
+    a, _ = _agent(client, FakeWorker(), tmp_path, clock=iter([1.0] * 3 + [7.5] * 40).__next__)
+    jev.METER.add({"usage": {"input_tokens": 500}}, 230.0)          # a Jev call made before the run: not billed
+    run_task = a.run("x")
+    asyncio.run(run_task)
+    lines = [json.loads(ln) for ln in a.run_log.read_text().splitlines()]
+    assert "bill" in lines[-1] and "final" in lines[-2]
+    bill = lines[-1]["bill"]
+    assert bill["model"] == "gpt-6-astra" and bill["calls"] == 1
+    assert bill["tokens"] == {"in": 1_000_000, "cached": 200_000, "out": 100_000}
+    assert abs(bill["usd"] - 13.2) < 1e-6 and bill["jev"] == {"calls": 0, "input_tokens": 0, "ms": 0, "errors": 0, "usd": 0.0}
+    assert abs(bill["total_usd"] - 13.2) < 1e-6 and bill["secs"] == 6.5
+    # a model the table does not know: tokens yes, dollars null, never a guess
+    cfg = AgentConfig(runs_dir=tmp_path / "runs2", model="gpt-9-mystery", reflexes=False, lane_first=False)
+    b, _ = _agent(FakeClient([_response("r1", _message("ok"), usage=usage)]), FakeWorker(), tmp_path, config=cfg)
+    asyncio.run(b.run("y"))
+    bill = json.loads(b.run_log.read_text().splitlines()[-1])["bill"]
+    assert bill["usd"] is None and bill["total_usd"] is None and bill["tokens"]["in"] == 1_000_000
+
+
+def test_jev_calls_during_a_run_are_billed(tmp_path: Path) -> None:
+    from cc_buddy_bridge import jev
+
+    client = FakeClient([_response("r1", _message("ok"), usage={"input_tokens": 10, "output_tokens": 1})])
+    a, _ = _agent(client, FakeWorker(), tmp_path)
+
+    class Worker(FakeWorker):
+        async def start(self) -> dict:
+            jev.METER.add({"usage": {"input_tokens": 3000}}, 240.0)      # a step asked mid-run
+            jev.METER.add({}, 3000.0, error=True)                        # and one that failed
+            return await super().start()
+
+    a.worker_factory = lambda: Worker()
+    asyncio.run(a.run("x"))
+    bill = json.loads(a.run_log.read_text().splitlines()[-1])["bill"]
+    assert bill["jev"]["calls"] == 2 and bill["jev"]["input_tokens"] == 3000 and bill["jev"]["errors"] == 1
+    assert abs(bill["jev"]["usd"] - 3000 * 0.042 / 1_000_000) < 1e-12 and bill["jev"]["ms"] == 3240
+
+
+def test_bill_report_sums_the_runs(tmp_path: Path) -> None:
+    import sys
+
+    sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "tools"))
+    import bill_report
+
+    runs = tmp_path / "runs"
+    runs.mkdir()
+    (runs / "2026-09-21-100000.jsonl").write_text(
+        json.dumps({"goal": "open mail"}) + "\n" + json.dumps({"turn": 1}) + "\n"
+        + json.dumps({"bill": {"model": "gpt-6-astra", "calls": 2, "tokens": {"in": 100, "cached": 20, "out": 10},
+                               "usd": 0.0013, "jev": {"calls": 3, "input_tokens": 900, "ms": 700, "errors": 0, "usd": 0.0000378},
+                               "total_usd": 0.0013378, "secs": 4.2}}) + "\n")
+    (runs / "2026-09-21-110000.jsonl").write_text(
+        json.dumps({"goal": "old run"}) + "\n" + json.dumps({"final": "done"}) + "\n")          # no bill: older log
+    (runs / "2026-09-21-120000.jsonl").write_text(
+        json.dumps({"goal": "mystery"}) + "\n" + json.dumps({"bill": {"model": "gpt-9", "calls": 1, "tokens": {"in": 5, "cached": 0, "out": 1},
+                                                                       "usd": None, "jev": {"calls": 0, "input_tokens": 0, "ms": 0, "errors": 0, "usd": 0.0},
+                                                                       "total_usd": None, "secs": 1.0}}) + "\n"
+        + "not json\n")
+    rows, without = bill_report.read_bills(runs)
+    assert [r["goal"] for r in rows] == ["open mail", "mystery"] and without == 1
+    total = bill_report.summarize(rows)
+    assert total["runs"] == 2 and total["unpriced"] == 1 and abs(total["usd"] - 0.0013) < 1e-9
+    assert total["model_in"] == 105 and total["jev_calls"] == 3 and total["jev_tokens"] == 900 and total["secs"] == 5.2
+    assert bill_report.main(["--runs", str(runs)]) == 0
+    empty = tmp_path / "empty"
+    empty.mkdir()
+    assert bill_report.main(["--runs", str(empty)]) == 0                # says "no bill lines", never $0
+    assert bill_report.main(["--runs", str(tmp_path / "missing")]) == 1

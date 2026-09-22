@@ -254,7 +254,13 @@ asking, as in bypass mode. It is **off by
 default** and needs a switch, a bot token and an owner id together. With `CC_BUDDY_RECORDS=1` the text brain
 also gets a memory layer (`records.py`): typed, git-tracked markdown records the owner
 can edit, a profile one-pager, and a read-only keyword search — written only by a nightly
-reconcile, never by the agent. See [text buddy through Telegram](docs/stackchan/telegram.md).
+reconcile, never by the agent. With `CC_BUDDY_COMPOSIO=1` the owner's apps (Gmail read only,
+the calendar writable, Drive and the rest asked first) are reachable by API through Composio
+(`composio_tools.py`), and with `CC_BUDDY_SECOND_BRAIN=1` a text becomes a note in a local
+markdown vault Obsidian opens (`second_brain.py`, [docs](docs/stackchan/second-brain.md)).
+Every brain that searches the web does it through OpenRouter's Exa engine (`websearch.py`).
+While the Claude relay is on, Jev judges each relayed shell command for risk before it runs
+(`typed_ask.py`; shadow by default). See [text buddy through Telegram](docs/stackchan/telegram.md).
 
 A [local Laya expression-tuning study](docs/stackchan/laya-emotion/README.md)
 tests context-sensitive eyes and chirps. It includes trained experimental weights,

@@ -84,6 +84,11 @@ browser = ["playwright>=1.63,<2"]
 # `pip install -e ".[fast]"` and copy the checkpoint to
 # ~/.config/cc-buddy-bridge/models/laya-multilingual-mlx (see docs/stackchan/voice.md).
 fast = ["laya-mlx>=0.1.0,<0.2; sys_platform == 'darwin' and platform_machine == 'arm64'"]
+# Composio, the text buddy's "app hands" (composio_tools.py): one session per owner, its meta tools beside
+# buddy's own in the Telegram brain. 0.22.0 current per PyPI, 2026-09-21 (composio-core is deprecated; do not
+# use it); composio-openai 0.22.0 shapes the tools for the Responses API. Imported lazily; the daemon runs
+# without it and with CC_BUDDY_COMPOSIO off. Install with `pip install -e ".[composio]"`.
+composio = ["composio>=0.22,<0.23", "composio-openai>=0.22,<0.23"]
 
 [project.scripts]
 cc-buddy-bridge = "cc_buddy_bridge.cli:main"

@@ -44,10 +44,11 @@ import subprocess
 import tempfile
 import textwrap
 import time
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Awaitable, Callable, Optional
+from typing import Any, Awaitable, Callable, Collection, Optional, Sequence
 
+from . import composio_tools, second_brain, websearch
 from .computer_agent import AgentEvent
 from .records import MEMORY_TOOLS
 
@@ -247,11 +248,34 @@ TOOLS: list[dict[str, Any]] = [
                        "properties": {"question": {"type": "string",
                                                    "description": "The whole question, self-contained."}}},
     },
-    {"type": "web_search"},
 ]
 TOOL_NAMES = ("start_task", "steer_task", "stop_task", "take_photo", "screenshot", "send_file", "list_files",
               "look", "look_around", "find", "move_head", "go_explore", "set_sound", "remember", "take_notes",
-              "think_hard", "memory_search", "memory_get")
+              "think_hard", "memory_search", "memory_get", websearch.TOOL_NAME)
+
+# Composio (composio_tools.py), when it is on: the owner's apps by API, in seconds, where a Mac task takes
+# minutes. Appended to the instructions only while the session is up, so the model never hears of tools it
+# does not have.
+APPS_BLOCK = """
+
+Your owner's apps (Gmail, Google Calendar, Google Drive and more) are reachable through the COMPOSIO tools, and
+a job inside one of them is done there, not on the Mac's screen: "any mail from Sam today", "what's on my
+calendar tomorrow", "put lunch with Ana on Friday at noon", "find the budget sheet in my Drive". First
+COMPOSIO_SEARCH_TOOLS with the use case, then COMPOSIO_MULTI_EXECUTE_TOOL with the exact slugs and arguments
+it returned; pass the session_id it gives you to every later call. Gmail is read only here: you may read and
+search mail, never send, reply, label, archive or delete; say so if asked. The calendar may be changed. Some
+actions are asked of the owner first in this chat by code; you do not need to ask twice. If an app is not
+connected, COMPOSIO_MANAGE_CONNECTIONS returns a sign-in link: send the owner that link as it is. Summarise
+what came back in your own few words; never paste a raw record."""
+
+
+def tools_for(config: TelegramConfig, profile: str = "", extra: Sequence[dict[str, Any]] = (),
+              vault: bool = False) -> list[dict[str, Any]]:
+    """The tools of one turn: buddy's own, the memory tools with a profile, the web search the engine
+    calls for (websearch.tools_for: Exa through OpenRouter, or the hosted one), the second brain's tools
+    when the vault is on, and the app tools lent."""
+    return (TOOLS + (MEMORY_TOOLS if profile else []) + websearch.tools_for(config.search)
+            + (list(second_brain.SECOND_BRAIN_TOOLS) if vault else []) + list(extra))
 # A request that asks to SEE something: its task's result comes with the screen it left. Only then — the
 # owner wants a picture when they ask for one, not with every result (owner, 2026-09-21).
 # The whole message is a request for the screen: answered by code, no model call, mid-task or not — like
@@ -281,6 +305,7 @@ class TelegramConfig:
     ask_timeout_secs: float = DEFAULT_ASK_TIMEOUT_SECS
     idle_close_secs: float = DEFAULT_IDLE_CLOSE_SECS
     ask_permissions: bool = False          # the phone asks about Claude Code's tool calls: off (owner, 2026-09-21)
+    search: websearch.SearchConfig = field(default_factory=websearch.SearchConfig)   # Exa via OpenRouter, or hosted
 
     def __repr__(self) -> str:       # a config can end up in a log line or a traceback: never the token
         return (f"TelegramConfig(enabled={self.enabled}, token={'set' if self.token else 'unset'}, "
@@ -322,7 +347,7 @@ def configured(environ: Any = None) -> TelegramConfig:
                                            ("CC_BUDDY_TELEGRAM_OWNER", owners)) if not have]
         log.warning("telegram: asked for (CC_BUDDY_TELEGRAM=1) but off: %s not set", " and ".join(missing))
     return TelegramConfig(enabled=enabled, token=token, owner_ids=owners, model=model, effort=effort,
-                          ask_permissions=ask)
+                          ask_permissions=ask, search=websearch.configured(env))
 
 
 # ---- who may speak ----------------------------------------------------------------------------
@@ -420,7 +445,7 @@ def chunks(text: str, limit: int = MAX_MESSAGE_CHARS) -> list[str]:
 # ---- the text brain ---------------------------------------------------------------------------
 
 def request(config: TelegramConfig, items: list[dict[str, Any]], memory: str = "",
-            profile: str = "") -> dict[str, Any]:
+            profile: str = "", app_tools: Sequence[dict[str, Any]] = (), vault: bool = False) -> dict[str, Any]:
     """The exact Responses body. Stateless: ``store=False`` and the turn's own items sent back each round
     (with the model's reasoning as ``encrypted_content``), so nothing the owner texted is kept on OpenAI's
     side and no ``previous_response_id`` is needed. With a ``profile`` (records.py) the one-pager is in the
@@ -430,11 +455,15 @@ def request(config: TelegramConfig, items: list[dict[str, Any]], memory: str = "
     instructions = INSTRUCTIONS + memory_block(memory)
     if profile:
         instructions += PROFILE_HEADER + "\n" + profile
+    if vault:
+        instructions += "\n\n" + second_brain.INSTRUCTIONS_BLOCK
+    if app_tools:
+        instructions += APPS_BLOCK
     return {
         "model": config.model,
         "instructions": instructions,
         "input": items,
-        "tools": TOOLS + MEMORY_TOOLS if profile else TOOLS,
+        "tools": tools_for(config, profile, app_tools, vault),
         "tool_choice": "auto",
         "parallel_tool_calls": False,
         "reasoning": {"effort": config.effort},
@@ -450,8 +479,9 @@ def message_item(role: str, text: str) -> dict[str, Any]:
     return {"type": "message", "role": role, "content": [{"type": kind, "text": text}]}
 
 
-def parse_response(response: Any) -> tuple[list[dict[str, Any]], str, list[dict[str, Any]]]:
-    """→ (function calls, text, items to send back next round). Raises on a reply the loop cannot read."""
+def parse_response(response: Any, allowed: Collection[str] = ()) -> tuple[list[dict[str, Any]], str, list[dict[str, Any]]]:
+    """→ (function calls, text, items to send back next round). Raises on a reply the loop cannot read.
+    `allowed` names the lent tools (the apps') this turn offered beside TOOL_NAMES."""
     if not isinstance(response, dict) or not isinstance(response.get("output"), list):
         raise RuntimeError("malformed Responses API reply")
     calls: list[dict[str, Any]] = []
@@ -463,7 +493,7 @@ def parse_response(response: Any) -> tuple[list[dict[str, Any]], str, list[dict[
         kind = item.get("type")
         if kind == "function_call":
             name = item.get("name")
-            if name not in TOOL_NAMES:
+            if name not in TOOL_NAMES and name not in allowed:
                 raise RuntimeError(f"unexpected function call {name!r}")
             try:
                 args = json.loads(item.get("arguments") or "{}")
@@ -694,6 +724,10 @@ class TelegramInlet:
     * ``on_state``      — the board's phase, for a texted task
     * ``on_closed``     — turns -> None: the quiet chat goes to conversation memory
     * ``records``       — records.RecordsReader: the profile and the two read-only memory tools, or None
+    * ``apps``          — composio_tools.ComposioBridge: the owner's apps by API (Gmail read only, the
+                          calendar writable, everything else asked first), or None
+    * ``vault``         — second_brain.VaultConfig: the owner's own notes, todos and journals as a local
+                          markdown vault (PARA+), captured from this chat and read back, or None
     * ``screen``        — () -> Path | None: a JPEG of the screen (capture_screen); tests hand in a fake
     * ``scene``, ``head`` — the daemon's SceneWatcher and Head, for look / look_around / find / move_head
     * ``on_explore``    — () -> None: "go explore" (daemon._request_explore)
@@ -723,7 +757,7 @@ class TelegramInlet:
                  thinker: Optional[Callable[[str], Awaitable[dict[str, Any]]]] = None,
                  on_state: Callable[[str], None] = lambda state: None,
                  on_closed: Optional[Callable[[list[tuple[str, str]]], None]] = None,
-                 records: Any = None,
+                 records: Any = None, apps: Any = None, vault: Any = None,
                  screen: Callable[[], Optional[Path]] = capture_screen,
                  scene: Any = None, head: Any = None,
                  on_explore: Optional[Callable[[], Any]] = None,
@@ -747,6 +781,9 @@ class TelegramInlet:
         self._on_state = on_state
         self._on_closed = on_closed
         self._records = records
+        self._apps = apps                                  # composio_tools.ComposioBridge, or None
+        self._app_policy = composio_tools.toolkit_policy()
+        self._vault = vault                                # second_brain.VaultConfig (enabled), or None
         self._screen = screen
         self._scene, self._head = scene, head
         self._on_explore, self._on_sound, self._on_star, self._on_caption = on_explore, on_sound, on_star, on_caption
@@ -1052,10 +1089,14 @@ class TelegramInlet:
         memory = self._memory()
         # The profile is a file the owner may edit between two texts: read per turn, never cached.
         prof = self._records.profile() if self._records is not None else ""
+        app_tools = self._app_tools()
+        app_names = frozenset(t["name"] for t in app_tools)
         text = ""
         for round_no in range(1, MAX_TOOL_ROUNDS + 1):
-            response = await self._create(request(self.config, items, memory, profile=prof))
-            calls, text, carry = parse_response(response)
+            response = await self._create(request(self.config, items, memory, profile=prof, app_tools=app_tools,
+                                                  vault=self._vault is not None))
+            calls, text, carry = parse_response(response, app_names | (set(second_brain.SECOND_BRAIN_TOOL_NAMES)
+                                                                       if self._vault is not None else set()))
             if not calls:
                 return text, round_no
             items = items + carry
@@ -1100,12 +1141,45 @@ class TelegramInlet:
                 if name == "memory_search":
                     return await asyncio.to_thread(self._records.search, str(args.get("query") or ""))
                 return await asyncio.to_thread(self._records.get, str(args.get("id") or ""))
+            if name == websearch.TOOL_NAME:
+                # Exa through OpenRouter (websearch.py), off the loop: a second or two of network
+                return await asyncio.to_thread(websearch.search, str(args.get("query") or ""), self.config.search)
+            if self._apps is not None and name in self._apps.names:
+                return await self._app_tool(name, args, chat_id)
+            if name in second_brain.SECOND_BRAIN_TOOL_NAMES:
+                if self._vault is None:
+                    return {"ok": False, "reason": "the second brain is off on this computer (CC_BUDDY_SECOND_BRAIN)"}
+                return await asyncio.to_thread(second_brain.dispatch, self._vault.root, name, args)
             return await self._think_hard(str(args.get("question") or "").strip())
         except asyncio.CancelledError:
             raise
         except Exception:  # noqa: BLE001
             log.exception("telegram: %s failed", name)
             return {"ok": False, "reason": f"{name} failed"}
+
+    def _app_tools(self) -> list[dict[str, Any]]:
+        """The apps' tools for this turn: none until the Composio session is up (it starts on a thread)."""
+        if self._apps is None or not getattr(self._apps, "started", False):
+            return []
+        try:
+            return list(self._apps.tools())
+        except Exception as e:  # noqa: BLE001 — a session that cannot list its tools offers none this turn
+            log.warning("telegram: the apps' tools are unavailable (%s)", type(e).__name__)
+            return []
+
+    async def _app_tool(self, name: str, args: dict[str, Any], chat_id: int) -> dict[str, Any]:
+        """One Composio call under the owner's policy (composio_tools.decide): a reading call runs; a writing
+        call is refused (Gmail), runs (the calendar) or is the owner's yes/no in this chat first (the rest)."""
+        decision = composio_tools.decide(name, args, self._app_policy)
+        if decision.action == "refuse":
+            log.info("telegram: apps: refused %s (%s)", name, ", ".join(decision.slugs))
+            return {"ok": False, "reason": decision.why}
+        if decision.action == "ask":
+            question = composio_tools.describe_for_confirmation(name, args) + "\nyes / no?"
+            answer = (await self._ask_user(question, chat_id)).strip().lower()
+            if not answer.startswith(("yes", "y", "ok", "sure", "go", "do it", "allow", "approve")):
+                return {"ok": False, "reason": "the owner said no; do not retry it"}
+        return await asyncio.to_thread(self._apps.execute, name, args)
 
     def _start_task(self, goal: str, chat_id: int) -> dict[str, Any]:
         if not goal:

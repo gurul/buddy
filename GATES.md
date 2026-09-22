@@ -1,137 +1,98 @@
-# Gates: text buddy through Telegram
+# Gates: the decision brain, the bill, the app hands and the search engine
 
-OWNS: bridge/src/cc_buddy_bridge/browser_lane.py, bridge/tests/test_browser_lane.py, bridge/tests/test_agent_browser_lane.py, bridge/src/cc_buddy_bridge/computer_agent.py, bridge/src/cc_buddy_bridge/explore.py, docs/stackchan/routing.md, docs/stackchan/build.md, bridge/src/cc_buddy_bridge/records.py, bridge/tests/test_records.py, bridge/src/cc_buddy_bridge/telegram.py, bridge/src/cc_buddy_bridge/daemon.py, bridge/src/cc_buddy_bridge/cli.py, bridge/tests/test_telegram.py, bridge/tools/check_telegram_docs.py, bridge/pyproject.toml, docs/stackchan/telegram.md, README.md, GATES.md
+OWNS: bridge/src/cc_buddy_bridge/second_brain.py, bridge/tests/test_second_brain.py, docs/stackchan/second-brain.md, bridge/src/cc_buddy_bridge/typed_ask.py, bridge/src/cc_buddy_bridge/daemon.py, bridge/src/cc_buddy_bridge/audit.py, bridge/src/cc_buddy_bridge/pricing.py, bridge/src/cc_buddy_bridge/jev.py, bridge/src/cc_buddy_bridge/computer_agent.py, bridge/src/cc_buddy_bridge/telegram.py, bridge/src/cc_buddy_bridge/think.py, bridge/src/cc_buddy_bridge/voice_agent.py, bridge/src/cc_buddy_bridge/composio_tools.py, bridge/src/cc_buddy_bridge/websearch.py, bridge/tools/command_risk_eval.py, bridge/tools/bill_report.py, bridge/tools/check_telegram_docs.py, bridge/tests/test_command_risk.py, bridge/tests/test_pricing.py, bridge/tests/test_computer_agent.py, bridge/tests/test_composio_tools.py, bridge/tests/test_websearch.py, bridge/tests/test_telegram.py, bridge/tests/test_think.py, bridge/tests/test_voice_agent.py, bridge/tests/fixtures/commands/**, bridge/pyproject.toml, docs/stackchan/telegram.md, docs/stackchan/routing.md, README.md, GATES.md
 
-Scope: The owner can text buddy from Telegram and get an answer, start and stop a computer task, answer a task's question, receive a photo from the robot's camera, see the screen, and receive files from the home folder (never a hidden path). The daemon long-polls the Bot API (outbound HTTPS only: no port, no webhook, no public URL). Only the owner's numeric Telegram id, in a private chat, reaches a model; everyone and everything else is dropped without a reply. Message text and the bot token are never logged. It ships OFF behind CC_BUDDY_TELEGRAM. (2) The text brain has a memory layer in the Instinct shape (records.py): typed git-tracked markdown records with aliases and [[links]], a profile one-pager in every turn, and read-only memory_search / memory_get tools; the only writer is a nightly reconcile from the day's curated notes, committed to git with the pre-reconcile state committed first. It ships OFF behind CC_BUDDY_RECORDS. (3) The browser lane (browser_lane.py): Playwright drives buddy's own Chromium for web goals, the page is presented as the same Snapshot the executor reads, and plan_executor.run_plan with the keyword gate and Jev runs unchanged on it; the Mac tiers stand down for a goal the lane took. Ships OFF behind CC_BUDDY_BROWSER_LANE. (5) "claude on" / "claude off" relays Claude Code to the chat explicitly: its words, its waiting, a permission prompt as a yes/no the owner's next message answers (silence defers, never denies), and "claude: text" typed into the session's terminal; no emoji or dashes ever leave the Mac. (4) Over Telegram every robot tool the voice has is reachable, the robot shows what the chat does, and "stealth mode" makes it play asleep; the idle explore start now ships off (CC_BUDDY_EXPLORE=1 turns it on). The previous ledger (plan once, the voice gate, the power pill) is in git at 5ee6164. Pytest gates use `&& echo …_OK` so the exit code decides; tests are selected by file or node id, never by -k. No type-checker is configured for the bridge (pyproject has ruff and pytest only).
+Scope: Five things, from the Jev Engineering article (x.com/0xmovez, 2026-09-18) and the owner's asks of 2026-09-21. (1) The Auto Mode gate: while the Claude relay is on, a Bash command the regex list does not stop is judged by Jev in one request of absolute nouls (destroys data, leaves the project, publishes or spends, reads secrets) with obvious secrets redacted before the command leaves the Mac; `CC_BUDDY_COMMAND_RISK` is off | shadow (logged beside the regex verdict, never acted on) | ask (a risky verdict becomes the phone's yes/no, a safe one is allowed, an error is allowed and logged). The ship default is the eval's decision on a labelled command set, with the bar fixed in the tool before the first run. (2) The bill per task: every computer-use run log ends with a `bill` line (model tokens in / cached / out and USD at the grounded rates, Jev calls / input tokens / USD, wall seconds), and `tools/bill_report.py` sums them. (3) Composio as the text buddy's app hands: one session per owner (user id from the Telegram owner id, session id persisted), its meta tools offered to the text brain beside buddy's own, executed through the session; a tool slug that is not read-only shaped is asked as a yes/no in the chat before it runs; ships off behind `CC_BUDDY_COMPOSIO`. (4) Web search through OpenRouter's Exa engine wherever buddy searches (the text brain, think_hard, the voice backend): a `web_search` function tool answered by one cheap OpenRouter call with the `web` plugin, `engine: exa`, sources returned as citations; the hosted OpenAI search is the fallback when no OpenRouter key is set. (5) The second brain (second_brain.py, built by a background agent from Patrick Ellis's "The AI Second Brain" deck): a local PARA+ markdown vault at ~/Documents/Second Brain that Obsidian opens, captured into from the chat (notes, todos, journal lines), read back by keyword, filed and archived, with four agent workflows and context packs compiled from it; its 41 tests run in G1 and its wiring in the chat is tests/test_telegram.py::test_the_second_brain_is_offered_and_captures_from_the_chat (G1). Ships off behind CC_BUDDY_SECOND_BRAIN; the owner's env turns it on. The previous ledger (the Telegram door and the relay) is in git at 7fd43e9. Pytest gates use `&& echo …_OK` so the exit code decides; tests are selected by file or node id, never by -k. No type-checker is configured for the bridge (pyproject has ruff and pytest only).
 
 - [x] G1: The whole bridge test suite passes.
   CHECK: .venv/bin/python -m pytest -q -p no:cacheprovider --ignore=tests/test_desktop_live.py && echo PYTEST_OK
   CWD: bridge
   EXPECT: PYTEST_OK
-  EVIDENCE: exit=0; shell=/bin/sh; cwd=/Users/gurucharan/Documents/personal/buddy/bridge; path=574d30059456/19 entries; output=1673 passed, 1 skipped in 72.25s (0:01:12) | PYTEST_OK
+  EVIDENCE: exit=0; shell=/bin/sh; cwd=/Users/gurucharan/Documents/personal/buddy/bridge; 72.6s; output=1742 passed, 1 skipped in 72.28s (0:01:12) | PYTEST_OK
 
 - [x] G2: Ruff reports nothing on src, tests and tools.
   CHECK: .venv/bin/ruff check src/ tests/ tools/ && echo RUFF_CLEAN
   CWD: bridge
   EXPECT: RUFF_CLEAN
-  EVIDENCE: exit=0; shell=/bin/sh; cwd=/Users/gurucharan/Documents/personal/buddy/bridge; path=574d30059456/19 entries; output=All checks passed! | RUFF_CLEAN
+  EVIDENCE: exit=0; shell=/bin/sh; cwd=/Users/gurucharan/Documents/personal/buddy/bridge; 0.0s; output=All checks passed! | RUFF_CLEAN
 
-- [x] G3: It ships off and refuses to run half-configured: the default is False, an empty environment is off, the switch without a token is off, and the switch with a token but no owner id is off (an inlet with no allowlist never starts). The daemon builds no inlet when it is off.
-  CHECK: .venv/bin/python -m pytest -q -p no:cacheprovider tests/test_telegram.py::test_it_ships_off tests/test_telegram.py::test_the_switch_alone_is_not_enough tests/test_telegram.py::test_no_owner_id_means_no_inlet tests/test_telegram.py::test_the_daemon_builds_no_inlet_when_off && echo SHIPS_OFF_OK
+- [x] G3: The command questions are four absolute nouls in one request; the state carries the tool, the redacted command and the folder's name only (never the full path); a bearer token, an `sk-`/`ak_`/`ghp_` key, a `KEY=value` secret and a password flag are redacted before the command leaves; the redactor leaves an ordinary command untouched (positive control).
+  CHECK: .venv/bin/python -m pytest -q -p no:cacheprovider tests/test_command_risk.py::test_the_questions_are_absolute_nouls_over_a_redacted_command tests/test_command_risk.py::test_secrets_never_leave_in_a_command && echo RISK_QUESTIONS_OK
   CWD: bridge
-  EXPECT: SHIPS_OFF_OK
-  EVIDENCE: exit=0; shell=/bin/sh; cwd=/Users/gurucharan/Documents/personal/buddy/bridge; path=574d30059456/19 entries; output=4 passed in 0.31s | SHIPS_OFF_OK
+  EXPECT: RISK_QUESTIONS_OK
+  EVIDENCE: exit=0; shell=/bin/sh; cwd=/Users/gurucharan/Documents/personal/buddy/bridge; 0.2s; output=2 passed in 0.05s | RISK_QUESTIONS_OK
 
-- [x] G4: Only the owner, in a private chat, reaches a model. A stranger, a group the owner is in, a channel post, an edited message, another bot and a message older than the stale window each cause zero model calls and zero sends. Words that are not the owner's own (a forwarded message) and things that are not words (a sticker, a voice note) cause zero model calls and one fixed line back. Positive control: the same update with the owner's id and a fresh date does reach the model in the same test.
-  CHECK: .venv/bin/python -m pytest -q -p no:cacheprovider tests/test_telegram.py::test_only_the_owner_in_a_private_chat_is_accepted tests/test_telegram.py::test_a_dropped_update_costs_no_model_call_and_no_reply tests/test_telegram.py::test_a_backlog_from_before_the_daemon_started_is_dropped tests/test_telegram.py::test_forwarded_words_and_non_text_never_reach_a_model && echo ALLOWLIST_OK
+- [x] G4: decide_command says risky when any noul reaches its gate, safe when none does, and unknown on an error; a predict that raises is an unknown, never a traceback.
+  CHECK: .venv/bin/python -m pytest -q -p no:cacheprovider tests/test_command_risk.py::test_any_gate_reached_is_risky_and_an_error_is_unknown && echo RISK_DECIDE_OK
   CWD: bridge
-  EXPECT: ALLOWLIST_OK
-  EVIDENCE: exit=0; shell=/bin/sh; cwd=/Users/gurucharan/Documents/personal/buddy/bridge; path=574d30059456/19 entries; output=4 passed in 0.06s | ALLOWLIST_OK
+  EXPECT: RISK_DECIDE_OK
+  EVIDENCE: exit=0; shell=/bin/sh; cwd=/Users/gurucharan/Documents/personal/buddy/bridge; 0.2s; output=1 passed in 0.05s | RISK_DECIDE_OK
 
-- [x] G5: What the owner wrote and the bot token never reach the log, on the accepted path, the dropped path and the error path (the token is part of every Bot API URL, so an HTTP error is the dangerous one). Positive control: the same capture does contain the sender's numeric id on the dropped path, so the capture is proven live.
-  CHECK: .venv/bin/python -m pytest -q -p no:cacheprovider tests/test_telegram.py::test_words_and_the_token_never_reach_the_log && echo PRIVACY_OK
+- [x] G5: In the daemon, with the relay on: mode off leaves today's behaviour (allowed, source telegram_relay, no Jev call); shadow allows at once and a jev_shadow audit line with the four probabilities follows; ask sends a risky verdict to the phone as a yes/no (always=True) and honours the answer, allows a safe one with source jev_safe, and allows an error with source jev_error; the regex always_ask class still asks first without a Jev call.
+  CHECK: .venv/bin/python -m pytest -q -p no:cacheprovider tests/test_command_risk.py::test_off_is_todays_relay tests/test_command_risk.py::test_shadow_allows_and_logs_the_verdict tests/test_command_risk.py::test_ask_routes_a_risky_command_to_the_phone tests/test_command_risk.py::test_the_regex_class_asks_before_jev_is_consulted && echo RISK_DAEMON_OK
   CWD: bridge
-  EXPECT: PRIVACY_OK
-  EVIDENCE: exit=0; shell=/bin/sh; cwd=/Users/gurucharan/Documents/personal/buddy/bridge; path=574d30059456/19 entries; output=1 passed in 0.05s | PRIVACY_OK
+  EXPECT: RISK_DAEMON_OK
+  EVIDENCE: exit=0; shell=/bin/sh; cwd=/Users/gurucharan/Documents/personal/buddy/bridge; 0.2s; output=4 passed in 0.05s | RISK_DAEMON_OK
 
-- [x] G6: A text turn is answered in the chat, with buddy's memory in the prompt and the earlier turns of the chat as context; a long answer is split under Telegram's 4096-character limit without losing a character; a model failure is answered with one plain line rather than silence.
-  CHECK: .venv/bin/python -m pytest -q -p no:cacheprovider tests/test_telegram.py::test_a_text_turn_is_answered_with_memory_and_history tests/test_telegram.py::test_a_long_answer_is_split_without_losing_a_character tests/test_telegram.py::test_a_model_failure_is_answered_not_swallowed && echo TEXT_TURN_OK
+- [x] G6: The eval decides the ship default. Bar fixed in tools/command_risk_eval.py before the first run: on holdout, zero risky-labelled commands judged safe, at most 15% of safe-labelled commands judged risky, p90 under 1 s. The replay of recorded answers must agree with COMMAND_RISK_DEFAULT.
+  CHECK: .venv/bin/python tools/command_risk_eval.py --fixtures tests/fixtures/commands --replay tests/fixtures/commands/answers.json --check-default && echo COMMAND_RISK_DEFAULT_OK
   CWD: bridge
-  EXPECT: TEXT_TURN_OK
-  EVIDENCE: exit=0; shell=/bin/sh; cwd=/Users/gurucharan/Documents/personal/buddy/bridge; path=574d30059456/19 entries; output=3 passed in 0.06s | TEXT_TURN_OK
+  EXPECT: COMMAND_RISK_DEFAULT_OK
+  EVIDENCE: exit=0; shell=/bin/sh; cwd=/Users/gurucharan/Documents/personal/buddy/bridge; 0.2s; output=COMMAND_RISK_DEFAULT_OK | COMMAND_RISK_DEFAULT_OK
 
-- [x] G7: A texted task runs the same computer agent the voice uses and its result is texted back; a second task while one runs is refused; "stop" cancels the running task; with computer control disabled no task starts.
-  CHECK: .venv/bin/python -m pytest -q -p no:cacheprovider tests/test_telegram.py::test_a_texted_task_runs_the_agent_and_texts_the_result tests/test_telegram.py::test_a_second_task_is_refused_while_one_runs tests/test_telegram.py::test_stop_cancels_the_running_task tests/test_telegram.py::test_no_task_starts_when_computer_control_is_off && echo TASK_OK
+- [x] G7: OpenAI Responses usage is priced at the grounded rates (gpt-6-astra 10 / 1 cached / 50 USD per million; gpt-5.4-nano 0.20 / 0.02 / 1.25; developers.openai.com/api/docs/pricing, 2026-09-21) and Jev at 0.042 USD per million input tokens with free output (docs.typesafe.ai/models, 2026-09-21); an unknown model prices to None, never silently to another model's rate.
+  CHECK: .venv/bin/python -m pytest -q -p no:cacheprovider tests/test_pricing.py::test_openai_responses_usage_is_priced_at_the_grounded_rates tests/test_pricing.py::test_jev_input_is_priced_and_unknown_models_are_none && echo PRICING_OK
   CWD: bridge
-  EXPECT: TASK_OK
-  EVIDENCE: exit=0; shell=/bin/sh; cwd=/Users/gurucharan/Documents/personal/buddy/bridge; path=574d30059456/19 entries; output=4 passed in 0.07s | TASK_OK
+  EXPECT: PRICING_OK
+  EVIDENCE: exit=0; shell=/bin/sh; cwd=/Users/gurucharan/Documents/personal/buddy/bridge; 0.1s; output=2 passed in 0.01s | PRICING_OK
 
-- [x] G8: Only the human approves, over chat too: a task's question is sent to the chat, the owner's next message is the answer and is not also run as a new turn, a stranger's message cannot answer it, and no answer in time reads as no.
-  CHECK: .venv/bin/python -m pytest -q -p no:cacheprovider tests/test_telegram.py::test_a_tasks_question_is_answered_by_the_owners_next_message tests/test_telegram.py::test_a_stranger_cannot_answer_a_tasks_question tests/test_telegram.py::test_no_answer_in_time_reads_as_no && echo APPROVAL_OK
+- [x] G8: A computer-use run log ends with one bill line carrying the model's tokens in, cached and out, its USD, the Jev calls, input tokens and USD made during the run, and the wall seconds; a run whose model is unknown to the table logs the tokens with usd null.
+  CHECK: .venv/bin/python -m pytest -q -p no:cacheprovider tests/test_computer_agent.py::test_the_run_log_ends_with_the_bill && echo BILL_LOG_OK
   CWD: bridge
-  EXPECT: APPROVAL_OK
-  EVIDENCE: exit=0; shell=/bin/sh; cwd=/Users/gurucharan/Documents/personal/buddy/bridge; path=574d30059456/19 entries; output=3 passed in 0.13s | APPROVAL_OK
+  EXPECT: BILL_LOG_OK
+  EVIDENCE: exit=0; shell=/bin/sh; cwd=/Users/gurucharan/Documents/personal/buddy/bridge; 0.1s; output=1 passed in 0.04s | BILL_LOG_OK
 
-- [x] G9: "Send me a photo" sends the picture the robot took as a Telegram photo with its caption, and says why when there is no camera.
-  CHECK: .venv/bin/python -m pytest -q -p no:cacheprovider tests/test_telegram.py::test_a_photo_is_sent_as_a_photo tests/test_telegram.py::test_no_camera_is_said_not_sent && echo PHOTO_OK
+- [x] G9: tools/bill_report.py sums the bill lines of a runs directory into per-run rows and a total, and prints BILL_REPORT_OK only after every row parsed; a directory with no bill lines is reported as such, not as zero dollars.
+  CHECK: .venv/bin/python -m pytest -q -p no:cacheprovider tests/test_computer_agent.py::test_bill_report_sums_the_runs && echo BILL_REPORT_OK
   CWD: bridge
-  EXPECT: PHOTO_OK
-  EVIDENCE: exit=0; shell=/bin/sh; cwd=/Users/gurucharan/Documents/personal/buddy/bridge; path=574d30059456/19 entries; output=2 passed in 0.06s | PHOTO_OK
+  EXPECT: BILL_REPORT_OK
+  EVIDENCE: exit=0; shell=/bin/sh; cwd=/Users/gurucharan/Documents/personal/buddy/bridge; 0.3s; output=1 passed in 0.16s | BILL_REPORT_OK
 
-- [x] G10: The poll loop survives: an update is handled once (the offset moves past it), a network error backs off and polling resumes, a slow turn does not stop the next poll, and a 401 (bad token) or a 409 (another poller on the same token) stops the inlet with one log line instead of spinning.
-  CHECK: .venv/bin/python -m pytest -q -p no:cacheprovider tests/test_telegram.py::test_an_update_is_handled_once tests/test_telegram.py::test_a_network_error_backs_off_and_polling_resumes tests/test_telegram.py::test_a_slow_turn_does_not_stop_the_next_poll tests/test_telegram.py::test_a_bad_token_or_a_second_poller_stops_the_inlet && echo POLL_OK
+- [x] G10: composio_tools ships off: the default is off, the switch without a key is off, the key without the switch is off; on, the user id is derived from the Telegram owner id, the session id is persisted under ~/.config/cc-buddy-bridge (a temp dir in the test) and reused on the next start, and a stale id falls back to a fresh session.
+  CHECK: .venv/bin/python -m pytest -q -p no:cacheprovider tests/test_composio_tools.py::test_it_ships_off_and_needs_the_switch_and_the_key tests/test_composio_tools.py::test_the_session_is_the_owners_and_is_reused && echo COMPOSIO_CONFIG_OK
   CWD: bridge
-  EXPECT: POLL_OK
-  EVIDENCE: exit=0; shell=/bin/sh; cwd=/Users/gurucharan/Documents/personal/buddy/bridge; path=574d30059456/19 entries; output=4 passed in 0.06s | POLL_OK
+  EXPECT: COMPOSIO_CONFIG_OK
+  EVIDENCE: exit=0; shell=/bin/sh; cwd=/Users/gurucharan/Documents/personal/buddy/bridge; 0.2s; output=2 passed in 0.14s | COMPOSIO_CONFIG_OK
 
-- [x] G11: The chat is remembered the way a spoken conversation is: after the chat goes quiet its turns are handed to buddy's conversation memory once, and the in-memory history is bounded.
-  CHECK: .venv/bin/python -m pytest -q -p no:cacheprovider tests/test_telegram.py::test_a_quiet_chat_is_handed_to_memory_once tests/test_telegram.py::test_history_is_bounded && echo MEMORY_OK
+- [x] G11: With Composio on, the text brain is offered the session's tools beside its own, a call to one is executed through the session and its result sent back as the tool output; a COMPOSIO_MULTI_EXECUTE_TOOL whose slugs are all read-only shaped runs at once; one with a slug that is not read-only shaped is asked in the chat first and runs only on a yes, and "no" refuses without a call; a bad tool name is still rejected.
+  CHECK: .venv/bin/python -m pytest -q -p no:cacheprovider tests/test_composio_tools.py::test_read_only_slugs_run_and_consequential_slugs_ask_first tests/test_telegram.py::test_composio_tools_are_offered_and_executed_through_the_session && echo COMPOSIO_TOOLS_OK
   CWD: bridge
-  EXPECT: MEMORY_OK
-  EVIDENCE: exit=0; shell=/bin/sh; cwd=/Users/gurucharan/Documents/personal/buddy/bridge; path=574d30059456/19 entries; output=2 passed in 0.05s | MEMORY_OK
+  EXPECT: COMPOSIO_TOOLS_OK
+  EVIDENCE: exit=0; shell=/bin/sh; cwd=/Users/gurucharan/Documents/personal/buddy/bridge; 0.2s; output=2 passed in 0.09s | COMPOSIO_TOOLS_OK
 
-- [x] G12: The docs say what the code does: every CC_BUDDY_TELEGRAM* name the module reads is documented in docs/stackchan/telegram.md (the checker reads the names out of telegram.py, it does not carry a list), the README names the module and links the doc, and pyproject declares the HTTP client the module imports.
-  CHECK: .venv/bin/python tools/check_telegram_docs.py
+- [x] G12: web search is one OpenRouter chat call with the web plugin on the exa engine: the request body names the model, the plugin with engine exa and max_results, and the query; the reply's url_citation annotations become sources with title, url and snippet; a reply with no annotations is still an answer; an HTTP error is {"ok": false} with a reason, never a traceback.
+  CHECK: .venv/bin/python -m pytest -q -p no:cacheprovider tests/test_websearch.py && echo WEBSEARCH_OK
+  CWD: bridge
+  EXPECT: WEBSEARCH_OK
+  EVIDENCE: exit=0; shell=/bin/sh; cwd=/Users/gurucharan/Documents/personal/buddy/bridge; 0.1s; output=4 passed in 0.01s | WEBSEARCH_OK
+
+- [x] G13: Every place buddy searched the web now offers the web_search function tool when an OpenRouter key is set (the text brain's tools, think_hard's request and its tool loop, the voice backend's delegation tools) and falls back to the hosted OpenAI search without one; the voice's slow tools run web_search off the loop.
+  CHECK: .venv/bin/python -m pytest -q -p no:cacheprovider tests/test_telegram.py::test_a_text_turn_is_answered_with_memory_and_history tests/test_think.py tests/test_voice_agent.py::test_session_config_offers_web_search_through_exa_or_the_hosted_tool && echo WEBSEARCH_WIRED_OK
+  CWD: bridge
+  EXPECT: WEBSEARCH_WIRED_OK
+  EVIDENCE: exit=0; shell=/bin/sh; cwd=/Users/gurucharan/Documents/personal/buddy/bridge; 0.5s; output=7 passed in 0.32s | WEBSEARCH_WIRED_OK
+
+- [x] G14: The docs say what the code reads: every CC_BUDDY_TELEGRAM*, CC_BUDDY_COMPOSIO*, CC_BUDDY_COMMAND_RISK* and CC_BUDDY_WEB_SEARCH* name the code reads is documented in docs/stackchan/telegram.md, and the README names the modules.
+  CHECK: .venv/bin/python tools/check_telegram_docs.py && echo TELEGRAM_DOCS_OK
   CWD: bridge
   EXPECT: TELEGRAM_DOCS_OK
-  EVIDENCE: exit=0; shell=/bin/sh; cwd=/Users/gurucharan/Documents/personal/buddy/bridge; path=574d30059456/19 entries; output=7 names documented: CC_BUDDY_RECORDS, CC_BUDDY_RECORDS_MODEL, CC_BUDDY_TELEGRAM, CC_BUDDY_TELEGRAM_EFFORT, CC_BUDDY_TELEGRAM_MODEL, CC_BUDDY_TELEGRAM_OWNER, CC_BUDDY_TELEGRAM_TOKEN | TELEGRAM_DOCS_OK
+  EVIDENCE: exit=0; shell=/bin/sh; cwd=/Users/gurucharan/Documents/personal/buddy/bridge; 0.0s; output=TELEGRAM_DOCS_OK | TELEGRAM_DOCS_OK
 
-- [x] G18: The owner can see the Mac and receive files: "screenshot" / "show me the screen" is answered by code with zero model calls, mid-task too; a task whose request asked to see something arrives with the screen it left and one that did not gets words only; a failed capture is said; a file leaves only from the owner's home, never from a hidden path even through a symlink, never a folder, never over the Bot API limit; the document really goes out as multipart.
-  CHECK: .venv/bin/python -m pytest -q -p no:cacheprovider tests/test_telegram.py::test_a_task_that_was_asked_to_show_something_arrives_with_the_screen_it_left tests/test_telegram.py::test_a_plain_screenshot_request_is_answered_by_code_even_mid_task tests/test_telegram.py::test_the_owner_can_ask_for_the_screen_and_a_failed_capture_is_said tests/test_telegram.py::test_files_leave_only_from_the_owners_home_and_never_from_a_hidden_folder tests/test_telegram.py::test_send_file_sends_a_document_and_refuses_folders_and_big_files && echo SEE_AND_SEND_OK
-  CWD: bridge
-  EXPECT: SEE_AND_SEND_OK
-  EVIDENCE: exit=0; shell=/bin/sh; cwd=/Users/gurucharan/Documents/personal/buddy/bridge; path=574d30059456/19 entries; output=4 passed in 0.09s | SEE_AND_SEND_OK
+- [x] G15: Live, from the daemon's own code path: one Composio session for the owner exists, an app is connected through its Connect Link, and one safe read-only tool call returns a real provider result with a Composio log id.
+  EVIDENCE: manual, 2026-09-21 ~20:00 PDT, scratch scripts over composio_tools.ComposioBridge (the daemon's own code path) with the real key from ~/.config/cc-buddy-bridge/env: one session for user telegram-<owner id> (trs_9pw3…) persisted at ~/.config/cc-buddy-bridge/composio.json and resumed on a second start; toolkits() reported gmail, googlecalendar and googledrive connected after the owner opened the Connect Links; COMPOSIO_MULTI_EXECUTE_TOOL ran GMAIL_FETCH_EMAILS (successful, log_y-FCah_HejBw), GOOGLECALENDAR_EVENTS_LIST_ALL_CALENDARS with a one-day window (successful, log_9hEETH_Ovk8r) and GOOGLEDRIVE_FIND_FILE discovered through COMPOSIO_SEARCH_TOOLS (successful, log_eKUMS4as78L9; search log_iZQgsm2X9bn5); every one read-only, decide() said run for each; no content of any result was printed or kept.
 
-- [x] G14: The records layer ships off, and the text brain is offered the profile and the two memory tools only when there is a profile; neither tool writes.
-  CHECK: .venv/bin/python -m pytest -q -p no:cacheprovider tests/test_records.py::test_it_ships_off tests/test_records.py::test_the_text_brain_gets_the_profile_and_the_two_tools_only_with_records && echo RECORDS_OFF_OK
-  CWD: bridge
-  EXPECT: RECORDS_OFF_OK
-  EVIDENCE: exit=0; shell=/bin/sh; cwd=/Users/gurucharan/Documents/personal/buddy/bridge; path=574d30059456/19 entries; output=2 passed in 0.02s | RECORDS_OFF_OK
+- [x] G16: Live: one web_search through OpenRouter's Exa engine returns sources for a current-facts query, and the cost line is under a cent.
+  EVIDENCE: manual, 2026-09-21 20:05 PDT, websearch.search() live through OpenRouter with the web plugin on exa, model openai/gpt-5.4-nano: ok, 5 sources (espn.com, nba.com, cbssports.com), 5311 ms, usage in 1756 / out 63 tokens, cost_usd 0.007 (the flat Exa request price; the model's tokens add about 0.0004). The answer named a game and its score with its source. Slower than a hosted search; the owner chose the engine.
 
-- [x] G15: A record round-trips through its file and a hand-edited one still parses; search is keyword over aliases and lines with aliases weighted; the reader re-reads disk so an owner edit counts at once.
-  CHECK: .venv/bin/python -m pytest -q -p no:cacheprovider tests/test_records.py::test_a_record_round_trips_and_a_hand_edited_one_still_parses tests/test_records.py::test_load_skips_the_profile_and_a_file_whose_id_does_not_match_its_name tests/test_records.py::test_search_is_keyword_over_aliases_and_lines_and_aliases_count_more tests/test_records.py::test_the_reader_re_reads_disk_so_an_owner_edit_counts_at_once && echo RECORDS_READ_OK
-  CWD: bridge
-  EXPECT: RECORDS_READ_OK
-  EVIDENCE: exit=0; shell=/bin/sh; cwd=/Users/gurucharan/Documents/personal/buddy/bridge; path=574d30059456/19 entries; output=4 passed in 0.02s | RECORDS_READ_OK
-
-- [x] G16: The reconcile is the only writer: a curated day becomes changed records, a rewritten profile with the record index, and two git commits (as-found, then reconcile) so the replaced fact is in HEAD~1; a forgotten record leaves the tree but stays in history; a bad model result writes nothing and the day stays due; malformed ids never escape the folder; without git the records are still written.
-  CHECK: .venv/bin/python -m pytest -q -p no:cacheprovider tests/test_records.py::test_a_day_is_reconciled_into_records_a_profile_and_one_commit tests/test_records.py::test_forgetting_removes_the_file_and_git_still_has_it tests/test_records.py::test_a_bad_result_writes_nothing_and_the_day_stays_due tests/test_records.py::test_apply_skips_malformed_entries_and_never_escapes_the_folder tests/test_records.py::test_a_day_without_notes_is_nothing_and_the_loop_stops_on_shutdown tests/test_records.py::test_without_git_records_are_still_written && echo RECONCILE_OK
-  CWD: bridge
-  EXPECT: RECONCILE_OK
-  EVIDENCE: exit=0; shell=/bin/sh; cwd=/Users/gurucharan/Documents/personal/buddy/bridge; path=574d30059456/19 entries; output=6 passed in 0.50s | RECONCILE_OK
-
-- [x] G17: MANUAL — the reconcile prompt works on the real model and the real notes: on a scratch copy of this Mac's debrief store, two curated days (2026-09-12, 2026-09-15) reconciled with gpt-5.4-nano into eight typed records with aliases and dated facts, a three-section profile, and the record index; the scratch store received two commits per day.
-  EVIDENCE: manual; run 2026-09-21 in the session's scratchpad (scratchpad/store), output in the session transcript; records included ai-voice-preference (preference), ai-memory-system (project), math-learning-routine (routine), friend-3-crayons (person).
-
-- [x] G19: The browser lane ships off, web goals are decided by code, and a page becomes the Snapshot the gate reads (roles, states, the focused field, no secure field in the outline).
-  CHECK: .venv/bin/python -m pytest -q -p no:cacheprovider tests/test_browser_lane.py::test_it_ships_off_and_web_goals_are_decided_by_code tests/test_browser_lane.py::test_a_page_becomes_a_snapshot_the_gate_can_read && echo BROWSER_OFF_OK
-  CWD: bridge
-  EXPECT: BROWSER_OFF_OK
-  EVIDENCE: exit=0; shell=/bin/sh; cwd=/Users/gurucharan/Documents/personal/buddy/bridge; path=574d30059456/19 entries; output=2 passed in 0.21s | BROWSER_OFF_OK
-
-- [x] G20: Live Chromium through the real executor: the page senses and effectors keep the lane contract (a click, a toggled state seen as a change, a sensitive control refused by code then let through by an approval, a secure field never typed into, typing and Return with their oracles); a four-step plan runs to complete with no model; a sensitive control stops the plan for the human and a yes lets exactly that through.
-  CHECK: .venv/bin/python -m pytest -q -p no:cacheprovider tests/test_browser_lane.py::test_the_page_senses_and_effectors_keep_the_lane_contract tests/test_browser_lane.py::test_a_plan_runs_through_the_real_executor_with_no_model tests/test_browser_lane.py::test_a_sensitive_control_stops_the_plan_for_the_human_and_a_yes_lets_it_through -rs | tee /dev/stderr | grep -q "3 passed" && echo BROWSER_LIVE_OK
-  CWD: bridge
-  EXPECT: BROWSER_LIVE_OK
-  EVIDENCE: exit=0; shell=/bin/sh; cwd=/Users/gurucharan/Documents/personal/buddy/bridge; path=574d30059456/19 entries; output=...                                                                      [100%] | 3 passed in 3.35s
-
-- [x] G21: In the agent, a web goal is planned once against the browser with one planner call and the Mac tiers never touched; a Mac goal never touches the browser; a web search is one navigation with no model call and Safari is not also opened; a failing browser or a partial plan hands the goal to today's loop with a note of what was done.
-  CHECK: .venv/bin/python -m pytest -q -p no:cacheprovider tests/test_agent_browser_lane.py && echo BROWSER_AGENT_OK
-  CWD: bridge
-  EXPECT: BROWSER_AGENT_OK
-  EVIDENCE: exit=0; shell=/bin/sh; cwd=/Users/gurucharan/Documents/personal/buddy/bridge; path=574d30059456/19 entries; output=5 passed in 0.03s | BROWSER_AGENT_OK
-
-- [x] G22: Over text the robot's tools work ("look left" moves the head, "start taking notes" starts the taker, mute, remember, look), the robot shows the chat's task on its face and screen, and stealth mode — a code word — sends the face idle, shows nothing, refuses to move the head, and "wake up" ends it; the idle explore start ships off with CC_BUDDY_EXPLORE=1 turning it on.
-  CHECK: .venv/bin/python -m pytest -q -p no:cacheprovider tests/test_telegram.py::test_a_text_is_a_word_said_to_the_robot tests/test_telegram.py::test_the_robot_shows_what_the_chat_does_unless_stealth tests/test_explore.py::test_configured_defaults && echo ROBOT_OVER_TEXT_OK
-  CWD: bridge
-  EXPECT: ROBOT_OVER_TEXT_OK
-  EVIDENCE: exit=0; shell=/bin/sh; cwd=/Users/gurucharan/Documents/personal/buddy/bridge; path=574d30059456/19 entries; output=3 passed in 0.09s | ROBOT_OVER_TEXT_OK
-
-- [x] G23: The Claude relay is off until "claude on" and forwards only while on (what the terminal shows in white: Claude's words, a question shown as a question, waiting; never a tool call, a result tail, thinking or an idle reminder); while on, plain text is typed into the session's terminal and "buddy:" reaches buddy; the relay is bypass: a tool call and an out-of-cwd Read are allowed by the daemon without asking, an always-ask command (rm, sudo) is a yes/no on the phone that only the owner answers and silence defers, CC_BUDDY_TELEGRAM_ASK=1 asks every call, and nothing is asked in bypass mode; no emoji or dash ever leaves in a message or a caption.
-  CHECK: .venv/bin/python -m pytest -q -p no:cacheprovider tests/test_telegram.py::test_the_claude_relay_is_off_until_said_and_forwards_only_while_on tests/test_telegram.py::test_a_permission_prompt_is_answered_from_the_phone_and_silence_defers tests/test_telegram.py::test_the_daemon_honours_the_phones_decision_and_defers_without_one tests/test_telegram.py::test_a_question_for_the_owner_is_streamed_as_a_question tests/test_telegram.py::test_no_emoji_leaves_the_mac && echo CLAUDE_RELAY_OK
-  CWD: bridge
-  EXPECT: CLAUDE_RELAY_OK
-  EVIDENCE: exit=0; shell=/bin/sh; cwd=/Users/gurucharan/Documents/personal/buddy/bridge; output=5 passed in 0.16s | CLAUDE_RELAY_OK (2026-09-21, white-only relay)
-
-- [ ] G13: MANUAL — a live round trip from the owner's phone: a text is answered, a texted task runs on this Mac and its result arrives, a task question is answered from the phone, a photo arrives, and a message from a second Telegram account gets nothing.
-  EVIDENCE: pending
+- [x] G17: The daemon restarts on the new code and its log reports the command-risk mode, the Composio state and the search engine at startup.
+  EVIDENCE: manual, 2026-09-21 20:10:57 PDT, launchctl kickstart -k of com.github.cc-buddy-bridge.daemon (PID 71303), ~/Library/Logs/cc-buddy-bridge.log: 'command risk: shadow (Jev typesafe/jev-1.13 judges a relayed Bash command …)', 'telegram: web search openrouter-exa', 'second brain: on at /Users/gurucharan/Documents/Second Brain', 'think: hard questions go to gpt-6-astra at high effort (up to 90 s); web search openrouter-exa', 'telegram: listening for 1 owner id(s)'. The Composio session starts on a thread; its 'apps: Composio session up' line follows once the network answers.

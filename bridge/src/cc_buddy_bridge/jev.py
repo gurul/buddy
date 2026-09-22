@@ -43,6 +43,7 @@ from __future__ import annotations
 
 import json
 import os
+import threading
 import time
 import urllib.error
 import urllib.request
@@ -64,6 +65,40 @@ RETRIES = 2                    # jev-ultrafast retries twice with 0.5 s * 2**n; 
 
 class JevError(RuntimeError):
     """One line, no traceback: `Decider.choose` turns this into `Choice.error`."""
+
+
+class Meter:
+    """What Jev has been asked so far in this process: calls, input tokens (the only billed kind) and
+    milliseconds, from every `predict` this module makes. The computer agent snapshots it at the start and
+    the end of a run and writes the difference into the run log's bill (pricing.estimate_jev_cost)."""
+
+    def __init__(self) -> None:
+        self._lock = threading.Lock()
+        self.calls = 0
+        self.input_tokens = 0
+        self.ms = 0.0
+        self.errors = 0
+
+    def add(self, payload: Any, ms: float, *, error: bool = False) -> None:
+        usage = payload.get("usage") if isinstance(payload, dict) and isinstance(payload.get("usage"), dict) else {}
+        tokens = usage.get("input_tokens")
+        with self._lock:
+            self.calls += 1
+            self.ms += ms
+            self.errors += 1 if error else 0
+            if isinstance(tokens, int) and not isinstance(tokens, bool):
+                self.input_tokens += max(0, tokens)
+
+    def snapshot(self) -> dict[str, Any]:
+        with self._lock:
+            return {"calls": self.calls, "input_tokens": self.input_tokens, "ms": round(self.ms), "errors": self.errors}
+
+    @staticmethod
+    def delta(before: dict[str, Any], after: dict[str, Any]) -> dict[str, Any]:
+        return {k: after[k] - before[k] for k in ("calls", "input_tokens", "ms", "errors")}
+
+
+METER = Meter()
 
 
 def route_config(env: Mapping[str, str], route: str = "") -> tuple[str, str, str]:
@@ -97,6 +132,7 @@ def make_predict(
 
     def predict(state: Any, questions: dict[str, Any]) -> dict[str, Any]:
         body = json.dumps({"model": model, "state": state, "questions": questions}).encode("utf-8")
+        t0 = time.perf_counter()
         for attempt in range(RETRIES + 1):
             request = urllib.request.Request(
                 url, data=body, method="POST",
@@ -109,14 +145,20 @@ def make_predict(
                 if e.code in RETRY_STATUS and attempt < RETRIES:
                     sleep(0.2 * 2**attempt)
                     continue
+                METER.add({}, (time.perf_counter() - t0) * 1000.0, error=True)
                 raise JevError(f"HTTP {e.code} from {url}") from None
             except urllib.error.URLError as e:
+                METER.add({}, (time.perf_counter() - t0) * 1000.0, error=True)
                 raise JevError(f"{url} unreachable: {e.reason}") from None
             except (ValueError, TypeError) as e:
+                METER.add({}, (time.perf_counter() - t0) * 1000.0, error=True)
                 raise JevError(f"undecodable response from {url}: {type(e).__name__}") from None
             if not isinstance(payload, dict):
+                METER.add({}, (time.perf_counter() - t0) * 1000.0, error=True)
                 raise JevError(f"{url} returned {type(payload).__name__}, not an object")
+            METER.add(payload, (time.perf_counter() - t0) * 1000.0)
             return normalize(payload, questions)
+        METER.add({}, (time.perf_counter() - t0) * 1000.0, error=True)
         raise JevError(f"{url} kept returning a retryable status")
 
     return predict
