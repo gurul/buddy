@@ -1869,6 +1869,9 @@ class Daemon:
                 self.state.add_entry(f"+ {tool_name}")
                 self._ensure_session(req)
                 self.state.note_tool(req.get("session_id", ""), tool_name)
+            inlet = getattr(self, "_telegram", None)
+            if inlet is not None and inlet.claude:
+                inlet.relay_tool_result(str(tool_name or "tool"), str(req.get("result_tail") or ""))
             await self._push_heartbeat()
             return {"ok": True}
 
@@ -1919,6 +1922,9 @@ class Daemon:
         audit_kwargs = dict(
             session_id=session_id, tool_name=tool_name, hint=hint, matcher=decision_class,
         )
+        relay = getattr(self, "_telegram", None)
+        if relay is not None and relay.claude:
+            relay.relay_tool_call(str(tool_name), hint)          # the terminal shows every call; so does the phone
         if decision_class == "allow":
             log.info("pretooluse for %s (%s): auto_allow match → allow", tool_name, hint[:60])
             self.audit.record(**audit_kwargs, decision="allow", source="auto_allow")
@@ -1927,7 +1933,8 @@ class Daemon:
         # The phone is a decision surface (before the robot check: the phone is for when the owner is away) when the owner has said "claude on" (telegram.py): the prompt
         # goes to the chat and only the owner's next message answers it. Silence defers, never denies.
         inlet = getattr(self, "_telegram", None)
-        if inlet is not None and inlet.claude:
+        mode = str(req.get("permission_mode") or "")
+        if inlet is not None and inlet.claude and mode not in ("bypassPermissions", "dontAsk"):
             decision = await inlet.decide_permission(tool_name, hint, str(req.get("cwd") or ""))
             if decision in ("allow", "deny"):
                 log.info("pretooluse for %s (%s): answered from Telegram → %s", tool_name, hint[:60], decision)

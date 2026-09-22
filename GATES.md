@@ -127,11 +127,11 @@ Scope: The owner can text buddy from Telegram and get an answer, start and stop 
   EXPECT: ROBOT_OVER_TEXT_OK
   EVIDENCE: exit=0; shell=/bin/sh; cwd=/Users/gurucharan/Documents/personal/buddy/bridge; path=574d30059456/19 entries; output=3 passed in 0.09s | ROBOT_OVER_TEXT_OK
 
-- [x] G23: The Claude relay is off until "claude on" and forwards only while on (words, waiting, never idle reminders); a permission prompt is answered from the phone by the owner only, silence defers; the daemon honours an allow or deny from the phone before its robot-connected check and defers without one; "claude: text" types into the terminal only while on; no emoji or dash ever leaves in a message or a caption.
+- [x] G23: The Claude relay is off until "claude on" and forwards only while on (words, waiting, never idle reminders); while on, plain text is typed into the session's terminal and "buddy:" reaches buddy; the phone never asks about a tool call unless CC_BUDDY_TELEGRAM_ASK=1 and never in bypass mode, and when it does only the owner answers and silence defers; no emoji or dash ever leaves in a message or a caption.
   CHECK: .venv/bin/python -m pytest -q -p no:cacheprovider tests/test_telegram.py::test_the_claude_relay_is_off_until_said_and_forwards_only_while_on tests/test_telegram.py::test_a_permission_prompt_is_answered_from_the_phone_and_silence_defers tests/test_telegram.py::test_the_daemon_honours_the_phones_decision_and_defers_without_one tests/test_telegram.py::test_no_emoji_leaves_the_mac && echo CLAUDE_RELAY_OK
   CWD: bridge
   EXPECT: CLAUDE_RELAY_OK
-  EVIDENCE: exit=0; shell=/bin/sh; cwd=/Users/gurucharan/Documents/personal/buddy/bridge; path=574d30059456/19 entries; output=4 passed in 0.13s | CLAUDE_RELAY_OK
+  EVIDENCE: exit=0; shell=/bin/sh; cwd=/Users/gurucharan/Documents/personal/buddy/bridge; path=574d30059456/19 entries; output=4 passed in 0.14s | CLAUDE_RELAY_OK
 
 - [ ] G13: MANUAL — a live round trip from the owner's phone: a text is answered, a texted task runs on this Mac and its result arrives, a task question is answered from the phone, a photo arrives, and a message from a second Telegram account gets nothing.
   EVIDENCE: pending
