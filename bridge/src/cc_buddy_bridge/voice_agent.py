@@ -78,8 +78,9 @@ from typing import Any, Awaitable, Callable, Optional
 
 from . import head as head_mod
 from . import system_context, websearch
+from .agent_contract import AgentEvent
 from .caption_pager import CaptionPager, Event, PagerConfig, caption_instructions
-from .computer_agent import AgentEvent, ComputerAgent
+from .computer_agent import ComputerAgent
 from .intent import LEAVE, LESSON, LOOK, MUTE, REMEMBER, UNMUTE, fast_intent, normalize
 from .learning import LESSON_ACTIONS, run_lesson
 from .learning import think_aloud as think_aloud_mod

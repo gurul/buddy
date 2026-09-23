@@ -144,3 +144,9 @@ def test_switches() -> None:
     assert app_reflex.reflexes_on({}) is True
     assert app_reflex.jev_asker({"CC_BUDDY_ROUTER_MODEL": "off"}) is None
     assert app_reflex.jev_asker({"CC_BUDDY_ROUTER_MODEL": "jev", "CC_BUDDY_JEV_ROUTE": "openrouter"}) is None  # no key
+
+
+def test_agent_event_has_one_definition() -> None:
+    from cc_buddy_bridge import agent_contract, computer_agent
+
+    assert computer_agent.AgentEvent is agent_contract.AgentEvent

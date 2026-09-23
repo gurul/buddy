@@ -57,6 +57,7 @@ from urllib.parse import quote_plus
 
 from . import browser_lane, pricing, task_router
 from . import jev as jev_mod
+from .agent_contract import AgentEvent  # noqa: F401 — defined there, re-exported for importers of this module
 from .fast_lane import DECIDE_MODES, DEFAULT_DECIDE, FAST_LANE_DEFAULT, LANE_FIRST_DEFAULT
 
 log = logging.getLogger(__name__)
@@ -369,15 +370,6 @@ def configured(environ: Any = None) -> AgentConfig:
 
 
 # ---- events -----------------------------------------------------------------------
-
-@dataclass(frozen=True)
-class AgentEvent:
-    """What the voice session and the board get told. kind: started | turn |
-    commentary | exec | progress | ask | final | cancelled | error."""
-
-    kind: str
-    text: str = ""
-    turn: int = 0
 
 
 # ---- the worker client (child process) ----------------------------------------------

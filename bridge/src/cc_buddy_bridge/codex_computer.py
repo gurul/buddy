@@ -21,7 +21,7 @@ from typing import Any
 from urllib.parse import urlsplit
 
 from . import telegram_images
-from .computer_agent import AgentEvent
+from .agent_contract import AgentEvent
 
 log = logging.getLogger(__name__)
 

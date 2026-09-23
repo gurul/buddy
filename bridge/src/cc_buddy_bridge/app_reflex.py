@@ -35,7 +35,7 @@ import time
 from typing import Any, Awaitable, Callable, Iterable, Optional
 
 from . import task_router
-from .computer_agent import AgentEvent
+from .agent_contract import AgentEvent
 
 log = logging.getLogger(__name__)
 
