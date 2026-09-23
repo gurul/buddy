@@ -25,9 +25,18 @@ runs unchanged on top of it. Nothing about approval is reimplemented here.
                                                             complete → one sentence · partial → today's loop
 
 The browser is buddy's own: a persistent Chromium profile under ``~/.config/cc-buddy-bridge/browser``,
-headed so the owner (and the phone's screenshot) sees it, signed in once by the owner. It never attaches
-to the owner's Chrome — that would need a debugging port, a consent prompt per session, and the owner's
-live cookies under the daemon.
+headed so the owner (and the phone's screenshot) sees it, signed in once by the owner.
+
+ATTACH MODE (owner, 2026-09-23: "i want buddy to be able to control logged in browser, that's the most
+important"). With ``CC_BUDDY_BROWSER_ATTACH=1`` the lane drives the owner's own running Chrome, signed in
+to everything, instead of its own profile. Chrome 136+ ignores ``--remote-debugging-port`` on the default
+profile; the supported route (Chrome 144+) is the owner switching on remote debugging once at
+``chrome://inspect/#remote-debugging``, after which Chrome writes ``DevToolsActivePort`` (port, then the
+browser's WebSocket path) into its user data directory. ``devtools_endpoint`` reads that file exactly as
+Google's chrome-devtools-mcp ``--autoConnect`` does, and Playwright's ``connect_over_cdp`` attaches.
+In attach mode the lane works in a NEW TAB of its own — never one of the owner's — and closing it closes
+that tab and disconnects: the owner's browser, windows and tabs are never closed. The same gate applies as
+everywhere: a sensitive control (buy, send, delete, pay…) stops the plan for the owner's yes.
 
 Playwright's sync API must stay on the thread that created it, so the lane owns one worker thread and
 everything runs there; the daemon awaits it. It ships OFF (``BROWSER_LANE_DEFAULT``): its evaluation set
@@ -54,12 +63,13 @@ log = logging.getLogger(__name__)
 
 BROWSER_LANE_DEFAULT = False
 DEFAULT_PROFILE = "~/.config/cc-buddy-bridge/browser"
+DEFAULT_CHROME_DIR = "~/Library/Application Support/Google/Chrome"   # the owner's Chrome user data directory
 DEFAULT_VIEWPORT = (1280, 860)
 MAX_CANDIDATES = 120
 SNAPSHOT_TIMEOUT_MS = 3000
 NAV_TIMEOUT_MS = 15000
 SETTLE_CAP_SECS = 3.0
-KEYS = {"return": "Enter", "escape": "Escape", "tab": "Tab", "space": " ", "up": "ArrowUp", "down": "ArrowDown",
+KEYS = {"return": "Enter", "enter": "Enter", "escape": "Escape", "tab": "Tab", "space": " ", "up": "ArrowUp", "down": "ArrowDown",
         "left": "ArrowLeft", "right": "ArrowRight", "delete": "Backspace"}
 
 # A goal for the web: a URL, a site, or the browser named. Anything else stays on the Mac lane.
@@ -131,16 +141,41 @@ class BrowserLaneConfig:
     enabled: bool = BROWSER_LANE_DEFAULT
     profile: Path = Path(DEFAULT_PROFILE).expanduser()
     headless: bool = False
+    attach: bool = False                          # drive the owner's running Chrome (see ATTACH MODE)
+    chrome_dir: Path = Path(DEFAULT_CHROME_DIR).expanduser()
 
 
 def configured(environ: Any = None) -> BrowserLaneConfig:
     """``CC_BUDDY_BROWSER_LANE=1`` turns it on; ``CC_BUDDY_BROWSER_PROFILE`` moves the profile;
-    ``CC_BUDDY_BROWSER_HEADLESS=1`` hides the window (tests and benches — the owner should see it)."""
+    ``CC_BUDDY_BROWSER_HEADLESS=1`` hides the window (tests and benches — the owner should see it);
+    ``CC_BUDDY_BROWSER_ATTACH=1`` drives the owner's running Chrome instead (``CC_BUDDY_CHROME_DIR`` moves
+    where its ``DevToolsActivePort`` is looked for)."""
     env = os.environ if environ is None else environ
     switch = (env.get("CC_BUDDY_BROWSER_LANE") or ("1" if BROWSER_LANE_DEFAULT else "0")).strip().lower()
     profile = Path((env.get("CC_BUDDY_BROWSER_PROFILE") or "").strip() or DEFAULT_PROFILE).expanduser()
     headless = (env.get("CC_BUDDY_BROWSER_HEADLESS") or "0").strip().lower() in ("1", "true", "yes", "on")
-    return BrowserLaneConfig(enabled=switch in ("1", "true", "yes", "on"), profile=profile, headless=headless)
+    attach = (env.get("CC_BUDDY_BROWSER_ATTACH") or "0").strip().lower() in ("1", "true", "yes", "on")
+    chrome_dir = Path((env.get("CC_BUDDY_CHROME_DIR") or "").strip() or DEFAULT_CHROME_DIR).expanduser()
+    return BrowserLaneConfig(enabled=switch in ("1", "true", "yes", "on"), profile=profile, headless=headless,
+                             attach=attach, chrome_dir=chrome_dir)
+
+
+def devtools_endpoint(chrome_dir: Path) -> Optional[str]:
+    """The running Chrome's browser WebSocket, from ``<chrome_dir>/DevToolsActivePort`` (a port line, then a
+    path line), or None when the file is missing or malformed — remote debugging is off, or Chrome is not
+    running. The same reading as chrome-devtools-mcp's autoConnect."""
+    try:
+        lines = [ln.strip() for ln in (Path(chrome_dir) / "DevToolsActivePort").read_text().splitlines() if ln.strip()]
+    except OSError:
+        return None
+    if len(lines) < 2 or not lines[0].isdigit() or not lines[1].startswith("/devtools/browser/"):
+        return None
+    port = int(lines[0])
+    return f"ws://127.0.0.1:{port}{lines[1]}" if 0 < port < 65536 else None
+
+
+class AttachError(RuntimeError):
+    """The owner's Chrome cannot be reached: remote debugging is off, or Chrome is not running."""
 
 
 def is_web_goal(goal: str, route_kind: str = "") -> bool:
@@ -314,6 +349,7 @@ class BrowserLane:
         self._context: Any = None
         self._page: Optional[_Page] = None
         self._plain_http: dict[str, str] = {}          # tests only: an https URL the plan contract insists on → a loopback http one
+        self._browser: Any = None                         # attach mode: the owner's Chrome, connected over CDP
 
     # -- the thread --
     async def _run(self, fn: Callable[..., Any], *args: Any) -> Any:
@@ -326,6 +362,20 @@ class BrowserLane:
                 return self._page
             except Exception:  # noqa: BLE001 — the owner closed the window: open a fresh one
                 self._page = None
+        if self._context is None and self.config.attach and self._launcher is None:
+            endpoint = devtools_endpoint(self.config.chrome_dir)
+            if endpoint is None:
+                raise AttachError("Chrome's remote debugging is off (or Chrome is not running): open "
+                                  "chrome://inspect/#remote-debugging in Chrome and switch it on")
+            from playwright.sync_api import sync_playwright
+
+            self._pw = sync_playwright().start()
+            self._browser = self._pw.chromium.connect_over_cdp(endpoint)
+            self._context = self._browser.contexts[0]        # the owner's profile: their cookies and logins
+            page = self._context.new_page()                   # buddy's own tab; the owner's tabs are never touched
+            page.bring_to_front()
+            self._page = _Page(page)
+            return self._page
         if self._context is None:
             if self._launcher is not None:
                 self._context = self._launcher()
@@ -345,6 +395,22 @@ class BrowserLane:
         return self._page
 
     def _close(self) -> None:
+        if self._browser is not None:
+            # Attach mode: close buddy's own tab and disconnect. Never the context or the browser — they are
+            # the owner's Chrome, with every window and tab they have open.
+            try:
+                if self._page is not None:
+                    self._page.page.close()
+            except Exception:  # noqa: BLE001 — the owner may have closed it already
+                pass
+            try:
+                if self._pw is not None:
+                    self._pw.stop()
+            except Exception:  # noqa: BLE001
+                pass
+            self._browser = self._context = self._pw = None
+            self._page = None
+            return
         for obj in (self._context, self._pw):
             try:
                 if obj is not None:
@@ -434,6 +500,7 @@ def make_lane(config: BrowserLaneConfig, environ: Any = None) -> Optional[Browse
                     "`python -m playwright install chromium`", e)
         return None
     lane = BrowserLane(config, step_asker=make_step_asker(environ))
-    log.info("browser lane: on — buddy's own Chromium profile at %s%s", config.profile,
-             "" if lane._step_asker is None else "; Jev grounds each step")
+    where = (f"the owner's own Chrome (attach, via {config.chrome_dir}/DevToolsActivePort)" if config.attach
+             else f"buddy's own Chromium profile at {config.profile}")
+    log.info("browser lane: on — %s%s", where, "" if lane._step_asker is None else "; Jev grounds each step")
     return lane

@@ -208,6 +208,36 @@ agent:
   app-server dies.
 - `CC_BUDDY_CODEX_PREWARM=0` turns it off.
 
+## Controlling your logged-in Chrome (attach mode)
+
+The owner's priority (2026-09-23): buddy should drive the **real, signed-in
+Chrome**. With `CC_BUDDY_BROWSER_ATTACH=1`, the Playwright lane
+(`browser_lane.py`) attaches to your running Chrome instead of launching its
+own profile.
+
+- **How it connects.** Chrome 136+ ignores `--remote-debugging-port` on your
+  default profile. The supported route (Chrome 144+; this Mac has 153) is to
+  switch on remote debugging **once** at `chrome://inspect/#remote-debugging`.
+  Chrome then writes `DevToolsActivePort` (a port, then a WebSocket path) into
+  `~/Library/Application Support/Google/Chrome`. The lane reads that file
+  exactly as Google's chrome-devtools-mcp `--autoConnect` does, and attaches
+  with Playwright's `connect_over_cdp`. `CC_BUDDY_CHROME_DIR` moves where it
+  looks.
+- **What it touches.** It works only in **its own new tab**. Closing it closes
+  that tab and disconnects. It never closes your context, your windows or
+  your other tabs. The same approval gate applies: a sensitive control (buy,
+  send, delete, pay…) stops the plan until you say yes.
+- **If it's off.** When remote debugging is off or Chrome isn't running, the
+  lane says how to switch it on and never guesses.
+- **Verified 2026-09-23 on a stand-in Chrome** (Chrome for Testing with
+  `--remote-debugging-port=0`, which writes the same file). The lane attached
+  in 0.75 s, typed a Wikipedia search and pressed Enter in its own tab. The
+  "owner's" tab and the browser were still there afterward
+  (`tests/test_browser_attach.py`; the live test runs with `CC_BUDDY_LIVE=1`).
+- **Caution.** While remote debugging is on, any local program can connect to
+  your Chrome, not just buddy. Switch it off in the same place when you don't
+  need it.
+
 ## Two bodies for a web job: Codex or an isolated browser
 
 A task that isn't a reflex goes to Codex, which drives your real Chrome
