@@ -446,8 +446,13 @@ class BrowserLane:
                 self._context = self._pw.chromium.launch_persistent_context(
                     str(self.config.profile), headless=self.config.headless, viewport={"width": w, "height": h},
                     args=["--disable-blink-features=AutomationControlled"])
-        pages = list(self._context.pages)
-        page = pages[0] if pages else self._context.new_page()
+        if self._browser is not None:
+            # Attached, and buddy's tab is gone (the owner closed it, or Chrome dropped it): a NEW tab of its
+            # own. Never pages[0] — in the owner's Chrome that is one of THEIR tabs.
+            page = self._context.new_page()
+        else:
+            pages = list(self._context.pages)
+            page = pages[0] if pages else self._context.new_page()
         page.bring_to_front()
         self._page = _Page(page)
         return self._page
@@ -511,7 +516,8 @@ class BrowserLane:
         connection; ``answer_prompt`` (chrome_consent.ConsentBroker.answer_own_connection) runs alongside,
         so the dialog raised by THIS connection is answered with the owner's own yes or no."""
         if self._context is not None:
-            alive = self._browser is None or self._alive()
+            # On the lane's own thread: Playwright's sync objects belong to the thread that made them.
+            alive = self._browser is None or await self._run(self._alive)
             if alive:
                 return
             log.info("browser lane: the Chrome connection is gone (Chrome restarted?); reconnecting")

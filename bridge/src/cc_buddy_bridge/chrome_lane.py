@@ -19,6 +19,7 @@ app_reflex.ReflexFirstAgent as its second body (make_auto) with no change to the
 
 from __future__ import annotations
 
+import asyncio
 import logging
 import time
 from typing import Any, Awaitable, Callable, Optional
@@ -42,6 +43,7 @@ class ChromeLaneAgent:
         self.on_event, self.ask_user = on_event, ask_user
         self._current: Any = None                    # the planner, then (maybe) Codex
         self._cancel_reason: Optional[str] = None
+        self._preparing: Optional[asyncio.Future] = None  # connecting / waiting on the owner's Allow: cancellable
         self.goal = self.final = ""
         self.handed_on = False                        # Codex finished what the lane started (or did it all)
         self.browser_used = True
@@ -59,6 +61,8 @@ class ChromeLaneAgent:
 
     def cancel(self, reason: str = "") -> None:
         self._cancel_reason = reason
+        if self._preparing is not None and not self._preparing.done():
+            self._preparing.cancel()                   # "stop" while waiting for Chrome's Allow is immediate
         if self._current is not None:
             self._current.cancel(reason=reason)
 
@@ -74,7 +78,15 @@ class ChromeLaneAgent:
         planner = self._current = self._make_planner(self._forward, self.ask_user)
         try:
             if self._prepare is not None:
-                await self._prepare(goal)             # raises when Chrome cannot be reached: Codex takes it
+                self._preparing = asyncio.ensure_future(self._prepare(goal))
+                try:
+                    await self._preparing             # raises when Chrome cannot be reached: Codex takes it
+                except asyncio.CancelledError:
+                    if self._cancel_reason is None:
+                        raise                         # the whole task was cancelled from outside: let it go
+                    self.final = "Stopped."
+                    self.on_event(AgentEvent("cancelled", self.final))
+                    return self.final
             answer, note = await planner.run_in_browser(goal)
         except Exception as e:  # noqa: BLE001 — the lane never costs the task: Codex takes it
             log.warning("chrome-lane: the lane failed (%s); Codex takes the task", type(e).__name__)

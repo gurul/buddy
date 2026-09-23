@@ -164,3 +164,24 @@ def test_a_dead_connection_is_replaced_on_the_next_connect() -> None:
     lane._browser = SimpleNamespace(is_connected=lambda: True)
     asyncio.run(lane.connect(prompt))
     assert events == []                                      # alive: no reconnect, no new question
+
+
+def test_stop_while_waiting_for_chromes_allow_is_immediate() -> None:
+    import time as _time
+
+    agent, made, events = rig(("never", ""))
+
+    async def slow_prepare(goal: str) -> None:
+        await asyncio.sleep(30)                     # the owner has not answered yet
+
+    agent._prepare = slow_prepare
+
+    async def go() -> tuple[str, float]:
+        t = _time.perf_counter()
+        task = asyncio.ensure_future(agent.run("check my gmail"))
+        await asyncio.sleep(0.05)
+        agent.cancel("stopped from Telegram")
+        return await task, _time.perf_counter() - t
+
+    said, secs = asyncio.run(go())
+    assert said == "Stopped." and secs < 1 and "codex" not in made and events[-1][0] == "cancelled"

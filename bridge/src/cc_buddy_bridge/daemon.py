@@ -1120,7 +1120,16 @@ class Daemon:
         chat = getattr(inlet, "_chat_id", None) if inlet is not None else None
         if inlet is None or chat is None:
             raise RuntimeError("no Telegram chat to ask the owner in")
+        if getattr(inlet, "_awaiting_answer", False):
+            # Another question is waiting (a task's, a Claude permission): asking now would take its answer.
+            raise RuntimeError("another question is already waiting for the owner")
         return await inlet._ask_user(question, chat, title="Chrome access")
+
+    async def _tell_owner_on_phone(self, text: str) -> None:
+        inlet = getattr(self, "_telegram", None)
+        chat = getattr(inlet, "_chat_id", None) if inlet is not None else None
+        if inlet is not None and chat is not None:
+            await inlet._say(chat, text)
 
     def _chrome_body(self, make_inner: Any, on_event: Any, ask_user: Any) -> dict[str, Any]:
         """The Chrome lane as ReflexFirstAgent's second body, for web goals (browser_lane.is_web_goal: a URL, a
@@ -1133,7 +1142,8 @@ class Daemon:
 
         telegram_on = getattr(self, "_telegram", None) is not None
         broker = chrome_consent.ConsentBroker(
-            (lambda q: Daemon._ask_owner_on_phone(self, q)) if telegram_on else None)
+            (lambda q: Daemon._ask_owner_on_phone(self, q)) if telegram_on else None,
+            tell_owner=(lambda text: Daemon._tell_owner_on_phone(self, text)) if telegram_on else None)
         if getattr(self, "_planner_create", None) is None:
             self._planner_create = make_response_creator()
         create, cfg = self._planner_create, self._agent_cfg

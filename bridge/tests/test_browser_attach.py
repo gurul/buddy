@@ -220,3 +220,28 @@ def test_profiles_map_primary_accounts_to_contexts_and_a_missing_one_is_refused(
     assert lane._pick_profile("") is work
     with pytest.raises(AttachError, match="no open Chrome window for student@school.example"):
         lane._pick_profile("student@school.example")
+
+
+def test_a_lost_tab_in_the_owners_chrome_is_replaced_by_a_new_one_never_theirs() -> None:
+    """Regression: once attached, a dead buddy tab fell through to pages[0] — the owner's own first tab."""
+    opened: list[str] = []
+
+    class Page:
+        def __init__(self, name: str, alive: bool = True) -> None:
+            self.name, self.alive = name, alive
+
+        def title(self) -> str:
+            if not self.alive:
+                raise RuntimeError("closed")
+            return self.name
+
+        def bring_to_front(self) -> None:
+            pass
+
+    owners = [Page("owner's inbox"), Page("owner's bank")]
+    ctx = SimpleNamespace(pages=owners, new_page=lambda: opened.append("new") or Page("buddy's new tab"))
+    lane = BrowserLane(BrowserLaneConfig(enabled=True, attach=True))
+    lane._browser, lane._context = SimpleNamespace(), ctx
+    lane._page = SimpleNamespace(page=Page("buddy's old tab", alive=False))
+    got = lane._ensure()
+    assert got.page.name == "buddy's new tab" and opened == ["new"]

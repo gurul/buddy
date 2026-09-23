@@ -30,7 +30,11 @@ log = logging.getLogger(__name__)
 DIALOG_TEXT = "Allow remote debugging?"
 APPEAR_SECS = 10.0            # how long after buddy starts connecting the dialog may take to show
 POLL_SECS = 0.3
-ASK_TIMEOUT_SECS = 180.0      # how long the owner has to answer on the phone
+ASK_TIMEOUT_SECS = 100.0      # the owner's time to answer: inside browser_lane.CONSENT_TIMEOUT_MS (120 s), so a
+                              # late yes never lands after the connection has given up
+GONE_LINE = "Chrome's question was answered at the Mac, so you don't need to reply."
+PRESS_FAILED_LINE = ("I couldn't press the button in Chrome: macOS may need to let buddy control System Events "
+                     "(System Settings → Privacy & Security → Automation). Codex will take this task.")
 QUESTION = ("buddy wants to control your Chrome (your logged-in browser) for a task: Chrome is asking "
             "\"Allow remote debugging?\". Allow it? yes / no")
 
@@ -125,11 +129,13 @@ class ConsentBroker:
     cancelled. ``showing``/``pressing`` are the Accessibility seams (tests fake them)."""
 
     def __init__(self, ask_owner: Optional[Callable[[str], Awaitable[str]]], *,
+                 tell_owner: Optional[Callable[[str], Awaitable[None]]] = None,
                  showing: Callable[[], Awaitable[bool]] = dialog_showing,
                  pressing: Callable[[str], Awaitable[bool]] = press,
                  appear_secs: float = APPEAR_SECS, ask_timeout_secs: float = ASK_TIMEOUT_SECS,
                  poll_secs: float = POLL_SECS) -> None:
         self._ask, self._showing, self._pressing = ask_owner, showing, pressing
+        self._tell = tell_owner
         self._appear, self._ask_timeout, self._poll = appear_secs, ask_timeout_secs, poll_secs
         self.last: str = ""                      # what happened last: allowed | declined | no_dialog | …
 
@@ -146,18 +152,48 @@ class ConsentBroker:
             await self._pressing("Cancel")
             self.last = "no_way_to_ask"
             return self.last
+        asking = asyncio.ensure_future(self._ask(QUESTION))
+        deadline = time.monotonic() + self._ask_timeout
         try:
-            reply = await asyncio.wait_for(self._ask(QUESTION), timeout=self._ask_timeout)
+            while not asking.done():
+                if time.monotonic() >= deadline:
+                    raise asyncio.TimeoutError
+                await asyncio.sleep(self._poll)
+                if not asking.done() and not await self._showing():
+                    # Answered at the Mac (or the connection gave up): withdraw the phone question, so the
+                    # owner's next text is not swallowed as its answer.
+                    asking.cancel()
+                    await asyncio.gather(asking, return_exceptions=True)
+                    await self._say(GONE_LINE)
+                    self.last = "answered_at_mac"
+                    return self.last
+            reply = asking.result()
         except (asyncio.TimeoutError, Exception) as e:  # noqa: BLE001 — no answer is a no
             log.info("chrome-consent: no answer from the owner (%s); cancelling", type(e).__name__)
+            if not asking.done():
+                asking.cancel()
+                await asyncio.gather(asking, return_exceptions=True)
             await self._pressing("Cancel")
             self.last = "unanswered"
             return self.last
         if consent.approves(reply):
             ok = await self._pressing("Allow")
-            self.last = "allowed" if ok else "dialog_gone"
+            if ok:
+                self.last = "allowed"
+            elif await self._showing():
+                await self._say(PRESS_FAILED_LINE)           # still up and we could not press it: say why
+                self.last = "press_failed"
+            else:
+                self.last = "dialog_gone"
         else:
             await self._pressing("Cancel")
             self.last = "declined"
         log.info("chrome-consent: %s", self.last)
         return self.last
+
+    async def _say(self, text: str) -> None:
+        if self._tell is not None:
+            try:
+                await self._tell(text)
+            except Exception:  # noqa: BLE001 — telling is best effort
+                pass
