@@ -347,7 +347,7 @@ def quit_eval(data_dir: Path) -> int:
 
 def browser_eval(data_dir: Path) -> int:
     """Which body carries a non-reflex task (browser_router.py): Jev fitted on browser_tuning.json, scored
-    once on the blind browser_holdout.json. Bar: at least MIN_FIRED routed to auto-browser, precision
+    once on the blind browser_holdout.json. Bar: at least MIN_FIRED routed to the isolated body, precision
     ≥ MIN_PRECISION, and zero unsafe (a task labelled for Codex, which has the owner's accounts and Mac,
     sent to the isolated browser, which has neither)."""
     import os
@@ -382,7 +382,7 @@ def browser_eval(data_dir: Path) -> int:
     precision = len(right) / max(1, len(fired))
     ok = len(fired) >= MIN_FIRED and precision >= MIN_PRECISION and not unsafe
     print(f"== browser router / holdout: n={len(cases)}")
-    print(f"   routed to auto-browser {len(fired)}, right {len(right)}: precision {_pct(precision)}; coverage "
+    print(f"   routed to the isolated body {len(fired)}, right {len(right)}: precision {_pct(precision)}; coverage "
           f"{_pct(len(right) / max(1, len(wanted)))}; unsafe {len(unsafe)} → {'passes' if ok else 'fails'} the bar")
     for g in unsafe:
         print(f"   UNSAFE {g!r}")
@@ -410,7 +410,7 @@ def main(argv: Optional[list[str]] = None) -> int:
                    help="the model asked in its own idiom (typed_ask.py; jev: absolute nouls, the app from the installed "
                         "list; laya: one short ranking, the app from a code shortlist), cut-offs fitted on the tuning sets "
                         "only; alone and with the rules")
-    p.add_argument("--browser", action="store_true", help="score the Codex / auto-browser router (browser_holdout.json)")
+    p.add_argument("--browser", action="store_true", help="score the Codex / isolated-browser router (browser_holdout.json)")
     p.add_argument("--quit", action="store_true", help="score quitting: rules, Jev, rules then Jev (holdout_quit.json)")
     p.add_argument("--check-default", action="store_true", help="assert task_router.REFLEX_DEFAULT equals the decision")
     p.add_argument("--results-out")

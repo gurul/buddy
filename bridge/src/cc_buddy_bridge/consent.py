@@ -1,6 +1,6 @@
 """Reading the owner's yes or no, for every reply that gates an action.
 
-A permission prompt from Claude Code, a Composio app action, an auto-browser approval: each waits for the
+A permission prompt from Claude Code, a Composio app action, a browser step's approval: each waits for the
 owner's next message and acts on a yes. The rule used to be a prefix match ("y" admitted "yikes, no"), in
 two different word orders at two sites and an exact set at a third. It is one rule now, and it fails
 closed:

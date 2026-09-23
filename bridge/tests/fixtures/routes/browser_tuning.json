@@ -1,111 +1,111 @@
 {
- "note": "Browser-routing TUNING set, authored 2026-09-23 by the router's writer; it fits the cut-offs and is not evidence. browser_holdout.json, written blind, decides.",
+ "note": "Browser-routing TUNING set, authored 2026-09-23 by the router's writer; it fits the cut-offs and is not evidence. browser_holdout.json, written blind, decides. (Labels renamed auto_browser -> isolated on 2026-09-23 when auto-browser was retired; meaning unchanged.)",
  "cases": [
   {
    "goal": "research the best budget mechanical keyboards under $100 and give me the top three",
-   "body": "auto_browser",
+   "body": "isolated",
    "tricky": false,
    "source": "authored"
   },
   {
    "goal": "compare the M4 MacBook Air and the Dell XPS 13 specs and tell me which has better battery life",
-   "body": "auto_browser",
+   "body": "isolated",
    "tricky": false,
    "source": "authored"
   },
   {
    "goal": "find the opening hours of the Exploratorium this weekend",
-   "body": "auto_browser",
+   "body": "isolated",
    "tricky": false,
    "source": "authored"
   },
   {
    "goal": "look up the population of Lisbon and Porto and tell me the difference",
-   "body": "auto_browser",
+   "body": "isolated",
    "tricky": false,
    "source": "authored"
   },
   {
    "goal": "check what the latest version of FastAPI is on its docs site",
-   "body": "auto_browser",
+   "body": "isolated",
    "tricky": false,
    "source": "authored"
   },
   {
    "goal": "go through the first three pages of Hacker News and summarize anything about robotics",
-   "body": "auto_browser",
+   "body": "isolated",
    "tricky": false,
    "source": "authored"
   },
   {
    "goal": "find three highly rated ramen places in the Mission with their addresses",
-   "body": "auto_browser",
+   "body": "isolated",
    "tricky": false,
    "source": "authored"
   },
   {
    "goal": "test the signup form on localhost:3000 and tell me if it shows an error for an empty email",
-   "body": "auto_browser",
+   "body": "isolated",
    "tricky": false,
    "source": "authored"
   },
   {
    "goal": "collect the prices of the Sony WH-1000XM6 on Best Buy, Target and B&H",
-   "body": "auto_browser",
+   "body": "isolated",
    "tricky": false,
    "source": "authored"
   },
   {
    "goal": "read the Python 3.14 what's new page and list the headline features",
-   "body": "auto_browser",
+   "body": "isolated",
    "tricky": false,
    "source": "authored"
   },
   {
    "goal": "what are the visa requirements for a US citizen visiting Japan, check the official site",
-   "body": "auto_browser",
+   "body": "isolated",
    "tricky": false,
    "source": "authored"
   },
   {
    "goal": "find the phone number for the DMV office in San Jose",
-   "body": "auto_browser",
+   "body": "isolated",
    "tricky": true,
    "source": "authored"
   },
   {
    "goal": "check whether the Golden Gate park tennis courts need a reservation",
-   "body": "auto_browser",
+   "body": "isolated",
    "tricky": true,
    "source": "authored"
   },
   {
    "goal": "fill out the public contact form on example.org saying my name is Sam and I'd like a quote",
-   "body": "auto_browser",
+   "body": "isolated",
    "tricky": true,
    "source": "authored"
   },
   {
    "goal": "scan the pricing pages of Linear, Jira and Asana and put their team plan prices side by side",
-   "body": "auto_browser",
+   "body": "isolated",
    "tricky": true,
    "source": "authored"
   },
   {
    "goal": "see if the new Pixel is in stock at the Google Store in blue",
-   "body": "auto_browser",
+   "body": "isolated",
    "tricky": true,
    "source": "authored"
   },
   {
    "goal": "find a recipe for vegan lasagna that takes under an hour and list the ingredients",
-   "body": "auto_browser",
+   "body": "isolated",
    "tricky": true,
    "source": "authored"
   },
   {
    "goal": "look up the weather forecast for Tahoe this Saturday and tell me if it'll snow",
-   "body": "auto_browser",
+   "body": "isolated",
    "tricky": true,
    "source": "authored"
   },

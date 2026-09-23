@@ -1083,32 +1083,10 @@ class Daemon:
                       else (lambda: CodexComputerAgent(on_event=on_event, ask_user=ask_user)))
         agent = app_reflex.ReflexFirstAgent(make_inner, on_event, asker=app_reflex.jev_asker(),
                                             quit_asker=app_reflex.jev_quit_asker(),
-                                            **Daemon._auto_browser_body(self, on_event, ask_user),
                                             enabled=app_reflex.reflexes_on(),
                                             on_done=warm.kick if warm is not None else (lambda: None))
         self._active_agent = agent
         return agent
-
-    def _auto_browser_body(self, on_event: Any, ask_user: Any) -> dict[str, Any]:
-        """auto-browser as a second body (auto_browser.py), chosen per task by Jev (browser_router.py). Off
-        (CC_BUDDY_AUTO_BROWSER unset), no Jev key, or the controller not answering: every task stays Codex's."""
-        from . import auto_browser, browser_router
-
-        cfg = auto_browser.configured()
-        if not cfg.enabled:
-            return {}
-        router = browser_router.jev_router()
-        if router is None:
-            log.warning("auto-browser: on, but Jev is not configured; every task stays with Codex")
-            return {}
-
-        async def route_body(goal: str) -> str:
-            if not await auto_browser.available(cfg):
-                return "codex"
-            return await asyncio.to_thread(router, goal)
-
-        return {"make_auto": lambda: auto_browser.AutoBrowserAgent(on_event=on_event, ask_user=ask_user, config=cfg),
-                "route_body": route_body}
 
     async def _cancel_active_task(self, reason: str) -> None:
         """Stop a running desktop task with a reason the owner can read (log + caption),

@@ -1,7 +1,10 @@
-"""Which body carries a task that is not a reflex: Codex (the owner's real Chrome and Mac) or auto-browser.
+"""Which body carries a task that is not a reflex: Codex (the owner's real Chrome and Mac) or an isolated browser.
 
-Asked only when auto-browser is switched on and its controller answers (auto_browser.available); otherwise
-every task goes to Codex exactly as before, at no cost. Jev decides, asked the way TypeSafe documents for
+The isolated body was auto-browser until 2026-09-23, when it was retired (it needs Docker, which this Mac
+does not have, and it has no scored results; research in docs/stackchan/routing.md). buddy's own Playwright
+lane (browser_lane.py) is the intended isolated body once it has an evaluation set; until one is wired in
+through app_reflex.ReflexFirstAgent(make_auto=..., route_body=...), nothing asks this router and every task
+goes to Codex. Jev decides, asked the way TypeSafe documents for
 a routing decision (docs.typesafe.ai: State, Choice "Structured instructions and criteria", Intent routing,
 Jev 1.13 jaggedness), and the way typed_ask.py asks it everywhere else:
 
@@ -13,7 +16,7 @@ Jev 1.13 jaggedness), and the way typed_ask.py asks it everywhere else:
   Noul is absolute"): does the request need the owner's own signed-in accounts? does it touch anything
   outside a browser on the Mac? does the owner want it shown on their own screen? is it a job on the
   public web that can be reported back as text?
-* Code combines them and owns the safety rule: auto-browser only when the job is public-web, needs none
+* Code combines them and owns the safety rule: the isolated body only when the job is public-web, needs none
   of the owner's accounts and nothing outside the browser, AND the Choice picks it with enough weight.
   Every cut-off is fitted with zero unsafe routes allowed (a task that needs the owner's accounts or Mac
   sent to a browser that has neither) — tools/route_eval.py --browser, on a blind holdout.
@@ -26,10 +29,12 @@ from typing import Any, Callable, Mapping, Optional
 
 Predict = Callable[[Any, dict[str, Any]], dict[str, Any]]
 
-CODEX, AUTO = "codex", "auto_browser"
+CODEX, ISOLATED = "codex", "isolated"
+AUTO = ISOLATED                   # the name the fitting and eval code use for the isolated body
 
-# The two bodies, as the Choice's options. Facts only: auto-browser's from its source (auto_browser.py
-# docstring), Codex's from docs/codex-computer-use/README.md.
+# The two bodies, as the Choice's options. Facts only: the isolated browser's as auto-browser's source
+# described it and as the Playwright lane is built (its own profile, no owner accounts, reports as text);
+# Codex's from docs/codex-computer-use/README.md.
 BODIES: dict[str, Any] = {
     "owner_chrome": {
         "what": "an agent that operates the owner's own Mac and the owner's real Chrome browser, already signed "
@@ -49,7 +54,7 @@ BODIES: dict[str, Any] = {
                     "anything the owner wants to watch or hear on their own screen"],
     },
 }
-OPTION_TO_BODY = {"owner_chrome": CODEX, "sandbox_browser": AUTO}
+OPTION_TO_BODY = {"owner_chrome": CODEX, "sandbox_browser": ISOLATED}
 
 
 def questions() -> dict[str, Any]:
@@ -130,7 +135,7 @@ MAX_GRID = (0.05, 0.1, 0.2, 0.3, 0.5)
 
 def fit(answers: list[BodyAnswer], truths: list[str]) -> BodyGates:
     """The cut-offs that route the most AUTO-labelled tasks there with ZERO CODEX-labelled tasks sent to
-    auto-browser. Ties go to the stricter setting."""
+    the isolated browser. Ties go to the stricter setting."""
     best: Optional[tuple[float, ...]] = None
     chosen = BodyGates(1.01, 0.0, 0.0, 1.01, 0.0)
     for public in GRID:

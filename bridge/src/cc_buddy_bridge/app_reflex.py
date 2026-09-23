@@ -182,7 +182,7 @@ class ReflexFirstAgent:
         self._on_done, self.provider = on_done, provider
         self._quit_asker, self._quitter = quit_asker, quitter
         self._quit_everything = quit_everything or (lambda: quit_all(quit_keep()))
-        # browser_router.py: when auto-browser is on and up, Jev picks the body for a task the reflex declined
+        # browser_router.py: with an isolated body wired in, Jev picks the body for a task the reflex declined
         self._make_auto, self._route_body = make_auto, route_body
         self.body = "codex"
         self._reflex_running = False
@@ -194,16 +194,16 @@ class ReflexFirstAgent:
         return self._reflex_running or bool(getattr(self._inner, "running", False))
 
     async def _choose_body(self, goal: str) -> Any:
-        """Codex, unless auto-browser is wired in and the router sends this task there. Never raises."""
+        """Codex, unless an isolated body is wired in and the router sends this task there. Never raises."""
         if self._make_auto is not None and self._route_body is not None:
             try:
                 body = await self._route_body(goal)
             except Exception as e:  # noqa: BLE001 — a router that fails keeps the task with Codex
                 log.warning("app-reflex: the body router failed (%s); Codex takes it", type(e).__name__)
                 body = "codex"
-            if body == "auto_browser":
-                self.body, self.provider = "auto_browser", "auto-browser"
-                log.info("app-reflex: auto-browser takes this task")
+            if body == "isolated":
+                self.body, self.provider = "isolated", "isolated-browser"
+                log.info("app-reflex: the isolated browser takes this task")
                 return self._make_auto()
         return self._make_inner()
 
