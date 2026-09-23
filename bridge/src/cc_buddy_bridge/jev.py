@@ -42,6 +42,8 @@ state during a computer-use task the user spoke, but it is a new egress and the 
 from __future__ import annotations
 
 import json
+import logging
+import math
 import os
 import threading
 import time
@@ -99,6 +101,24 @@ class Meter:
 
 
 METER = Meter()
+
+
+def timeout_from_env(env: Mapping[str, str]) -> float:
+    """CC_BUDDY_JEV_TIMEOUT in seconds, or DEFAULT_TIMEOUT_S when it is unset, blank, not a number, or not a
+    positive finite one. One reader for every caller: a typo here used to raise out of the asker's builder
+    (desktop_worker, browser_lane) or quietly switch the command-risk gate off (daemon)."""
+    raw = str(env.get("CC_BUDDY_JEV_TIMEOUT") or "").strip()
+    if not raw:
+        return DEFAULT_TIMEOUT_S
+    try:
+        seconds = float(raw)
+    except ValueError:
+        seconds = float("nan")
+    if not math.isfinite(seconds) or seconds <= 0:
+        logging.getLogger(__name__).warning("jev: CC_BUDDY_JEV_TIMEOUT=%r is not a positive number of seconds; "
+                                            "using %.1f", raw[:20], DEFAULT_TIMEOUT_S)
+        return DEFAULT_TIMEOUT_S
+    return seconds
 
 
 def route_config(env: Mapping[str, str], route: str = "") -> tuple[str, str, str]:
@@ -198,7 +218,7 @@ def load(
     """
     t0 = time.perf_counter()
     source = env if env is not None else os.environ
-    seconds = timeout_s or float((source.get("CC_BUDDY_JEV_TIMEOUT") or DEFAULT_TIMEOUT_S))
+    seconds = timeout_s or timeout_from_env(source)
     try:
         url, key, model = route_config(source, route)
     except JevError as e:

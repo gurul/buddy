@@ -2116,7 +2116,7 @@ class Daemon:
             try:
                 from . import jev
                 url, key, model = jev.route_config(os.environ)
-                seconds = float(os.environ.get("CC_BUDDY_JEV_TIMEOUT") or jev.DEFAULT_TIMEOUT_S)
+                seconds = jev.timeout_from_env(os.environ)
                 asker = typed_ask.make_jev_command_asker(jev.make_predict(url, key, model, timeout_s=seconds),
                                                          time.perf_counter)
                 built = (raw, asker)

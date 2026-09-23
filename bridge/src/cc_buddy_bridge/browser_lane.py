@@ -419,7 +419,7 @@ def make_step_asker(environ: Any = None) -> Any:
     except jev.JevError as e:
         log.info("browser lane: jev is off (%s); the keyword gate decides alone", e)
         return None
-    seconds = float((env.get("CC_BUDDY_JEV_TIMEOUT") or jev.DEFAULT_TIMEOUT_S))
+    seconds = jev.timeout_from_env(env)
     return partial(ask_jev_step, jev.make_predict(url, key, model, timeout_s=seconds), clock=time.perf_counter)
 
 
