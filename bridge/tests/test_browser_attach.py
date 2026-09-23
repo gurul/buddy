@@ -116,3 +116,23 @@ def test_live_attach_to_a_standin_chrome_works_in_its_own_tab_and_leaves_the_own
     finally:
         proc.terminate()
         proc.wait(timeout=5)
+
+
+def test_a_protected_file_falls_back_to_the_port_and_chromes_own_prompt(tmp_path: Path, monkeypatch) -> None:
+    """macOS app-data protection refuses other apps a read of Chrome's folder: the endpoint is then the debugging
+    port (Chrome asks the owner "Allow remote debugging?" per connection), and only while it is listening."""
+    (tmp_path / "DevToolsActivePort").write_text("9222\n/devtools/browser/x\n")
+
+    def refused(self, *a, **k):
+        raise PermissionError("Operation not permitted")
+
+    monkeypatch.setattr(Path, "read_text", refused)
+    monkeypatch.setattr(bl, "_listening", lambda port: port == 9333)
+    assert devtools_endpoint(tmp_path, 9333) == "ws://127.0.0.1:9333/devtools/browser"
+    assert devtools_endpoint(tmp_path, 9222) is None                           # nothing listening: off
+
+
+def test_the_debug_port_is_configurable() -> None:
+    assert configured({}).debug_port == 9222
+    assert configured({"CC_BUDDY_CHROME_DEBUG_PORT": "9333"}).debug_port == 9333
+    assert configured({"CC_BUDDY_CHROME_DEBUG_PORT": "nope"}).debug_port == 9222

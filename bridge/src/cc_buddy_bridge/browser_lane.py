@@ -64,6 +64,8 @@ log = logging.getLogger(__name__)
 BROWSER_LANE_DEFAULT = False
 DEFAULT_PROFILE = "~/.config/cc-buddy-bridge/browser"
 DEFAULT_CHROME_DIR = "~/Library/Application Support/Google/Chrome"   # the owner's Chrome user data directory
+DEFAULT_DEBUG_PORT = 9222            # what chrome://inspect/#remote-debugging shows as "Server running at"
+CONSENT_TIMEOUT_MS = 120_000         # Chrome asks the owner "Allow remote debugging?" per connection: wait for the click
 DEFAULT_VIEWPORT = (1280, 860)
 MAX_CANDIDATES = 120
 SNAPSHOT_TIMEOUT_MS = 3000
@@ -143,6 +145,7 @@ class BrowserLaneConfig:
     headless: bool = False
     attach: bool = False                          # drive the owner's running Chrome (see ATTACH MODE)
     chrome_dir: Path = Path(DEFAULT_CHROME_DIR).expanduser()
+    debug_port: int = DEFAULT_DEBUG_PORT
 
 
 def configured(environ: Any = None) -> BrowserLaneConfig:
@@ -156,16 +159,36 @@ def configured(environ: Any = None) -> BrowserLaneConfig:
     headless = (env.get("CC_BUDDY_BROWSER_HEADLESS") or "0").strip().lower() in ("1", "true", "yes", "on")
     attach = (env.get("CC_BUDDY_BROWSER_ATTACH") or "0").strip().lower() in ("1", "true", "yes", "on")
     chrome_dir = Path((env.get("CC_BUDDY_CHROME_DIR") or "").strip() or DEFAULT_CHROME_DIR).expanduser()
+    try:
+        debug_port = int(str(env.get("CC_BUDDY_CHROME_DEBUG_PORT") or DEFAULT_DEBUG_PORT))
+    except ValueError:
+        debug_port = DEFAULT_DEBUG_PORT
     return BrowserLaneConfig(enabled=switch in ("1", "true", "yes", "on"), profile=profile, headless=headless,
-                             attach=attach, chrome_dir=chrome_dir)
+                             attach=attach, chrome_dir=chrome_dir, debug_port=debug_port)
 
 
-def devtools_endpoint(chrome_dir: Path) -> Optional[str]:
-    """The running Chrome's browser WebSocket, from ``<chrome_dir>/DevToolsActivePort`` (a port line, then a
-    path line), or None when the file is missing or malformed — remote debugging is off, or Chrome is not
-    running. The same reading as chrome-devtools-mcp's autoConnect."""
+def _listening(port: int) -> bool:
+    import socket
+
+    try:
+        with socket.create_connection(("127.0.0.1", port), timeout=0.5):
+            return True
+    except OSError:
+        return False
+
+
+def devtools_endpoint(chrome_dir: Path, port: int = DEFAULT_DEBUG_PORT) -> Optional[str]:
+    """The running Chrome's browser WebSocket, or None when remote debugging is off or Chrome is not running.
+
+    First ``<chrome_dir>/DevToolsActivePort`` (a port line, then a path line), the same reading as
+    chrome-devtools-mcp's autoConnect. macOS's app-data protection refuses that read to other apps
+    ("Operation not permitted", 2026-09-23), so when the file cannot be read the endpoint is Chrome's
+    debugging ``port`` (the one chrome://inspect shows) at ``/devtools/browser`` — Chrome then asks the owner
+    "Allow remote debugging?" for the connection, and that click, not the file, is the gate."""
     try:
         lines = [ln.strip() for ln in (Path(chrome_dir) / "DevToolsActivePort").read_text().splitlines() if ln.strip()]
+    except PermissionError:
+        return f"ws://127.0.0.1:{port}/devtools/browser" if _listening(port) else None
     except OSError:
         return None
     if len(lines) < 2 or not lines[0].isdigit() or not lines[1].startswith("/devtools/browser/"):
@@ -363,14 +386,14 @@ class BrowserLane:
             except Exception:  # noqa: BLE001 — the owner closed the window: open a fresh one
                 self._page = None
         if self._context is None and self.config.attach and self._launcher is None:
-            endpoint = devtools_endpoint(self.config.chrome_dir)
+            endpoint = devtools_endpoint(self.config.chrome_dir, self.config.debug_port)
             if endpoint is None:
                 raise AttachError("Chrome's remote debugging is off (or Chrome is not running): open "
                                   "chrome://inspect/#remote-debugging in Chrome and switch it on")
             from playwright.sync_api import sync_playwright
 
             self._pw = sync_playwright().start()
-            self._browser = self._pw.chromium.connect_over_cdp(endpoint)
+            self._browser = self._pw.chromium.connect_over_cdp(endpoint, timeout=CONSENT_TIMEOUT_MS)
             self._context = self._browser.contexts[0]        # the owner's profile: their cookies and logins
             page = self._context.new_page()                   # buddy's own tab; the owner's tabs are never touched
             page.bring_to_front()

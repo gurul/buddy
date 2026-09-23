@@ -229,6 +229,18 @@ own profile.
   send, delete, pay…) stops the plan until you say yes.
 - **If it's off.** When remote debugging is off or Chrome isn't running, the
   lane says how to switch it on and never guesses.
+- **Your click is the gate.** Chrome asks **"Allow remote debugging?"** for
+  every new connection. On macOS, other apps can't read Chrome's
+  `DevToolsActivePort` because app-data protection returns "Operation not
+  permitted". So when that read is refused, the lane connects on Chrome's
+  debugging port (9222 by default, `CC_BUDDY_CHROME_DEBUG_PORT`; it's the
+  "Server running at" that chrome://inspect shows), and **your Allow click
+  grants access**. It waits up to 2 minutes for the click. One connection
+  serves many pages, so you click once per connection, not per page.
+- **Verified 2026-09-23 on your real Chrome.** The attach took 6.1 s including
+  the Allow click, and read `example.com` in 0.13 s. A second page on the same
+  connection took 0.43 s with no new prompt. Afterward only buddy's tab had
+  closed; your tab and Chrome were untouched.
 - **Verified 2026-09-23 on a stand-in Chrome** (Chrome for Testing with
   `--remote-debugging-port=0`, which writes the same file). The lane attached
   in 0.75 s, typed a Wikipedia search and pressed Enter in its own tab. The
