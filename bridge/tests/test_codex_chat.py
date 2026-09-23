@@ -196,3 +196,23 @@ def test_stop_clears_a_pending_permission_question(tmp_path):
             assert not any(m.get('id') == 100 for m in p.requests)
             await chat.close()
     asyncio.run(go())
+
+
+def test_the_turn_result_goes_to_done_when_the_caller_tells_it_from_progress(tmp_path):
+    async def go():
+        processes, steps, results = [], [], []
+        async def spawn(*args, **kw):
+            processes.append(ChatProcess())
+            return processes[-1]
+        async def emit(text): steps.append(text)
+        async def done(text): results.append(text)
+        async def ask(q): raise AssertionError(q)
+        chat = CodexChat(ask_user=ask)
+        with patch('asyncio.create_subprocess_exec', spawn):
+            await chat.start(tmp_path, emit, done=done)
+            await chat.send('first prompt')
+            await chat._turn_job
+            assert results == ['Calculator displays 4.']
+            assert 'Calculator displays 4.' not in steps       # the result is not also a step
+            await chat.close()
+    asyncio.run(go())

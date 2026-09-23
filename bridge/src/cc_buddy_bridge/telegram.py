@@ -173,6 +173,25 @@ TYPING_EVERY_SECS = 4.0
 TYPING_TURN_SECS = 120.0             # a buddy text turn: most answer in seconds, a tool round in tens of seconds
 TYPING_THINK_SECS = 300.0            # think_hard: the slow brain may take its whole timeout (think.py caps it at 300)
 TYPING_RELAY_SECS = 300.0            # a relayed line, until Claude says something, asks, waits or ends its turn
+# Task progress in one message (owner, 2026-09-23; proposal 10 in docs/stackchan/telegram-bot-api.md). A
+# computer task started from the chat, and each Codex relay turn, gets ONE progress message with a Stop button
+# under it. Each step edits that message in place (editMessageText) instead of sending one more: a busy task
+# used to post a message per event, past the Bot API FAQ's one message per second per chat. Edits are paced to
+# one per PROGRESS_EDIT_SECS, and an edit that would change nothing is not sent. When an edit fails, the steps
+# go as new messages again, as before. The result is a NEW message (an edit does not notify), sent as a reply
+# to the owner's request (reply_parameters, allow_sending_without_reply), so it says which request it answers.
+PROGRESS_EDIT_SECS = 1.0             # at most one edit per this long, per progress message
+PROGRESS_LINES = 6                   # the latest steps shown; older ones scroll off
+MAX_PROGRESS_LINE_CHARS = 160
+STOP_BUTTON = "Stop"                 # a tap does exactly what texting "stop" does
+PROGRESS_DONE_LINE = "Finished. The result is below."
+PROGRESS_STOPPED_LINE = "Stopped."
+PROGRESS_CLOSED_LINE = "Closed."
+CODEX_SENT_LINE = "Sent to Codex."
+CODEX_TITLE = "Codex"
+# A task's free question opens the reply box on itself (ForceReply), so the owner's next message is visibly
+# the answer. The placeholder is 1-64 characters (ForceReply.input_field_placeholder).
+ASK_PLACEHOLDER = "Your answer"
 
 NOT_TEXT_LINE = "Send text, a photo, or a still JPEG, PNG, WebP, or GIF image file."
 FORWARDED_LINE = "I don't act on forwarded messages. Type it to me in your own words."
@@ -863,16 +882,26 @@ class BotApi:
         return await telegram_images.download(self._client, self._call, self._token, item)
 
     async def send_message(self, chat_id: int, text: str, title: Optional[str] = None,
-                           subtitle: Optional[str] = None, buttons: Sequence[str] = ()) -> None:
+                           subtitle: Optional[str] = None, buttons: Sequence[str] = (), *,
+                           reply_to: int = 0, force_reply: Optional[str] = None) -> None:
         """One message, composed by telegram_format (a bold ``title`` when the voice is not buddy's, an
         italic ``subtitle`` when an identifier helps, the body as HTML paragraphs) and sent in pieces
         under the Bot API limit. A piece Telegram will not parse goes again as plain text: a message is
         never lost to markup. ``buttons`` become a one-time reply keyboard under the last piece: a tap
         sends that button's text as the owner's own message, so no callback path is needed. It is what
-        a picker falls back to when its inline keyboard cannot be sent (TelegramInlet._send_choices)."""
-        markup = ({"keyboard": [[{"text": b[:MAX_BUTTON_CHARS]}] for b in buttons],
-                   "one_time_keyboard": True, "resize_keyboard": True} if buttons else None)
-        await self._send_pieces(chat_id, text, title, subtitle, markup)
+        a picker falls back to when its inline keyboard cannot be sent (TelegramInlet._send_choices).
+
+        ``reply_to`` makes the first piece a reply to that message of the owner's (reply_parameters, with
+        allow_sending_without_reply, so a request the owner has since deleted never stops the send).
+        ``force_reply`` opens the owner's reply box on the last piece (ForceReply), with that text as the
+        placeholder, or none when it is empty."""
+        markup: Optional[dict[str, Any]] = None
+        if buttons:
+            markup = {"keyboard": [[{"text": b[:MAX_BUTTON_CHARS]}] for b in buttons],
+                      "one_time_keyboard": True, "resize_keyboard": True}
+        elif force_reply is not None:
+            markup = {"force_reply": True, **({"input_field_placeholder": force_reply[:64]} if force_reply else {})}
+        await self._send_pieces(chat_id, text, title, subtitle, markup, reply_to=reply_to)
 
     async def send_inline(self, chat_id: int, text: str, keyboard: Sequence[Sequence[tuple[str, str, str]]],
                           title: Optional[str] = None, subtitle: Optional[str] = None) -> int:
@@ -886,11 +915,13 @@ class BotApi:
         return await self._send_pieces(chat_id, text, title, subtitle, {"inline_keyboard": rows})
 
     async def _send_pieces(self, chat_id: int, text: str, title: Optional[str], subtitle: Optional[str],
-                           markup: Optional[dict[str, Any]]) -> int:
+                           markup: Optional[dict[str, Any]], *, reply_to: int = 0) -> int:
         pieces = fmt.split(fmt.compose(text, title, subtitle))
         sent_id = 0
         for i, piece in enumerate(pieces):
             extra: dict[str, Any] = {}
+            if reply_to and i == 0:
+                extra["reply_parameters"] = {"message_id": reply_to, "allow_sending_without_reply": True}
             if markup is not None and i == len(pieces) - 1:
                 extra["reply_markup"] = markup
             try:
@@ -906,12 +937,17 @@ class BotApi:
         return sent_id
 
     async def edit_message(self, chat_id: int, message_id: int, text: str, title: Optional[str] = None,
-                           subtitle: Optional[str] = None) -> None:
+                           subtitle: Optional[str] = None,
+                           keyboard: Optional[Sequence[Sequence[tuple[str, str, str]]]] = None) -> None:
         """Rewrite one of the bot's own messages (editMessageText) and take its inline keyboard away: the
-        empty ``inline_keyboard`` says so explicitly. Only the first piece: a prompt is short. Unparseable
-        markup goes again as plain text, as in send_message."""
+        empty ``inline_keyboard`` says so explicitly. ``keyboard`` (rows as in send_inline) keeps buttons on
+        it instead: a progress message is edited with its Stop button still under it. Only the first piece:
+        a prompt or a progress message is short. Unparseable markup goes again as plain text, as in
+        send_message."""
         piece = fmt.split(fmt.compose(text, title, subtitle))[0]
-        data: dict[str, Any] = {"chat_id": chat_id, "message_id": message_id, "reply_markup": {"inline_keyboard": []}}
+        rows = [[{"text": label[:MAX_BUTTON_CHARS], "callback_data": key, **({"style": style} if style else {})}
+                 for label, key, style in row] for row in (keyboard or ())]
+        data: dict[str, Any] = {"chat_id": chat_id, "message_id": message_id, "reply_markup": {"inline_keyboard": rows}}
         try:
             await self._call("editMessageText", {**data, "text": piece, "parse_mode": fmt.PARSE_MODE})
         except BotApiError as e:
@@ -992,6 +1028,32 @@ class _Keyboard:
     message_id: int = 0                                           # set once the message is sent
 
 
+@dataclass(eq=False)
+class _Progress:
+    """One running piece of work's progress message: a computer task started from the chat, or one Codex
+    relay turn. ``head`` is what it says before any step ("On it…", "Sent to Codex."); ``steps`` are the
+    latest few; ``unsent`` are the steps no edit has shown yet, which go as a new message if editing fails.
+    ``request_id`` is the owner's message that asked for the work: the result replies to it."""
+    chat_id: int
+    head: str
+    title: Optional[str] = None
+    subtitle: Optional[str] = None
+    request_id: int = 0
+    steps: list[str] = field(default_factory=list)
+    unsent: list[str] = field(default_factory=list)
+    message_id: int = 0
+    shown: str = ""                                               # the text last put on the phone
+    edited_at: float = float("-inf")
+    broken: bool = False                                          # edits failed: steps go as new messages
+    closed: bool = False
+    board: Optional[_Keyboard] = None                             # the Stop button
+    lock: asyncio.Lock = field(default_factory=asyncio.Lock)      # the first send, edits and the close, in order
+    flush: Optional[asyncio.Task] = None
+
+    def text(self) -> str:
+        return "\n\n".join([self.head] + (["\n".join("- " + s for s in self.steps)] if self.steps else []))
+
+
 class TelegramInlet:
     """Polls, decides who may speak, runs one text turn at a time, and owns at most one computer task.
 
@@ -1039,6 +1101,10 @@ class TelegramInlet:
     Inline buttons (owner, 2026-09-23): yes/no prompts, a relayed question's options and the pickers ("claude
     on", "new claude", the Codex folders) are buttons under the message. A tap arrives as a callback_query
     (``_on_tap``), is always answered, and does exactly what typing its words would. Typing still works.
+
+    Progress (owner, 2026-09-23): a computer task started here, and each Codex relay turn, has one progress
+    message with a Stop button (``_open_progress``). Steps edit it in place, paced and never a no-op; the
+    result is a new message replying to the owner's request. Any refusal falls back to plain messages.
 
     The robot shows what the chat is doing — the phase on its face, a caption for each task step and the
     result — unless the owner has said "stealth mode": then it acts asleep (idle, no captions, no head)
@@ -1118,6 +1184,11 @@ class TelegramInlet:
         self._agent_task: Optional[asyncio.Task] = None
         self._task_chat: Optional[int] = None             # the running task's chat and words, for a restart notice
         self._task_goal = ""
+        # One progress message per running piece of work, edited in place, with a Stop button (_open_progress).
+        # The owner message a text turn answers is kept while the turn runs, so a task it starts can reply to it.
+        self._task_progress: Optional[_Progress] = None
+        self._codex_progress: Optional[_Progress] = None
+        self._turn_request = 0
         self._pending_answer: Optional[asyncio.Future] = None
         self._pending_answer_chat: Optional[int] = None
         # A permission prompt with Allow/Deny buttons is strict: only a tap or a clear yes/no answers it, and
@@ -1421,14 +1492,16 @@ class TelegramInlet:
             return
         codex_text = re.match(r"^/?codex\s*:\s*(.+)$", inbound.text, re.I | re.S)
         if codex_text:
-            self._spawn(self._codex_send(inbound.chat_id, codex_text.group(1), self._codex_epoch), "telegram-codex")
+            self._spawn(self._codex_send(inbound.chat_id, codex_text.group(1), self._codex_epoch,
+                                         message_id=inbound.message_id), "telegram-codex")
             return
         if (self._codex_chat == inbound.chat_id
                 and word not in STEALTH_ON + STEALTH_OFF and not SCREEN_NOW.match(inbound.text)
                 and not self._answers_pending(inbound.text)):
             for_buddy = BUDDY_PREFIX.match(inbound.text)
             if for_buddy is None:
-                self._spawn(self._codex_send(inbound.chat_id, inbound.text, self._codex_epoch), "telegram-codex")
+                self._spawn(self._codex_send(inbound.chat_id, inbound.text, self._codex_epoch,
+                                             message_id=inbound.message_id), "telegram-codex")
                 return
             inbound = dataclasses.replace(inbound, text=for_buddy.group(2).strip())
             word = inbound.text.lower().rstrip(".! ")
@@ -1497,7 +1570,7 @@ class TelegramInlet:
             )
             self._chat_id = inbound.chat_id
             if target == "codex":
-                await self._codex_send(inbound.chat_id, prompt, epoch)
+                await self._codex_send(inbound.chat_id, prompt, epoch, message_id=inbound.message_id)
             else:
                 await self._type_to_claude(inbound.chat_id, prompt)
         except telegram_images.ImageError as exc:
@@ -1506,17 +1579,29 @@ class TelegramInlet:
             await self._say(inbound.chat_id, "I couldn't receive that image. Please send it again.")
 
     async def _say(self, chat_id: int, text: str, title: Optional[str] = None, subtitle: Optional[str] = None,
-                   buttons: Sequence[str] = ()) -> None:
+                   buttons: Sequence[str] = (), *, reply_to: int = 0, force_reply: Optional[str] = None) -> None:
         """Send one message. ``title`` names the voice or the event when it is not buddy's own reply
         (telegram_format.compose); ``subtitle`` is an identifier that helps a person, or nothing;
-        ``buttons`` are tap-to-send replies."""
+        ``buttons`` are tap-to-send replies; ``reply_to`` is the owner's message this answers; ``force_reply``
+        opens the reply box on it. A message Telegram refuses with a reply link or a reply box goes again
+        without them: the words always matter more than the link."""
+        extra: dict[str, Any] = {}
+        if reply_to:
+            extra["reply_to"] = reply_to
+        if force_reply is not None:
+            extra["force_reply"] = force_reply
         try:
             if buttons:
-                await self.api.send_message(chat_id, text, title=title, subtitle=subtitle, buttons=list(buttons))
+                await self.api.send_message(chat_id, text, title=title, subtitle=subtitle, buttons=list(buttons), **extra)
             else:
-                await self.api.send_message(chat_id, text, title=title, subtitle=subtitle)
+                await self.api.send_message(chat_id, text, title=title, subtitle=subtitle, **extra)
+            return
         except BotApiError as e:
-            log.warning("telegram: could not send (%s)", e)
+            if not extra:
+                log.warning("telegram: could not send (%s)", e)
+                return
+            log.warning("telegram: could not send with a reply link or reply box (%s); sending it plain", e)
+        await self._say(chat_id, text, title=title, subtitle=subtitle, buttons=buttons)
 
     async def _screen_now(self, chat_id: int) -> None:
         result = await self._send_screen(chat_id, "")
@@ -1654,12 +1739,123 @@ class TelegramInlet:
         board, self._options_board = self._options_board, None
         self._retire(board, drop=True)
 
+    # -- one progress message per piece of work, edited in place --
+    def _open_progress(self, chat_id: int, head: str, *, title: Optional[str] = None,
+                       subtitle: Optional[str] = None, request_id: int = 0) -> _Progress:
+        """Start a progress message for work that is starting now → its handle. It is sent at once (a job)
+        with a Stop button whose tap sends "stop", exactly as typing it would (a SAY keyboard: it goes
+        through _handle, so a Codex chat is interrupted and a task is cancelled, as the word does). The
+        button is live only while the work is: after the close, a tap is "expired"."""
+        progress = _Progress(chat_id, head, title=title, subtitle=subtitle, request_id=request_id)
+        progress.board = _Keyboard(chat_id, SAY, [Choice(STOP_BUTTON, "stop", "danger")],
+                                   valid=lambda: not progress.closed)
+        self._spawn(self._send_progress(progress), "telegram-progress")
+        return progress
+
+    async def _send_progress(self, progress: _Progress) -> None:
+        async with progress.lock:
+            if progress.closed:
+                return
+            text = progress.text()
+            sent = await self._send_choices(progress.chat_id, text, progress.board, title=progress.title,
+                                            subtitle=progress.subtitle)
+            progress.shown, progress.edited_at, progress.unsent = text, self._clock(), []
+            if sent and progress.board is not None and progress.board.message_id:
+                progress.message_id = progress.board.message_id
+            else:
+                progress.broken = True                     # sent plain, or not at all: nothing to edit later
+
+    def _progress_step(self, progress: Optional[_Progress], line: str) -> None:
+        """One step of the work (a task's narration, a Codex commentary). It is added to the progress message
+        by an edit, paced to one per PROGRESS_EDIT_SECS; the same step twice in a row is shown once."""
+        line = " ".join(str(line or "").split())[:MAX_PROGRESS_LINE_CHARS]
+        if progress is None or progress.closed or not line or (progress.steps and progress.steps[-1] == line):
+            return
+        progress.steps.append(line)
+        del progress.steps[:-PROGRESS_LINES]
+        progress.unsent.append(line)
+        if progress.flush is None or progress.flush.done():
+            progress.flush = self._spawn(self._flush_progress(progress), "telegram-progress")
+
+    def _stop_rows(self, progress: _Progress) -> Optional[list[list[tuple[str, str, str]]]]:
+        """The Stop button's row while its key is live, else None (a tapped or retired button stays gone)."""
+        board = progress.board
+        if board is None or not board.keys or not all(k in self._taps for k in board.keys):
+            return None
+        return [[(c.label, k, c.style) for c, k in zip(board.choices, board.keys, strict=True)]]
+
+    async def _flush_progress(self, progress: _Progress) -> None:
+        """Put the latest steps on the phone, no sooner than PROGRESS_EDIT_SECS after the last change, and
+        again while steps keep coming. An edit that would change nothing is skipped."""
+        while not progress.closed:
+            wait = progress.edited_at + PROGRESS_EDIT_SECS - self._clock()
+            if wait > 0:
+                await self._sleep(wait)
+            async with progress.lock:
+                if progress.closed:
+                    return
+                text = progress.text()
+                if text == progress.shown and not progress.unsent:
+                    return
+                await self._push_progress(progress, text)
+
+    async def _push_progress(self, progress: _Progress, text: str) -> None:
+        progress.edited_at = self._clock()
+        if not progress.broken and progress.message_id:
+            try:
+                rows = self._stop_rows(progress)
+                if rows:
+                    await self.api.edit_message(progress.chat_id, progress.message_id, text, title=progress.title,
+                                                subtitle=progress.subtitle, keyboard=rows)
+                else:
+                    await self.api.edit_message(progress.chat_id, progress.message_id, text, title=progress.title,
+                                                subtitle=progress.subtitle)
+                progress.shown, progress.unsent = text, []
+                return
+            except asyncio.CancelledError:
+                raise
+            except Exception as e:  # noqa: BLE001 — a failed edit is today's behaviour: one message per step
+                if isinstance(e, BotApiError) and "not modified" in e.description.lower():
+                    progress.shown, progress.unsent = text, []
+                    return
+                log.warning("telegram: could not edit a progress message (%s); steps go as new messages",
+                            e if isinstance(e, BotApiError) else type(e).__name__)
+                progress.broken = True
+        lines, progress.unsent = progress.unsent, []
+        progress.shown = text
+        if lines:
+            await self._say(progress.chat_id, "\n".join(lines), title=progress.title, subtitle=progress.subtitle)
+
+    async def _close_progress(self, progress: Optional[_Progress], line: str) -> None:
+        """The work is over: the progress message says ``line`` under its last steps and loses its Stop
+        button. Steps not yet shown are dropped, since the result comes next. Fail-soft throughout."""
+        if progress is None or progress.closed:
+            return
+        progress.closed = True
+        self._retire(progress.board)
+        flush = progress.flush
+        if flush is not None and not flush.done() and flush is not asyncio.current_task():
+            flush.cancel()
+        async with progress.lock:
+            if not progress.message_id:
+                return
+            text = progress.text() + "\n\n" + line
+            try:
+                await self.api.edit_message(progress.chat_id, progress.message_id, text, title=progress.title,
+                                            subtitle=progress.subtitle)
+            except asyncio.CancelledError:
+                raise
+            except Exception as e:  # noqa: BLE001 — the result still goes; a stale Stop only answers "expired"
+                log.debug("telegram: could not close a progress message (%s)", type(e).__name__)
+                await self._drop_buttons(progress.chat_id, progress.message_id)
+
     # -- fresh Codex folder chats --
     async def _codex_command(self, chat_id: int, action: str, selection: Optional[str], epoch: int) -> None:
         async with self._codex_lock:
             if epoch != self._codex_epoch:
                 return
             if action in ("off", "disconnect"):
+                await self._end_codex_progress(PROGRESS_CLOSED_LINE)
                 await self._codex.close()
                 if action == "off":
                     await self._say(chat_id, "Codex chat closed. Back to Buddy.")
@@ -1685,10 +1881,26 @@ class TelegramInlet:
                     return
                 folder = codex_chat.select_folder(folders, selection)
                 self._codex_title = folder.name
+                await self._end_codex_progress(PROGRESS_CLOSED_LINE)     # the last chat's turn, if one was open
 
                 async def emit(text: str) -> None:
+                    # A step of the running turn edits its progress message; with none open (a note
+                    # between turns), it is a message of its own, as every step used to be.
                     if self._codex_chat == chat_id and epoch == self._codex_epoch:
-                        await self._say(chat_id, text, title="Codex", subtitle=folder.name)
+                        progress = self._codex_progress
+                        if progress is not None and not progress.closed:
+                            self._progress_step(progress, text)
+                        else:
+                            await self._say(chat_id, text, title=CODEX_TITLE, subtitle=folder.name)
+
+                async def done(text: str) -> None:
+                    # The turn's result: the progress message is closed, and the result is a new message
+                    # (it notifies) replying to the owner's request.
+                    if self._codex_chat == chat_id and epoch == self._codex_epoch:
+                        progress, self._codex_progress = self._codex_progress, None
+                        await self._close_progress(progress, PROGRESS_DONE_LINE)
+                        await self._say(chat_id, text, title=CODEX_TITLE, subtitle=folder.name,
+                                        reply_to=progress.request_id if progress is not None else 0)
 
                 async def picture() -> None:
                     if self._codex_chat == chat_id and epoch == self._codex_epoch:
@@ -1696,11 +1908,11 @@ class TelegramInlet:
                         if not result.get('ok'):
                             await self._say(chat_id, "I couldn't send the browser picture: " + str(result.get('reason')))
 
-                await self._codex.start(folder, emit, picture)
+                await self._codex.start(folder, emit, picture, done=done)
                 if epoch != self._codex_epoch:
                     await self._codex.close()
                     return
-                await self._say(chat_id, f"New Codex chat in {folder.name}. Send your message.", title="Codex")
+                await self._say(chat_id, f"New Codex chat in {folder.name}. Send your message.", title=CODEX_TITLE)
             except (codex_chat.CodexUnavailable, OSError) as exc:
                 log.warning('telegram: codex startup failed error=%s', type(exc).__name__)
                 await self._codex.close()
@@ -1709,7 +1921,15 @@ class TelegramInlet:
                 await self._say(chat_id, str(exc) if isinstance(exc, codex_chat.CodexUnavailable)
                                 else "Could not start Codex. Buddy is still available.")
 
-    async def _codex_send(self, chat_id: int, text: str, epoch: int, *, interrupt: bool = False) -> None:
+    async def _end_codex_progress(self, line: str) -> None:
+        progress, self._codex_progress = self._codex_progress, None
+        await self._close_progress(progress, line)
+
+    async def _codex_send(self, chat_id: int, text: str, epoch: int, *, interrupt: bool = False,
+                          message_id: int = 0) -> None:
+        """Send the owner's message to the Codex chat, or interrupt its turn. A message that starts a turn
+        gets the turn's progress message ("Sent to Codex.", then its steps, with a Stop button); one sent
+        while a turn runs steers it and is confirmed in a line, as before."""
         async with self._codex_lock:
             if epoch != self._codex_epoch:
                 return
@@ -1722,9 +1942,16 @@ class TelegramInlet:
             try:
                 if interrupt:
                     await self._codex.interrupt()
-                else:
-                    await self._codex.send(text)
-                await self._say(chat_id, "Stop requested in Codex." if interrupt else "Sent to Codex.")
+                    await self._say(chat_id, "Stop requested in Codex.")
+                    return
+                steering = bool(getattr(self._codex, "running", False))
+                await self._codex.send(text)
+                if steering and self._codex_progress is not None:
+                    await self._say(chat_id, CODEX_SENT_LINE)
+                    return
+                await self._end_codex_progress(PROGRESS_CLOSED_LINE)
+                self._codex_progress = self._open_progress(chat_id, CODEX_SENT_LINE, title=CODEX_TITLE,
+                                                           subtitle=self._codex_title, request_id=message_id)
             except (codex_chat.CodexUnavailable, OSError, TimeoutError) as exc:
                 log.warning('telegram: codex send failed error=%s', type(exc).__name__)
                 if not self._codex.connected:
@@ -2060,6 +2287,7 @@ class TelegramInlet:
     async def _turn(self, inbound: Inbound, *, image: Optional[telegram_images.ReceivedImage] = None) -> None:
         async with self._turn_lock:
             chat_id = inbound.chat_id
+            self._turn_request = inbound.message_id          # a task this turn starts replies to it
             t0 = self._clock()
             user_item = message_item("user", inbound.text or "Please describe this image.")
             if image is not None:
@@ -2122,7 +2350,9 @@ class TelegramInlet:
             if all(c["name"] == "start_task" for c in calls) and all(r.get("ok") for r in results):
                 # A started task needs no second model call to say so (measured live 2026-09-21: the
                 # round that only produced "On it!" cost 1.9 s). The result is texted when it exists.
-                return text or ON_IT_LINE, round_no
+                # Its progress message already says "On it" (_start_task), so only the model's own words,
+                # if it wrote any, go as a reply as well.
+                return text, round_no
         return text or "I got tangled up in that one. Ask me again?", MAX_TOOL_ROUNDS
 
     # -- tools --
@@ -2231,13 +2461,17 @@ class TelegramInlet:
             return {"ok": False, "reason": "someone is talking with buddy at the desk right now; the Mac is theirs "
                                            "until that conversation ends"}
         self._stopped_from_chat = False
-        self._agent = self._agent_factory(lambda ev: self._on_agent_event(ev, chat_id),
+        # One message for the task's progress, "On it" with a Stop button, edited as steps come (owner,
+        # 2026-09-23). It stands for the "On it" reply a started task used to get.
+        progress = self._task_progress = self._open_progress(chat_id, ON_IT_LINE, request_id=self._turn_request)
+        self._note("buddy", ON_IT_LINE)
+        self._agent = self._agent_factory(lambda ev: self._on_agent_event(ev, chat_id, progress),
                                           lambda question: self._ask_user(question, chat_id))
         self._task_chat, self._task_goal = chat_id, goal
-        self._agent_task = self._spawn(self._run_agent(goal, chat_id), "telegram-agent")
+        self._agent_task = self._spawn(self._run_agent(goal, chat_id, progress), "telegram-agent")
         return {"ok": True, "goal": goal, "note": "started, not finished; the result is texted when it is done"}
 
-    async def _run_agent(self, goal: str, chat_id: int) -> None:
+    async def _run_agent(self, goal: str, chat_id: int, progress: Optional[_Progress] = None) -> None:
         try:
             final = await self._agent.run(goal)
         except asyncio.CancelledError:
@@ -2252,9 +2486,14 @@ class TelegramInlet:
         final = str(final or "").strip() or "The task ended without a result."
         self._note("buddy", final)
         self._show(None, final)
+        if self._task_progress is progress:
+            self._task_progress = None
+        await self._close_progress(progress, PROGRESS_STOPPED_LINE if self._stopped_from_chat else PROGRESS_DONE_LINE)
         if not self._stopped_from_chat:
-            # The result arrives minutes after the request: the goal under the title says which one.
-            await self._say(chat_id, final, title=TASK_FAILED_TITLE if failed else TASK_DONE_TITLE, subtitle=goal)
+            # The result arrives minutes after the request: the goal under the title says which one, and it
+            # is a new message (an edit would not notify) replying to the owner's request.
+            await self._say(chat_id, final, title=TASK_FAILED_TITLE if failed else TASK_DONE_TITLE, subtitle=goal,
+                            reply_to=progress.request_id if progress is not None else 0)
             if getattr(self._agent, 'browser_used', False) or WANTS_SCREEN.search(goal):
                 result = await self._send_screen(chat_id, "the screen when the task ended")
                 if not result.get('ok'):
@@ -2278,12 +2517,19 @@ class TelegramInlet:
                 self._on_caption({"cmd": "caption", "page": 0, "of": 1, "lines": lines, "hold_ms": 5000,
                                   "final": True, "chirp": chirp})
 
-    def _on_agent_event(self, ev: AgentEvent, chat_id: Optional[int] = None) -> None:
+    def _on_agent_event(self, ev: AgentEvent, chat_id: Optional[int] = None,
+                        progress: Optional[_Progress] = None) -> None:
+        """A task's event: the robot acts it out (unless in stealth), and a step ("progress") also goes into
+        the task's progress message in the chat, whichever provider runs it. Before 2026-09-23 only Codex's
+        steps reached the chat, one message each; stealth never hid the chat, only the robot."""
         state = {"started": "working", "exec": "working", "commentary": "working", "turn": "working",
                  "ask": "asking", "final": "done", "error": "error", "cancelled": "idle"}.get(ev.kind)
         if ev.kind == "progress":
             self._show(None, ev.text, chirp=False)
-            if getattr(self._agent, "provider", None) == "codex" and chat_id is not None:
+            if chat_id is not None and progress is not None:
+                self._progress_step(progress, ev.text)
+            elif chat_id is not None and getattr(self._agent, "provider", None) == "codex":
+                # No progress message to edit: a Codex step goes as a message of its own, as before.
                 self._spawn(self._say(chat_id, ev.text, title="Codex progress"), "telegram-codex-progress")
         elif state is not None:
             self._show(state)
@@ -2319,7 +2565,8 @@ class TelegramInlet:
                     self._pending_strict = False           # plain text after all: the next message answers
                     self._pending_words = frozenset()
             else:
-                await self._say(chat_id, question, title=title)
+                # A free question opens the reply box on itself (ForceReply): the next message is its answer.
+                await self._say(chat_id, question, title=title, force_reply=ASK_PLACEHOLDER)
             answer = await asyncio.wait_for(future, timeout=self.config.ask_timeout_secs)
             said = answer.strip().lower().rstrip(".!")
             line = next((c.done or c.label for c in choices if c.value == said), ANSWERED_LINE)

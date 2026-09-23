@@ -29,7 +29,7 @@ Telegram; nothing calls the Mac.
 
 Computer tasks now use Codex's existing Computer Use through the public app-server
 protocol. `start_task`, `steer_task`, and `stop_task` keep their existing interface.
-Codex commentary is relayed as **Codex progress**, and app permission requests wait
+Codex commentary appears as steps in the task's progress message, and app permission requests wait
 for an explicit reply. Native app-access prompts offer `yes` (once),
 `allow for task`, or `always allow` when Codex permits those choices; `no` denies.
 `always allow` saves the app in Codex's own Always-allowed apps list for future
@@ -352,6 +352,15 @@ Flip it to `ask` if two seconds a command is a price you will pay.
   texts the result when there is one. Starting a task costs one model call, not
   two: measured live on 2026-09-21, the second call that only produced "On it!"
   cost 1.9 s, so code says it instead.
+- **One progress message per task.** The "On it" message has a red **Stop**
+  button under it. Each step the task reports is added to that same message
+  (it is edited, at most once a second), so a busy task no longer fills the
+  chat. The latest six steps show. A tap on Stop does exactly what texting
+  `stop` does. When the task ends, the message says "Finished" or "Stopped" and
+  the button goes. The result comes as a new message, so your phone notifies,
+  and it is a reply to the message that asked for the task. If Telegram will
+  not edit the message, each step comes as its own message, as before. If it
+  will not take the reply link, the result comes without it.
 - **The `/` menu.** At startup buddy sets its code words as bot commands in
   your own chat only (`setMyCommands`, scoped to your chat): `/claude_on`,
   `/claude_off`, `/new_claude`, `/codex`, `/rundown`, `/screenshot`,
@@ -361,8 +370,9 @@ Flip it to `ask` if two seconds a command is a price you will pay.
   the first 5 seconds. It is sent again every 4 s and stops when the reply goes
   out. `think_hard` keeps it up for up to 5 minutes. It pauses while buddy waits
   for your answer to a question.
-- **`stop`** (or `cancel`, `/stop`, `/cancel`) — stops the running task. This is
-  code, not a model call: it works when the model is down or mid-turn.
+- **`stop`** (or `cancel`, `/stop`, `/cancel`, or the **Stop** button) — stops
+  the running task. This is code, not a model call: it works when the model is
+  down or mid-turn.
 - **A photo** — "send me a picture of my desk". The robot snaps, the diary keeps
   and captions it as it does for the voice, and the picture arrives in the chat.
 - **The screen** — "screenshot", "show me the screen", "what's on the screen".
@@ -393,7 +403,8 @@ Flip it to `ask` if two seconds a command is a price you will pay.
   learning workspace, bound to the microphone) stays voice-only.
 - **What the robot shows.** While the chat drives a task the robot acts it
   out as it does for the voice: the phase on its face, each progress line and
-  the result as a caption on its screen.
+  the result as a caption on its screen. Stealth hides only the robot: the
+  progress message in the chat still updates.
 - **`stealth mode`** — a code word (also "play dead", "act asleep"); "wake
   up" / "stealth off" ends it. Asleep, the robot's face goes idle and stays
   there, nothing is shown on its screen, and the head, `find`, `look_around`
@@ -409,8 +420,11 @@ Flip it to `ask` if two seconds a command is a price you will pay.
   The Mac needs to be awake, but no existing task or open app window is required.
 
   Plain messages (or `codex: message`) continue the new chat, retaining its context.
-  During a running turn they steer it. Public progress and final answers return
-  under **Codex**; reasoning and tool output stay out of Telegram. Browser tasks
+  During a running turn they steer it. Each message that starts a turn gets one
+  progress message under **Codex** ("Sent to Codex.", then Codex's public steps,
+  edited in place) with a **Stop** button that works like `stop`. The final
+  answer is a new message replying to yours. Reasoning and tool output stay out
+  of Telegram. Browser tasks
   send the captured image from their own tab using the same validation as Buddy's
   computer tasks. `codex status` reports the folder, `stop` interrupts the turn
   while keeping the chat, and `codex off` stops active work and closes the session.
@@ -487,7 +501,8 @@ Flip it to `ask` if two seconds a command is a price you will pay.
   it true.
 - **An answer.** When a task needs a yes before something consequential, the
   question arrives in the chat. Your next message is the answer, and only the
-  answer. No reply in three minutes reads as no. A question whose answers are
+  answer. A question without buttons opens the reply box on itself, so the
+  answer is clearly a reply to it. No reply in three minutes reads as no. A question whose answers are
   known also has buttons: **Allow** / **Deny** for a yes/no (app actions,
   Chrome access, a Codex command), **Yes** / **No** for "Should I go ahead…",
   and Codex's app-access choices (**Allow once**, **Allow for this task**,

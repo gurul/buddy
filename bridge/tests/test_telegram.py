@@ -97,6 +97,11 @@ class FakeApi:
         self.edits: list[tuple[int, str]] = []                                 # editMessageText (message id, text)
         self.dropped: list[int] = []                                           # editMessageReplyMarkup: buttons taken off
         self.answered: list[tuple[str, str]] = []                              # answerCallbackQuery (query id, toast)
+        self.replies: list[tuple[str, int]] = []                               # (text, reply_to) per message that replied
+        self.force_replies: list[tuple[str, str]] = []                         # (text, placeholder) per ForceReply send
+        self.edit_keyboards: list[tuple[int, Any]] = []                        # (message id, rows or None) per edit
+        self.fail_edits: Optional[BotApiError] = None                          # editMessageText refused with this
+        self.refuse_links = False                                              # reply_to / force_reply refused (400)
 
     def feed(self, *updates: dict[str, Any]) -> None:
         """A message that arrives later, while the poll is being held open."""
@@ -116,7 +121,14 @@ class FakeApi:
         return batch
 
     async def send_message(self, chat_id: int, text: str, title: Optional[str] = None,
-                           subtitle: Optional[str] = None, buttons: Any = ()) -> None:
+                           subtitle: Optional[str] = None, buttons: Any = (), *, reply_to: int = 0,
+                           force_reply: Optional[str] = None) -> None:
+        if self.refuse_links and (reply_to or force_reply is not None):
+            raise BotApiError(400, "Bad Request: message to be replied not found")
+        if reply_to:
+            self.replies.append((text, reply_to))
+        if force_reply is not None:
+            self.force_replies.append((text, force_reply))
         self.sent.append((chat_id, text))
         self.titled.append((title, subtitle, text))
         self.buttons.append(list(buttons))
@@ -135,8 +147,11 @@ class FakeApi:
         return self.message_id
 
     async def edit_message(self, chat_id: int, message_id: int, text: str, title: Optional[str] = None,
-                           subtitle: Optional[str] = None) -> None:
+                           subtitle: Optional[str] = None, keyboard: Any = None) -> None:
+        if self.fail_edits is not None:
+            raise self.fail_edits
         self.edits.append((message_id, text))
+        self.edit_keyboards.append((message_id, keyboard))
 
     async def drop_buttons(self, chat_id: int, message_id: int) -> None:
         self.dropped.append(message_id)
@@ -1565,12 +1580,14 @@ class FakeCodex:
         self.stops = 0
         self.closed = 0
         self.emit = None
+        self.done = None            # the turn's result (CodexChat hands it here, not to emit, when given)
+        self.running = False        # a turn is going: a message sent now steers it
         self.fail = False
         self.attach_wait = None
 
-    async def start(self, folder, emit, picture=None):
+    async def start(self, folder, emit, picture=None, done=None):
         self.selected.append(folder)
-        self.emit = emit
+        self.emit, self.done = emit, done
         if self.attach_wait:
             await self.attach_wait.wait()
         if self.fail:
@@ -1609,10 +1626,19 @@ def test_codex_selection_relay_escape_stop_and_off():
         assert rig.inlet._codex_chat is None and not codex.selected
         await dispatch(rig, 'codex buddy')
         assert codex.selected == [CODEX_FOLDER]
-        await dispatch(rig, 'implement it')
+        await dispatch(rig, 'implement it', update_id=7)
         assert codex.sent == ['implement it'] and not create.requests
-        await codex.emit('Here is the answer.')
+        # the turn's one progress message, with a Stop button; a step edits it, the result is a new reply
+        assert api.titled[-1] == ('Codex', 'buddy', 'Sent to Codex.') and api.buttons[-1] == ['Stop']
+        progress_id = api.message_id
+        await codex.emit('Reading the tests')
+        await settle()
+        assert api.edits[-1] == (progress_id, 'Sent to Codex.\n\n- Reading the tests')
+        await codex.done('Here is the answer.')
+        await settle()
         assert api.titled[-1] == ('Codex', 'buddy', 'Here is the answer.')
+        assert api.replies[-1] == ('Here is the answer.', 7)
+        assert api.edits[-1][1].endswith(telegram.PROGRESS_DONE_LINE)
         await dispatch(rig, 'buddy: how are you?')
         assert len(create.requests) == 1 and codex.sent == ['implement it']
         await dispatch(rig, 'stop')
@@ -1620,6 +1646,7 @@ def test_codex_selection_relay_escape_stop_and_off():
         await dispatch(rig, 'codex off')
         count = len(api.sent)
         await codex.emit('late output must not leak')
+        await codex.done('late result must not leak')
         assert len(api.sent) == count and not codex.connected
         await dispatch(rig, 'hello buddy')
         assert len(create.requests) == 2
@@ -2710,3 +2737,227 @@ def test_the_codex_folder_menu_is_buttons_and_a_tap_starts_that_folder() -> None
         await rig.inlet._shutdown()
 
     asyncio.run(go())
+
+
+# ---- task progress in one message, with a Stop button (owner, 2026-09-23) ---------------------
+
+def task_rig(api: FakeApi, **kw: Any) -> Rig:
+    return Rig(api, FakeCreate(call("start_task", {"goal": "open the calculator"})), **kw)
+
+
+def test_a_tasks_steps_edit_one_progress_message_and_the_result_replies_to_the_request() -> None:
+    api = FakeApi([update("open the calculator", update_id=31)])
+    captions: list[dict[str, Any]] = []
+    rig = task_rig(api, on_caption=captions.append)
+
+    async def during() -> None:
+        progress_id = api.message_id
+        assert api.sent == [(OWNER, ON_IT_LINE)] and api.buttons == [["Stop"]]
+        agent = rig.agents[0]
+        agent.on_event(AgentEvent("progress", "Opening Calculator"))
+        agent.on_event(AgentEvent("progress", "Opening Calculator"))     # the same step again: shown once
+        agent.on_event(AgentEvent("progress", "Typing 2+2"))
+        await settle()
+        assert len(api.sent) == 1                                          # still one message: edits, not sends
+        assert api.edits[-1] == (progress_id, ON_IT_LINE + "\n\n- Opening Calculator\n- Typing 2+2")
+        assert api.edit_keyboards[-1][1][0][0][0] == "Stop"               # the Stop button stays under it
+        edits = len(api.edits)
+        rig.inlet._progress_step(rig.inlet._task_progress, "Typing 2+2")
+        await settle()
+        assert len(api.edits) == edits                                     # a no-op edit is never sent
+        agent.release.set()
+
+    run_rig(rig, during)
+    assert api.sent == [(OWNER, ON_IT_LINE), (OWNER, "Calculator is open.")]
+    assert api.titled[-1][0] == telegram.TASK_DONE_TITLE
+    assert api.replies == [("Calculator is open.", 31)]                    # a new message, replying to the request
+    assert api.edits[-1][1].endswith(telegram.PROGRESS_DONE_LINE) and api.edit_keyboards[-1][1] is None
+    assert any("Opening Calculator" in " ".join(c["lines"]) for c in captions)   # the robot still acts it out
+
+
+def test_progress_edits_are_paced_to_one_a_second() -> None:
+    api = FakeApi([update("open the calculator")])
+    waits: list[float] = []
+    rig: Rig
+
+    async def paced(secs: float) -> None:
+        waits.append(secs)
+        rig.now["t"] += secs
+        await asyncio.sleep(0)
+
+    rig = task_rig(api, sleep=paced)
+
+    async def during() -> None:
+        rig.now["t"] = 0.25                                                # a step a quarter second after "On it"
+        rig.agents[0].on_event(AgentEvent("progress", "one"))
+        rig.agents[0].on_event(AgentEvent("progress", "two"))
+        await settle()
+        assert waits and abs(waits[0] - 0.75) < 1e-9                       # waited out the rest of the second
+        assert [t for _, t in api.edits] == [ON_IT_LINE + "\n\n- one\n- two"]   # both steps, one edit
+        rig.agents[0].release.set()
+
+    run_rig(rig, during)
+
+
+def test_the_stop_button_does_what_texting_stop_does() -> None:
+    api = FakeApi([update("open the calculator", update_id=1)])
+    rig = task_rig(api)
+
+    async def during() -> None:
+        progress_id, key = api.key("Stop")
+        rig.inlet._dispatch(tap_update(key, message_id=progress_id, uid=STRANGER))   # only an owner may act
+        await settle()
+        assert rig.inlet.task_running and rig.agents[0].cancel_reason is None
+        rig.inlet._dispatch(tap_update(key, message_id=progress_id))
+        await settle()
+        assert not rig.inlet.task_running and rig.agents[0].cancel_reason == "stopped from Telegram"
+        assert api.answered[-1] == ("q1", "Stop") and progress_id in api.dropped
+        assert api.edits[-1] == (progress_id, ON_IT_LINE + "\n\n" + telegram.PROGRESS_STOPPED_LINE)
+        rig.inlet._dispatch(tap_update(key, message_id=progress_id, query_id="q2"))  # a second tap: spent
+        await settle()
+        assert api.answered[-1] == ("q2", telegram.TAP_EXPIRED_LINE)
+
+    run_rig(rig, during)
+    assert api.sent == [(OWNER, ON_IT_LINE), (OWNER, STOPPED_LINE)]       # as "stop" typed: no result line
+
+
+def test_a_failed_edit_falls_back_to_a_message_per_step_and_the_result_still_arrives() -> None:
+    api = FakeApi([update("open the calculator", update_id=5)])
+    api.fail_edits = BotApiError(400, "Bad Request: message can't be edited")
+    api.refuse_links = True                                                # and the reply link is refused too
+    rig = task_rig(api)
+
+    async def during() -> None:
+        rig.agents[0].on_event(AgentEvent("progress", "Opening Calculator"))
+        await settle()
+        rig.agents[0].on_event(AgentEvent("progress", "Typing 2+2"))
+        await settle()
+        assert api.sent == [(OWNER, ON_IT_LINE), (OWNER, "Opening Calculator"), (OWNER, "Typing 2+2")]
+        rig.agents[0].release.set()
+
+    run_rig(rig, during)
+    assert api.sent[-1] == (OWNER, "Calculator is open.")                  # sent plain, never lost
+    assert api.replies == [] and api.dropped                               # the Stop button still went
+
+
+def test_progress_falls_back_to_plain_messages_when_buttons_are_refused() -> None:
+    api = FakeApi([update("open the calculator")])
+
+    async def refused(*a: Any, **kw: Any) -> int:
+        raise BotApiError(400, "Bad Request: inline keyboards are not allowed")
+
+    api.send_inline = refused  # type: ignore[method-assign]
+    rig = task_rig(api)
+
+    async def during() -> None:
+        rig.agents[0].on_event(AgentEvent("progress", "Opening Calculator"))
+        await settle()
+        rig.agents[0].release.set()
+
+    run_rig(rig, during)
+    assert api.sent == [(OWNER, ON_IT_LINE), (OWNER, "Opening Calculator"), (OWNER, "Calculator is open.")]
+    assert api.edits == []
+
+
+def test_stealth_hides_the_robot_not_the_progress_message() -> None:
+    api = FakeApi([update("stealth mode", update_id=1), update("open the calculator", update_id=2)])
+    captions: list[dict[str, Any]] = []
+    rig = Rig(api, FakeCreate(call("start_task", {"goal": "open the calculator"})), on_caption=captions.append)
+
+    async def during() -> None:
+        assert rig.inlet.stealth
+        rig.agents[0].on_event(AgentEvent("progress", "Opening Calculator"))
+        await settle()
+        assert api.edits[-1][1].endswith("- Opening Calculator")
+        rig.agents[0].release.set()
+
+    run_rig(rig, during)
+    assert captions == []
+
+
+def test_a_free_task_question_opens_the_reply_box() -> None:
+    api = FakeApi([update("email the report to Sam", update_id=1)])
+    rig = Rig(api, FakeCreate(call("start_task", {"goal": "email the report to Sam"})),
+              agent_kw={"ask": "Which address should I use?", "final": "Sent."})
+
+    async def during() -> None:
+        assert api.force_replies == [("Which address should I use?", telegram.ASK_PLACEHOLDER)]
+        api.feed(update("sam@example.com", update_id=2))
+        await settle()
+        rig.agents[0].release.set()
+
+    run_rig(rig, during)
+    assert api.sent[-1] == (OWNER, "Sent. (answer=sam@example.com)")
+    # a refused reply box still asks the question, plainly
+    api = FakeApi([update("email the report to Sam", update_id=1)])
+    api.refuse_links = True
+    rig = Rig(api, FakeCreate(call("start_task", {"goal": "email the report to Sam"})),
+              agent_kw={"ask": "Which address should I use?"})
+
+    async def plain() -> None:
+        assert (OWNER, "Which address should I use?") in api.sent
+        rig.agents[0].release.set()
+
+    run_rig(rig, plain)
+
+
+def test_the_codex_stop_button_interrupts_and_a_steer_keeps_the_progress_message() -> None:
+    async def go() -> None:
+        codex, api = FakeCodex(), FakeApi()
+        rig = Rig(api, FakeCreate(), codex=codex, codex_folders=lambda: [CODEX_FOLDER])
+        await dispatch(rig, "codex buddy")
+        await dispatch(rig, "fix the tests", update_id=3)
+        progress_id, key = api.key("Stop")
+        codex.running = True
+        await dispatch(rig, "and the docs", update_id=4)                 # steers the running turn
+        assert codex.sent == ["fix the tests", "and the docs"] and api.sent[-1] == (OWNER, "Sent to Codex.")
+        assert api.key("Stop") == (progress_id, key)                      # no second progress message
+        await tap(rig, key, progress_id)
+        assert codex.stops == 1 and api.sent[-1] == (OWNER, "Stop requested in Codex.")
+        await codex.done("Codex stopped.")
+        await settle()
+        assert api.replies[-1] == ("Codex stopped.", 3)
+        await dispatch(rig, "codex off")
+        await rig.inlet._shutdown()
+
+    asyncio.run(go())
+
+
+def test_codex_off_closes_an_open_progress_message() -> None:
+    async def go() -> None:
+        codex, api = FakeCodex(), FakeApi()
+        rig = Rig(api, FakeCreate(), codex=codex, codex_folders=lambda: [CODEX_FOLDER])
+        await dispatch(rig, "codex buddy")
+        await dispatch(rig, "fix the tests")
+        progress_id, key = api.key("Stop")
+        await dispatch(rig, "codex off")
+        assert api.edits[-1] == (progress_id, "Sent to Codex.\n\n" + telegram.PROGRESS_CLOSED_LINE)
+        await tap(rig, key, progress_id)
+        assert api.answered[-1][1] == telegram.TAP_EXPIRED_LINE and codex.stops == 0
+        await rig.inlet._shutdown()
+
+    asyncio.run(go())
+
+
+def test_the_bot_api_sends_reply_links_reply_boxes_and_keeps_buttons_on_an_edit() -> None:
+    async def go() -> list[tuple[str, dict[str, Any]]]:
+        seen: list[tuple[str, dict[str, Any]]] = []
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            seen.append((request.url.path.rsplit("/", 1)[-1], json.loads(request.read())))
+            return httpx.Response(200, json={"ok": True, "result": {"message_id": 9}})
+
+        api = BotApi(TOKEN, client=httpx.AsyncClient(transport=httpx.MockTransport(handler)))
+        await api.send_message(OWNER, "the result", reply_to=31)
+        await api.send_message(OWNER, "which one?", force_reply="Your answer")
+        await api.edit_message(OWNER, 9, "step", keyboard=[[("Stop", "k.1", "danger")]])
+        await api.edit_message(OWNER, 9, "done")
+        await api.close()
+        return seen
+
+    seen = asyncio.run(go())
+    assert seen[0][1]["reply_parameters"] == {"message_id": 31, "allow_sending_without_reply": True}
+    assert seen[1][1]["reply_markup"] == {"force_reply": True, "input_field_placeholder": "Your answer"}
+    assert seen[2][0] == "editMessageText" and seen[2][1]["reply_markup"] == {
+        "inline_keyboard": [[{"text": "Stop", "callback_data": "k.1", "style": "danger"}]]}
+    assert seen[3][1]["reply_markup"] == {"inline_keyboard": []}

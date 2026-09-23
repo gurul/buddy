@@ -523,7 +523,8 @@ What the relay does now (`telegram.py` and `daemon.py`):
 9. **Picker names can collide.** Two sessions in different folders with the
    same name show the same button, and `names.index` picks the first.
 10. **Codex progress is one message per event** ("Codex progress"), which can
-    hit the one-message-per-second guidance on a busy task.
+    hit the one-message-per-second guidance on a busy task. *Fixed 2026-09-23:*
+    one progress message per task or Codex turn, edited at most once a second.
 
 ### Ideas, ranked by value to the owner
 
@@ -632,7 +633,9 @@ problem, not a Telegram one, but it is the most serious weakness in the relay.
    same code path as typing the button's words.
 4. **`sendMessageDraft`** for relayed Claude output and think_hard, with a
    repeated `typing` action between drafts.
-5. **Task progress in one edited message**, with a Stop button.
+5. **Task progress in one edited message**, with a Stop button. *Done
+   2026-09-23.* The result is a new message replying to the request, and a
+   task's free question uses ForceReply.
 6. **A pinned status message**, edited in place.
 
 ## What the docs did not confirm

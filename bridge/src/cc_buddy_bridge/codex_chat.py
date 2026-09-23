@@ -79,6 +79,9 @@ class CodexChat(CodexComputerAgent):
         super().__init__(on_event=self._event, ask_user=ask_user, **kw)
         self._output: Callable[[str], Awaitable[None]] | None = None
         self._picture: Callable[[], Awaitable[None]] | None = None
+        # The turn's result, when the caller tells it apart from progress (Telegram edits one progress
+        # message and sends the result as a new one); without it the result goes to the output like a step.
+        self._result: Callable[[str], Awaitable[None]] | None = None
         self._turn_job: asyncio.Task | None = None
         self._connected = False
         self.cwd: Path | None = None
@@ -93,10 +96,11 @@ class CodexChat(CodexComputerAgent):
             self._background(self._output(event.text))
 
     async def start(self, folder: Path, emit: Callable[[str], Awaitable[None]],
-                    picture: Callable[[], Awaitable[None]] | None = None) -> None:
+                    picture: Callable[[], Awaitable[None]] | None = None,
+                    done: Callable[[str], Awaitable[None]] | None = None) -> None:
         await self.close()
         self._cancelled = False
-        self.cwd, self._output, self._picture = folder, emit, picture
+        self.cwd, self._output, self._picture, self._result = folder, emit, picture, done
         if not folder.is_dir() or not os.access(folder, os.R_OK | os.X_OK):
             raise CodexUnavailable('That folder is no longer accessible.')
         try:
@@ -153,8 +157,8 @@ class CodexChat(CodexComputerAgent):
             status = turn.get('status')
             result = (self.final or 'Codex ended without a reply.') if status == 'completed' else (
                 'Codex stopped.' if status == 'interrupted' else 'Codex could not finish this message.')
-            if self._output:
-                await self._output(result)
+            if self._result or self._output:
+                await (self._result or self._output)(result)
             if status == 'completed' and self.browser_used and self._picture:
                 await self._picture()
         except asyncio.CancelledError:
@@ -163,8 +167,8 @@ class CodexChat(CodexComputerAgent):
             self._connected = False
             with contextlib.suppress(CodexUnavailable, TimeoutError):
                 await asyncio.wait_for(self.interrupt(), 3)
-            if self._output:
-                await self._output('Codex stopped responding. No work was retried. '
+            if self._result or self._output:
+                await (self._result or self._output)('Codex stopped responding. No work was retried. '
                                    'Send codex off to return to Buddy, or codex <folder> for a new chat.')
         finally:
             self.running = False
@@ -219,4 +223,4 @@ class CodexChat(CodexComputerAgent):
         self._proc = self._reader = self._done = None
         self.thread_id = self.turn_id = None
         self.running = False
-        self._output = self._picture = None
+        self._output = self._picture = self._result = None
