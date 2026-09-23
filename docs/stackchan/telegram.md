@@ -211,7 +211,13 @@ listing, never text from the chat, and it is shell-quoted. After the window
 opens, `claude on` connects the chat to it as usual.
 
 `claude on` itself starts from the sessions that are running (the daemon knows
-each one from its hooks):
+each one from its hooks). A session whose terminal was closed or crashed never
+says goodbye, so before it lists them buddy checks the Mac: it looks for a
+running `claude` process in each session's folder (`ps` and `lsof`, about
+30 ms). A session with no process there is left out and forgotten. If that
+check fails or finds no `claude` at all, every session is listed, as before.
+A session that started in the last 30 s, or one with a question still waiting,
+is always listed.
 
 - **One session:** the chat joins it at once.
 - **Several:** "Which Claude session?" with a button per folder
@@ -326,6 +332,15 @@ Flip it to `ask` if two seconds a command is a price you will pay.
   texts the result when there is one. Starting a task costs one model call, not
   two: measured live on 2026-09-21, the second call that only produced "On it!"
   cost 1.9 s, so code says it instead.
+- **The `/` menu.** At startup buddy sets its code words as bot commands in
+  your own chat only (`setMyCommands`, scoped to your chat): `/claude_on`,
+  `/claude_off`, `/new_claude`, `/codex`, `/rundown`, `/screenshot`,
+  `/stealth`, `/wake` and `/stop`. Each works exactly like the typed word. If
+  Telegram refuses the menu, the words still work when typed.
+- **"typing…"** shows while buddy works on a reply, for the whole turn, not only
+  the first 5 seconds. It is sent again every 4 s and stops when the reply goes
+  out. `think_hard` keeps it up for up to 5 minutes. It pauses while buddy waits
+  for your answer to a question.
 - **`stop`** (or `cancel`, `/stop`, `/cancel`) — stops the running task. This is
   code, not a model call: it works when the model is down or mid-turn.
 - **A photo** — "send me a picture of my desk". The robot snaps, the diary keeps
@@ -414,7 +429,9 @@ Flip it to `ask` if two seconds a command is a price you will pay.
   session (`focus_terminal.py`) and typed with Return through System Events.
   A 👍 reaction on your message says it went in; buddy sends no "typed" line
   (owner, 2026-09-23), and only if the reaction fails does a short `Typed.`
-  arrive instead;
+  arrive instead. Then "typing…" shows until Claude says something, asks you
+  something, waits on you, or ends its turn (the Stop hook), for 5 minutes at
+  most;
   `buddy: <text>` talks to buddy instead, and buddy's code words (`stop`,
   `screenshot`, `stealth mode`, `claude off`) still work. **The relay is
   bypass**: while it is on, the daemon's pretooluse hook allows a tool call

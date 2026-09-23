@@ -47,8 +47,9 @@ FLOW_TIMEOUT_SECS = 300.0            # an unanswered question this old is droppe
 WARP_CONFIG_NAME = "buddy-claude"
 RECENT_PATH = Path.home() / ".config" / "cc-buddy-bridge" / "claude-launch.json"
 
-TRIGGER = re.compile(r"^/?(?:new ?claude(?: session)?|claude ?new|start claude|claude session)(?:\s+(.*))?$",
-                     re.I | re.S)
+# "/new_claude" is the / menu's form (telegram.BOT_COMMANDS): a Bot API command has underscores, not spaces.
+TRIGGER = re.compile(r"^/?(?:new[ _]?claude(?:[ _]session)?|claude[ _]?new|start[ _]claude|claude[ _]session)"
+                     r"(?:\s+(.*))?$", re.I | re.S)
 GENERAL_WORDS = ("general", "whole", "root", "all", "g", "the whole thing", "top")
 LIST_WORDS = ("list", "ls", "?", "show", "folders", "list them", "show me", "which", "options")
 _NUMBERED = re.compile(r"^(.+)-\d+$")    # era-maker-213: a worktree of era-maker, folded out of the list

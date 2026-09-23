@@ -65,8 +65,12 @@ The [Telegram door](docs/stackchan/telegram.md) is **off by default**. With it o
 - **`new claude`** opens Warp on the Mac with Claude Code (personal) or era-code
   (work) in a folder you pick, with tap buttons. **`claude on`** relays a running
   session to the phone: it picks the only one, offers buttons when there are
-  several, and opens a new one when there are none. A 👍 on your text means it
-  was typed.
+  several, and opens a new one when there are none. Sessions whose terminal
+  has closed are left out. A 👍 on your text means it was typed, and
+  "typing…" shows until Claude answers.
+- **A `/` menu** of the code words (`/claude_on`, `/new_claude`, `/codex`,
+  `/rundown`, `/screenshot`, `/stealth`, `/wake`, `/stop` and more), in your
+  chat only.
 - **Keeps your personal notes.** With the [second brain](docs/stackchan/second-brain.md)
   on, a text saves a note, updates a list, checks off a todo, or undoes an edit in
   your Markdown vault.

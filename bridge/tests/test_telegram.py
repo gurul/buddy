@@ -78,6 +78,9 @@ class FakeApi:
         self.photos: list[tuple[int, str, str]] = []
         self.buttons: list[list[str]] = []                                     # per message sent, [] for none
         self.reactions: list[tuple[int, int, str]] = []
+        self.typings: list[int] = []                                           # sendChatAction typing, per chat
+        self.commands: list[tuple[tuple[tuple[str, str], ...], int]] = []      # setMyCommands (commands, chat)
+        self.order: list[str] = []                                             # "typing" / "send", as they happened
         self.polls = 0
         self._more: Optional[asyncio.Event] = None
 
@@ -103,6 +106,7 @@ class FakeApi:
         self.sent.append((chat_id, text))
         self.titled.append((title, subtitle, text))
         self.buttons.append(list(buttons))
+        self.order.append("send")
 
     async def react(self, chat_id: int, message_id: int, emoji: str) -> None:
         self.reactions.append((chat_id, message_id, emoji))
@@ -111,7 +115,11 @@ class FakeApi:
         self.photos.append((chat_id, str(path), caption))
 
     async def typing(self, chat_id: int) -> None:
-        pass
+        self.typings.append(chat_id)
+        self.order.append("typing")
+
+    async def set_commands(self, commands: Any, chat_id: int) -> None:
+        self.commands.append((tuple(commands), chat_id))
 
 
 class FakeCreate:
@@ -1728,3 +1736,317 @@ def test_a_failed_reaction_falls_back_to_a_short_line() -> None:
         assert api.sent[-1] == (OWNER, "Typed.")
 
     run_rig(rig, during)
+
+
+# ---- the / menu (setMyCommands) ---------------------------------------------------------------
+
+def test_the_menu_is_set_once_for_each_owner_chat_and_only_there() -> None:
+    two = TelegramConfig(enabled=True, token=TOKEN, owner_ids=frozenset({OWNER, 77}))
+    api = FakeApi()
+    rig = Rig(api, FakeCreate(), config=two)
+
+    async def during() -> None:
+        assert api.commands == [(telegram.BOT_COMMANDS, 77), (telegram.BOT_COMMANDS, OWNER)]
+
+    run_rig(rig, during)
+
+
+def test_a_menu_telegram_refuses_leaves_buddy_answering() -> None:
+    class NoMenu(FakeApi):
+        async def set_commands(self, commands: Any, chat_id: int) -> None:
+            raise BotApiError(400, "Bad Request: BOT_COMMAND_INVALID")
+
+    api = NoMenu([update("stop", update_id=1)])
+    rig = Rig(api, FakeCreate())
+
+    async def during() -> None:
+        assert api.sent == [(OWNER, NOTHING_TO_STOP_LINE)]              # the poll loop lived on
+
+    run_rig(rig, during)
+
+
+def test_every_menu_command_is_well_formed() -> None:
+    import re as _re
+    names = [c for c, _ in telegram.BOT_COMMANDS]
+    assert len(names) == len(set(names)) <= 100
+    for command, description in telegram.BOT_COMMANDS:
+        assert _re.fullmatch(r"[a-z0-9_]{1,32}", command), command
+        assert 1 <= len(description) <= 256
+
+
+def test_the_menu_request_is_scoped_to_the_owners_chat() -> None:
+    async def go() -> list[tuple[str, dict[str, Any]]]:
+        calls: list[tuple[str, dict[str, Any]]] = []
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            calls.append((request.url.path.rsplit("/", 1)[-1], json.loads(request.content)))
+            return httpx.Response(200, json={"ok": True, "result": True})
+
+        api = BotApi(TOKEN, client=httpx.AsyncClient(transport=httpx.MockTransport(handler)))
+        await api.set_commands(telegram.BOT_COMMANDS, OWNER)
+        await api.typing(OWNER)
+        await api.close()
+        return calls
+
+    calls = asyncio.run(go())
+    assert calls[0] == ("setMyCommands", {
+        "commands": [{"command": c, "description": d} for c, d in telegram.BOT_COMMANDS],
+        "scope": {"type": "chat", "chat_id": OWNER}})
+    assert calls[1] == ("sendChatAction", {"chat_id": OWNER, "action": "typing"})
+
+
+def _menu_rig(api: FakeApi, create: Optional[FakeCreate] = None) -> Rig:
+    async def terminal(cwd: str, text: str) -> str:
+        return ""
+
+    async def launcher(folder: Path, harness: str) -> str:
+        return "opened"
+
+    return Rig(api, create or FakeCreate(), terminal=terminal, claude_sessions=lambda: ["/Users/g/repo"],
+               launcher=launcher, launch_recent=lambda: [], codex=FakeCodex(), codex_folders=lambda: [CODEX_FOLDER])
+
+
+def _check_claude_on(rig: Rig) -> None:
+    assert rig.inlet.claude is True and rig.api.sent[-1] == (OWNER, telegram.CLAUDE_ON_LINE)
+
+
+def _check_claude_off(rig: Rig) -> None:
+    assert rig.inlet.claude is False and rig.api.sent[-1] == (OWNER, telegram.CLAUDE_OFF_LINE)
+
+
+def _check_new_claude(rig: Rig) -> None:
+    assert rig.inlet._launch is not None and rig.api.buttons[-1]         # the tree's first question, as buttons
+
+
+def _check_codex(rig: Rig) -> None:
+    assert rig.api.sent and rig.api.sent[-1] == (OWNER, "buddy")           # the folder menu, not a model turn
+
+
+def _check_screenshot(rig: Rig) -> None:
+    assert rig.api.sent[-1][1].startswith("I couldn't grab the screen")
+
+
+def _check_stealth(rig: Rig) -> None:
+    assert rig.inlet.stealth is True and rig.api.sent[-1] == (OWNER, telegram.STEALTH_ON_LINE)
+
+
+def _check_wake(rig: Rig) -> None:
+    assert rig.inlet.stealth is False and rig.api.sent[-1] == (OWNER, telegram.STEALTH_OFF_LINE)
+
+
+def _check_stop(rig: Rig) -> None:
+    assert rig.api.sent[-1] == (OWNER, NOTHING_TO_STOP_LINE)
+
+
+def _check_rundown(rig: Rig) -> None:
+    # the rundown is a model turn with the daily skill in it, not an ordinary chat turn
+    assert any("rundown" in json.dumps(r).lower() for r in rig.create.requests)
+    assert rig.api.sent[-1] == (OWNER, "Your day.")
+
+
+MENU_CHECKS = {
+    "claude_on": ([], _check_claude_on),
+    "claude_off": (["/claude_on"], _check_claude_off),
+    "new_claude": ([], _check_new_claude),
+    "codex": ([], _check_codex),
+    "rundown": ([], _check_rundown),
+    "screenshot": ([], _check_screenshot),
+    "stealth": ([], _check_stealth),
+    "wake": (["/stealth"], _check_wake),
+    "stop": ([], _check_stop),
+}
+
+
+def test_the_menu_offers_only_commands_the_dispatch_knows() -> None:
+    assert sorted(MENU_CHECKS) == sorted(c for c, _ in telegram.BOT_COMMANDS)
+
+
+@pytest.mark.parametrize("command", sorted(MENU_CHECKS))
+def test_each_menu_command_is_accepted_as_the_menu_sends_it(command: str) -> None:
+    before, check = MENU_CHECKS[command]
+    api = FakeApi()
+    rig = _menu_rig(api, FakeCreate(say("Your day.")) if command == "rundown" else None)
+
+    async def go() -> None:
+        for i, text in enumerate(before + [f"/{command}"], start=1):
+            await dispatch(rig, text, update_id=i)
+        await settle()
+        check(rig)
+        if command != "rundown":
+            assert rig.create.requests == []                              # code words: no model call
+
+    asyncio.run(go())
+
+
+def test_the_underscore_words_also_take_a_target() -> None:
+    api = FakeApi()
+    rig = _menu_rig(api)
+    rig.inlet._claude_sessions = lambda: ["/Users/g/repo", "/Users/g/other"]
+
+    async def go() -> None:
+        await dispatch(rig, "/claude_on other")
+        assert rig.inlet.claude and rig.inlet._relay_pin == "/Users/g/other"
+
+    asyncio.run(go())
+
+
+# ---- "typing…" while work goes on --------------------------------------------------------------
+
+def test_a_buddy_turn_keeps_typing_until_the_reply_and_no_longer() -> None:
+    release = asyncio.Event()
+
+    async def slow() -> dict[str, Any]:
+        await release.wait()
+        return say("Here you go.")
+
+    api = FakeApi([update("what's up", update_id=1)])
+    rig = Rig(api, FakeCreate(slow))
+
+    async def during() -> None:
+        await settle(400)
+        # repeated while the model works, never more than the turn's cap in ticks
+        cap = int(telegram.TYPING_TURN_SECS // telegram.TYPING_EVERY_SECS)
+        assert 1 < len(api.typings) <= cap and set(api.typings) == {OWNER}
+        release.set()
+        await settle()
+        assert api.sent[-1] == (OWNER, "Here you go.")
+        assert api.order[-1] == "send"                                    # no "typing…" after the reply
+        after = len(api.typings)
+        await settle()
+        assert len(api.typings) == after and OWNER not in rig.inlet._typing_tasks
+
+    run_rig(rig, during)
+
+
+def test_typing_stops_at_its_cap_when_the_end_is_never_seen() -> None:
+    async def go() -> None:
+        api = FakeApi()
+        rig = Rig(api, FakeCreate())
+        rig.inlet._keep_typing(OWNER, "relay", telegram.TYPING_RELAY_SECS)
+        rig.inlet._keep_typing(OWNER, "relay", telegram.TYPING_RELAY_SECS)   # the same reason again: no second loop
+        await settle(1000)
+        assert len(api.typings) == int(telegram.TYPING_RELAY_SECS // telegram.TYPING_EVERY_SECS)
+        assert OWNER not in rig.inlet._typing and OWNER not in rig.inlet._typing_tasks
+
+    asyncio.run(go())
+
+
+def test_a_failed_typing_is_tried_once_and_the_turn_still_answers() -> None:
+    class NoTyping(FakeApi):
+        async def typing(self, chat_id: int) -> None:
+            self.typings.append(chat_id)
+            raise BotApiError(429, "Too Many Requests: retry after 5")
+
+    async def model() -> dict[str, Any]:
+        await settle(20)                                                  # long enough for a few ticks
+        return say("Hello!")
+
+    api = NoTyping([update("hi", update_id=1)])
+    rig = Rig(api, FakeCreate(model))
+
+    async def during() -> None:
+        assert api.typings == [OWNER] and api.sent == [(OWNER, "Hello!")]
+
+    run_rig(rig, during)
+
+
+def test_think_hard_keeps_its_own_typing_and_a_question_pauses_it() -> None:
+    async def go() -> None:
+        release = asyncio.Event()
+
+        async def thinker(question: str) -> dict[str, Any]:
+            await release.wait()
+            return {"ok": True, "answer": "42"}
+
+        api = FakeApi()
+        rig = Rig(api, FakeCreate(), thinker=thinker)
+        inlet = rig.inlet
+        job = asyncio.ensure_future(inlet._think_hard("why", OWNER))
+        await settle(10)                                                  # a few ticks (the fake sleep is instant)
+        assert "think" in inlet._typing[OWNER] and api.typings
+        release.set()
+        assert (await job)["answer"] == "42"
+        assert OWNER not in inlet._typing
+        # a question to the owner is not work: no "typing…" under it, and it comes back with the answer
+        inlet._keep_typing(OWNER, "turn", telegram.TYPING_TURN_SECS)
+        ask = asyncio.ensure_future(inlet._ask_user("Which one?", OWNER))
+        await settle(10)
+        waiting = len(api.typings)
+        await settle(10)
+        assert len(api.typings) == waiting and OWNER not in inlet._typing
+        inlet._pending_answer.set_result("the red one")
+        assert await ask == "the red one"
+        assert "turn" in inlet._typing[OWNER]
+        inlet._stop_typing(OWNER, "turn")
+
+    asyncio.run(go())
+
+
+def test_a_relayed_line_types_until_claude_answers_asks_or_ends_its_turn() -> None:
+    async def terminal(cwd: str, text: str) -> str:
+        return ""
+
+    api = FakeApi([update("claude on", update_id=1)])
+    rig = Rig(api, FakeCreate(), terminal=terminal, claude_sessions=lambda: ["/Users/g/repo"])
+
+    def typing() -> bool:
+        return "relay" in rig.inlet._typing.get(OWNER, {})
+
+    async def during() -> None:
+        inlet = rig.inlet
+        assert inlet.claude and not typing()
+        api.feed(update("run the tests", update_id=2))
+        await settle(20)
+        assert typing() and api.typings
+        await inlet.relay_text("All green.", "/Users/g/repo")               # Claude's next words
+        assert not typing()
+        api.feed(update("now ship it", update_id=3))
+        await settle(20)
+        assert typing()
+        inlet.relay_turn_ended("/Users/g/elsewhere")                      # another session's turn: no change
+        assert typing()
+        inlet.relay_turn_ended("/Users/g/repo")                           # the joined session's Stop hook
+        assert not typing()
+        api.feed(update("one more", update_id=4))
+        await settle(20)
+        inlet.relay_tool_call("AskUserQuestion", "Ship now? (1. Yes / 2. No)")
+        assert not typing()
+        api.feed(update("2", update_id=5))
+        await settle(20)
+        rig.now["t"] += telegram.ASKED_RECENTLY_SECS + 1
+        await inlet.relay_notification("permission_prompt", "Claude needs your input", True)
+        assert not typing()
+        api.feed(update("again", update_id=6))
+        await settle(20)
+        api.feed(update("claude off", update_id=7))
+        await settle(20)
+        assert not typing() and OWNER not in inlet._typing_tasks
+
+    run_rig(rig, during)
+
+
+def test_the_daemon_ends_the_relays_typing_at_the_stop_hook() -> None:
+    from cc_buddy_bridge.state import State
+
+    ended: list[str] = []
+    state = State()
+    state.session_start("s1", cwd="/Users/g/repo")
+
+    async def deferred(session_id: str, delay: float) -> None:
+        return None
+
+    async def side_effects(secs: float) -> None:
+        return None
+
+    inlet = SimpleNamespace(claude=True, relay_turn_ended=ended.append)
+    daemon = SimpleNamespace(_pending_turn_ends={}, _deferred_turn_end=deferred, state=state,
+                             _turn_end_side_effects=side_effects, _telegram=inlet)
+
+    async def go() -> None:
+        assert await Daemon._ipc_turn_end(daemon, {"session_id": "s1"}) == {"ok": True}
+        inlet.claude = False
+        await Daemon._ipc_turn_end(daemon, {"session_id": "s1"})          # relay off: nothing to end
+        await asyncio.sleep(0)
+
+    asyncio.run(go())
+    assert ended == ["/Users/g/repo"]

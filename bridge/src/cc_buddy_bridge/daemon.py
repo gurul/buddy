@@ -13,8 +13,8 @@ from typing import TYPE_CHECKING, Any, Optional
 if TYPE_CHECKING:
     from .key_tap import KeyTapper
 
+from . import claude_live, photos, voice_agent
 from . import follow as follow_mod
-from . import photos, voice_agent
 from . import recall as recall_mod
 from . import records as records_mod
 from . import telegram as telegram_mod
@@ -1076,8 +1076,8 @@ class Daemon:
             scene=self._scene, head=self._head, on_explore=lambda: self._request_explore("requested from Telegram"),
             on_sound=self._set_sound, on_star=self._star_by_voice, on_caption=self._on_caption,
             notes=lambda: self._room_notes_taker(), terminal=Daemon._type_into_terminal,
-            claude_sessions=lambda: [s.cwd for s in sorted(self.state.sessions.values(),
-                                                           key=lambda s: s.started_at, reverse=True) if s.cwd],
+            # Live sessions only: one whose terminal died without a SessionEnd is dropped (claude_live).
+            claude_sessions=lambda: claude_live.picker_sessions(self.state),
             records=records_mod.RecordsReader(self._recall_cfg) if records_mod.configured().enabled else None)
 
     def _make_agent(self, on_event: Any, ask_user: Any) -> Any:
@@ -1882,6 +1882,14 @@ class Daemon:
         # correct before anything is pushed.
         CELEBRATE_SECS = 5.0
         self.state.pulse_completed(duration_secs=CELEBRATE_SECS)
+        # The phone's "typing…" for a relayed line ends with the joined session's turn.
+        inlet = getattr(self, "_telegram", None)
+        if inlet is not None and inlet.claude:
+            sess = self.state.sessions.get(session_id)
+            try:
+                inlet.relay_turn_ended(getattr(sess, "cwd", None) or "")
+            except Exception:  # noqa: BLE001 — the Stop hook's reply must never wait on the phone
+                log.exception("telegram: relay_turn_ended failed")
         # Kick off the BLE push in the background so this coroutine can
         # return {"ok": True} immediately — the Stop hook caller must not
         # block on _push_heartbeat(force=True) or it surfaces as ETIMEDOUT

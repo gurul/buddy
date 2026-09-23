@@ -494,7 +494,8 @@ What the relay does now (`telegram.py` and `daemon.py`):
 2. **Dead sessions stay in the picker.** A session leaves `state.sessions` only
    on the `SessionEnd` hook. A terminal that is killed or crashes never sends it,
    so it stays in the "claude on" list. Joining it types into whatever window
-   is frontmost (weakness 1).
+   is frontmost (weakness 1). *Fixed 2026-09-23:* `claude_live.py` drops a
+   session with no running `claude` process in its folder.
 3. **A pending yes/no eats the next message.** While `decide_permission` waits,
    any plain text is taken as the answer. A message meant for Claude is not
    typed. `consent.decision` finds no yes or no, the prompt goes back to the Mac
@@ -510,6 +511,8 @@ What the relay does now (`telegram.py` and `daemon.py`):
    in the terminal".
 8. **No sign of work.** During a relayed turn there is no typing indicator.
    The 👍 means "typed", not "Claude is on it" or "Claude is done".
+   *Fixed 2026-09-23:* "typing…" is repeated from the typed line until Claude
+   answers, asks, waits or ends its turn.
 9. **Picker names can collide.** Two sessions in different folders with the
    same name show the same button, and `names.index` picks the first.
 10. **Codex progress is one message per event** ("Codex progress"), which can
@@ -612,7 +615,7 @@ problem, not a Telegram one, but it is the most serious weakness in the relay.
 ## Next candidates for buddy
 
 1. **`setMyCommands`** for the code words, scoped to the owner's chat. One call
-   at startup.
+   at startup. *Done 2026-09-23.*
 2. **Callback plumbing plus inline yes/no** for permission prompts, Composio,
    Jev and Codex app prompts. Stops a pending prompt eating the next message.
 3. **AskUserQuestion options and pickers as inline buttons.**

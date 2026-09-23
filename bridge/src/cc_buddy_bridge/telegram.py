@@ -44,6 +44,7 @@ import asyncio
 import dataclasses
 import json
 import logging
+import math
 import mimetypes
 import os
 import re
@@ -95,8 +96,9 @@ DONE_HOLD_SECS = 3.0                # the board shows "done" this long after a t
 STOP_WORDS = ("stop", "/stop", "cancel", "/cancel")
 STEALTH_ON = ("stealth mode", "stealth", "stealth on", "go stealth", "/stealth", "play dead", "act asleep")
 STEALTH_OFF = ("stealth off", "wake up", "/wake", "stop stealth", "end stealth", "you can wake up")
-CLAUDE_ON = ("claude on", "/claude on", "claude relay on", "relay claude")
-CLAUDE_OFF = ("claude off", "/claude off", "claude relay off", "stop relaying claude")
+# "/claude_on" and "/claude_off" are the forms the / menu sends (BOT_COMMANDS): a command has no spaces.
+CLAUDE_ON = ("claude on", "/claude on", "/claude_on", "claude relay on", "relay claude")
+CLAUDE_OFF = ("claude off", "/claude off", "/claude_off", "claude relay off", "stop relaying claude")
 CLAUDE_PREFIX = re.compile(r"^(claude|>)\s*:?\s+(.+)$", re.I | re.S)     # "claude: fix the tests" → typed into the terminal
 # While relaying, this one is for buddy: "buddy: …", "buddy, …", and "hey buddy …" with or without the comma
 # (live, 2026-09-23: "Hey buddy how many unread emails…" went to the Claude terminal for want of one).
@@ -130,6 +132,30 @@ RELAY_BATCH_SECS = 1.2                     # relay lines are batched this long i
 STEALTH_ON_LINE = "Stealth mode: I'll act asleep at the desk until you say wake up."
 STEALTH_OFF_LINE = "Awake again."
 FATAL_CODES = (401, 404, 409)       # bad token, malformed token, another poller on this token
+# The / menu in the owner's chat: buddy's code words as Bot API commands, set once at startup (setMyCommands,
+# scoped to each owner's private chat with BotCommandScopeChat, so nobody else's menu shows them). A command
+# is 1-32 lowercase letters, digits and underscores; a description is 1-256 characters. Every one of these is
+# accepted by _dispatch exactly as typed from the menu (tests hold it), so the menu never offers a dead word
+# (owner, 2026-09-23).
+BOT_COMMANDS: tuple[tuple[str, str], ...] = (
+    ("claude_on", "Join a running Claude Code session"),
+    ("claude_off", "Stop relaying Claude Code"),
+    ("new_claude", "Open a new Claude Code session"),
+    ("codex", "Chat with Codex in a folder"),
+    ("rundown", "Mail, calendar and todos in one brief"),
+    ("screenshot", "Send the Mac's screen"),
+    ("stealth", "Act asleep at the desk"),
+    ("wake", "Wake up from stealth"),
+    ("stop", "Stop the running task"),
+)
+# "typing…" while buddy or Claude works. Telegram shows a chat action for 5 s at most and clears it when the
+# bot's next message arrives (sendChatAction), so it is sent again every 4 s, and only for a bounded number of
+# ticks: a turn whose end is never seen (a lost Stop hook) stops showing it on its own. Counted in ticks, not
+# clock time, so a slow network cannot stretch it and the tests need no clock (owner, 2026-09-23).
+TYPING_EVERY_SECS = 4.0
+TYPING_TURN_SECS = 120.0             # a buddy text turn: most answer in seconds, a tool round in tens of seconds
+TYPING_THINK_SECS = 300.0            # think_hard: the slow brain may take its whole timeout (think.py caps it at 300)
+TYPING_RELAY_SECS = 300.0            # a relayed line, until Claude says something, asks, waits or ends its turn
 
 NOT_TEXT_LINE = "Send text, a photo, or a still JPEG, PNG, WebP, or GIF image file."
 FORWARDED_LINE = "I don't act on forwarded messages. Type it to me in your own words."
@@ -341,7 +367,7 @@ def tools_for(config: TelegramConfig, profile: str = "", extra: Sequence[dict[st
 # owner wants a picture when they ask for one, not with every result (owner, 2026-09-21).
 # The whole message is a request for the screen: answered by code, no model call, mid-task or not — like
 # "stop". Live 2026-09-21: five such texts during a task each cost three model calls and sent nothing.
-SCREEN_NOW = re.compile(r"^(please |can you |could you )?(send( me)?( a| the)? |show( me)?( the)? |take( a)? |give( me)?( a)? )?"
+SCREEN_NOW = re.compile(r"^/?(please |can you |could you )?(send( me)?( a| the)? |show( me)?( the)? |take( a)? |give( me)?( a)? )?"
                         r"(screen ?shot|screen|screen ?grab|your screen|the mac|mac screen|what('s| is) on (the |my )?screen)"
                         r"( now| please| pls)?[\s.!?]*$", re.I)
 WANTS_SCREEN = re.compile(r"\b(screen ?shots?|screen ?grab|show me|send me (a |the )?(picture|screen|image)|"
@@ -671,7 +697,7 @@ def unhide_tokens() -> None:
 
 
 class BotApi:
-    """The four Bot API methods buddy uses. ``client`` is an ``httpx.AsyncClient`` (tests hand it one
+    """The Bot API methods buddy uses. ``client`` is an ``httpx.AsyncClient`` (tests hand it one
     with a mock transport, so the real request and logging paths run)."""
 
     def __init__(self, token: str, client: Any = None) -> None:
@@ -757,7 +783,15 @@ class BotApi:
                          files={"document": (Path(path).name, blob, "application/octet-stream")})
 
     async def typing(self, chat_id: int) -> None:
+        """"typing…" under the bot's name for 5 s at most, or until its next message (sendChatAction). The
+        inlet repeats it while work goes on (TelegramInlet._keep_typing)."""
         await self._call("sendChatAction", {"chat_id": chat_id, "action": "typing"})
+
+    async def set_commands(self, commands: Sequence[tuple[str, str]], chat_id: int) -> None:
+        """The / menu for one chat only (setMyCommands with a BotCommandScopeChat scope): the owner's
+        private chat shows buddy's code words, and no other chat's menu changes."""
+        await self._call("setMyCommands", {"commands": [{"command": c, "description": d} for c, d in commands],
+                                           "scope": {"type": "chat", "chat_id": chat_id}})
 
     async def close(self) -> None:
         await self._client.aclose()
@@ -804,7 +838,8 @@ class TelegramInlet:
     * ``terminal``      — (cwd, text) -> str: type a line into the Claude Code terminal for that session;
                           "" when it went in (the owner's message gets a reaction), else the line to say
     * ``claude_sessions`` — () -> [cwd]: the running Claude Code sessions' folders, newest first, for the
-                          "claude on" picker
+                          "claude on" picker (the daemon's leaves out sessions whose process is gone:
+                          claude_live.picker_sessions)
     * ``launcher``      — (folder, harness) -> str: open a new coding session on the Mac
                           (claude_launch.open_session). "new claude" (code word) and the start_coding_session
                           tool walk claude_launch's tree: personal or work, then general or which folder;
@@ -902,6 +937,10 @@ class TelegramInlet:
         self._jobs: set[asyncio.Task] = set()
         self._dropped_ids: set[int] = set()
         self.stopped_reason: Optional[str] = None
+        # "typing…" per chat: why it is shown (a buddy turn, think_hard, a relayed line) and how many more
+        # ticks each reason is worth. One loop per chat sends it while any reason is left (_typing_loop).
+        self._typing: dict[int, dict[str, int]] = {}
+        self._typing_tasks: dict[int, asyncio.Task] = {}
 
     # -- the loop --
     @property
@@ -916,6 +955,7 @@ class TelegramInlet:
     async def run(self) -> None:
         log.info("telegram: listening for %d owner id(s); text turns go to %s at %s effort",
                  len(self.config.owner_ids), self.config.model, self.config.effort)
+        self._spawn(self._set_commands(), "telegram-commands")
         offset: Optional[int] = None
         backoff = 1.0
         try:
@@ -958,9 +998,83 @@ class TelegramInlet:
                     pass
         for job in list(self._jobs):
             job.cancel()
-        await asyncio.gather(*self._jobs, return_exceptions=True)
+        typing = list(self._typing_tasks.values())
+        self._typing.clear()
+        self._typing_tasks.clear()
+        for job in typing:
+            job.cancel()
+        await asyncio.gather(*self._jobs, *typing, return_exceptions=True)
         await self._codex.close()
         self._hand_to_memory()
+
+    async def _set_commands(self) -> None:
+        """buddy's code words in the / menu of each owner's private chat (a private chat's id is its user's
+        id). Once per start, and fail-soft: a menu Telegram refuses leaves every word working when typed."""
+        for owner in sorted(self.config.owner_ids):
+            try:
+                await self.api.set_commands(BOT_COMMANDS, owner)
+            except asyncio.CancelledError:
+                raise
+            except Exception as e:  # noqa: BLE001 — a missing menu is cosmetic
+                log.warning("telegram: could not set the / menu (%s); the code words still work typed",
+                            e if isinstance(e, BotApiError) else type(e).__name__)
+                return
+        log.info("telegram: / menu set for %d owner chat(s)", len(self.config.owner_ids))
+
+    # -- "typing…" while work goes on --
+    def _keep_typing(self, chat_id: Optional[int], reason: str, secs: float) -> None:
+        """Show "typing…" in this chat for ``reason`` for about ``secs`` (in 4 s ticks), until
+        ``_stop_typing`` with the same reason. A second call for a reason already shown extends it, never
+        doubles it: one loop per chat, one sendChatAction per tick, whatever the number of reasons."""
+        if chat_id is None:
+            return
+        reasons = self._typing.setdefault(chat_id, {})
+        reasons[reason] = max(reasons.get(reason, 0), max(1, math.ceil(secs / TYPING_EVERY_SECS)))
+        task = self._typing_tasks.get(chat_id)
+        if task is None or task.done():
+            # Not one of self._jobs: it is not work to wait for, only a sign that work is going on.
+            self._typing_tasks[chat_id] = asyncio.ensure_future(self._typing_loop(chat_id))
+
+    def _stop_typing(self, chat_id: Optional[int], reason: str) -> None:
+        """Drop one reason; with none left, the loop ends now, so no "typing…" follows the reply."""
+        reasons = self._typing.get(chat_id) if chat_id is not None else None
+        if reasons is None:
+            return
+        reasons.pop(reason, None)
+        if not reasons:
+            self._end_typing(chat_id)
+
+    def _end_typing(self, chat_id: int) -> dict[str, int]:
+        """Every reason at once, returned so ``_ask_user`` can put them back after the owner answers."""
+        reasons = self._typing.pop(chat_id, {})
+        task = self._typing_tasks.pop(chat_id, None)
+        if task is not None and task is not asyncio.current_task():
+            task.cancel()
+        return reasons
+
+    async def _typing_loop(self, chat_id: int) -> None:
+        try:
+            while True:
+                reasons = self._typing.get(chat_id)
+                if not reasons:
+                    self._typing.pop(chat_id, None)
+                    return
+                try:
+                    await self.api.typing(chat_id)
+                except asyncio.CancelledError:
+                    raise
+                except Exception as e:  # noqa: BLE001 — a missing "typing…" is not worth more than a debug line
+                    log.debug("telegram: typing failed (%s); not shown for this work", type(e).__name__)
+                    self._typing.pop(chat_id, None)
+                    return
+                for reason in list(reasons):
+                    reasons[reason] -= 1
+                    if reasons[reason] <= 0:
+                        del reasons[reason]
+                await self._sleep(TYPING_EVERY_SECS)
+        finally:
+            if self._typing_tasks.get(chat_id) is asyncio.current_task():
+                del self._typing_tasks[chat_id]
 
     def _spawn(self, coro: Awaitable[None], name: str) -> asyncio.Task:
         task = asyncio.ensure_future(coro)
@@ -1000,7 +1114,7 @@ class TelegramInlet:
             self._spawn(self._image(inbound, target, self._codex_epoch), "telegram-image")
             return
         word = inbound.text.lower().rstrip(".! ")
-        if not re.match(r"/?claude (on|off)\b", word) and self._launch_dispatch(inbound, word):
+        if not re.match(r"/?claude[ _](on|off)\b", word) and self._launch_dispatch(inbound, word):
             return
         if rundown.matches(inbound.text):
             self._spawn(self._turn(inbound), "telegram-rundown")
@@ -1019,6 +1133,7 @@ class TelegramInlet:
                 self._codex_chat = None if action == "off" else inbound.chat_id
                 if action != "off":
                     self.claude, self._relay_pin, self._join_after_launch = False, "", False
+                    self._stop_typing(inbound.chat_id, "relay")
                     self._relay_lines.clear()
                     if self._relay_flush is not None:
                         self._relay_flush.cancel()
@@ -1032,7 +1147,7 @@ class TelegramInlet:
             self._spawn(self._stop(inbound.chat_id), "telegram-stop")
             return
         self._chat_id = inbound.chat_id
-        claude_on_target = re.fullmatch(r"/?claude on\s+(.+)", word)
+        claude_on_target = re.fullmatch(r"/?claude[ _]on\s+(.+)", word)
         if word in CLAUDE_ON or word in CLAUDE_OFF or claude_on_target:
             self._codex_epoch += 1
             if (word in CLAUDE_ON or claude_on_target) and self._codex_chat is not None:
@@ -1044,6 +1159,7 @@ class TelegramInlet:
             self._note("user", inbound.text)
             if word in CLAUDE_OFF:
                 self.claude, self._relay_pin, self._join_after_launch = False, "", False
+                self._stop_typing(inbound.chat_id, "relay")
                 log.info("telegram: claude relay off")
                 self._spawn(self._say(inbound.chat_id, CLAUDE_OFF_LINE), "telegram-say")
                 return
@@ -1343,6 +1459,9 @@ class TelegramInlet:
         except (BotApiError, AttributeError) as e:
             log.warning("telegram: could not react (%s); said it instead", e)
             await self._say(chat_id, "Typed.")
+        # Claude is on it: "typing…" until it says something, asks, waits on the owner or ends its turn
+        # (relay_text, relay_tool_call, relay_notification, decide_permission, relay_turn_ended), or the cap.
+        self._keep_typing(chat_id, "relay", TYPING_RELAY_SECS)
 
     def relay_line(self, body: str, title: str = CLAUDE_TITLE, subtitle: str = "") -> None:
         """One message for the phone (what Claude said, a question it asks), batched with its neighbours:
@@ -1375,6 +1494,7 @@ class TelegramInlet:
         """A tool call the daemon saw. Only a question for the owner (AskUserQuestion) reaches the phone:
         the terminal's gray lines, the call itself and its result tail, stay on the Mac (owner, 2026-09-21)."""
         if tool == "AskUserQuestion":
+            self._stop_typing(self._chat_id, "relay")
             body = " ".join(str(hint).split()) or "(see the terminal)"
             if "(1. " in body:
                 body += "\n\nReply with the option's number."
@@ -1392,6 +1512,8 @@ class TelegramInlet:
         if cwd:
             self._relay_cwd = cwd
         body = str(text).strip()
+        if body:
+            self._stop_typing(self._chat_id, "relay")      # Claude's next words are the sign it answered
         if len(body) > MAX_RELAY_CHARS:
             # Cut on a paragraph, else a line, else a space near the cap, and say the rest is on the Mac.
             window = body[:MAX_RELAY_CHARS]
@@ -1401,9 +1523,17 @@ class TelegramInlet:
         if body:
             self.relay_line(body, subtitle=Path(self._relay_cwd).name if self._relay_cwd else "")
 
+    def relay_turn_ended(self, cwd: str = "") -> None:
+        """Claude Code's Stop hook: a turn ended. For the joined session, "typing…" stops now, even when the
+        turn ended without a word for the phone. Another session's end changes nothing here."""
+        if cwd and self._relay_pin and not _same_folder(cwd, self._relay_pin):
+            return
+        self._stop_typing(self._chat_id, "relay")
+
     async def relay_notification(self, kind: str, message: str, waits: bool) -> None:
         if not self.claude or self._chat_id is None or not waits:
             return
+        self._stop_typing(self._chat_id, "relay")          # waiting on the owner is not working
         if self._clock() - self._last_ask_at < ASKED_RECENTLY_SECS:
             return                                        # the question itself was just sent: no vague echo
         await self._say(self._chat_id, message.strip(), title=CLAUDE_WAITS_TITLE)
@@ -1419,6 +1549,7 @@ class TelegramInlet:
             return None                                   # one question at a time; this one defers
         if cwd:
             self._relay_cwd = cwd
+        self._stop_typing(self._chat_id, "relay")          # asking is not working
         # The command as code, so nothing in it is read as markup; the repo under the title.
         question = "```\n" + hint.strip()[:300] + "\n```\n\nyes / no?"
         self._last_ask_at = self._clock()
@@ -1482,12 +1613,13 @@ class TelegramInlet:
                                                 datetime.fromtimestamp(self._wall()).astimezone())
                 items = [message_item("user", inbound.text), message_item("developer", skill)]
             self._note("user", inbound.text + (" [image attached]" if image else ""))
+            # "typing…" for the whole turn, not only its first 5 s (owner, 2026-09-23), gone before the reply.
+            self._keep_typing(chat_id, "turn", TYPING_TURN_SECS)
             try:
-                await self.api.typing(chat_id)
-            except BotApiError:
-                pass                                     # a missing "typing…" is not worth a log line
-            try:
-                reply, rounds = await self._think(items, chat_id, daily=daily)
+                try:
+                    reply, rounds = await self._think(items, chat_id, daily=daily)
+                finally:
+                    self._stop_typing(chat_id, "turn")
             except asyncio.CancelledError:
                 raise
             except Exception as e:  # noqa: BLE001 — the type only: a message can quote what was asked
@@ -1550,7 +1682,7 @@ class TelegramInlet:
                 if self._vault is None:
                     return {"ok": False, "reason": "the second brain is off on this computer (CC_BUDDY_SECOND_BRAIN)"}
                 return await asyncio.to_thread(second_brain.dispatch, self._vault.root, name, args)
-            return await self._think_hard(str(args.get("question") or "").strip())
+            return await self._think_hard(str(args.get("question") or "").strip(), chat_id)
         except asyncio.CancelledError:
             raise
         except Exception:  # noqa: BLE001
@@ -1703,6 +1835,8 @@ class TelegramInlet:
         self._pending_answer = loop.create_future()
         self._pending_answer_chat = chat_id
         self._note("buddy", question)
+        # Waiting on the owner is not working: no "typing…" under the question. It comes back with the answer.
+        paused = self._end_typing(chat_id)
         try:
             await self._say(chat_id, question, title=title)
             return await asyncio.wait_for(self._pending_answer, timeout=self.config.ask_timeout_secs)
@@ -1712,6 +1846,8 @@ class TelegramInlet:
         finally:
             self._pending_answer = None
             self._pending_answer_chat = None
+            for reason, ticks in paused.items():
+                self._keep_typing(chat_id, reason, ticks * TYPING_EVERY_SECS)
 
     async def _send_screen(self, chat_id: int, caption: str, *, agent: Any = None) -> dict[str, Any]:
         agent = agent or (self._codex if self._codex_chat == chat_id else self._agent)
@@ -1847,12 +1983,17 @@ class TelegramInlet:
         await self.api.send_photo(chat_id, Path(shot["path"]), caption)
         return {"ok": True, "sent": True, "shows": caption}
 
-    async def _think_hard(self, question: str) -> dict[str, Any]:
+    async def _think_hard(self, question: str, chat_id: Optional[int] = None) -> dict[str, Any]:
         if not question:
             return {"ok": False, "reason": "empty question"}
         if self._thinker is None:
             return {"ok": False, "reason": "deep reasoning is off on this computer; answer as best you can"}
-        return await self._thinker(question)
+        # The slow brain can outlast a turn's "typing…": it keeps its own for as long as it may take.
+        self._keep_typing(chat_id, "think", TYPING_THINK_SECS)
+        try:
+            return await self._thinker(question)
+        finally:
+            self._stop_typing(chat_id, "think")
 
 
 # TelegramInlet._tool's fixed tools: name -> handler, called as handler(inlet, name, args, chat_id). Checked
