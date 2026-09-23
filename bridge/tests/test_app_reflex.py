@@ -60,9 +60,9 @@ def test_launch_then_more_goes_to_the_inner_agent_whole() -> None:
 
 def test_consequential_and_uninstalled_are_the_inner_agents() -> None:
     agent, inner, opened, _ = rig()
-    asyncio.run(agent.run("quit Spotify"))
+    asyncio.run(agent.run("force quit Spotify"))
     asyncio.run(agent.run("open Photoshop"))
-    assert opened == [] and inner.goals == ["quit Spotify", "open Photoshop"]
+    assert opened == [] and inner.goals == ["force quit Spotify", "open Photoshop"]
 
 
 def test_failed_open_falls_back_to_the_inner_agent() -> None:

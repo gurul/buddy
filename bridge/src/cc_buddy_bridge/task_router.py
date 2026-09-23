@@ -67,7 +67,7 @@ REFLEX_LAUNCH_DEFAULT: bool = True      # holdout 3: 19 bare launches fired, 19 
 REFLEX_POLICIES = ("off", "launch", "all")
 
 TIERS = ("reflex", "lane", "astra")
-KINDS = ("launch", "search", "lane", "astra")
+KINDS = ("launch", "search", "quit", "quit_all", "lane", "astra")
 
 # Wording that means "this can cost the human something": only the planner, with ask_user, may act.
 CONSEQUENTIAL = re.compile(
@@ -127,7 +127,7 @@ class Plan:
     """What to try, in order. `kind` is the first tier's action; `tiers` always ends in astra
     unless a reflex fully answers the request (`complete`)."""
 
-    kind: str                      # launch | search | lane | astra
+    kind: str                      # launch | search | quit | quit_all | lane | astra
     tiers: tuple[str, ...]         # e.g. ("reflex",) · ("reflex", "astra") · ("lane", "astra") · ("astra",)
     app: str = ""                  # launch: the installed app's name, as installed
     query: str = ""                # search: the query
@@ -155,6 +155,8 @@ class Plan:
     def sentence(self) -> str:
         if self.kind == "launch":
             return f"Opened {self.app}."
+        if self.kind == "quit":
+            return f"Quit {self.app}."
         if self.kind == "search":
             shown = self.query if len(self.query) <= 60 else self.query[:59].rstrip() + "…"
             return f"Here's a search for {shown}."
@@ -223,6 +225,34 @@ APP_ALIASES = {"apple tv": "TV", "chrome": "Google Chrome", "settings": "System 
                "system preferences": "System Settings", "preferences": "System Settings", "apple music": "Music",
                "itunes": "Music", "vs code": "Visual Studio Code", "vscode": "Visual Studio Code",
                "imessage": "Messages"}
+
+
+# Quitting (owner, 2026-09-23): only the explicit word QUIT, a graceful quit (Cmd+Q: an app with unsaved
+# work asks to save), never "close", "exit", "kill" or "force quit" — those stay the planner's. "quit all"
+# quits every regular app except the ones buddy works through (app_reflex.QUIT_ALL_KEEP).
+QUIT_VERB = re.compile(r"^(?:go ahead and |just )?quit(?: out of)?\s+", re.IGNORECASE)
+QUIT_ALL_TARGET = re.compile(
+    r"^(?:all|everything|every ?thing|all of (?:it|them)|every (?:app|application|program)|"
+    r"all (?:of )?(?:my |the |the open |my open |open |running |the running )?(?:apps|applications|programs)"
+    r"(?: (?:that are|i have|i've got) (?:open|running))?)$", re.IGNORECASE)
+FORCE = re.compile(r"\bforce\b", re.IGNORECASE)
+QUIT_WORD = re.compile(r"\bquit\b", re.IGNORECASE)
+
+
+def _quit(text: str, apps: Iterable[str]) -> Optional[str]:
+    """The installed app a request asks to quit, "*" for quit all, None when it is not nothing but that."""
+    if FORCE.search(text):
+        return None
+    t = _strip_filler(text)
+    if AND_THEN.search(t) and not QUIT_ALL_TARGET.match(QUIT_VERB.sub("", t, count=1).strip()):
+        return None                                     # "quit Spotify and open Music": the planner's
+    m = QUIT_VERB.match(t)
+    if not m:
+        return None
+    target = re.sub(r"^(?:the|my)\s+", "", t[m.end():].strip(" ,.!"), flags=re.IGNORECASE)
+    if QUIT_ALL_TARGET.match(target):
+        return "*"
+    return match_app(target, apps) or None
 
 
 def _first_clause(text: str) -> tuple[str, str]:
@@ -348,10 +378,11 @@ def _consequential(text: str) -> bool:
     return any(CONSEQUENTIAL.match(clause.strip()) for clause in clauses[1:])
 
 
-def classify(goal: str, *, frontmost_app: str = "", apps: Iterable[str] = (), model=None) -> Plan:
+def classify(goal: str, *, frontmost_app: str = "", apps: Iterable[str] = (), model=None, quit_model=None) -> Plan:
     """The Plan for one request (the module docstring has the rules). Pure unless `model` is given
-    (`model(goal, apps) -> app or ""`, asked only when the gates pass and the rules find no reflex);
-    never raises."""
+    (`model(goal, apps) -> app or ""`, asked only when the gates pass and the rules find no reflex) or
+    `quit_model` (`quit_model(goal, apps) -> app, "*" or ""`, asked only for a request that says "quit",
+    not "force", is no question, and that the quit rules did not take); never raises."""
     installed = tuple(apps)
     raw = " ".join(str(goal or "").split())
     polite = POLITE.match(raw) is not None
@@ -362,6 +393,23 @@ def classify(goal: str, *, frontmost_app: str = "", apps: Iterable[str] = (), mo
     reasons: list[str] = []
     if not text:
         return Plan("astra", ("astra",), reasons=("empty",))
+    if QUIT_WORD.search(text) and not FORCE.search(text):
+        words = re.findall(r"[a-z']+", text.casefold())
+        asks = (bool(words) and words[0].replace("'", "") in QUESTION_WORDS) or ("?" in text and not polite)
+        if not asks:
+            target = _quit(text.rstrip("?").strip(), installed)
+            how = "the quit rules"
+            if target is None and quit_model is not None:
+                try:
+                    said = str(quit_model(text, list(installed)) or "")
+                except Exception:  # noqa: BLE001 — a model that fails abstains
+                    said = ""
+                target = said if said == "*" or said in installed else None
+                how = "the model, for wording the quit rules did not know"
+            if target == "*":
+                return Plan("quit_all", ("reflex",), reasons=(f"{how}: quit every app but buddy's own",))
+            if target:
+                return Plan("quit", ("reflex",), app=target, reasons=(f"{how}: a bare quit of an installed app",))
     if _consequential(text):
         return Plan("astra", ("astra",), reasons=("consequential: only the planner can ask first",))
     if TYPING.search(text) and not _explicit_search(text):

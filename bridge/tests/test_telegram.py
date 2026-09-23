@@ -1021,6 +1021,9 @@ def test_the_claude_relay_is_off_until_said_and_forwards_only_while_on() -> None
         await settle()
         assert len(api.sent) == before
         await inlet.relay_notification("permission_prompt", "Bash needs approval", True)
+        assert len(api.sent) == before                  # right after the question itself: an echo, dropped
+        rig.now["t"] += telegram.ASKED_RECENTLY_SECS + 1
+        await inlet.relay_notification("permission_prompt", "Bash needs approval", True)
         assert api.titled[-1] == (telegram.CLAUDE_WAITS_TITLE, None, "Bash needs approval")
         api.feed(update("> git status", update_id=3), update("claude: make it green", update_id=4),
                  update("now run the tests please", update_id=5))             # relay on: plain text is for Claude
@@ -1160,7 +1163,7 @@ def test_a_question_for_the_owner_is_streamed_as_a_question() -> None:
          "options": [{"label": "Postgres", "description": "x"}, {"label": "SQLite", "description": "y"}]},
         {"question": "Ship it now?", "options": []},
     ]})
-    assert asked == "Which database? (Postgres / SQLite) | Ship it now?"
+    assert asked == "Which database? (1. Postgres / 2. SQLite) | Ship it now?"
     assert _summarize({"questions": "nope", "command": "ls"}) == "ls"
     api = FakeApi()
     rig = Rig(api, FakeCreate())
@@ -1171,7 +1174,8 @@ def test_a_question_for_the_owner_is_streamed_as_a_question() -> None:
         rig.inlet.relay_tool_call("AskUserQuestion", "")
         await settle()
         assert api.titled[-1] == (telegram.CLAUDE_ASKS_TITLE, None,
-                                  "Which database? (Postgres / SQLite) | Ship it now?\n\n(see the terminal)")
+                                  "Which database? (1. Postgres / 2. SQLite) | Ship it now?\n\n"
+                                  "Reply with the option's number.\n\n(see the terminal)")
 
     run_rig(rig, during)
 

@@ -45,7 +45,7 @@ def test_install_from_scratch(temp_settings: Path) -> None:
     # All 7 hook events covered.
     assert set(data["hooks"].keys()) == {
         "PreToolUse", "PostToolUse", "SessionStart", "SessionEnd",
-        "UserPromptSubmit", "Stop", "Notification",
+        "UserPromptSubmit", "Stop", "Notification", "PermissionRequest",
     }
     # Non-hook settings preserved.
     assert data["statusLine"]["command"] == "true"

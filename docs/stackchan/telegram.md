@@ -142,6 +142,26 @@ token without an owner id is off. A door with no allowlist never opens.
 | `CC_BUDDY_CODE_AREAS` | `personal,work` | The first question's answers: folders under the root, comma separated. |
 | `CC_BUDDY_CLAUDE_TERMINAL` | `warp` if installed | `warp` or `terminal` (Terminal.app): where a new session opens. |
 
+## Questions and permission prompts from Claude Code
+
+With `claude on`, what Claude Code asks you reaches the chat in full, not just
+as "Claude is waiting on you":
+
+- **A question with choices** (AskUserQuestion) arrives with its options
+  numbered: "Quit all? (1. Keep terminals / 2. Everything)". Reply with the
+  number; the relay types it into the dialog. buddy's PreToolUse hook covers
+  `AskUserQuestion` for this, and it only relays the question. A hook never
+  answers it.
+- **A permission dialog for any tool** (Edit, Write, WebFetch, an MCP tool)
+  becomes a yes/no in the chat, through the `PermissionRequest` hook. Yes
+  allows it and no denies it. If you don't answer, the dialog stays on the Mac
+  as before. With the relay off, the hook does nothing.
+- The general "Claude is waiting on you" notice is skipped for 20 s after the
+  question itself was sent, so you don't get it twice.
+
+`cc-buddy-bridge install` registers both hooks. Claude Code sessions that were
+already open pick them up when they restart.
+
 ## Start a coding session
 
 `new claude` (also `start claude`, `claude new`, `/newclaude`) opens a new

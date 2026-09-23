@@ -24,7 +24,8 @@ BLOCK_TIMEOUT_SECS = 320.0
 
 def _question(tool_input: dict) -> str:
     """An AskUserQuestion call as one line the owner can answer from the phone: each question with its
-    options in parentheses. Empty when the input is not that shape."""
+    options numbered in parentheses, so a reply of "2" picks the second (the relay types it into the
+    dialog). Empty when the input is not that shape."""
     questions = tool_input.get("questions")
     if not isinstance(questions, list):
         return ""
@@ -36,7 +37,8 @@ def _question(tool_input: dict) -> str:
         labels = [str(o.get("label") or "").strip() for o in (q.get("options") or []) if isinstance(o, dict)]
         labels = [x for x in labels if x]
         if text:
-            lines.append(text + (f" ({' / '.join(labels)})" if labels else ""))
+            lines.append(text + (" (" + " / ".join(f"{i}. {x}" for i, x in enumerate(labels, 1)) + ")"
+                                 if labels else ""))
     return " | ".join(lines)
 
 

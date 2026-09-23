@@ -76,11 +76,11 @@ class Scored:
 
 
 def truth_class(case: dict[str, Any]) -> str:
-    return case["kind"] if case["kind"] in ("launch", "search") and "reflex" in case["tiers"] else "other"
+    return case["kind"] if case["kind"] in ("launch", "search", "quit", "quit_all") and "reflex" in case["tiers"] else "other"
 
 
 def _slot_ok(case: dict[str, Any], plan: tr.Plan) -> bool:
-    if plan.kind == "launch":
+    if plan.kind in ("launch", "quit"):
         return plan.app == case.get("app")
     if plan.kind == "search":
         q = plan.query.casefold()
@@ -269,6 +269,82 @@ def native_jev(tuning: dict[str, Any], seen: list[dict[str, Any]], holdout: Opti
     return 0
 
 
+def quit_eval(data_dir: Path) -> int:
+    """Quitting (owner, 2026-09-23): the rules alone, Jev alone, and the rules then Jev, on the blind
+    holdout_quit.json. Jev's cut-offs are fitted on quit_tuning.json only. Bar: at least MIN_FIRED quits,
+    precision 100% (a wrong app quit is never acceptable), zero on a planner-only request."""
+    import os
+    import statistics
+    import time
+
+    from cc_buddy_bridge import jev
+    from cc_buddy_bridge import typed_ask as ta
+    from cc_buddy_bridge.envfile import load_env_file
+
+    tuning = json.loads((data_dir / "quit_tuning.json").read_text(encoding="utf-8"))
+    holdout = json.loads((data_dir / "holdout_quit.json").read_text(encoding="utf-8"))
+    apps = list(tuning["apps"])
+
+    def truth(c: dict[str, Any]) -> str:
+        return c.get("app", "") if c["kind"] == "quit" else "*" if c["kind"] == "quit_all" else ""
+
+    def score(title: str, cases: list[dict[str, Any]], said: list[str]) -> bool:
+        fired = [i for i, x in enumerate(said) if x]
+        right = [i for i in fired if said[i] == truth(cases[i])]
+        unsafe = [cases[i]["goal"] for i in fired if tuple(cases[i]["tiers"]) == PLANNER_ONLY]
+        wanted = [i for i, c in enumerate(cases) if truth(c)]
+        ok = len(fired) >= MIN_FIRED and len(right) == len(fired) and not unsafe
+        print(f"== {title}: n={len(cases)}")
+        print(f"   quits fired {len(fired)}, right {len(right)}: precision {_pct(len(right) / max(1, len(fired)))}; "
+              f"coverage {_pct(sum(1 for i in wanted if i in right) / max(1, len(wanted)))}; unsafe {len(unsafe)}"
+              f" → {'passes' if ok else 'fails'} the bar")
+        for g in unsafe:
+            print(f"   UNSAFE {g!r}")
+        for i in fired:
+            if i not in right and cases[i]["goal"] not in unsafe:
+                print(f"   WRONG  {cases[i]['goal']!r}: said {said[i]!r}, truth {truth(cases[i])!r}")
+        for i in wanted:
+            if not said[i]:
+                print(f"   miss   {cases[i]['goal']!r}")
+        return ok
+
+    def rules(cases: list[dict[str, Any]], quit_model: Any = None) -> list[str]:
+        out = []
+        for c in cases:
+            plan = tr.classify(c["goal"], apps=apps, quit_model=quit_model)
+            out.append(plan.app if plan.kind == "quit" else "*" if plan.kind == "quit_all" else "")
+        return out
+
+    score("rules alone / quit tuning (not evidence)", tuning["cases"], rules(tuning["cases"]))
+    rules_ok = score("rules alone / holdout_quit", holdout["cases"], rules(holdout["cases"]))
+    load_env_file()
+    url, key, model = jev.route_config(os.environ)
+    predict = jev.make_predict(url, key, model, timeout_s=8.0)
+    # Jev sits behind the same code gate as in classify(): only a request that says "quit" and not "force"
+    # reaches it (the owner's rule is the word itself, which a literal reader cannot be expected to know:
+    # asked about "close Mail" it rightly says that is quitting one app). Fitted and scored behind it.
+    def reaches(goal: str) -> bool:
+        return bool(tr.QUIT_WORD.search(goal)) and not tr.FORCE.search(goal)
+
+    fit_cases = [c for c in tuning["cases"] if reaches(c["goal"])]
+    fit = [ta.ask_jev_quit(predict, c["goal"], apps, time.perf_counter) for c in fit_cases]
+    gates = ta.fit_quit_gates(fit, [truth(c) for c in fit_cases])
+    print(f"jev quit: cut-offs fitted on the {len(fit)} tuning requests that reach it (zero wrong allowed): {gates}")
+    answers = {c["goal"]: ta.ask_jev_quit(predict, c["goal"], apps, time.perf_counter) for c in holdout["cases"]}
+    ms = [a.ms for a in answers.values()]
+    print(f"   latency ms p50 {statistics.median(ms):.0f}  p95 {sorted(ms)[int(0.95 * (len(ms) - 1))]:.0f}; "
+          f"errors {sum(1 for a in answers.values() if a.error)}")
+    jev_ok = score("jev alone (behind the quit-word gate) / holdout_quit", holdout["cases"],
+                   [ta.decide_quit(answers[c["goal"]], gates) if reaches(c["goal"]) else "" for c in holdout["cases"]])
+    both_ok = score("rules, then jev for a quit the rules did not take / holdout_quit", holdout["cases"],
+                    rules(holdout["cases"], quit_model=lambda goal, _apps: ta.decide_quit(
+                        answers.get(goal) or ta.ask_jev_quit(predict, goal, apps, time.perf_counter), gates)))
+    print(f"QUIT DECISION: rules {'pass' if rules_ok else 'fail'}, jev {'pass' if jev_ok else 'fail'}, "
+          f"rules then jev {'pass' if both_ok else 'fail'}")
+    print("QUIT_EVAL_COMPLETE")
+    return 0
+
+
 def _rows(cases: list[dict[str, Any]], apps: list[str], args: argparse.Namespace, choose: Any) -> list[Scored]:
     if args.model:
         return [score_model(c, choose) for c in cases]
@@ -283,9 +359,12 @@ def main(argv: Optional[list[str]] = None) -> int:
                    help="the model asked in its own idiom (typed_ask.py; jev: absolute nouls, the app from the installed "
                         "list; laya: one short ranking, the app from a code shortlist), cut-offs fitted on the tuning sets "
                         "only; alone and with the rules")
+    p.add_argument("--quit", action="store_true", help="score quitting: rules, Jev, rules then Jev (holdout_quit.json)")
     p.add_argument("--check-default", action="store_true", help="assert task_router.REFLEX_DEFAULT equals the decision")
     p.add_argument("--results-out")
     args = p.parse_args(argv)
+    if args.quit:
+        return quit_eval(Path(args.data).parent)
     tuning = json.loads(Path(args.data).read_text(encoding="utf-8"))
     apps = list(tuning["apps"])
     holdout_path = Path(args.data).with_name("holdout.json")

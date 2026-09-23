@@ -160,6 +160,41 @@ week view." Pure code is the fastest arm but misses a quarter of launches
 one unsafe fire, and costs ~0.2 s only on the requests the rules didn't
 recognise.
 
+**Quitting** follows the same path, with the owner's rule (2026-09-23): only the
+explicit word **quit** counts. "close", "exit", "kill" and "force quit" stay with
+Codex.
+
+- **"quit <App>"** is a graceful quit, like ⌘Q, sent without waiting. An app
+  with unsaved work shows its own save dialog. The reply says whether it quit,
+  checked every 0.25 s for up to 2 s.
+- **"quit all"** quits every regular app except those in `QUIT_ALL_KEEP`, plus
+  `CC_BUDDY_QUIT_ALL_KEEP`. The built-in list keeps the terminals Claude Code
+  runs in, Claude, ChatGPT/Codex, buddy's own app, and Finder.
+- **Refused:** a question, a second clause, two apps, a tab or window, or an app
+  that isn't installed. All of these go to Codex.
+
+Jev is asked only when a request says "quit" (and not "force") and the rules
+didn't take it. It answers two absolute yes/no questions ("only quitting one
+app?", "quitting all apps?") and picks the app from the installed list. Its
+cut-offs are fitted on `quit_tuning.json` with zero wrong quits allowed.
+`tools/route_eval.py --quit` scores it on `holdout_quit.json`, 90 requests
+written blind by an author who saw neither the code nor the rules. The bar is at
+least 15 fired and 100% precision, because a wrong app quit is never
+acceptable:
+
+| Arm | Quits right | Coverage | Unsafe | Latency |
+|---|---|---|---|---|
+| **Rules, then Jev** (shipped) | 45 / 45 | 95.7% | 0 | µs, or ~0.2 s when asked |
+| Jev alone, behind the "quit" gate | 42 / 42 | 89.4% | 0 | 220 ms p50 |
+| Rules alone | 39 / 39 | 83.0% | 0 | µs |
+
+Jev has to sit behind the "quit" gate. Asked about "close Mail" or "exit
+Slack", it reads each as quitting one app (0.82 and 0.96). By meaning that's
+right, but the owner's rule is about the word, and a literal reader cannot know
+that. Fitted without the gate, no cut-off was clean. The earlier holdouts'
+"Quit Spotify." and "Quit Safari." were relabelled from planner-only to quit
+under the new rule; "Close Safari." stays planner-only.
+
 **Codex warm-up** (`codex_warm.py`). Before a cold Codex run uses the goal, it
 spends 4.8 to 11 s on the app-server, `initialize`, an ephemeral thread and the
 `cua_repl` check (all measured 2026-09-23). `WarmCodex` does that ahead of time and

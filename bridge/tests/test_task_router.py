@@ -43,7 +43,7 @@ def test_what_looks_like_a_launch_and_is_not() -> None:
                  "Open a new Astra 6 session.", "Open Figma.", "Play Spotify", "Pause Spotify."):
         p = plan(goal)
         assert "reflex" not in p.tiers, (goal, p)
-    for goal in ("Quit Spotify.", "Open Mail and send the draft to Sam.", "Is Slack open?",
+    for goal in ("Force quit Spotify.", "Open Mail and send the draft to Sam.", "Is Slack open?",
                  "Open Reminders and add a reminder to call the dentist.",
                  "Can you open the Music app and tell me what's playing?",
                  'Write this into the Terminal right now: "hello"'):
