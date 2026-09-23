@@ -66,9 +66,9 @@ public app-server. `codex on` lists accessible saved folder names only;
 `codex buddy` creates a new chat in that folder. It does not attach an existing
 Mac task or depend on private desktop IPC. Subsequent messages retain context;
 `stop` interrupts a turn and `codex off` closes the session. Failed startup
-returns to Buddy. The earlier `codex_relay.py` remains as legacy code and is not
-used by Telegram. Its task catalog needed source filtering because internal
-review tasks can have no agent nickname; they caused the reported attach timeout.
+returns to Buddy. The earlier `codex_relay.py`, which attached to existing Mac
+tasks, was removed on 2026-09-23 once nothing imported it; it is in git history
+before that date.
 
 Installed metadata inspected:
 
