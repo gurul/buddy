@@ -136,3 +136,87 @@ def test_the_debug_port_is_configurable() -> None:
     assert configured({}).debug_port == 9222
     assert configured({"CC_BUDDY_CHROME_DEBUG_PORT": "9333"}).debug_port == 9333
     assert configured({"CC_BUDDY_CHROME_DEBUG_PORT": "nope"}).debug_port == 9222
+
+
+class _GrowingPage:
+    """A web app that says Loading… first, then fills in."""
+
+    def __init__(self, texts: list[str], url: str = "https://mail.google.com/mail/u/0/#inbox") -> None:
+        self.texts, self.url = list(texts), url
+
+    def inner_text(self, selector: str, timeout: int = 0) -> str:
+        return self.texts.pop(0) if len(self.texts) > 1 else self.texts[0]
+
+    def title(self) -> str:
+        return "Inbox"
+
+
+def _lane_on(page: _GrowingPage, monkeypatch) -> BrowserLane:
+    lane = BrowserLane(BrowserLaneConfig(enabled=True))
+    monkeypatch.setattr(lane, "_ensure", lambda: SimpleNamespace(page=page))
+    monkeypatch.setattr(bl, "READ_POLL_SECS", 0.0)
+    return lane
+
+
+def test_page_text_waits_for_a_loading_app_to_fill_in(monkeypatch) -> None:
+    full = "Inbox " + "message " * 80
+    lane = _lane_on(_GrowingPage(["Loading…", "Loading… Gmail", full, full]), monkeypatch)
+    got = lane._page_text()
+    assert got["text"] == " ".join(full.split()) and got["signed_out"] is False
+
+
+def test_page_text_notices_a_sign_in_redirect(monkeypatch) -> None:
+    lane = _lane_on(_GrowingPage(["Sign in to GitHub " * 30],
+                                 url="https://github.com/login?return_to=https%3A%2F%2Fgithub.com%2Fnotifications"),
+                    monkeypatch)
+    assert lane._page_text()["signed_out"] is True
+    for url in ("https://accounts.google.com/v3/signin/identifier?x=1", "https://www.amazon.com/ap/signin?x=1"):
+        assert bl.SIGN_IN.search(url)
+    for url in ("https://mail.google.com/mail/u/0/#inbox", "https://news.ycombinator.com/", "https://github.com/notifications"):
+        assert not bl.SIGN_IN.search(url)
+
+
+# ---- which Chrome profile ----------------------------------------------------------------------------
+
+LIST_ACCOUNTS = ('["gaia.l.a.r",[["gaia.l.a",1,"Guru","owner@work.example","https://x/photo.jpg",1,1,0,null,1,"1"],'
+                 '["gaia.l.a",1,"Guru","OWNER@gmail.com","https://x/p2.jpg",0,0,0,null,1,"2"]]]')
+PROFILES = {"owner@gmail.com": "personal-ctx", "owner@work.example": "work-ctx", "student@school.example": "school-ctx"}
+
+
+def test_accounts_are_read_primary_first_and_deduplicated() -> None:
+    assert bl.accounts_in(LIST_ACCOUNTS) == ["owner@work.example", "owner@gmail.com"]
+    assert bl.accounts_in("") == [] and bl.accounts_in("[]") == []
+
+
+@pytest.mark.parametrize("request_text,expected", [
+    ("check my era inbox", "owner@work.example"),
+    ("open canvas on my uw account", "student@school.example"),
+    ("how many unread in gmail", "owner@gmail.com"),
+    ("use student@school.example and open canvas", "student@school.example"),
+    ("what's the weather", ""),                                  # nothing named, no default: the first profile
+])
+def test_a_request_names_its_profile(request_text: str, expected: str) -> None:
+    assert bl.profile_for(request_text, PROFILES) == expected
+
+
+def test_the_configured_default_applies_only_when_it_is_open() -> None:
+    assert bl.profile_for("what's the weather", PROFILES, "owner@work.example") == "owner@work.example"
+    assert bl.profile_for("what's the weather", PROFILES, "someone@else.com") == ""
+    assert configured({"CC_BUDDY_CHROME_PROFILE": " Owner@Work.Example "}).chrome_profile == "owner@work.example"
+
+
+class _Ctx:
+    def __init__(self, body: str) -> None:
+        self.body = body
+        self.request = SimpleNamespace(get=lambda url, timeout=0: SimpleNamespace(text=lambda: self.body))
+
+
+def test_profiles_map_primary_accounts_to_contexts_and_a_missing_one_is_refused() -> None:
+    work, personal = _Ctx(LIST_ACCOUNTS), _Ctx('[[["x",1,"G","owner@gmail.com"]]]')
+    lane = BrowserLane(BrowserLaneConfig(enabled=True, attach=True))
+    lane._browser = SimpleNamespace(contexts=[work, personal])
+    assert lane._profiles() == {"owner@work.example": work, "owner@gmail.com": personal}
+    assert lane._pick_profile("owner@gmail.com") is personal
+    assert lane._pick_profile("") is work
+    with pytest.raises(AttachError, match="no open Chrome window for student@school.example"):
+        lane._pick_profile("student@school.example")

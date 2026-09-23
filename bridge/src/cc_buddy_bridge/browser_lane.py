@@ -55,7 +55,7 @@ import re
 import time
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Callable, Mapping, Optional
+from typing import Any, Awaitable, Callable, Mapping, Optional
 
 from .ax_candidates import Candidate, Snapshot, is_sensitive
 
@@ -64,6 +64,10 @@ log = logging.getLogger(__name__)
 BROWSER_LANE_DEFAULT = False
 DEFAULT_PROFILE = "~/.config/cc-buddy-bridge/browser"
 DEFAULT_CHROME_DIR = "~/Library/Application Support/Google/Chrome"   # the owner's Chrome user data directory
+READ_WAIT_SECS = 6.0                 # page_text: how long a still-growing page may take to settle
+READ_POLL_SECS = 0.5
+READ_ENOUGH_CHARS = 400              # below this a page is still loading (Gmail's shell is ~190)
+SIGN_IN = re.compile(r"(/login|/signin|/sign_in|/ServiceLogin|accounts\.google\.com/.*(signin|ServiceLogin)|/ap/signin)", re.I)
 DEFAULT_DEBUG_PORT = 9222            # what chrome://inspect/#remote-debugging shows as "Server running at"
 CONSENT_TIMEOUT_MS = 120_000         # Chrome asks the owner "Allow remote debugging?" per connection: wait for the click
 DEFAULT_VIEWPORT = (1280, 860)
@@ -146,6 +150,7 @@ class BrowserLaneConfig:
     attach: bool = False                          # drive the owner's running Chrome (see ATTACH MODE)
     chrome_dir: Path = Path(DEFAULT_CHROME_DIR).expanduser()
     debug_port: int = DEFAULT_DEBUG_PORT
+    chrome_profile: str = ""                      # attach: the Google account whose Chrome profile to work in
 
 
 def configured(environ: Any = None) -> BrowserLaneConfig:
@@ -164,7 +169,37 @@ def configured(environ: Any = None) -> BrowserLaneConfig:
     except ValueError:
         debug_port = DEFAULT_DEBUG_PORT
     return BrowserLaneConfig(enabled=switch in ("1", "true", "yes", "on"), profile=profile, headless=headless,
-                             attach=attach, chrome_dir=chrome_dir, debug_port=debug_port)
+                             attach=attach, chrome_dir=chrome_dir, debug_port=debug_port,
+                             chrome_profile=(env.get("CC_BUDDY_CHROME_PROFILE") or "").strip().lower())
+
+
+# Which Chrome profile a context is: the Google accounts signed in there, from Google's own account list,
+# fetched with THAT profile's cookies (context.request) — no tab opens. The first listed is the profile's
+# primary account.
+ACCOUNTS_URL = "https://accounts.google.com/ListAccounts?gpsia=1&source=ChromiumBrowser&json=standard"
+EMAIL = re.compile(r"[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}")
+
+
+def accounts_in(body: str) -> list[str]:
+    """The signed-in accounts in a ListAccounts reply, primary first, deduplicated, lower-cased."""
+    seen: list[str] = []
+    for m in EMAIL.findall(body or ""):
+        e = m.lower()
+        if e not in seen:
+            seen.append(e)
+    return seen
+
+
+def profile_for(request: str, profiles: dict[str, Any], default: str = "") -> str:
+    """The profile (primary account) a request names — an email, its part before @, or its domain word
+    ("era", "uw", "gmail") — else ``default`` if open, else "" (the first profile)."""
+    words = set(re.findall(r"[a-z0-9.@-]+", request.lower()))
+    for email in profiles:
+        local, _, domain = email.partition("@")
+        names = {email, local, domain, domain.split(".")[0]}
+        if words & names:
+            return email
+    return default if default in profiles else ""
 
 
 def _listening(port: int) -> bool:
@@ -394,7 +429,7 @@ class BrowserLane:
 
             self._pw = sync_playwright().start()
             self._browser = self._pw.chromium.connect_over_cdp(endpoint, timeout=CONSENT_TIMEOUT_MS)
-            self._context = self._browser.contexts[0]        # the owner's profile: their cookies and logins
+            self._context = self._pick_profile(self.config.chrome_profile)   # the owner's profile: their logins
             page = self._context.new_page()                   # buddy's own tab; the owner's tabs are never touched
             page.bring_to_front()
             self._page = _Page(page)
@@ -417,6 +452,82 @@ class BrowserLane:
         self._page = _Page(page)
         return self._page
 
+    def _profiles(self) -> dict[str, Any]:
+        """{primary account email: its Chrome context} for every profile with an open window. Cached per
+        connection; nothing is opened on screen."""
+        if getattr(self, "_profile_map", None) is not None:
+            return self._profile_map
+        found: dict[str, Any] = {}
+        for ctx in list(self._browser.contexts):
+            try:
+                reply = ctx.request.get(ACCOUNTS_URL, timeout=8000)
+                accounts = accounts_in(reply.text())
+            except Exception:  # noqa: BLE001 — a profile that cannot say is simply not addressable by name
+                accounts = []
+            if accounts and accounts[0] not in found:
+                found[accounts[0]] = ctx
+        self._profile_map = found
+        log.info("browser lane: Chrome profiles open: %s", ", ".join(found) or "none identified")
+        return found
+
+    def _pick_profile(self, wanted: str) -> Any:
+        profiles = self._profiles() if wanted else {}
+        if wanted and wanted not in profiles:
+            raise AttachError(f"no open Chrome window for {wanted}: open one in that profile"
+                              + (f" (open now: {', '.join(profiles)})" if profiles else ""))
+        return profiles.get(wanted) or self._browser.contexts[0]
+
+    def _use_profile(self, request: str) -> str:
+        """Point the lane at the profile a request names (or the configured default). Returns the account."""
+        p = self._ensure()
+        if self._browser is None:
+            return ""
+        profiles = self._profiles()
+        email = profile_for(request, profiles, self.config.chrome_profile)
+        target = profiles.get(email) or self._browser.contexts[0]
+        if target is not self._context:
+            try:
+                p.page.close()
+            except Exception:  # noqa: BLE001
+                pass
+            self._context = target
+            page = target.new_page()
+            page.bring_to_front()
+            self._page = _Page(page)
+        return email
+
+    def _alive(self) -> bool:
+        try:
+            return bool(self._browser.is_connected())
+        except Exception:  # noqa: BLE001
+            return False
+
+    @property
+    def connected(self) -> bool:
+        return self._context is not None
+
+    async def connect(self, answer_prompt: Optional[Callable[[], Awaitable[Any]]] = None) -> None:
+        """Connect now, if not already. In attach mode Chrome asks "Allow remote debugging?" for this
+        connection; ``answer_prompt`` (chrome_consent.ConsentBroker.answer_own_connection) runs alongside,
+        so the dialog raised by THIS connection is answered with the owner's own yes or no."""
+        if self._context is not None:
+            alive = self._browser is None or self._alive()
+            if alive:
+                return
+            log.info("browser lane: the Chrome connection is gone (Chrome restarted?); reconnecting")
+            await self._run(self._close)                 # then a fresh connection, and a fresh Allow
+        connecting = asyncio.ensure_future(self._run(self._ensure))
+        answering = asyncio.ensure_future(answer_prompt()) if answer_prompt is not None else None
+        try:
+            await connecting
+        finally:
+            if answering is not None and not answering.done():
+                answering.cancel()
+                await asyncio.gather(answering, return_exceptions=True)
+
+    async def use_profile(self, request: str) -> str:
+        return await self._run(self._use_profile, request)
+
     def _close(self) -> None:
         if self._browser is not None:
             # Attach mode: close buddy's own tab and disconnect. Never the context or the browser — they are
@@ -433,6 +544,7 @@ class BrowserLane:
                 pass
             self._browser = self._context = self._pw = None
             self._page = None
+            self._profile_map = None
             return
         for obj in (self._context, self._pw):
             try:
@@ -479,6 +591,31 @@ class BrowserLane:
     async def run_plan(self, plan_dict: dict[str, Any], goal: str, start: int = 0,
                        approved: Optional[Mapping[str, str]] = None) -> dict[str, Any]:
         return await self._run(self._run_plan, plan_dict, goal, start, dict(approved or {}))
+
+    def _page_text(self, limit: int = 12000) -> dict[str, Any]:
+        """Read once the text stops growing: a web app (Gmail) says "Loading…" for seconds after the load event
+        (live, 2026-09-23: 190 characters read too early). Polls every READ_POLL_SECS, up to READ_WAIT_SECS."""
+        p = self._ensure()
+
+        def body() -> str:
+            try:
+                return " ".join(p.page.inner_text("body", timeout=5000).split())
+            except Exception:  # noqa: BLE001 — a page with no body text reads as empty, never as a crash
+                return ""
+
+        text, deadline = body(), time.perf_counter() + READ_WAIT_SECS
+        while time.perf_counter() < deadline:
+            time.sleep(READ_POLL_SECS)
+            again = body()
+            if len(again) <= len(text) and len(again) >= READ_ENOUGH_CHARS:
+                break                                       # stopped growing, and there is something to read
+            text = again if len(again) >= len(text) else text
+        return {"title": p.page.title(), "url": p.page.url, "text": text[:limit],
+                "signed_out": bool(SIGN_IN.search(p.page.url))}
+
+    async def page_text(self, limit: int = 12000) -> dict[str, Any]:
+        """The page's title, URL and visible text (whitespace-collapsed, capped): what a question is answered from."""
+        return await self._run(self._page_text, limit)
 
     async def open_url(self, url: str) -> str:
         return await self._run(lambda: self._ensure().open_url(url))

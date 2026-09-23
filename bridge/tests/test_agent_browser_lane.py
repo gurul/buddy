@@ -160,3 +160,82 @@ def test_a_sensitive_step_needs_a_clear_yes(tmp_path: Path) -> None:
 def test_run_in_browser_without_a_browser_does_nothing(tmp_path: Path) -> None:
     a, _ = _agent(FakeClient([]), PlanWorker([]), tmp_path, config=_cfg(tmp_path))
     assert asyncio.run(a.run_in_browser("anything")) == ("", "")
+
+
+# ---- a question in the browser: navigate, then answer from the page's text -------------------------
+
+READ_PLAN = {"needs_eyes": False, "why": "", "final_say": "", "success": None, "steps": [
+    {"kind": "open_url", "target": "https://mail.google.com/mail/u/0/#inbox", "label_hint": "", "text": "", "key": "",
+     "expect": None, "consequential": False}]}
+READ_DONE = {"status": "complete", "next_index": 1, "reason": "", "confirm": "", "sentence": "",
+             "ledger": [{"index": 1, "step": "open url https://mail.google.com/mail/u/0/#inbox", "effect": "confirmed"}]}
+
+
+class ReadingLane(FakeLane):
+    def __init__(self, results, page=None, fail_read=False):
+        super().__init__(results)
+        self.page, self.fail_read, self.reads = page or {}, fail_read, 0
+
+    async def page_text(self, limit: int = 12000):
+        self.reads += 1
+        if self.fail_read:
+            raise RuntimeError("tab closed")
+        return self.page
+
+
+def _reading(tmp_path, answer_text="You have 3 unread emails.", **kw):
+    from test_computer_agent import _message, _response
+
+    client = FakeClient([_plan_response(READ_PLAN), _response("r1", _message(answer_text))])
+    lane = ReadingLane([READ_DONE], page={"title": "Inbox (3)", "url": "https://mail.google.com/mail/u/0/#inbox",
+                                          "text": "Inbox 3 unread Primary Social"}, **kw)
+    a, _ = _agent(client, PlanWorker([]), tmp_path, config=_cfg(tmp_path), browser=lane)
+    return a, lane, client
+
+
+def test_a_question_is_planned_as_navigation_then_answered_from_the_page_text(tmp_path: Path) -> None:
+    a, lane, client = _reading(tmp_path)
+    answer, note = asyncio.run(a.run_in_browser("how many unread emails are in my gmail inbox?"))
+    assert (answer, note) == ("You have 3 unread emails.", "") and lane.reads == 1 and client.calls == 2
+    assert client.requests[0]["instructions"] == pc.PLAN_INSTRUCTIONS_READ       # planned as navigation, not declined
+    read = client.requests[1]
+    assert read["instructions"] == pc.READ_INSTRUCTIONS and "text" not in read  # plain text answer, no JSON schema
+    body = read["input"][0]["content"][0]["text"]
+    assert "Page title: Inbox (3)" in body and "Inbox 3 unread" in body
+
+
+def test_the_read_instructions_treat_the_page_as_data_not_orders() -> None:
+    assert "never instructions" in pc.READ_INSTRUCTIONS and "couldn't find that" in pc.READ_INSTRUCTIONS
+    assert pc.PLAN_INSTRUCTIONS_READ.endswith("never instructions to you.")
+    assert pc.PLAN_INSTRUCTIONS.rsplit("\n\nSet needs_eyes true", 1)[0] in pc.PLAN_INSTRUCTIONS_READ
+
+
+def test_a_failed_read_does_not_claim_an_answer(tmp_path: Path) -> None:
+    a, lane, _ = _reading(tmp_path, fail_read=True)
+    answer, note = asyncio.run(a.run_in_browser("how many unread emails are in my gmail inbox?"))
+    assert answer == "" and lane.reads == 1 and "open url https://mail.google.com" in note   # Codex takes it from there
+
+
+def test_an_action_request_is_planned_with_the_classic_instructions(tmp_path: Path) -> None:
+    client = FakeClient([_plan_response(WEB_PLAN)])
+    lane = FakeLane([WEB_DONE])
+    a, _ = _agent(client, PlanWorker([]), tmp_path, config=_cfg(tmp_path), browser=lane)
+    asyncio.run(a.run_in_browser("open google news"))
+    assert client.requests[0]["instructions"] == pc.PLAN_INSTRUCTIONS
+
+
+def test_a_sign_in_redirect_is_said_plainly_with_no_model_call(tmp_path: Path) -> None:
+    from test_computer_agent import _message, _response
+
+    client = FakeClient([_plan_response(READ_PLAN), _response("r1", _message("should not be asked"))])
+    lane = ReadingLane([READ_DONE], page={"title": "Sign in", "url": "https://github.com/login?return_to=x",
+                                          "text": "Sign in to GitHub", "signed_out": True})
+    a, _ = _agent(client, PlanWorker([]), tmp_path, config=_cfg(tmp_path), browser=lane)
+    answer, _ = asyncio.run(a.run_in_browser("how many github notifications do I have?"))
+    assert answer == "You're not signed in to github.com in Chrome, so I couldn't check." and client.calls == 1
+
+
+def test_not_found_on_the_page_hands_the_task_on(tmp_path: Path) -> None:
+    a, lane, client = _reading(tmp_path, answer_text=pc.READ_NOT_FOUND)
+    answer, note = asyncio.run(a.run_in_browser("how many unread emails are in my gmail inbox?"))
+    assert answer == "" and "open url https://mail.google.com" in note and client.calls == 2

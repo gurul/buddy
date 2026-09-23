@@ -35,8 +35,10 @@ class ChromeLaneAgent:
 
     def __init__(self, make_planner: Callable[[Callable[[AgentEvent], None], Callable[[str], Awaitable[str]]], Any],
                  make_fallback: Callable[[], Any], on_event: Callable[[AgentEvent], None],
-                 ask_user: Callable[[str], Awaitable[str]]) -> None:
+                 ask_user: Callable[[str], Awaitable[str]],
+                 prepare: Optional[Callable[[str], Awaitable[Any]]] = None) -> None:
         self._make_planner, self._make_fallback = make_planner, make_fallback
+        self._prepare = prepare                       # connect (the owner's Allow) and pick the Chrome profile
         self.on_event, self.ask_user = on_event, ask_user
         self._current: Any = None                    # the planner, then (maybe) Codex
         self._cancel_reason: Optional[str] = None
@@ -71,6 +73,8 @@ class ChromeLaneAgent:
         t0 = time.perf_counter()
         planner = self._current = self._make_planner(self._forward, self.ask_user)
         try:
+            if self._prepare is not None:
+                await self._prepare(goal)             # raises when Chrome cannot be reached: Codex takes it
             answer, note = await planner.run_in_browser(goal)
         except Exception as e:  # noqa: BLE001 — the lane never costs the task: Codex takes it
             log.warning("chrome-lane: the lane failed (%s); Codex takes the task", type(e).__name__)

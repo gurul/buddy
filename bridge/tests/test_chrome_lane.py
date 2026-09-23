@@ -94,3 +94,73 @@ def test_a_cancel_stops_without_handing_on() -> None:
         return await agent.run("anything")
 
     assert asyncio.run(go()) == "Stopped." and "codex" not in made and events[-1][0] == "cancelled"
+
+
+# ---- the daemon's wiring -------------------------------------------------------------------------------
+
+def test_with_the_lane_off_nothing_changes() -> None:
+    from types import SimpleNamespace
+
+    from cc_buddy_bridge.daemon import Daemon
+
+    assert Daemon._chrome_body(SimpleNamespace(_chrome_lane=None), lambda: None, lambda ev: None, None) == {}
+
+
+def test_with_the_lane_on_web_goals_take_the_chrome_body_and_the_rest_stay_codex() -> None:
+    from types import SimpleNamespace
+
+    from cc_buddy_bridge.daemon import Daemon
+
+    host = SimpleNamespace(_chrome_lane=object(), _telegram=None, _planner_create=lambda req: None,
+                           _agent_cfg=SimpleNamespace())
+    wiring = Daemon._chrome_body(host, lambda: None, lambda ev: None, None)
+    route = wiring["route_body"]
+    assert asyncio.run(route("how many unread emails are in my gmail inbox")) == "chrome"
+    assert asyncio.run(route("search amazon for AA batteries")) == "chrome"
+    assert asyncio.run(route("open spotify and play jazz")) == "codex"
+    assert asyncio.run(route("put the calendar on year view")) == "codex"
+    assert wiring["make_auto"]().provider == "chrome-lane"
+
+
+def test_chrome_approval_is_asked_in_the_owners_telegram_chat() -> None:
+    from types import SimpleNamespace
+
+    from cc_buddy_bridge.daemon import Daemon
+
+    asked = []
+
+    async def ask_user(q, chat, title=""):
+        asked.append((q, chat, title))
+        return "yes"
+
+    host = SimpleNamespace(_telegram=SimpleNamespace(_chat_id=4242, _ask_user=ask_user))
+    assert asyncio.run(Daemon._ask_owner_on_phone(host, "Allow?")) == "yes"
+    assert asked == [("Allow?", 4242, "Chrome access")]
+    try:
+        asyncio.run(Daemon._ask_owner_on_phone(SimpleNamespace(_telegram=None), "Allow?"))
+        raise AssertionError("expected no way to ask")
+    except RuntimeError:
+        pass
+
+
+def test_a_dead_connection_is_replaced_on_the_next_connect() -> None:
+    from types import SimpleNamespace
+
+    from cc_buddy_bridge.browser_lane import BrowserLane, BrowserLaneConfig
+
+    lane = BrowserLane(BrowserLaneConfig(enabled=True, attach=True))
+    events = []
+    lane._context, lane._browser = object(), SimpleNamespace(is_connected=lambda: False)
+    lane._close = lambda: (events.append("closed"), setattr(lane, "_context", None), setattr(lane, "_browser", None))
+    lane._ensure = lambda: (events.append("connected"), setattr(lane, "_context", object()))
+
+    async def prompt():
+        events.append("asked")
+
+    asyncio.run(lane.connect(prompt))
+    # the dead one closes first; the new connection and the owner's consent then run side by side
+    assert events[0] == "closed" and sorted(events[1:]) == ["asked", "connected"]
+    events.clear()
+    lane._browser = SimpleNamespace(is_connected=lambda: True)
+    asyncio.run(lane.connect(prompt))
+    assert events == []                                      # alive: no reconnect, no new question

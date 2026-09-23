@@ -53,9 +53,9 @@ from dataclasses import dataclass, field
 from datetime import datetime
 from pathlib import Path
 from typing import Any, Awaitable, Callable, Optional
-from urllib.parse import quote_plus
+from urllib.parse import quote_plus, urlsplit
 
-from . import browser_lane, consent, pricing, task_router
+from . import browser_lane, consent, lane_router, pricing, task_router
 from . import jev as jev_mod
 from .agent_contract import AgentEvent  # noqa: F401 — defined there, re-exported for importers of this module
 from .fast_lane import DECIDE_MODES, DEFAULT_DECIDE, FAST_LANE_DEFAULT, LANE_FIRST_DEFAULT
@@ -1202,11 +1202,14 @@ class ComputerAgent:
                 raise
             except Exception as e:  # noqa: BLE001 — the plan's own open_app step is the fallback
                 log.info("agent: could not open %s before planning (%s)", named, type(e).__name__)
+        # In the browser a question is navigation plus a read of the page's text (browser_lane.page_text), not
+        # "needs eyes": plan only the way to the page, then answer from what it says.
+        reads = lane == "browser" and (lane_router.is_question(goal) or bool(task_router.TELL_ME.search(goal)))
         req = pc.plan_request(self.config.model, goal, app=str(outline.get("app") or ""),
                               outline=[str(x) for x in outline.get("lines") or []],
                               apps=[] if lane == "browser" else task_router.installed_apps(),
                               effort=self.config.plan_exec_effort,
-                              timeout=self.config.api_timeout_secs)
+                              timeout=self.config.api_timeout_secs, reads=reads)
         try:
             response = await self._interruptible(self._create(req, 0))
             self._meter(response)
@@ -1244,6 +1247,13 @@ class ComputerAgent:
             if not consent.approves(said):                  # fail-closed: "yeah no" is not a yes
                 return f"Okay, I stopped before that: {what}.", ""
             approved[str(start)] = what
+        # The planner leaves final_say empty exactly when the answer must be read off the page (READ instructions);
+        # a plan with its own sentence ("Here is the top headline.") keeps it.
+        if reads and not plan.final_say and result.get("status") in ("complete", "checkpoint"):
+            said = await self._read_answer(goal, worker)
+            if said:
+                log.info("agent: plan and page read in %.2f s", self._clock() - t0)
+                return said, ""
         if result.get("status") == "complete" and result.get("sentence"):
             log.info("agent: plan ran in %.2f s with one planner call", self._clock() - t0)
             return str(result["sentence"]), ""
@@ -1253,6 +1263,34 @@ class ComputerAgent:
         return "", ("\n\n[note] Before you started, a plan already did, in order: " + "; ".join(done)
                     + f". It stopped there ({result.get('reason') or result.get('status')}). Start from the "
                     "screenshot; do not repeat those steps.")
+
+    async def _read_answer(self, goal: str, worker: Any) -> str:
+        """Answer a question from the page the plan left on screen: its visible text, one short text-only call.
+        "" on any failure (the caller then does what it would have done without the read)."""
+        from . import plan_contract as pc
+
+        try:
+            page = await self._interruptible(worker.page_text())
+            if page.get("signed_out"):
+                host = urlsplit(str(page.get("url") or "")).hostname or "that site"
+                said = f"You're not signed in to {host.removeprefix('www.')} in Chrome, so I couldn't check."
+                self._log({"turn": 0, "read": {"url": page.get("url"), "signed_out": True}})
+                return said
+            req = pc.read_request(self.config.model, goal, page, effort=self.config.plan_exec_effort,
+                                  timeout=self.config.api_timeout_secs)
+            response = await self._interruptible(self._create(req, 0))
+            self._meter(response)
+            said = " ".join(str(classify_response(response).text or "").split())
+        except (Cancelled, FailSafe):
+            raise
+        except Exception as e:  # noqa: BLE001
+            self._log({"turn": 0, "read": {"error": f"{type(e).__name__}: {e}"[:200]}})
+            return ""
+        self._log({"turn": 0, "read": {"url": page.get("url"), "chars": len(str(page.get("text") or "")),
+                                       "answer": said[:200]}})
+        if said.rstrip(".").lower() == pc.READ_NOT_FOUND.rstrip(".").lower():
+            return ""                                   # not on the page: not an answer — the caller hands it on
+        return said
 
     async def _checked_final(self, goal: str, claim: str, turn: int, worker: Any) -> Optional[str]:
         """The answer to speak, or None to send the agent back once to look again.

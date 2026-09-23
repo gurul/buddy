@@ -86,7 +86,7 @@ def test_the_wrapper_sends_a_routed_task_to_the_second_body_and_keeps_reflexes_f
 
     assert asyncio.run(agent().run("open Spotify")) == "Opened Spotify."        # the reflex never asks the router
     a = agent()
-    assert asyncio.run(a.run("compare three laptops")) == "auto" and a.provider == "isolated-browser"
+    assert asyncio.run(a.run("compare three laptops")) == "auto" and a.provider == "isolated"
     assert asyncio.run(agent().run("check my gmail")) == "codex"
     assert routed == ["compare three laptops", "check my gmail"]
 

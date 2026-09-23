@@ -371,6 +371,9 @@ class Daemon:
         self._codex_warm = codex_warm.WarmCodex(CodexComputerAgent, enabled=warm_on and self._agent_cfg.enabled,
                                                 max_age=warm_age)
         tasks.append(asyncio.create_task(self._codex_warm.refresh_loop(), name="codex-warm"))
+        # The fast path into the owner's logged-in Chrome (chrome_lane.py): ONE attached lane for the daemon's
+        # life, so Chrome's "Allow remote debugging?" is answered once per Chrome session (over Telegram).
+        self._chrome_lane = Daemon._make_chrome_lane(self)
         self._telegram = self._make_telegram()
         if self._telegram is not None:
             tasks.append(asyncio.create_task(self._telegram.run(), name="telegram"))
@@ -395,6 +398,8 @@ class Daemon:
                 await asyncio.gather(self._expression_audition, return_exceptions=True)
             await self._send_cam(False)
             self._vision.stop()
+            if getattr(self, "_chrome_lane", None) is not None:
+                await self._chrome_lane.close()             # buddy's tab only; the owner's Chrome stays
             for t in tasks:
                 t.cancel()
             for pend in list(self._pending_turn_ends.values()):
@@ -1084,9 +1089,68 @@ class Daemon:
         agent = app_reflex.ReflexFirstAgent(make_inner, on_event, asker=app_reflex.jev_asker(),
                                             quit_asker=app_reflex.jev_quit_asker(),
                                             enabled=app_reflex.reflexes_on(),
-                                            on_done=warm.kick if warm is not None else (lambda: None))
+                                            on_done=warm.kick if warm is not None else (lambda: None),
+                                            **Daemon._chrome_body(self, make_inner, on_event, ask_user))
         self._active_agent = agent
         return agent
+
+    def _make_chrome_lane(self) -> Any:
+        """CC_BUDDY_BROWSER_ATTACH=1: the browser lane attached to the owner's own Chrome, kept for the daemon's
+        life (connected on the first web task, not now). None otherwise, or without Playwright."""
+        from . import browser_lane
+
+        cfg = browser_lane.configured()
+        if not cfg.attach:
+            return None
+        try:
+            import playwright  # noqa: F401 — the import is the check
+        except ImportError:
+            log.warning("chrome lane: CC_BUDDY_BROWSER_ATTACH is on but Playwright is not installed; off")
+            return None
+        # Jev grounds each click unless the owner turned it off (CC_BUDDY_JEV_STEP=0).
+        env = {**os.environ, "CC_BUDDY_JEV_STEP": os.environ.get("CC_BUDDY_JEV_STEP", "1")}
+        lane = browser_lane.BrowserLane(cfg, step_asker=browser_lane.make_step_asker(env))
+        log.info("chrome lane: on — web tasks try the owner's logged-in Chrome first (profile: %s); Codex is the "
+                 "floor", cfg.chrome_profile or "the first open")
+        return lane
+
+    async def _ask_owner_on_phone(self, question: str) -> str:
+        """A yes/no for the owner over Telegram (chrome_consent.py). Raises when there is no way to ask."""
+        inlet = getattr(self, "_telegram", None)
+        chat = getattr(inlet, "_chat_id", None) if inlet is not None else None
+        if inlet is None or chat is None:
+            raise RuntimeError("no Telegram chat to ask the owner in")
+        return await inlet._ask_user(question, chat, title="Chrome access")
+
+    def _chrome_body(self, make_inner: Any, on_event: Any, ask_user: Any) -> dict[str, Any]:
+        """The Chrome lane as ReflexFirstAgent's second body, for web goals (browser_lane.is_web_goal: a URL, a
+        site, the browser). {} when the lane is off: every task stays Codex's."""
+        lane = getattr(self, "_chrome_lane", None)
+        if lane is None:
+            return {}
+        from . import browser_lane, chrome_consent, chrome_lane
+        from .computer_agent import ComputerAgent, make_response_creator
+
+        telegram_on = getattr(self, "_telegram", None) is not None
+        broker = chrome_consent.ConsentBroker(
+            (lambda q: Daemon._ask_owner_on_phone(self, q)) if telegram_on else None)
+        if getattr(self, "_planner_create", None) is None:
+            self._planner_create = make_response_creator()
+        create, cfg = self._planner_create, self._agent_cfg
+
+        async def prepare(goal: str) -> None:
+            await lane.connect(broker.answer_own_connection)
+            await lane.use_profile(goal)
+
+        def make_planner(ev: Any, ask: Any) -> Any:
+            return ComputerAgent(create, config=cfg, on_event=ev, ask_user=ask, browser=lane)
+
+        async def route_body(goal: str) -> str:
+            return "chrome" if browser_lane.is_web_goal(goal) else "codex"
+
+        return {"make_auto": lambda: chrome_lane.ChromeLaneAgent(make_planner, make_inner, on_event, ask_user,
+                                                                  prepare=prepare),
+                "route_body": route_body}
 
     async def _cancel_active_task(self, reason: str) -> None:
         """Stop a running desktop task with a reason the owner can read (log + caption),

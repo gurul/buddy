@@ -201,10 +201,12 @@ class ReflexFirstAgent:
             except Exception as e:  # noqa: BLE001 — a router that fails keeps the task with Codex
                 log.warning("app-reflex: the body router failed (%s); Codex takes it", type(e).__name__)
                 body = "codex"
-            if body == "isolated":
-                self.body, self.provider = "isolated", "isolated-browser"
-                log.info("app-reflex: the isolated browser takes this task")
-                return self._make_auto()
+            if body and body != "codex":
+                agent = self._make_auto()
+                self.body = body
+                self.provider = str(getattr(agent, "provider", "") or body)
+                log.info("app-reflex: %s takes this task", self.provider)
+                return agent
         return self._make_inner()
 
     def cancel(self, reason: str = "") -> None:

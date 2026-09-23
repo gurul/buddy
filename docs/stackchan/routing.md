@@ -246,6 +246,39 @@ own profile.
   in 0.75 s, typed a Wikipedia search and pressed Enter in its own tab. The
   "owner's" tab and the browser were still there afterward
   (`tests/test_browser_attach.py`; the live test runs with `CC_BUDDY_LIVE=1`).
+- **You approve from your phone** (`chrome_consent.py`). When buddy connects,
+  it watches for Chrome's own "Allow remote debugging?" dialog and texts you
+  on Telegram: *"buddy wants to control your Chrome… Allow it? yes / no"*.
+  - A clear yes (`consent.py`, fail-closed) makes buddy press **Allow**,
+    using Accessibility's AXPress; Chrome's web-UI buttons ignore a
+    synthetic click.
+  - A no, anything unclear, silence for 3 minutes, or Telegram being off
+    makes it press **Cancel**. The task then goes to Codex, which drives your
+    Chrome without this prompt.
+  - It only answers the dialog raised by its **own** connection, and only one
+    reading exactly "Allow remote debugging?" with an Allow button.
+  - The daemon keeps **one** connection for its whole life, so the text
+    comes once per Chrome session. If Chrome restarts, the next web task
+    reconnects and asks again.
+- **Which profile.** buddy identifies each open Chrome profile by its
+  signed-in Google account. It asks Google's account list with that
+  profile's cookies (`context.request`), so no tab opens. A task that names
+  an account works in that profile: "my era inbox" goes to owner@work.example,
+  "canvas on my uw account" to student@school.example, "gmail" to
+  owner@gmail.com. `CC_BUDDY_CHROME_PROFILE` sets the default. A
+  profile needs an open Chrome window to be reachable, and naming one without
+  a window gets a plain "open a window in that profile".
+- **Which tasks.** A web goal (`browser_lane.is_web_goal`: a URL, a site
+  name, the browser) tries your Chrome first. Everything else, including
+  anything the lane can't finish, goes to Codex. A question ("how many
+  unread…") is planned as navigation, then answered from the page's visible
+  text, read once it stops loading. A redirect to a sign-in page is reported
+  as "you're not signed in".
+- **Measured 2026-09-23 on your Chrome** (`tools/chrome_lane_eval.py`, five
+  read-only tasks). Hacker News, Amazon and weather.com were answered
+  correctly in 7.5–11.3 s. Gmail was read too early (fixed since: the read now
+  waits for the page to fill in), and GitHub is signed out in that profile.
+  The Codex comparison run is still to do.
 - **Caution.** While remote debugging is on, any local program can connect to
   your Chrome, not just buddy. Switch it off in the same place when you don't
   need it.
