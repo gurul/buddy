@@ -122,7 +122,10 @@ Owner's decision, 2026-09-21: "the second brain system is for my personal notes
 and things of that sort I'll text to Telegram". A text is a note in seconds, in a
 local markdown vault Obsidian opens, organised PARA+, with agent workflows (plan
 my day, weekly review, triage my inbox, distill this) and context packs compiled
-from it. The whole design, the capture rules and the pack format are in
+from it. Ask to add to, edit, remove an item from, or check off an existing note
+or list; `edit_note` updates the same file after a versioned read, and
+`undo_note` can restore its previous contents. Ambiguous matches and changed
+versions require another read or clarification. The whole design, the capture rules and the pack format are in
 [second-brain.md](second-brain.md). Ships off behind `CC_BUDDY_SECOND_BRAIN`.
 
 ## The Auto Mode gate: Jev judges a relayed command

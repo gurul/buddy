@@ -1360,3 +1360,54 @@ def test_the_second_brain_is_offered_and_captures_from_the_chat(tmp_path: Path) 
     assert second_brain.INSTRUCTIONS_BLOCK not in rig.create.requests[0]["instructions"]
     result = asyncio.run(rig.inlet._tool("capture_note", {"text": "x", "kind": "note"}, OWNER))
     assert result == {"ok": False, "reason": "the second brain is off on this computer (CC_BUDDY_SECOND_BRAIN)"}
+
+
+def test_telegram_reads_edits_and_undoes_the_same_note(tmp_path: Path) -> None:
+    from cc_buddy_bridge import second_brain as sb
+
+    vault = sb.VaultConfig(enabled=True, root=tmp_path / "vault")
+    path = sb.capture(vault.root, "# Shopping\n- [ ] bathroom mat").path
+    original = (vault.root / path).read_bytes()
+    api = FakeApi()
+
+    async def edit_from_read():
+        note = json.loads(create.requests[-1]["input"][-1]["output"])
+        assert note["ok"] and note["path"] == path
+        return call("edit_note", {"path": note["path"], "revision": note["revision"],
+                                  "old_text": "", "new_text": "- [ ] alcohol wipes"})
+
+    async def confirm_edit():
+        changed = json.loads(create.requests[-1]["input"][-1]["output"])
+        assert changed["ok"] and changed["undo_id"]
+        assert (vault.root / path).read_text().endswith("- [ ] alcohol wipes\n")
+        assert len(sb.inbox(vault.root)) == 1
+        return say("Added alcohol wipes to Shopping.")
+
+    async def undo_from_read():
+        note = json.loads(create.requests[-1]["input"][-1]["output"])
+        assert note["ok"] and note["undo_id"]
+        return call("undo_note", {"path": note["path"], "revision": note["revision"], "undo_id": note["undo_id"]})
+
+    async def confirm_undo():
+        undone = json.loads(create.requests[-1]["input"][-1]["output"])
+        assert undone["ok"] and (vault.root / path).read_bytes() == original
+        return say("Undid that edit to Shopping.")
+
+    create = FakeCreate(call("read_note", {"path": path}), edit_from_read, confirm_edit,
+                        call("read_note", {"path": path}), undo_from_read, confirm_undo)
+    rig = Rig(api, create, vault=vault)
+
+    async def go():
+        await rig.inlet._turn(telegram.Inbound(OWNER, OWNER, "add alcohol wipes to my shopping list"))
+        await rig.inlet._turn(telegram.Inbound(OWNER, OWNER, "undo that edit"))
+        assert (await rig.inlet._tool("edit_note", {"path": path, "revision": "stale",
+                                                   "old_text": "", "new_text": "oops"}, OWNER))["ok"] is False
+
+    asyncio.run(go())
+    assert api.sent == [(OWNER, "Added alcohol wipes to Shopping."), (OWNER, "Undid that edit to Shopping.")]
+    assert {"edit_note", "undo_note"} <= {tool.get("name") for tool in create.requests[0]["tools"]}
+    assert (vault.root / path).read_bytes() == original
+    assert len(sb.inbox(vault.root)) == 1
+    off = Rig(FakeApi(), FakeCreate())
+    for name in ("edit_note", "undo_note"):
+        assert asyncio.run(off.inlet._tool(name, {}, OWNER))["ok"] is False

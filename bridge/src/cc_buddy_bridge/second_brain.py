@@ -33,9 +33,9 @@ Four decisions, all code:
    master list; a journal line is appended to today's page. Classification is a
    handful of prefix rules (``classify_capture``), not a model call: a capture that
    waits on a model is a capture the owner stops making.
-3. **The agent adds and moves; it never deletes.** Filing changes ``status:`` and
+3. **The agent can edit with a saved previous version; it never deletes files.** Filing changes ``status:`` and
    moves the file; archiving moves it under ``09-archive/`` with its path kept; a
-   name clash gets ``-2``, ``-3``. Nothing here removes a byte of the owner's.
+   name clash gets ``-2``, ``-3``. Edits require the revision just read and keep undo history.
    ``read_note`` refuses any path that leaves the root or enters ``.obsidian/``.
 4. **Workflows are prompts compiled from the vault, and the model is the caller's.**
    ``workflow_prompt`` = the SOP in ``06-processes/<name>.md`` + a context pack
@@ -44,17 +44,22 @@ Four decisions, all code:
    model call, so the vault stays on the Mac unless the owner asks for a plan, a
    review or a distillation — and then only what the pack selected goes.
 
-It ships OFF (``SECOND_BRAIN_DEFAULT``): the text brain gains seven tools when it
+It ships OFF (``SECOND_BRAIN_DEFAULT``): the text brain gains nine tools when it
 is on, and a vault skeleton is written on first use.
 """
 
 from __future__ import annotations
 
 import fnmatch
+import hashlib
+import json
 import logging
 import os
 import re
+import tempfile
+import threading
 import unicodedata
+import uuid
 from dataclasses import dataclass, field
 from datetime import datetime
 from pathlib import Path
@@ -97,6 +102,8 @@ MAX_PROMPT_CHARS = 60000           # workflow prompts are handed to think_hard, 
 MAX_HITS = 8
 CHARS_PER_TOKEN = 4                # the deck's estimate, and good enough for a budget
 DEFAULT_MAX_PER_GLOB = 10
+HISTORY_DIR = ".buddy-history"
+_NOTE_LOCK = threading.RLock()
 
 PARA: tuple[tuple[str, str], ...] = (
     ("00-vision", "Mission, identity, principles, long-term goals"),
@@ -224,7 +231,8 @@ the owner supplied:
 
 ## Rules for agents
 
-- Add and move; never delete. Archive by moving under `09-archive/` with the path kept.
+- Edit existing notes with `edit_note` after `read_note`; keep its revision and undo history.
+  Add and move; never delete files. Archive under `09-archive/` with the path kept.
 - A note's frontmatter `status:` is `inbox`, `filed`, `done` or `archived`; change it when you
   move the file.
 - Keep `03-projects/` to what is genuinely active; a project with `status: done` or
@@ -683,7 +691,122 @@ def read_note(root: Path, rel_path: str, max_chars: int = MAX_NOTE_CHARS) -> dic
     text = path.read_text(encoding="utf-8", errors="replace")
     clipped = len(text) > max_chars
     return {"ok": True, "path": _rel(root, path), "title": title_of(text, path.stem),
-            "text": text[:max_chars], "clipped": clipped, "chars": len(text)}
+            "text": text[:max_chars], "clipped": clipped, "chars": len(text),
+            "revision": _revision(text), "undo_id": _latest_edit(root, _rel(root, path), text)}
+
+
+# ---- editing -------------------------------------------------------------------------------------
+
+def _revision(text: str) -> str:
+    return hashlib.sha256(text.encode("utf-8")).hexdigest()
+
+
+def _history_dir(root: Path, rel_path: str) -> Path:
+    """Private history, never exposed by search or context packs. Refuse redirected history folders."""
+    base = Path(root).resolve() / HISTORY_DIR
+    folder = base / _revision(rel_path)
+    if base.is_symlink() or folder.is_symlink():
+        raise ValueError("note history must not be a symlink")
+    return folder
+
+
+def _latest_edit(root: Path, rel_path: str, text: str) -> Optional[str]:
+    folder = _history_dir(root, rel_path)
+    revision = _revision(text)
+    for record in sorted(folder.glob("*.json"), reverse=True):
+        if record.is_symlink():
+            continue
+        try:
+            data = json.loads(record.read_text(encoding="utf-8"))
+            if isinstance(data, dict) and data.get("path") == rel_path and data.get("after") == revision:
+                return record.stem
+        except (OSError, ValueError):
+            continue
+    return None
+
+
+def _atomic_text(path: Path, text: str) -> None:
+    """Replace a complete file on the same filesystem, keeping its permissions."""
+    mode = path.stat().st_mode & 0o777 if path.exists() else 0o600
+    temporary = None
+    try:
+        with tempfile.NamedTemporaryFile(mode="w", encoding="utf-8", dir=path.parent,
+                                         prefix=".buddy-", delete=False) as fh:
+            temporary = Path(fh.name)
+            fh.write(text)
+            fh.flush()
+            os.fsync(fh.fileno())
+        os.chmod(temporary, mode)
+        os.replace(temporary, path)
+    finally:
+        if temporary is not None:
+            temporary.unlink(missing_ok=True)
+
+
+def edit_note(root: Path, rel_path: str, revision: str, old_text: str, new_text: str) -> dict[str, Any]:
+    """Replace one exact body passage, or append when old_text is empty. Save undo before writing."""
+    with _NOTE_LOCK:
+        path = _resolve(root, rel_path)
+        if not path.is_file() or path.suffix != ".md":
+            raise ValueError("no such markdown note")
+        current = path.read_text(encoding="utf-8")
+        if not revision or _revision(current) != revision:
+            raise ValueError("note changed; read_note again before editing")
+        match = _FRONTMATTER.match(current)
+        prefix = current[:match.start(2)] if match else ""
+        body = current[len(prefix):]
+        if old_text:
+            if body.count(old_text) != 1:
+                raise ValueError("old_text must match exactly once in the note body; read_note and use more context")
+            updated = prefix + body.replace(old_text, new_text, 1)
+        else:
+            if not new_text.strip():
+                raise ValueError("nothing to append")
+            updated = current + ("\n" if current and not current.endswith("\n") else "") + new_text.rstrip("\n") + "\n"
+        if updated == current:
+            return {"ok": True, "path": _rel(root, path), "changed": False, "revision": revision}
+        rel = _rel(root, path)
+        folder = _history_dir(root, rel)
+        folder.mkdir(parents=True, exist_ok=True, mode=0o700)
+        change_id = datetime.now().strftime("%Y%m%dT%H%M%S%f") + "-" + uuid.uuid4().hex
+        record = folder / f"{change_id}.json"
+        _atomic_text(record, json.dumps({"path": rel, "before": current,
+                                        "after": _revision(updated)}, ensure_ascii=False))
+        try:
+            if path.read_text(encoding="utf-8") != current:
+                raise ValueError("note changed; read_note again before editing")
+            _atomic_text(path, updated)
+        except (OSError, ValueError):
+            # Retain the backup for inspection, but never offer a failed edit as undoable.
+            record.rename(record.with_suffix(".failed"))
+            raise
+        log.info("second brain: edited %s", path.name)
+        return {"ok": True, "path": rel, "changed": True, "revision": _revision(updated), "undo_id": change_id}
+
+
+def undo_note(root: Path, rel_path: str, undo_id: str, revision: str) -> dict[str, Any]:
+    """Restore a saved edit only while its result is still the current note."""
+    with _NOTE_LOCK:
+        path = _resolve(root, rel_path)
+        if not path.is_file() or path.suffix != ".md":
+            raise ValueError("no such markdown note")
+        if not re.fullmatch(r"\d{8}T\d{12}-[a-f0-9]{32}", undo_id):
+            raise ValueError("use an undo_id returned by edit_note or read_note")
+        rel = _rel(root, path)
+        record = _history_dir(root, rel) / f"{undo_id}.json"
+        if record.is_symlink():
+            raise ValueError("note history must not be a symlink")
+        data = json.loads(record.read_text(encoding="utf-8"))
+        current = path.read_text(encoding="utf-8")
+        if not isinstance(data, dict) or data.get("path") != rel or not isinstance(data.get("before"), str):
+            raise ValueError("invalid note history")
+        if not revision or revision != _revision(current) or data.get("after") != revision:
+            raise ValueError("note changed since that edit; read_note before choosing what to undo")
+        _atomic_text(path, data["before"])
+        record.rename(record.with_suffix(".undone"))
+        log.info("second brain: undid an edit to %s", path.name)
+        return {"ok": True, "path": rel, "revision": _revision(data["before"]),
+                "undo_id": _latest_edit(root, rel, data["before"])}
 
 
 def inbox(root: Path) -> list[InboxItem]:
@@ -1026,6 +1149,28 @@ SECOND_BRAIN_TOOLS: list[dict[str, Any]] = [
                        "properties": {"path": {"type": "string", "description": "Relative path, e.g. 01-inbox/….md"}}},
     },
     {
+        "type": "function", "name": "edit_note", "strict": True,
+        "description": "Edit an existing note or list in place after read_note. Replace one exact body passage "
+                       "(include context to make it unique); empty old_text appends, empty new_text removes "
+                       "the matched passage. Can add/remove items, check off todos or change priorities. "
+                       "Preserves frontmatter and saves an undo_id. Never create a replacement copy.",
+        "parameters": {"type": "object", "additionalProperties": False,
+                       "required": ["path", "revision", "old_text", "new_text"],
+                       "properties": {"path": {"type": "string"},
+                                      "revision": {"type": "string", "description": "Exact revision from read_note."},
+                                      "old_text": {"type": "string", "description": "Exact unique passage, or empty to append."},
+                                      "new_text": {"type": "string", "description": "Replacement or appended text; empty to remove."}}},
+    },
+    {
+        "type": "function", "name": "undo_note", "strict": True,
+        "description": "Undo an edit to a note. read_note returns the undo_id available for its current version. "
+                       "Refuses to overwrite later changes. Does not undo captures or moves.",
+        "parameters": {"type": "object", "additionalProperties": False,
+                       "required": ["path", "undo_id", "revision"],
+                       "properties": {"path": {"type": "string"}, "undo_id": {"type": "string"},
+                                      "revision": {"type": "string", "description": "Exact revision from read_note."}}},
+    },
+    {
         "type": "function", "name": "list_inbox", "strict": True,
         "description": "List the unsorted notes in the second brain's inbox, oldest first.",
         "parameters": {"type": "object", "additionalProperties": False, "required": [], "properties": {}},
@@ -1058,7 +1203,20 @@ SECOND_BRAIN_TOOLS: list[dict[str, Any]] = [
 SECOND_BRAIN_TOOL_NAMES = tuple(t["name"] for t in SECOND_BRAIN_TOOLS)
 
 INSTRUCTIONS_BLOCK = """Your owner keeps a second brain: a folder of their own notes, todos and journals that you can write
-to and read. When they hand you something to keep — "remember this", "note:", "todo:", "task:", an idea
+to and read. Requests to change an existing note or list take precedence over capture: "add this to my
+shopping list", "remove the wipes", "mark that done", "change its priority" and "edit that note" mean
+search_notes then read_note then edit_note, using the returned path and revision. Keep the same file;
+do not capture a replacement copy or move another note as a workaround. Preserve unrelated items and
+the owner's wording. old_text is one exact unique body passage (include nearby text if repeated),
+new_text replaces it; empty old_text appends, empty new_text removes. For a priority change, replace
+one passage spanning the old and new priority sections so the item moves in one edit. A clipped read
+is only a fragment: edit an exact visible passage or append; never reconstruct the whole note from it.
+If multiple notes could be the intended list, ask which one; do not guess, merge, or archive duplicates.
+On a revision conflict, reread and reassess the requested change. For "undo that edit", read_note then
+undo_note with its undo_id and revision; if undo_id is null, say no saved edit can be undone for this
+version. Only report success when the tool returns ok. Confirm the change and note title briefly;
+do not show revision hashes or undo IDs unless asked. For an unrelated NEW thing to keep —
+"remember this", "note:", "todo:", "task:", an idea
 ("idea: …"), a journal thought ("journal:", "today I…", "dear diary") or plainly a line they want kept — call
 capture_note at once, with their words and without the prefix, and confirm in one short line naming the file
 it went to ("Saved to 01-inbox/2026-09-21-1830-pasta-place.md", "Added to your P2 todos"). Do not ask
@@ -1077,6 +1235,12 @@ def _clip(text: str, limit: int = MAX_TOOL_TEXT_CHARS) -> str:
 
 def dispatch(root: Path, name: str, args: dict[str, Any]) -> dict[str, Any]:
     """One tool call → one JSON-serialisable dict. Never raises: a failure is ``{"ok": False, "reason": …}``."""
+    # Telegram can serve multiple owner turns on worker threads. Serialize vault tool operations.
+    with _NOTE_LOCK:
+        return _dispatch(root, name, args)
+
+
+def _dispatch(root: Path, name: str, args: dict[str, Any]) -> dict[str, Any]:
     args = args if isinstance(args, dict) else {}
     try:
         if name == "capture_note":
@@ -1104,6 +1268,12 @@ def dispatch(root: Path, name: str, args: dict[str, Any]) -> dict[str, Any]:
         if name == "list_inbox":
             items = inbox(root)
             return {"ok": True, "items": [i.__dict__ for i in items], "count": len(items)}
+        if name == "edit_note":
+            return edit_note(root, str(args.get("path") or ""), str(args.get("revision") or ""),
+                             str(args.get("old_text") or ""), str(args.get("new_text") or ""))
+        if name == "undo_note":
+            return undo_note(root, str(args.get("path") or ""), str(args.get("undo_id") or ""),
+                             str(args.get("revision") or ""))
         if name == "file_note":
             new = file_note(root, str(args.get("path") or ""), str(args.get("into") or ""))
             return {"ok": True, "path": new}

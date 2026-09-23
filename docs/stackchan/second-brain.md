@@ -17,7 +17,7 @@ workflows driven by the vault, and context packs that compile it into one
 prompt.
 
 It ships **off** (`SECOND_BRAIN_DEFAULT = False`). When it is on, the text
-brain gains seven tools and the vault skeleton is written on first use.
+brain gains nine tools and the vault skeleton is written on first use.
 
 ```
 your phone ── Telegram ──▶ telegram.py text brain
@@ -27,7 +27,7 @@ your phone ── Telegram ──▶ telegram.py text brain
                    01-inbox/2026-09-21-1830-the-pasta-place-is-doppio.md
                    02-todos/master.md        ◀── "todo: p1 book the dentist"
                    08-journals/daily/2026-09-21.md  ◀── "journal: felt sharp this morning"
-                              │ search_notes · read_note · list_inbox · list_todos · file_note
+                              │ search_notes · read_note · edit_note · undo_note · list_inbox · list_todos · file_note
                               │ second_brain_workflow → one prompt → think_hard → your phone
 ```
 
@@ -80,9 +80,45 @@ Then: "what did I note about the pasta place" searches and reads; "what's on
 my list" is `list_todos`; "what's in my inbox" is `list_inbox`; "file that
 under the garden area" is `file_note` into `04-areas/garden`. File names are
 `YYYY-MM-DD-HHMM-<slug>` with a slug of at most six words and 48 characters,
-so the inbox sorts chronologically in any tool. A name clash gets `-2`, `-3`;
-nothing is ever overwritten, and nothing is ever deleted: archiving is a move
-into `09-archive/`.
+so the inbox sorts chronologically in any tool. A new capture with a name clash
+gets `-2`, `-3`. Existing notes can be edited in place with a saved previous
+version; files are never permanently deleted. Archiving is a move into
+`09-archive/`.
+
+## Changing an existing note
+
+You can text changes to the same note without creating replacement copies:
+
+| You text | What buddy can do |
+|---|---|
+| “Add alcohol wipes to my shopping list” | Find and read the list, then append the item to that file. |
+| “Change bathroom mat to a blue bathroom mat” | Replace that passage while preserving the other items. |
+| “Remove the curtains from my shopping list” | Remove the matching passage. The previous version remains available for undo. |
+| “Mark buy milk done” / “Reopen buy milk” | Change the item's checkbox in the todo list. |
+| “Move buy milk to P1” | Move that item between priority sections in one edit. |
+| “Undo that edit” | Restore the previous contents, provided no later change conflicts with the edit. |
+
+The text brain is instructed to use `search_notes` → `read_note` → `edit_note`
+for changes to an existing note. If several notes could be the requested list,
+it asks which one. It must not create a replacement copy or archive another
+note to simulate an edit. Natural-language interpretation is model driven;
+the tools enforce the file and version checks.
+
+`read_note` returns a revision of the complete file, even when the displayed
+text is clipped. `edit_note` requires that revision and replaces one exact,
+unique body passage; an empty old passage appends, and an empty replacement
+removes the matched passage. Frontmatter stays intact. A changed revision or
+an ambiguous match is refused, so buddy must read again. Telegram vault tool
+operations are serialized; writes replace a complete file atomically.
+
+Before each edit, the previous contents are saved privately under
+`.buddy-history/` inside the vault. Search and workflow packs exclude that
+folder. `read_note` returns the available `undo_id`; `undo_note` uses it and
+the current revision to restore the previous contents. Successive undo calls
+walk back saved edits. Undo refuses to replace a later manual edit. These
+controls cover edits, not captures or filing moves; history is tied to the
+note's vault path, so moving or renaming the file makes its old undo history
+unavailable at the new path. Existing duplicate notes are not merged automatically.
 
 ## The four workflows
 
@@ -149,18 +185,19 @@ pull in PyYAML. `.obsidian/` and hidden paths are excluded from every pack.
 
 | Variable | Default | What it does |
 |---|---|---|
-| `CC_BUDDY_SECOND_BRAIN` | `0` | The switch. On, the text brain gets `capture_note`, `search_notes`, `read_note`, `list_inbox`, `file_note`, `list_todos`, `second_brain_workflow`. |
+| `CC_BUDDY_SECOND_BRAIN` | `0` | The switch. On, the text brain gets `capture_note`, `search_notes`, `read_note`, `edit_note`, `undo_note`, `list_inbox`, `file_note`, `list_todos`, `second_brain_workflow`. |
 | `CC_BUDDY_VAULT` | `~/Documents/Second Brain` | The vault root. Point it at an existing Obsidian vault (or a subfolder of one) to keep everything in one place; only files are added. |
 
-## What never leaves the Mac
+## Storage and model access
 
-The vault is a folder on disk. Capturing, searching, reading, filing and
-archiving are file operations; no note is sent anywhere by them. The only
-thing that reaches a model is a workflow prompt you asked for, and it carries
-exactly the files its pack selected, within the budget, plus what you pasted.
-Logs carry counts and file names, never what you wrote.
+The vault and edit history are folders on disk. The tools perform local file
+operations without making model calls themselves. Their results go back to
+the Telegram text model: searches include snippets, reads include note text,
+and workflow prompts include the files selected by the pack within its budget.
+Edit and undo results carry paths, revisions and undo IDs, not the saved history
+contents. Logs carry counts and file names, never note bodies.
 
-`read_note` and `file_note` refuse any path that resolves outside the vault or
+`read_note`, `edit_note`, `undo_note` and `file_note` refuse source paths that resolve outside the vault or
 into `.obsidian/`. Note contents come back to the text brain as your words,
 not as instructions, and its prompt says so.
 
