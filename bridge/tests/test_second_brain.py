@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime
 from pathlib import Path
 
@@ -444,7 +445,7 @@ def test_workflow_prompt_for_every_name_has_sop_and_context(vault: Path) -> None
 # ---- the tools -----------------------------------------------------------------------------------
 
 def test_every_tool_is_strict_named_and_dispatched(vault: Path) -> None:
-    assert len(SECOND_BRAIN_TOOLS) == 7
+    assert len(SECOND_BRAIN_TOOLS) == 9
     for tool in SECOND_BRAIN_TOOLS:
         assert tool["type"] == "function" and tool["strict"] is True
         params = tool["parameters"]
@@ -455,7 +456,7 @@ def test_every_tool_is_strict_named_and_dispatched(vault: Path) -> None:
         assert isinstance(res, dict) and "ok" in res
         json.dumps(res)
     assert set(SECOND_BRAIN_TOOL_NAMES) == {"capture_note", "search_notes", "read_note", "list_inbox", "file_note",
-                                            "list_todos", "second_brain_workflow"}
+                                            "list_todos", "second_brain_workflow", "edit_note", "undo_note"}
 
 
 def test_dispatch_never_raises_and_returns_ok_false_for_bad_input(vault: Path) -> None:
@@ -503,7 +504,195 @@ def test_dispatch_clips_long_notes(vault: Path) -> None:
 
 
 def test_instructions_block_mentions_the_tools_and_workflows() -> None:
-    for name in ("capture_note", "search_notes", "read_note", "list_todos", "second_brain_workflow", "think_hard"):
+    for name in ("capture_note", "search_notes", "read_note", "list_todos", "second_brain_workflow", "think_hard",
+                 "edit_note", "undo_note"):
         assert name in sb.INSTRUCTIONS_BLOCK
     for phrase in ("plan my day", "weekly review", "triage my inbox", "distill this"):
         assert phrase in sb.INSTRUCTIONS_BLOCK
+
+
+def _edit(root: Path, path: str, old: str, new: str) -> dict:
+    note = dispatch(root, "read_note", {"path": path})
+    assert note["ok"]
+    return dispatch(root, "edit_note", {"path": path, "revision": note["revision"],
+                                        "old_text": old, "new_text": new})
+
+
+def test_edit_shopping_list_keeps_one_file_and_exact_frontmatter(vault: Path) -> None:
+    path = capture(vault, "# Shopping\n- [ ] wipes\n- [ ] bathroom mat", now=NOW).path
+    file = vault / path
+    original = file.read_text().replace("kind: note", "kind: note\ntags:\n  - home\ncustom: 'keep this'")
+    file.write_text(original)
+    before_paths = sorted(p.relative_to(vault) for p in vault.rglob("*.md"))
+    result = _edit(vault, path, "", "- [ ] alcohol wipes for electronics")
+    assert result["ok"] and result["path"] == path and result["changed"]
+    assert file.read_text() == original + "- [ ] alcohol wipes for electronics\n"
+    assert sorted(p.relative_to(vault) for p in vault.rglob("*.md")) == before_paths
+    assert _edit(vault, path, "- [ ] wipes", "- [x] wipes")["ok"]
+    assert _edit(vault, path, "- [ ] bathroom mat\n", "")["ok"]
+    assert file.read_text() == original.replace("- [ ] wipes", "- [x] wipes").replace(
+        "- [ ] bathroom mat\n", "") + "- [ ] alcohol wipes for electronics\n"
+    assert [h.path for h in search(vault, "electronics")] == [path]
+
+
+def test_todo_completion_reopen_and_priority_change(vault: Path) -> None:
+    capture(vault, "p2 buy milk", kind="todo", now=NOW)
+    capture(vault, "p1 call Sam", kind="todo", now=NOW)
+    line = "- [ ] buy milk (added 2026-09-21)"
+    assert _edit(vault, sb.TODOS_FILE, line, line.replace("[ ]", "[x]"))["ok"]
+    assert todos(vault)["P2"] == []
+    assert _edit(vault, sb.TODOS_FILE, line.replace("[ ]", "[x]"), line)["ok"]
+    assert todos(vault)["P2"] == ["buy milk (added 2026-09-21)"]
+    old = (vault / sb.TODOS_FILE).read_text()
+    new = old.replace(line + "\n", "").replace("## P0\n", "## P0\n" + line + "\n")
+    assert _edit(vault, sb.TODOS_FILE, old, new)["ok"]
+    assert todos(vault)["P0"] == ["buy milk (added 2026-09-21)"]
+    assert todos(vault)["P2"] == []
+    assert todos(vault)["P1"] == ["call Sam (added 2026-09-21)"]
+
+
+def test_edit_refuses_stale_ambiguous_missing_or_frontmatter_matches(vault: Path) -> None:
+    path = capture(vault, "milk\nmilk\nkeep me", now=NOW).path
+    before = (vault / path).read_text()
+    stale = read_note(vault, path)["revision"]
+    for old in ("milk", "not present", "status: inbox"):
+        result = _edit(vault, path, old, "oops")
+        assert not result["ok"] and "exactly once" in result["reason"]
+        assert (vault / path).read_text() == before
+    assert _edit(vault, path, "milk\nmilk", "oat milk")["ok"]  # positive control: context disambiguates
+    current = (vault / path).read_text()
+    for revision in (stale, ""):
+        result = dispatch(vault, "edit_note", {"path": path, "revision": revision,
+                                              "old_text": "keep me", "new_text": "lost"})
+        assert not result["ok"] and "read_note" in result["reason"]
+        assert (vault / path).read_text() == current
+
+
+def test_undo_restores_bytes_and_walks_history_without_toggling(vault: Path) -> None:
+    path = capture(vault, "original", now=NOW).path
+    original = (vault / path).read_bytes()
+    first = _edit(vault, path, "original", "second")
+    second = _edit(vault, path, "second", "original")  # deliberately return to a previous state
+    assert first["ok"] and second["ok"]
+    for expected, change in ((b"second\n", second), (b"original\n", first)):
+        note = read_note(vault, path)
+        assert note["undo_id"] == change["undo_id"]
+        result = dispatch(vault, "undo_note", {"path": path, "undo_id": note["undo_id"],
+                                              "revision": note["revision"]})
+        assert result["ok"] and (vault / path).read_bytes().endswith(expected)
+    assert (vault / path).read_bytes() == original
+    assert read_note(vault, path)["undo_id"] is None
+    assert len(list((vault / sb.HISTORY_DIR).rglob("*.undone"))) == 2
+
+
+def test_undo_refuses_later_obsidian_changes_and_wrong_note(vault: Path) -> None:
+    path = capture(vault, "original", now=NOW).path
+    change = _edit(vault, path, "original", "second")
+    other = capture(vault, "second", now=NOW).path
+    assert not dispatch(vault, "undo_note", {"path": other, "undo_id": change["undo_id"],
+                                            "revision": read_note(vault, other)["revision"]})["ok"]
+    (vault / path).write_text("a later manual edit\n")
+    for revision in (change["revision"], read_note(vault, path)["revision"]):
+        result = dispatch(vault, "undo_note", {"path": path, "undo_id": change["undo_id"], "revision": revision})
+        assert not result["ok"] and "note changed" in result["reason"]
+        assert (vault / path).read_text() == "a later manual edit\n"
+    assert read_note(vault, path)["undo_id"] is None
+
+
+def test_edit_paths_history_and_hidden_search(vault: Path, tmp_path: Path) -> None:
+    outside = tmp_path / "outside.md"
+    outside.write_text("outside")
+    (vault / "link.md").symlink_to(outside)
+    hidden = vault / ".obsidian" / "hidden.md"
+    hidden.write_text("hidden")
+    for path in ("../outside.md", str(outside), "link.md", ".obsidian/hidden.md", "02-todos/nope.md"):
+        for name in ("edit_note", "undo_note"):
+            assert not dispatch(vault, name, {"path": path, "revision": "x", "undo_id": "../x",
+                                              "old_text": "", "new_text": "oops"})["ok"]
+    assert outside.read_text() == "outside" and hidden.read_text() == "hidden"
+    (vault / "link.md").unlink()
+    path = capture(vault, "# Test\nsecretcobalt", now=NOW).path
+    assert [h.path for h in search(vault, "secretcobalt")] == [path]  # positive control
+    assert _edit(vault, path, "secretcobalt", "replacement")["ok"]
+    assert search(vault, "secretcobalt") == []
+    record = next((vault / sb.HISTORY_DIR).rglob("*.json"))
+    assert "secretcobalt" in record.read_text()
+    assert not read_note(vault, record.relative_to(vault).as_posix())["ok"]
+    pack = PackDef(name="all", description="", budget_tokens=100000, include=[Include("**/*")])
+    assert "secretcobalt" not in compile_pack(vault, pack).xml
+
+
+def test_history_symlink_and_failed_backup_leave_note_unchanged(vault: Path, tmp_path: Path, monkeypatch) -> None:
+    path = capture(vault, "keep", now=NOW).path
+    revision = read_note(vault, path)["revision"]
+    before = (vault / path).read_bytes()
+    external = tmp_path / "external"
+    external.mkdir()
+    (vault / sb.HISTORY_DIR).symlink_to(external, target_is_directory=True)
+    assert not dispatch(vault, "edit_note", {"path": path, "revision": revision,
+                                           "old_text": "keep", "new_text": "lose"})["ok"]
+    assert (vault / path).read_bytes() == before and list(external.iterdir()) == []
+    (vault / sb.HISTORY_DIR).unlink()
+
+    def fail_write(*args):
+        raise OSError("disk full")
+
+    monkeypatch.setattr(sb, "_atomic_text", fail_write)
+    assert not _edit(vault, path, "keep", "lose")["ok"]
+    assert (vault / path).read_bytes() == before
+
+
+def test_clipped_reads_support_targeted_edits_without_truncation(vault: Path) -> None:
+    body = "visible passage\n" + "z" * 10000 + "\nkeep this tail\n"
+    path = capture(vault, body, now=NOW).path
+    before = (vault / path).read_text()
+    assert dispatch(vault, "read_note", {"path": path})["clipped"]
+    assert _edit(vault, path, "visible passage", "changed passage")["ok"]
+    assert (vault / path).read_text() == before.replace("visible passage", "changed passage")
+
+
+def test_two_simultaneous_edits_cannot_overwrite_each_other(vault: Path) -> None:
+    path = capture(vault, "keep", now=NOW).path
+    revision = read_note(vault, path)["revision"]
+    def append(text):
+        return dispatch(vault, "edit_note", {"path": path, "revision": revision, "old_text": "", "new_text": text})
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        results = list(pool.map(append, ["one", "two"]))
+    assert sum(result["ok"] for result in results) == 1
+    text = (vault / path).read_text()
+    assert text.endswith("keep\none\n") or text.endswith("keep\ntwo\n")
+
+
+def test_failed_note_write_keeps_original_and_does_not_offer_failed_undo(vault: Path, monkeypatch) -> None:
+    path = capture(vault, "keep", now=NOW).path
+    original = (vault / path).read_bytes()
+    real_replace = sb.os.replace
+
+    def fail_note_replace(source, destination):
+        if destination == vault / path:
+            raise OSError("cannot replace note")
+        return real_replace(source, destination)
+
+    monkeypatch.setattr(sb.os, "replace", fail_note_replace)
+    result = _edit(vault, path, "keep", "changed")
+    assert not result["ok"] and (vault / path).read_bytes() == original
+    assert len(list((vault / sb.HISTORY_DIR).rglob("*.failed"))) == 1
+    assert not list((vault / sb.INBOX_DIR).glob(".buddy-*"))
+    # Even if a later manual edit matches the failed write, it must not gain an undo entry.
+    (vault / path).write_text(original.decode().replace("keep", "changed"))
+    assert read_note(vault, path)["undo_id"] is None
+
+
+def test_edit_rechecks_after_backup_when_an_external_editor_changes_note(vault: Path, monkeypatch) -> None:
+    path = capture(vault, "keep", now=NOW).path
+    real_write = sb._atomic_text
+
+    def external_change_after_backup(destination, text):
+        real_write(destination, text)
+        if destination.suffix == ".json":
+            (vault / path).write_text("edited in Obsidian\n")
+
+    monkeypatch.setattr(sb, "_atomic_text", external_change_after_backup)
+    result = _edit(vault, path, "keep", "changed")
+    assert not result["ok"] and "note changed" in result["reason"]
+    assert (vault / path).read_text() == "edited in Obsidian\n"

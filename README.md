@@ -44,6 +44,10 @@ workspace without the robot, and its offline demo needs no API key.
   are stored separately as distilled notes; “remember that” promotes a spoken fact.
 - **Takes notes.** Start a room-note session with `cc-buddy-bridge take-notes start`;
   stopping it produces a write-up of decisions, actions and open questions.
+- **Keeps your personal notes.** With the [second brain](docs/stackchan/second-brain.md)
+  enabled, Telegram can save notes, update an existing shopping list, check off
+  todos, and undo a note edit. Changes stay in the same Markdown file, with
+  previous contents saved for recovery.
 - **Mirrors Claude Code.** Session hooks and transcript updates make buddy sleep,
   work, celebrate, or ask for attention. A tap can focus a waiting terminal;
   Claude Code permission prompts remain in that terminal.
