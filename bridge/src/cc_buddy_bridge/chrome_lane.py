@@ -1,0 +1,99 @@
+"""The fast path into the owner's logged-in Chrome: plan once, execute in buddy's own tab, Codex as the floor.
+
+Owner, 2026-09-23: "i want buddy to be able to control logged in browser, that's the most important".
+Codex already drives the owner's Chrome; this is the faster road to the same browser. The daemon holds ONE
+browser_lane.BrowserLane in attach mode for its whole life — Chrome asks "Allow remote debugging?" per
+connection, so one connection means one click per Chrome session, not one per task. For each task:
+
+1. A fresh ComputerAgent (the planner, gpt-6-astra) runs ``run_in_browser``: one plan against the page in
+   buddy's tab, executed step by step with Jev grounding each click, a sensitive step (buy, send, delete…)
+   stopping for the owner's yes (consent.py), and a code check of each step's expected result.
+2. Finished: that is the answer. Stopped by the owner's no: that is the answer.
+3. Part done: the rest goes to Codex with a note of what was already done, so nothing is repeated.
+   Nothing done (no plan, the lane unreachable, the owner not clicking Allow): Codex takes the whole task,
+   exactly as before this module.
+
+``ChromeLaneAgent`` keeps the run/steer/cancel/status contract every door already uses, so it drops in behind
+app_reflex.ReflexFirstAgent as its second body (make_auto) with no change to the voice or Telegram doors.
+"""
+
+from __future__ import annotations
+
+import logging
+import time
+from typing import Any, Awaitable, Callable, Optional
+
+from .agent_contract import AgentEvent
+
+log = logging.getLogger(__name__)
+
+
+class ChromeLaneAgent:
+    """Plan once in the owner's Chrome (``make_planner().run_in_browser``), Codex (``make_fallback``) for the rest."""
+
+    provider = "chrome-lane"
+
+    def __init__(self, make_planner: Callable[[Callable[[AgentEvent], None], Callable[[str], Awaitable[str]]], Any],
+                 make_fallback: Callable[[], Any], on_event: Callable[[AgentEvent], None],
+                 ask_user: Callable[[str], Awaitable[str]]) -> None:
+        self._make_planner, self._make_fallback = make_planner, make_fallback
+        self.on_event, self.ask_user = on_event, ask_user
+        self._current: Any = None                    # the planner, then (maybe) Codex
+        self._cancel_reason: Optional[str] = None
+        self.goal = self.final = ""
+        self.handed_on = False                        # Codex finished what the lane started (or did it all)
+        self.browser_used = True
+
+    @property
+    def running(self) -> bool:
+        return bool(getattr(self._current, "running", False))
+
+    def status(self) -> dict[str, Any]:
+        inner = self._current.status() if hasattr(self._current, "status") else {}
+        return {**inner, "provider": self.provider, "handed_on": self.handed_on}
+
+    def steer(self, text: str) -> bool:
+        return bool(self._current is not None and self._current.steer(text))
+
+    def cancel(self, reason: str = "") -> None:
+        self._cancel_reason = reason
+        if self._current is not None:
+            self._current.cancel(reason=reason)
+
+    def __getattr__(self, name: str) -> Any:          # browser_screenshot, ui_evidence … from whoever ran last
+        if name.startswith("_") or self.__dict__.get("_current") is None:
+            raise AttributeError(name)
+        return getattr(self._current, name)
+
+    async def run(self, goal: str) -> str:
+        self.goal = goal
+        self.on_event(AgentEvent("started", goal))
+        t0 = time.perf_counter()
+        planner = self._current = self._make_planner(self._forward, self.ask_user)
+        try:
+            answer, note = await planner.run_in_browser(goal)
+        except Exception as e:  # noqa: BLE001 — the lane never costs the task: Codex takes it
+            log.warning("chrome-lane: the lane failed (%s); Codex takes the task", type(e).__name__)
+            answer, note = "", ""
+        if self._cancel_reason is not None:
+            self.final = answer or "Stopped."
+            self.on_event(AgentEvent("cancelled", self.final))
+            return self.final
+        if answer:
+            log.info("chrome-lane: done in the owner's Chrome in %.1f s", time.perf_counter() - t0)
+            self.final = answer
+            self.on_event(AgentEvent("final", answer))
+            return answer
+        self.handed_on = True
+        log.info("chrome-lane: %s after %.1f s; Codex takes it", "part done" if note else "nothing done",
+                 time.perf_counter() - t0)
+        if note:
+            self.on_event(AgentEvent("progress", "Part of it is done in your Chrome; Codex is finishing it."))
+        self._current = self._make_fallback()
+        self.final = await self._current.run(goal + note)
+        return self.final
+
+    def _forward(self, ev: AgentEvent) -> None:
+        # The planner's own started/final are this agent's to say; its progress and questions pass through.
+        if ev.kind not in ("started", "final"):
+            self.on_event(ev)
