@@ -109,3 +109,14 @@ def test_load_warms_up_and_a_failed_warm_up_is_a_one_line_runtime_error() -> Non
         jev.load(env={})
     with pytest.raises(RuntimeError, match="warm-up predict failed"):
         jev.load(env={"TYPESAFE_API_KEY": "k"}, opener=lambda r, timeout: Reply({"answers": {}}))
+
+
+def test_timeout_from_env_never_raises() -> None:
+    from cc_buddy_bridge import jev as jev_mod
+
+    assert jev_mod.timeout_from_env({}) == jev_mod.DEFAULT_TIMEOUT_S
+    assert jev_mod.timeout_from_env({"CC_BUDDY_JEV_TIMEOUT": " "}) == jev_mod.DEFAULT_TIMEOUT_S
+    assert jev_mod.timeout_from_env({"CC_BUDDY_JEV_TIMEOUT": "abc"}) == jev_mod.DEFAULT_TIMEOUT_S
+    assert jev_mod.timeout_from_env({"CC_BUDDY_JEV_TIMEOUT": "-2"}) == jev_mod.DEFAULT_TIMEOUT_S
+    assert jev_mod.timeout_from_env({"CC_BUDDY_JEV_TIMEOUT": "inf"}) == jev_mod.DEFAULT_TIMEOUT_S
+    assert jev_mod.timeout_from_env({"CC_BUDDY_JEV_TIMEOUT": "5"}) == 5.0
