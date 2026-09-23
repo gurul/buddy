@@ -11,6 +11,8 @@ import stat
 from pathlib import Path
 from typing import Any
 
+import pytest
+
 from cc_buddy_bridge.composio_tools import (
     COMPOSIO_DEFAULT,
     ComposioBridge,
@@ -298,3 +300,19 @@ def test_execute_never_raises(tmp_path: Path, caplog: Any) -> None:
     b = ComposioBridge(_cfg(tmp_path / "b"), client_factory=BrokenClient)
     b.start()
     assert b.wait_for("gmail", timeout=0.1) is False
+
+
+@pytest.mark.parametrize("slug,read", [
+    ("GMAIL_GET_LABEL", True),                  # the unread count lives on the INBOX label: a read (live, 2026-09-23)
+    ("GMAIL_LIST_LABELS", True),
+    ("GMAIL_FETCH_EMAILS", True),
+    ("GMAIL_ADD_LABEL_TO_EMAIL", False),
+    ("GMAIL_CREATE_LABEL", False),
+    ("GMAIL_MODIFY_THREAD_LABELS", False),
+    ("GMAIL_LABEL_EMAIL", False),               # LABEL in verb position is still a write
+    ("GMAIL_SEND_EMAIL", False),
+])
+def test_label_is_a_write_only_as_the_verb(slug: str, read: bool) -> None:
+    from cc_buddy_bridge.composio_tools import is_read_only
+
+    assert is_read_only(slug) is read

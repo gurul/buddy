@@ -57,6 +57,10 @@ WRITE_VERBS = frozenset({"SEND", "CREATE", "DELETE", "REMOVE", "UPDATE", "EDIT",
                          "TRIGGER", "MARK", "LABEL", "ASSIGN", "CLOSE", "REVOKE", "GRANT", "RENAME", "COPY", "IMPORT",
                          "SYNC", "RESET", "CLEAR", "PURGE", "BATCH", "DRAFT", "COMPOSE", "SCHEDULE", "BOOK", "ORDER",
                          "ACCEPT", "DECLINE", "APPROVE", "REJECT", "DISABLE", "ENABLE", "STAR", "UNSTAR", "PIN"})
+# Words that are also plain nouns: a write only in verb position (the first word after the toolkit). Live,
+# 2026-09-23: GMAIL_GET_LABEL (read the INBOX label, i.e. the unread count) was refused as a write under the
+# owner's "gmail: read" policy. Tools that change labels carry a real verb too: ADD_LABEL, MODIFY_…_LABELS.
+NOUN_TOO = frozenset({"LABEL"})
 READ_ONLY_SLUG = re.compile(r"^[A-Za-z0-9]+_[A-Za-z0-9_]+$")     # the shape; the words decide (is_read_only)
 
 # Per-toolkit policy for a call that WRITES (owner, 2026-09-21: "make gmail read only, allow write for
@@ -119,7 +123,8 @@ def is_read_only(slug: str) -> bool:
     if not READ_ONLY_SLUG.match(slug or ""):
         return False
     _toolkit, words = slug_words(slug)
-    return any(w in READ_VERBS for w in words) and not any(w in WRITE_VERBS for w in words)
+    writes = [w for i, w in enumerate(words) if w in WRITE_VERBS and (w not in NOUN_TOO or i == 0)]
+    return any(w in READ_VERBS for w in words) and not writes
 
 
 def toolkit_policy(environ: Optional[Mapping[str, str]] = None) -> dict[str, str]:
