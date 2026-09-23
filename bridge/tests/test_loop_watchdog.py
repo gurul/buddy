@@ -4,7 +4,7 @@ import logging
 import signal
 import time
 
-from cc_buddy_bridge.loop_watchdog import LoopWatchdog, register_dump_signal
+from cc_buddy_bridge.loop_watchdog import PET_SECS, LoopWatchdog, register_dump_signal
 
 LOGGER = "cc_buddy_bridge.loop_watchdog"
 
@@ -14,7 +14,8 @@ def _hold_the_loop(secs: float) -> None:
     time.sleep(secs)
 
 
-def _run(body, threshold=0.3, poll=0.05) -> LoopWatchdog:
+def _run(body, threshold=0.45, poll=0.05) -> LoopWatchdog:
+    # Well above PET_SECS (0.25 s), so an ordinary gap between pets under load is never a stall.
     loop = asyncio.new_event_loop()
     wd = LoopWatchdog(loop, threshold=threshold, poll=poll)
 
@@ -65,7 +66,11 @@ def test_a_healthy_loop_logs_nothing(caplog):
 def test_a_long_stall_is_reported_again_while_it_lasts(caplog):
     caplog.set_level(logging.WARNING, logger=LOGGER)
     loop = asyncio.new_event_loop()
-    wd = LoopWatchdog(loop, threshold=0.2, repeat=0.3, poll=0.05)
+    # The threshold must sit clearly above PET_SECS (0.25 s): at 0.2 an ordinary gap between two pets already
+    # read as a stall, so a little scheduling jitter around the real one counted a second stall (1 run in 7,
+    # 2026-09-23). A 1.0 s hold still crosses 0.4 and repeats every 0.3 s, so it is reported at least twice.
+    assert PET_SECS < 0.4
+    wd = LoopWatchdog(loop, threshold=0.4, repeat=0.3, poll=0.05)
 
     async def main():
         wd.start()
