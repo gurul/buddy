@@ -322,3 +322,15 @@ def test_telegram_tool_path_asks_then_the_reply_answers(root: Path) -> None:
     assert result["ok"] is True
     assert "general, or which folder" in rig.api.sent[0]
     assert rig.opened == [(root / "work" / "era-hub-api", "era-code")]
+
+
+def test_every_offered_tool_is_accepted_when_the_model_calls_it() -> None:
+    """TOOL_NAMES is what parse_response accepts; a tool offered but not accepted fails the turn (the
+    start_coding_session bug of 2026-09-23: it was offered, then refused as 'unexpected')."""
+    from cc_buddy_bridge import telegram
+    from cc_buddy_bridge.records import MEMORY_TOOLS
+
+    for tool in (*telegram.TOOLS, *MEMORY_TOOLS):
+        response = {"output": [{"type": "function_call", "name": tool["name"], "call_id": "c1", "arguments": "{}"}]}
+        calls, _, _ = telegram.parse_response(response)
+        assert [c["name"] for c in calls] == [tool["name"]]
