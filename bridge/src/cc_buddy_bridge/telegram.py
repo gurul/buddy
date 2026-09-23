@@ -1413,44 +1413,13 @@ class TelegramInlet:
 
     # -- tools --
     async def _tool(self, name: str, args: dict[str, Any], chat_id: int) -> dict[str, Any]:
+        """One tool call from the text brain. The fixed tools are a table (TOOL_HANDLERS, below the class);
+        then, in this order, the owner's apps (known only at run time), the second brain, and think_hard for
+        anything else. A handler that raises is reported, never raised."""
         try:
-            if name == "start_task":
-                return self._start_task(str(args.get("goal") or "").strip(), chat_id)
-            if name == "steer_task":
-                ok = self._agent is not None and self.task_running and self._agent.steer(str(args.get("text") or ""))
-                return {"ok": bool(ok)} if ok else {"ok": False, "reason": "no task is running"}
-            if name == "stop_task":
-                if self._agent is not None and self.task_running:
-                    self._agent.cancel(reason="stopped from Telegram")
-                    return {"ok": True}
-                return {"ok": False, "reason": "no task is running"}
-            if name == "start_coding_session":
-                flow = self._new_launch()
-                step = flow.request(str(args.get("area") or ""), str(args.get("folder") or ""),
-                                    str(args.get("harness") or ""))
-                self._launch = None if step.done else flow
-                self._spawn(self._launch_step(chat_id, step), "telegram-launch")
-                return {"ok": True, "sent": "the question or the result is already in the chat; add nothing "
-                                            "more than a word or two"}
-            if name == "take_photo":
-                return await self._take_photo(str(args.get("note") or ""), chat_id)
-            if name == "screenshot":
-                return await self._send_screen(chat_id, str(args.get("caption") or ""))
-            if name == "send_file":
-                return await self._send_file(chat_id, str(args.get("path") or ""), str(args.get("caption") or ""))
-            if name == "list_files":
-                return await asyncio.to_thread(list_files, str(args.get("path") or ""))
-            if name in ("look", "look_around", "find", "move_head", "go_explore", "set_sound", "remember", "take_notes"):
-                return await self._robot_tool(name, args)
-            if name in ("memory_search", "memory_get"):
-                if self._records is None:
-                    return {"ok": False, "reason": "no memory records on this computer"}
-                if name == "memory_search":
-                    return await asyncio.to_thread(self._records.search, str(args.get("query") or ""))
-                return await asyncio.to_thread(self._records.get, str(args.get("id") or ""))
-            if name == websearch.TOOL_NAME:
-                # Exa through OpenRouter (websearch.py), off the loop: a second or two of network
-                return await asyncio.to_thread(websearch.search, str(args.get("query") or ""), self.config.search)
+            handler = TOOL_HANDLERS.get(name)
+            if handler is not None:
+                return await handler(self, name, args, chat_id)
             if self._apps is not None and name in self._apps.names:
                 return await self._app_tool(name, args, chat_id)
             if name in second_brain.SECOND_BRAIN_TOOL_NAMES:
@@ -1463,6 +1432,55 @@ class TelegramInlet:
         except Exception:  # noqa: BLE001
             log.exception("telegram: %s failed", name)
             return {"ok": False, "reason": f"{name} failed"}
+
+    # -- the fixed tools, one handler each: (self, name, args, chat_id) -> result --
+    async def _tool_start_task(self, name: str, args: dict[str, Any], chat_id: int) -> dict[str, Any]:
+        return self._start_task(str(args.get("goal") or "").strip(), chat_id)
+
+    async def _tool_steer_task(self, name: str, args: dict[str, Any], chat_id: int) -> dict[str, Any]:
+        ok = self._agent is not None and self.task_running and self._agent.steer(str(args.get("text") or ""))
+        return {"ok": bool(ok)} if ok else {"ok": False, "reason": "no task is running"}
+
+    async def _tool_stop_task(self, name: str, args: dict[str, Any], chat_id: int) -> dict[str, Any]:
+        if self._agent is not None and self.task_running:
+            self._agent.cancel(reason="stopped from Telegram")
+            return {"ok": True}
+        return {"ok": False, "reason": "no task is running"}
+
+    async def _tool_start_coding_session(self, name: str, args: dict[str, Any], chat_id: int) -> dict[str, Any]:
+        flow = self._new_launch()
+        step = flow.request(str(args.get("area") or ""), str(args.get("folder") or ""),
+                            str(args.get("harness") or ""))
+        self._launch = None if step.done else flow
+        self._spawn(self._launch_step(chat_id, step), "telegram-launch")
+        return {"ok": True, "sent": "the question or the result is already in the chat; add nothing "
+                                    "more than a word or two"}
+
+    async def _tool_take_photo(self, name: str, args: dict[str, Any], chat_id: int) -> dict[str, Any]:
+        return await self._take_photo(str(args.get("note") or ""), chat_id)
+
+    async def _tool_screenshot(self, name: str, args: dict[str, Any], chat_id: int) -> dict[str, Any]:
+        return await self._send_screen(chat_id, str(args.get("caption") or ""))
+
+    async def _tool_send_file(self, name: str, args: dict[str, Any], chat_id: int) -> dict[str, Any]:
+        return await self._send_file(chat_id, str(args.get("path") or ""), str(args.get("caption") or ""))
+
+    async def _tool_list_files(self, name: str, args: dict[str, Any], chat_id: int) -> dict[str, Any]:
+        return await asyncio.to_thread(list_files, str(args.get("path") or ""))
+
+    async def _tool_robot(self, name: str, args: dict[str, Any], chat_id: int) -> dict[str, Any]:
+        return await self._robot_tool(name, args)
+
+    async def _tool_memory(self, name: str, args: dict[str, Any], chat_id: int) -> dict[str, Any]:
+        if self._records is None:
+            return {"ok": False, "reason": "no memory records on this computer"}
+        if name == "memory_search":
+            return await asyncio.to_thread(self._records.search, str(args.get("query") or ""))
+        return await asyncio.to_thread(self._records.get, str(args.get("id") or ""))
+
+    async def _tool_web_search(self, name: str, args: dict[str, Any], chat_id: int) -> dict[str, Any]:
+        # Exa through OpenRouter (websearch.py), off the loop: a second or two of network
+        return await asyncio.to_thread(websearch.search, str(args.get("query") or ""), self.config.search)
 
     def _app_tools(self) -> list[dict[str, Any]]:
         """The apps' tools for this turn: none until the Composio session is up (it starts on a thread)."""
@@ -1693,6 +1711,25 @@ class TelegramInlet:
         if self._thinker is None:
             return {"ok": False, "reason": "deep reasoning is off on this computer; answer as best you can"}
         return await self._thinker(question)
+
+
+# TelegramInlet._tool's fixed tools: name -> handler, called as handler(inlet, name, args, chat_id). Checked
+# before the owner's apps and the second brain, exactly as the if-chain it replaced (2026-09-23).
+ROBOT_TOOLS = ("look", "look_around", "find", "move_head", "go_explore", "set_sound", "remember", "take_notes")
+TOOL_HANDLERS: dict[str, Callable[..., Awaitable[dict[str, Any]]]] = {
+    "start_task": TelegramInlet._tool_start_task,
+    "steer_task": TelegramInlet._tool_steer_task,
+    "stop_task": TelegramInlet._tool_stop_task,
+    "start_coding_session": TelegramInlet._tool_start_coding_session,
+    "take_photo": TelegramInlet._tool_take_photo,
+    "screenshot": TelegramInlet._tool_screenshot,
+    "send_file": TelegramInlet._tool_send_file,
+    "list_files": TelegramInlet._tool_list_files,
+    **{robot: TelegramInlet._tool_robot for robot in ROBOT_TOOLS},
+    "memory_search": TelegramInlet._tool_memory,
+    "memory_get": TelegramInlet._tool_memory,
+    websearch.TOOL_NAME: TelegramInlet._tool_web_search,
+}
 
 
 def diagnose(environ: Any = None, api: Any = None) -> int:
