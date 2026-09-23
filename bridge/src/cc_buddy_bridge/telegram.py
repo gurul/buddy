@@ -1127,6 +1127,11 @@ class TelegramInlet:
         # A strict prompt's own button words, typed ("always allow", "allow for task"): an answer as well as a
         # bare yes or no is. Empty when the prompt has no buttons beyond yes and no.
         self._pending_words: frozenset[str] = frozenset()
+        # The permission prompt waiting on the owner, when the pending question is one. It belongs to the
+        # relayed session: when the relay goes off or moves to another session it is settled as "no answer"
+        # (the Mac dialog decides), so it never lingers to take the owner's next message, meant for buddy,
+        # as its answer (owner, 2026-09-23; review of "claude off" with Allow/Deny still on the screen).
+        self._permission_future: Optional[asyncio.Future] = None
         # Inline buttons: key -> (keyboard, choice). The generation makes keys from before a restart unknown.
         self._taps: dict[str, tuple[_Keyboard, Choice]] = {}
         self._tap_gen = secrets.token_hex(3)
@@ -1332,7 +1337,18 @@ class TelegramInlet:
             return False
         if consent.bare_decision(text) or text.strip().lower().rstrip(".!") in self._pending_words:
             return True
+        if self._permission_future is self._pending_answer:
+            return False                                  # a permission prompt stays strict, relay or not
         return not (self.claude or self._codex_chat is not None)
+
+    def _defer_permission(self) -> None:
+        """The relay is going off, or to another session: a permission prompt still waiting ends as "no
+        answer here", so the dialog on the Mac decides and the prompt is edited to say so. Without this the
+        prompt stayed pending for minutes after "claude off", and the owner's next message, meant for buddy,
+        could be taken as its answer: "ok, what's on my calendar" allowed an rm (owner, 2026-09-23)."""
+        future = self._permission_future
+        if future is not None and not future.done():
+            future.set_result("")                          # consent.decision("") is "": the dialog decides
 
     def _handle(self, inbound: Inbound) -> None:
         """One accepted message from the owner, routed. A picker's tap comes here too, with the button's
@@ -1367,6 +1383,7 @@ class TelegramInlet:
                 self._codex_epoch += 1
                 self._codex_chat = None if action == "off" else inbound.chat_id
                 if action != "off":
+                    self._defer_permission()
                     self.claude, self._relay_pin, self._join_after_launch = False, "", False
                     self._stop_typing(inbound.chat_id, "relay")
                     self._relay_lines.clear()
@@ -1394,6 +1411,7 @@ class TelegramInlet:
             self._note("user", inbound.text)
             if word in CLAUDE_OFF:
                 self._retire_options()
+                self._defer_permission()
                 self.claude, self._relay_pin, self._join_after_launch = False, "", False
                 self._stop_typing(inbound.chat_id, "relay")
                 log.info("telegram: claude relay off")
@@ -1792,6 +1810,7 @@ class TelegramInlet:
             return self._join(inbound.chat_id, cwds[0])
         if not cwds:
             return self._start_then_join(inbound.chat_id, "", CLAUDE_NONE_LINE)
+        self._defer_permission()
         self.claude = False
         self._join_after_launch = True                   # the picker's "new claude" joins what it opens
         log.info("telegram: claude relay asks which of %d sessions", len(cwds))
@@ -1802,6 +1821,8 @@ class TelegramInlet:
 
     def _relay_to(self, cwd: str) -> None:
         self._retire_options()
+        if not self.claude or cwd != self._relay_cwd:
+            self._defer_permission()                       # another session: its prompt is not this one's
         self.claude, self._relay_pin, self._relay_cwd = True, cwd, cwd
         log.info("telegram: claude relay on")
 
@@ -1811,6 +1832,7 @@ class TelegramInlet:
                     "telegram-say")
 
     def _start_then_join(self, chat_id: int, argument: str, intro: str = "") -> None:
+        self._defer_permission()
         self.claude = False
         self._launch = self._new_launch()
         step = self._launch.start(argument)
@@ -1971,7 +1993,7 @@ class TelegramInlet:
         title = CLAUDE_PERMISSION_TITLE.format(tool=tool)
         subtitle = Path(cwd).name if cwd else None
         loop = asyncio.get_running_loop()
-        future = self._pending_answer = loop.create_future()
+        future = self._pending_answer = self._permission_future = loop.create_future()
         # Strict from the start, not from when the send returns: while the prompt is on its way the owner may
         # well be typing to Claude, and a non-strict prompt would take that text as its answer and lose it.
         # Only a send that falls back to plain text makes it non-strict (owner, 2026-09-23).
@@ -1994,6 +2016,8 @@ class TelegramInlet:
                 self._pending_answer = None
                 self._pending_strict = False
                 self._pending_words = frozenset()
+            if self._permission_future is future:
+                self._permission_future = None
             self._retire(board)
             line = {"allow": ALLOW_DENY[0].done, "deny": ALLOW_DENY[1].done}.get(outcome or "",
                                                                                 PERMISSION_DEFERRED_LINE)

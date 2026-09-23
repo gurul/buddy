@@ -2252,6 +2252,65 @@ def test_while_allow_deny_waits_a_sentence_opening_with_yes_or_no_goes_to_claude
     asyncio.run(go())
 
 
+@pytest.mark.parametrize("off", ["claude off", "codex on buddy"])
+def test_turning_the_relay_off_settles_a_waiting_permission_prompt_for_the_mac_dialog(off: str) -> None:
+    """Review finding: after "claude off" the Allow/Deny prompt stayed pending and stopped being strict, so
+    the owner's next message to buddy was eaten as its answer, and a yes-opening sentence allowed the rm."""
+    async def go() -> None:
+        api, typed = FakeApi(), []
+        rig = relay_rig(api, typed, codex=FakeCodex(), codex_folders=lambda: [CODEX_FOLDER])
+        ask = asyncio.ensure_future(rig.inlet.decide_permission("Bash", "rm -rf ~/work"))
+        await jobs(rig)
+        message_id, key = api.key("Allow")
+        await dispatch(rig, off, update_id=5)
+        assert await ask is None                                      # no answer here: the Mac dialog decides
+        await jobs(rig)
+        assert api.edits[-1] == (message_id, "```\nrm -rf ~/work\n```\n\n" + telegram.PERMISSION_DEFERRED_LINE)
+        assert not rig.inlet._awaiting_answer and rig.inlet._permission_future is None
+        await tap(rig, key, message_id)                               # a late Allow tap is spent
+        assert api.answered[-1][1] == telegram.TAP_EXPIRED_LINE
+        if off == "claude off":
+            await dispatch(rig, "ok, what's on my calendar today", update_id=6)
+            assert len(rig.create.requests) == 1 and typed == []      # buddy's turn: the message is not lost
+        await rig.inlet._shutdown()
+
+    asyncio.run(go())
+
+
+def test_a_permission_prompt_stays_strict_even_with_no_relay_on() -> None:
+    """Belt and braces for the finding above: were a prompt ever left waiting with no relay, a sentence that
+    opens with a yes-word goes to buddy and allows nothing; only a clear yes or no answers."""
+    async def go() -> None:
+        api, typed = FakeApi(), []
+        rig = relay_rig(api, typed)
+        ask = asyncio.ensure_future(rig.inlet.decide_permission("Bash", "rm -rf ~/work"))
+        await jobs(rig)
+        rig.inlet.claude = False                                      # the relay gone, the prompt not settled
+        await dispatch(rig, "ok, what's on my calendar today", update_id=6)
+        assert not ask.done() and len(rig.create.requests) == 1
+        await dispatch(rig, "no", update_id=7)
+        assert await ask == "deny"
+        await rig.inlet._shutdown()
+
+    asyncio.run(go())
+
+
+def test_moving_the_relay_to_another_session_settles_its_permission_prompt() -> None:
+    async def go() -> None:
+        api, typed = FakeApi(), []
+        rig = relay_rig(api, typed)
+        ask = asyncio.ensure_future(rig.inlet.decide_permission("Bash", "rm -rf build/", "/Users/g/repo"))
+        await jobs(rig)
+        rig.inlet._relay_to("/Users/g/repo")                          # the same session again: still waiting
+        await jobs(rig)
+        assert not ask.done()
+        rig.inlet._relay_to("/Users/g/other")                         # another session: the Mac decides
+        assert await ask is None
+        await rig.inlet._shutdown()
+
+    asyncio.run(go())
+
+
 def test_text_sent_while_the_allow_deny_prompt_is_still_on_its_way_goes_to_claude() -> None:
     """Review finding: the prompt was non-strict until sendMessage returned, so text typed then was lost."""
     class Slow(FakeApi):

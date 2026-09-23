@@ -71,7 +71,8 @@ The [Telegram door](docs/stackchan/telegram.md) is **off by default**. With it o
   **Deny** buttons, and Claude's questions have a button per option. Other text
   you type while a prompt waits still goes to Claude. This holds for app
   consents and Codex approvals too: only a tap or a plain answer ("yes", "no",
-  "allow for task") answers them.
+  "allow for task") answers them. `claude off` while a prompt waits hands it
+  back to the dialog on the Mac.
 - **A `/` menu** of the code words (`/claude_on`, `/new_claude`, `/codex`,
   `/rundown`, `/screenshot`, `/stealth`, `/wake`, `/stop` and more), in your
   chat only.

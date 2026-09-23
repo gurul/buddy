@@ -170,7 +170,9 @@ as "Claude is waiting on you":
   the Mac decides, and the buttons go. If you don't answer, the dialog stays on
   the Mac as before. If Telegram refuses the buttons, the prompt is plain text
   and your next message is the answer, as before. With the relay off, the hook
-  does nothing.
+  does nothing. Turning the relay off, or moving it to another session, while
+  a prompt waits ends that prompt: the dialog on the Mac decides, the message
+  says so, and your next message goes to buddy, not to the old prompt.
 - **How a reply is read** (`consent.py`). One rule covers every yes/no that
   gates an action: permission prompts, app actions and auto-browser approvals.
   It fails closed. A reply is a yes only if its first word is a yes-word
