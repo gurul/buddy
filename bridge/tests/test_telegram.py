@@ -2229,6 +2229,57 @@ def test_while_allow_deny_waits_other_text_goes_to_claude_and_a_typed_yes_still_
     asyncio.run(go())
 
 
+@pytest.mark.parametrize("text", ["ok, also update the README when you're done", "no worries, keep going with X",
+                                  "go check the logs"])
+def test_while_allow_deny_waits_a_sentence_opening_with_yes_or_no_goes_to_claude(text: str) -> None:
+    """Review finding: a sentence whose first word is a yes-word used to allow an always_ask rm."""
+    async def go() -> None:
+        api, typed = FakeApi(), []
+        rig = relay_rig(api, typed)
+        ask = asyncio.ensure_future(rig.inlet.decide_permission("Bash", "rm -rf build/"))
+        await jobs(rig)
+        await dispatch(rig, text, update_id=5)
+        assert typed == [text] and not ask.done()                     # to Claude; nothing allowed or denied
+        for answer, verdict in (("go ahead", "allow"), ("no", "deny"), ("yes", "allow")):
+            await dispatch(rig, answer, update_id=6)
+            assert await ask == verdict
+            ask = asyncio.ensure_future(rig.inlet.decide_permission("Bash", "rm -rf build/"))
+            await jobs(rig)
+        assert typed == [text]
+        ask.cancel()
+        await rig.inlet._shutdown()
+
+    asyncio.run(go())
+
+
+def test_text_sent_while_the_allow_deny_prompt_is_still_on_its_way_goes_to_claude() -> None:
+    """Review finding: the prompt was non-strict until sendMessage returned, so text typed then was lost."""
+    class Slow(FakeApi):
+        def __init__(self) -> None:
+            super().__init__()
+            self.gate, self.sending = asyncio.Event(), asyncio.Event()
+
+        async def send_inline(self, *a: Any, **kw: Any) -> int:
+            self.sending.set()
+            await self.gate.wait()
+            return await super().send_inline(*a, **kw)
+
+    async def go() -> None:
+        api, typed = Slow(), []
+        rig = relay_rig(api, typed)
+        ask = asyncio.ensure_future(rig.inlet.decide_permission("Bash", "rm -rf build/"))
+        await api.sending.wait()
+        await dispatch(rig, "also run the linter after", update_id=5)
+        assert typed == ["also run the linter after"] and not ask.done()
+        api.gate.set()
+        await jobs(rig)
+        await tap(rig, api.key("Deny")[1], api.keyboards[-1][0])
+        assert await ask == "deny" and typed == ["also run the linter after"]
+        await rig.inlet._shutdown()
+
+    asyncio.run(go())
+
+
 def test_when_buttons_cannot_be_sent_the_prompt_is_plain_text_and_the_next_message_answers() -> None:
     class NoInline(FakeApi):
         async def send_inline(self, *a: Any, **kw: Any) -> int:

@@ -50,3 +50,23 @@ def denies(reply: str) -> bool:
 def decision(reply: str) -> str:
     """"allow", "deny", or "" when the reply is neither (the caller defers)."""
     return "allow" if approves(reply) else "deny" if denies(reply) else ""
+
+
+# A bare answer is short and made only of these: the yes and no words, the words of the yes openings, and a
+# little politeness. "yes", "no, leave it", "go ahead please" are bare; "ok, also update the README" and
+# "go check the logs" are sentences that happen to open with a yes-word (owner, 2026-09-23).
+BARE_MAX_WORDS = 4
+BARE_EXTRA_WORDS = frozenset({"please", "thanks", "thank", "you", "leave", "it", "that", "this", "one", "now"})
+_BARE_WORDS = (YES_WORDS | NO_WORDS | BARE_EXTRA_WORDS
+               | frozenset(w for opening in YES_OPENINGS for w in opening.split()))
+
+
+def bare_decision(reply: str) -> str:
+    """"allow" or "deny" only when the whole reply is a yes or a no, else "". For a prompt that has another
+    way to be answered (Allow/Deny buttons on the screen), where anything that is not plainly the answer
+    must go on to where it was meant to go instead of being eaten. ``decision`` stays the rule where the
+    next message is the answer by construction."""
+    words = _words(reply)
+    if not words or len(words) > BARE_MAX_WORDS or any(w not in _BARE_WORDS for w in words):
+        return ""
+    return decision(reply)

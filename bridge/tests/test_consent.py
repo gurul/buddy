@@ -51,3 +51,19 @@ def test_neither_defers(reply: str) -> None:
 
 def test_curly_apostrophes_are_read() -> None:
     assert consent.denies("don’t") and not consent.approves("ok don’t")
+
+
+@pytest.mark.parametrize("reply,verdict", [
+    ("yes", "allow"), ("Yes!", "allow"), ("go ahead", "allow"), ("yes go", "allow"), ("ok please", "allow"),
+    ("do it", "allow"), ("no", "deny"), ("no, leave it", "deny"), ("nope", "deny"), ("deny", "deny"),
+])
+def test_a_bare_answer_is_read(reply: str, verdict: str) -> None:
+    assert consent.bare_decision(reply) == verdict
+
+
+@pytest.mark.parametrize("reply", [
+    "ok, also update the README when you're done", "no worries, keep going with X", "go check the logs",
+    "yes but first run the tests", "maybe", "", "no worries",
+])
+def test_a_sentence_that_opens_with_yes_or_no_is_not_a_bare_answer(reply: str) -> None:
+    assert consent.bare_decision(reply) == ""

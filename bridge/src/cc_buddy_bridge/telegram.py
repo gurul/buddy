@@ -1315,12 +1315,14 @@ class TelegramInlet:
     def _answers_pending(self, text: Optional[str]) -> bool:
         """Is this message the answer to the question waiting on the owner? Any message is, for a task's
         question and for a prompt sent without buttons (the next message is the answer). A strict prompt
-        (Allow/Deny buttons on the screen) takes only a clear yes or no; ``None`` (an image) never is."""
+        (Allow/Deny buttons on the screen) takes only a reply that is wholly a yes or a no
+        (``consent.bare_decision``): "ok, also update the README" opens with a yes-word but is a message for
+        Claude, and it must not allow an rm on the way (owner, 2026-09-23). ``None`` (an image) never is."""
         if not self._awaiting_answer:
             return False
         if not self._pending_strict:
             return True
-        return text is not None and bool(consent.decision(text))
+        return text is not None and bool(consent.bare_decision(text))
 
     def _handle(self, inbound: Inbound) -> None:
         """One accepted message from the owner, routed. A picker's tap comes here too, with the button's
@@ -1960,15 +1962,18 @@ class TelegramInlet:
         subtitle = Path(cwd).name if cwd else None
         loop = asyncio.get_running_loop()
         future = self._pending_answer = loop.create_future()
-        self._pending_strict = False
+        # Strict from the start, not from when the send returns: while the prompt is on its way the owner may
+        # well be typing to Claude, and a non-strict prompt would take that text as its answer and lose it.
+        # Only a send that falls back to plain text makes it non-strict (owner, 2026-09-23).
+        self._pending_strict = True
         board = _Keyboard(self._chat_id, ANSWER, list(ALLOW_DENY), future=future)
         self._note("buddy", f"{title}: {hint.strip()[:300]}")
         outcome: Optional[str] = None
         try:
             buttons = await self._send_choices(self._chat_id, question, board, title=title, subtitle=subtitle,
                                                per_row=2)
-            if self._pending_answer is future and not future.done():
-                self._pending_strict = buttons
+            if not buttons and self._pending_answer is future and not future.done():
+                self._pending_strict = False
             answer = await asyncio.wait_for(future, timeout=self._permission_timeout)
             outcome = consent.decision(answer) or None    # neither a clear yes nor a no: the dialog decides
         except asyncio.TimeoutError:

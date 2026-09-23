@@ -161,8 +161,11 @@ as "Claude is waiting on you":
 - **A permission dialog for any tool** (Edit, Write, WebFetch, an MCP tool)
   becomes a yes/no in the chat, through the `PermissionRequest` hook. It comes
   with **Allow** (green) and **Deny** (red) buttons. A tap answers it, and so
-  does a typed yes or no. Anything else you type while it waits goes to Claude
-  as usual, and the prompt keeps waiting. After the answer, or after 240 s with
+  does a short typed reply that is only a yes or a no ("yes", "go ahead",
+  "no, leave it"). Anything else you type while it waits goes to Claude as
+  usual, and the prompt keeps waiting. That includes a sentence that starts
+  with a yes-word, like "ok, also update the README": it is a message for
+  Claude, not an Allow. This holds from the moment the prompt is sent. After the answer, or after 240 s with
   none, the message changes to say "Allowed.", "Denied." or that the dialog on
   the Mac decides, and the buttons go. If you don't answer, the dialog stays on
   the Mac as before. If Telegram refuses the buttons, the prompt is plain text
@@ -455,7 +458,8 @@ Flip it to `ask` if two seconds a command is a price you will pay.
   title: "Which database? (Postgres / SQLite)"), and a command on your own
   always-ask list (`rm`, `sudo`; `matchers.py`) as a yes/no with Allow and
   Deny buttons, titled "Claude asks to run Bash" with the command as a code
-  block. A tap or a typed yes/no answers it; other text still goes to Claude.
+  block. A tap or a short typed yes or no answers it; any other text, even
+  one starting with "ok" or "no", still goes to Claude.
   Silence there defers to Claude Code's own flow, never denies. With
   `CC_BUDDY_TELEGRAM_ASK=1` every call is asked that way. Off by default and
   off again after "claude off": nothing from the terminal leaves the Mac
