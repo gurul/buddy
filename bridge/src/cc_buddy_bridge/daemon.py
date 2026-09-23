@@ -1624,315 +1624,322 @@ class Daemon:
         if evt not in ("get_state", "diag", "explore", "expressions"):
             self._note_activity()
 
-        if evt == "expressions":
-            service = self._expressions
-            action = req.get("action", "status")
-            if action in ("on", "off"):
-                await service.set_enabled(action == "on")
-            elif action in ("react", "audition"):
-                text = req.get("text")
-                if not isinstance(text, str) or not text.strip() or len(text) > 2000:
-                    return {"ok": False, "error": "text must contain 1..2000 characters"}
-                if not service.enabled or not service.ready or not self.ble.connected:
-                    return {"ok": False, "error": "expressions are not ready or board is disconnected"}
-                if action == "audition":
-                    phase = req.get("phase", "speaking")
-                    if phase not in ("speaking", "listening", "idle"):
-                        return {"ok": False, "error": "audition phase must be speaking, listening, or idle"}
-                    if ((self._conversation is not None and not self._conversation.done())
-                            or self.state.pending_count or (self._expression_audition is not None and not self._expression_audition.done())):
-                        return {"ok": False, "error": "wait until the conversation, prompt, or audition ends"}
-                    previous = self._agent_state
-                    self._on_agent_state(phase)
+        # One method per event (_ipc_<evt>), found in IPC_HANDLERS below the class. Called through the class,
+        # not self: tests drive these handlers on a stub that carries only the methods it needs.
+        handler = IPC_HANDLERS.get(evt) if isinstance(evt, str) else None
+        if handler is None:
+            return {"ok": False, "error": f"unknown evt: {evt!r}"}
+        return await handler(self, req)
 
-                    async def restore_phase():
-                        try:
-                            await asyncio.sleep(6)
-                        finally:
-                            if (self._agent_state == phase and
-                                    (self._conversation is None or self._conversation.done())):
-                                self._on_agent_state(previous)
+    async def _ipc_expressions(self, req: dict[str, Any]) -> dict[str, Any]:
+        service = self._expressions
+        action = req.get("action", "status")
+        if action in ("on", "off"):
+            await service.set_enabled(action == "on")
+        elif action in ("react", "audition"):
+            text = req.get("text")
+            if not isinstance(text, str) or not text.strip() or len(text) > 2000:
+                return {"ok": False, "error": "text must contain 1..2000 characters"}
+            if not service.enabled or not service.ready or not self.ble.connected:
+                return {"ok": False, "error": "expressions are not ready or board is disconnected"}
+            if action == "audition":
+                phase = req.get("phase", "speaking")
+                if phase not in ("speaking", "listening", "idle"):
+                    return {"ok": False, "error": "audition phase must be speaking, listening, or idle"}
+                if ((self._conversation is not None and not self._conversation.done())
+                        or self.state.pending_count or (self._expression_audition is not None and not self._expression_audition.done())):
+                    return {"ok": False, "error": "wait until the conversation, prompt, or audition ends"}
+                previous = self._agent_state
+                self._on_agent_state(phase)
 
-                    self._expression_audition = asyncio.create_task(restore_phase(), name="expression-audition")
-                event = service.offer("demo", text)
-                return {"ok": event is not None, "id": event, "expressions": service.status()}
-            elif action != "status":
-                return {"ok": False, "error": "unknown expression action"}
-            return {"ok": True, "connected": self.ble.connected, "expressions": service.status()}
+                async def restore_phase():
+                    try:
+                        await asyncio.sleep(6)
+                    finally:
+                        if (self._agent_state == phase and
+                                (self._conversation is None or self._conversation.done())):
+                            self._on_agent_state(previous)
 
-        if evt == "explore":
-            # `cc-buddy-bridge explore [start|stop|status]`: the owner sends
-            # the robot off to look around (or calls it back) by hand.
-            action = str(req.get("action") or "start")
-            if action == "start":
-                try:
-                    await self._request_explore("requested by cli")
-                except ExploreRefused as e:
-                    return {"ok": False, "error": str(e), "connected": self.ble.connected,
-                            "explore": self._explorer.status()}
-            elif action == "stop":
-                self._note_activity()   # the human is here
-                await self._dismiss_explore("requested by cli")
-            elif action != "status":
-                return {"ok": False, "error": f"unknown explore action: {action!r}"}
-            return {"ok": True, "connected": self.ble.connected, "explore": self._explorer.status()}
+                self._expression_audition = asyncio.create_task(restore_phase(), name="expression-audition")
+            event = service.offer("demo", text)
+            return {"ok": event is not None, "id": event, "expressions": service.status()}
+        elif action != "status":
+            return {"ok": False, "error": "unknown expression action"}
+        return {"ok": True, "connected": self.ble.connected, "expressions": service.status()}
 
-        if evt == "lesson":
-            # `cc-buddy-bridge lesson <action>`: the lesson voice tool's path, from a terminal.
-            return await self._handle_lesson(req)
-
-        if evt == "notes":
-            # `cc-buddy-bridge notes start|stop|status`, and the voice path.
-            action = str(req.get("action") or "status")
-            taker = self._room_notes_taker()
-            if action == "start":
-                return taker.start()
-            if action == "stop":
-                return await taker.stop(str(req.get("reason") or "asked"))
-            return {"ok": True, **taker.status()}
-
-        if evt == "trace":
-            # The pose series the board reported during the last motion.
-            return {"ok": True, "trace": [[round(t, 3), y, p] for t, y, p in self._motion_trace]}
-
-        if evt == "pose":
-            # Where the head actually is, as the BOARD reports it on every camera
-            # frame (~4.3/s, head.observe). Sampling this during a motion is how a
-            # delivered swing is measured without a camera pointed at the room —
-            # the plan's own check, and the only one that reads the servos rather
-            # than the request.
-            head = self._head
-            return {"ok": True, "yaw": getattr(head, "yaw", None),
-                    "pitch": getattr(head, "pitch", None),
-                    "at": getattr(head, "pose_at", None),
-                    "connected": self.ble.connected}
-
-        if evt == "move":
-            # `cc-buddy-bridge move …`: a named motion the BOARD runs. The host
-            # only names it; motion.h admits every number before a servo sees it,
-            # so this path cannot ask for something unsafe however it is called.
-            from . import motion as motion_mod
-            kind = str(req.get("kind") or "osc")
+    async def _ipc_explore(self, req: dict[str, Any]) -> dict[str, Any]:
+        # `cc-buddy-bridge explore [start|stop|status]`: the owner sends
+        # the robot off to look around (or calls it back) by hand.
+        action = str(req.get("action") or "start")
+        if action == "start":
             try:
-                if kind == "stop":
-                    cmd = motion_mod.stop_command()
-                elif kind == "keys":
-                    cmd = motion_mod.keys_command(req.get("preset"), req.get("keys"))
-                else:
-                    cmd = motion_mod.osc_command(
-                        req.get("preset"), speed=float(req.get("speed") or 1.0),
-                        **{k: req[k] for k in ("yaw_amp", "pitch_amp", "period_ms",
-                                               "pitch_period_ms", "phase_deg", "cycles",
-                                               "dwell_pct", "jitter_pct", "center_yaw",
-                                               "center_pitch") if req.get(k) is not None})
-            except ValueError as e:
-                return {"ok": False, "error": str(e)}
-            if not self.ble.connected:
-                return {"ok": False, "error": "the board is not connected"}
-            ok = await self.ble.send(cmd)
-            if kind != "stop":
-                log.info("move: %s — %s", req.get("preset") or kind, motion_mod.describe(cmd))
+                await self._request_explore("requested by cli")
+            except ExploreRefused as e:
+                return {"ok": False, "error": str(e), "connected": self.ble.connected,
+                        "explore": self._explorer.status()}
+        elif action == "stop":
+            self._note_activity()   # the human is here
+            await self._dismiss_explore("requested by cli")
+        elif action != "status":
+            return {"ok": False, "error": f"unknown explore action: {action!r}"}
+        return {"ok": True, "connected": self.ble.connected, "explore": self._explorer.status()}
+
+    async def _ipc_lesson(self, req: dict[str, Any]) -> dict[str, Any]:
+        # `cc-buddy-bridge lesson <action>`: the lesson voice tool's path, from a terminal.
+        return await self._handle_lesson(req)
+
+    async def _ipc_notes(self, req: dict[str, Any]) -> dict[str, Any]:
+        # `cc-buddy-bridge notes start|stop|status`, and the voice path.
+        action = str(req.get("action") or "status")
+        taker = self._room_notes_taker()
+        if action == "start":
+            return taker.start()
+        if action == "stop":
+            return await taker.stop(str(req.get("reason") or "asked"))
+        return {"ok": True, **taker.status()}
+
+    async def _ipc_trace(self, req: dict[str, Any]) -> dict[str, Any]:
+        # The pose series the board reported during the last motion.
+        return {"ok": True, "trace": [[round(t, 3), y, p] for t, y, p in self._motion_trace]}
+
+    async def _ipc_pose(self, req: dict[str, Any]) -> dict[str, Any]:
+        # Where the head actually is, as the BOARD reports it on every camera
+        # frame (~4.3/s, head.observe). Sampling this during a motion is how a
+        # delivered swing is measured without a camera pointed at the room —
+        # the plan's own check, and the only one that reads the servos rather
+        # than the request.
+        head = self._head
+        return {"ok": True, "yaw": getattr(head, "yaw", None),
+                "pitch": getattr(head, "pitch", None),
+                "at": getattr(head, "pose_at", None),
+                "connected": self.ble.connected}
+
+    async def _ipc_move(self, req: dict[str, Any]) -> dict[str, Any]:
+        # `cc-buddy-bridge move …`: a named motion the BOARD runs. The host
+        # only names it; motion.h admits every number before a servo sees it,
+        # so this path cannot ask for something unsafe however it is called.
+        from . import motion as motion_mod
+        kind = str(req.get("kind") or "osc")
+        try:
+            if kind == "stop":
+                cmd = motion_mod.stop_command()
+            elif kind == "keys":
+                cmd = motion_mod.keys_command(req.get("preset"), req.get("keys"))
             else:
-                log.info("move: stop")
-            return {"ok": bool(ok), "sent": cmd, "asked": motion_mod.predict(cmd),
-                    "connected": self.ble.connected}
+                cmd = motion_mod.osc_command(
+                    req.get("preset"), speed=float(req.get("speed") or 1.0),
+                    **{k: req[k] for k in ("yaw_amp", "pitch_amp", "period_ms",
+                                           "pitch_period_ms", "phase_deg", "cycles",
+                                           "dwell_pct", "jitter_pct", "center_yaw",
+                                           "center_pitch") if req.get(k) is not None})
+        except ValueError as e:
+            return {"ok": False, "error": str(e)}
+        if not self.ble.connected:
+            return {"ok": False, "error": "the board is not connected"}
+        ok = await self.ble.send(cmd)
+        if kind != "stop":
+            log.info("move: %s — %s", req.get("preset") or kind, motion_mod.describe(cmd))
+        else:
+            log.info("move: stop")
+        return {"ok": bool(ok), "sent": cmd, "asked": motion_mod.predict(cmd),
+                "connected": self.ble.connected}
 
-        if evt == "celebrate":
-            # Host-triggered celebration. Reuses the same `completed: true`
-            # heartbeat flag the pet already celebrates on, so no firmware
-            # support is needed — the board cannot tell this from a finished
-            # Claude turn, which is exactly the point.
-            secs = float(req.get("secs") or 5.0)
-            self.state.pulse_completed(secs)
-            await self._push_heartbeat(force=True)
-            log.info("celebrate: pulsed for %.0fs", secs)
-            return {"ok": True, "connected": self.ble.connected}
+    async def _ipc_celebrate(self, req: dict[str, Any]) -> dict[str, Any]:
+        # Host-triggered celebration. Reuses the same `completed: true`
+        # heartbeat flag the pet already celebrates on, so no firmware
+        # support is needed — the board cannot tell this from a finished
+        # Claude turn, which is exactly the point.
+        secs = float(req.get("secs") or 5.0)
+        self.state.pulse_completed(secs)
+        await self._push_heartbeat(force=True)
+        log.info("celebrate: pulsed for %.0fs", secs)
+        return {"ok": True, "connected": self.ble.connected}
 
-        if evt == "species":
-            # Replaces the retired on-device menu. Firmware persists the index
-            # in NVS, so this survives reboots.
-            idx = int(req.get("idx") or 0)
-            if self.ble.connected:
-                await self.ble.send({"cmd": "species", "idx": idx})
-                log.info("species: set to index %d", idx)
-            return {"ok": True, "connected": self.ble.connected}
+    async def _ipc_species(self, req: dict[str, Any]) -> dict[str, Any]:
+        # Replaces the retired on-device menu. Firmware persists the index
+        # in NVS, so this survives reboots.
+        idx = int(req.get("idx") or 0)
+        if self.ble.connected:
+            await self.ble.send({"cmd": "species", "idx": idx})
+            log.info("species: set to index %d", idx)
+        return {"ok": True, "connected": self.ble.connected}
 
-        if evt == "diag":
-            # `cc-buddy-bridge diag`: ask the board for a fresh report, then
-            # return the last one we hold. The board's reply arrives
-            # asynchronously over serial, so a request now shows up in the
-            # NEXT call — hence returning both.
-            if self.ble.connected:
-                await self.ble.send({"cmd": "diag"})
-            return {"ok": True, "connected": self.ble.connected,
-                    "diag": self._last_diag}
-        if evt == "identity":
-            # `cc-buddy-bridge identity status|reset`. The daemon owns the
-            # in-memory prints, so a reset must go through it while it runs.
-            return self._handle_identity(str(req.get("action") or "status"))
-        if evt == "session_start":
-            self.state.session_start(
-                req["session_id"],
-                transcript_path=req.get("transcript_path"),
-                cwd=req.get("cwd"),
-            )
-            await self._push_heartbeat()
-            return {"ok": True}
+    async def _ipc_diag(self, req: dict[str, Any]) -> dict[str, Any]:
+        # `cc-buddy-bridge diag`: ask the board for a fresh report, then
+        # return the last one we hold. The board's reply arrives
+        # asynchronously over serial, so a request now shows up in the
+        # NEXT call — hence returning both.
+        if self.ble.connected:
+            await self.ble.send({"cmd": "diag"})
+        return {"ok": True, "connected": self.ble.connected,
+                "diag": self._last_diag}
 
-        if evt == "session_end":
-            self.state.session_end(req["session_id"])
-            await self._push_heartbeat()
-            return {"ok": True}
+    async def _ipc_identity(self, req: dict[str, Any]) -> dict[str, Any]:
+        # `cc-buddy-bridge identity status|reset`. The daemon owns the
+        # in-memory prints, so a reset must go through it while it runs.
+        return self._handle_identity(str(req.get("action") or "status"))
 
-        if evt == "turn_begin":
-            session_id = req["session_id"]
-            # A new user prompt cancels any pending deferred turn_end.
-            pending = self._pending_turn_ends.pop(session_id, None)
-            if pending is not None and not pending.done():
-                pending.cancel()
-            # Also kill any active celebrate pulse — user moved on.
-            self.state.completed_until = 0.0
-            self.state.session_start(session_id)  # idempotent
-            self.state.turn_begin(session_id)
-            prompt = req.get("prompt")
-            if isinstance(prompt, str) and prompt:
-                self.state.add_entry(f"> {truncate_utf8_bytes(prompt, _ENTRY_PAYLOAD_MAX_BYTES)}")
-            await self._push_heartbeat()
-            return {"ok": True}
+    async def _ipc_session_start(self, req: dict[str, Any]) -> dict[str, Any]:
+        self.state.session_start(
+            req["session_id"],
+            transcript_path=req.get("transcript_path"),
+            cwd=req.get("cwd"),
+        )
+        await self._push_heartbeat()
+        return {"ok": True}
 
-        if evt == "turn_end":
-            # Don't flip running→0 immediately; the firmware enters clock mode
-            # as soon as running+waiting both hit zero, which blanks the
-            # transcript HUD before the user has a chance to read the entry
-            # we just added. Schedule the flip 15s out — long enough to read,
-            # short enough that idle really does clock. A new turn_begin
-            # cancels the scheduled task.
-            session_id = req["session_id"]
-            previous = self._pending_turn_ends.get(session_id)
-            if previous is not None and not previous.done():
-                previous.cancel()
-            self._pending_turn_ends[session_id] = asyncio.create_task(
-                self._deferred_turn_end(session_id, delay=15.0)
-            )
-            # Trigger the firmware's celebrate animation for a few seconds.
-            # Set the pulse state synchronously so the heartbeat snapshot is
-            # correct before anything is pushed.
-            CELEBRATE_SECS = 5.0
-            self.state.pulse_completed(duration_secs=CELEBRATE_SECS)
-            # Kick off the BLE push in the background so this coroutine can
-            # return {"ok": True} immediately — the Stop hook caller must not
-            # block on _push_heartbeat(force=True) or it surfaces as ETIMEDOUT
-            # in the plugin's spawnSync call.
-            asyncio.create_task(self._turn_end_side_effects(CELEBRATE_SECS))
-            return {"ok": True}
+    async def _ipc_session_end(self, req: dict[str, Any]) -> dict[str, Any]:
+        self.state.session_end(req["session_id"])
+        await self._push_heartbeat()
+        return {"ok": True}
 
-        if evt == "pretooluse":
-            return await self._handle_pretooluse(req)
+    async def _ipc_turn_begin(self, req: dict[str, Any]) -> dict[str, Any]:
+        session_id = req["session_id"]
+        # A new user prompt cancels any pending deferred turn_end.
+        pending = self._pending_turn_ends.pop(session_id, None)
+        if pending is not None and not pending.done():
+            pending.cancel()
+        # Also kill any active celebrate pulse — user moved on.
+        self.state.completed_until = 0.0
+        self.state.session_start(session_id)  # idempotent
+        self.state.turn_begin(session_id)
+        prompt = req.get("prompt")
+        if isinstance(prompt, str) and prompt:
+            self.state.add_entry(f"> {truncate_utf8_bytes(prompt, _ENTRY_PAYLOAD_MAX_BYTES)}")
+        await self._push_heartbeat()
+        return {"ok": True}
 
-        if evt == "permissionrequest":
-            return await self._handle_permission_request(req)
+    async def _ipc_turn_end(self, req: dict[str, Any]) -> dict[str, Any]:
+        # Don't flip running→0 immediately; the firmware enters clock mode
+        # as soon as running+waiting both hit zero, which blanks the
+        # transcript HUD before the user has a chance to read the entry
+        # we just added. Schedule the flip 15s out — long enough to read,
+        # short enough that idle really does clock. A new turn_begin
+        # cancels the scheduled task.
+        session_id = req["session_id"]
+        previous = self._pending_turn_ends.get(session_id)
+        if previous is not None and not previous.done():
+            previous.cancel()
+        self._pending_turn_ends[session_id] = asyncio.create_task(
+            self._deferred_turn_end(session_id, delay=15.0)
+        )
+        # Trigger the firmware's celebrate animation for a few seconds.
+        # Set the pulse state synchronously so the heartbeat snapshot is
+        # correct before anything is pushed.
+        CELEBRATE_SECS = 5.0
+        self.state.pulse_completed(duration_secs=CELEBRATE_SECS)
+        # Kick off the BLE push in the background so this coroutine can
+        # return {"ok": True} immediately — the Stop hook caller must not
+        # block on _push_heartbeat(force=True) or it surfaces as ETIMEDOUT
+        # in the plugin's spawnSync call.
+        asyncio.create_task(self._turn_end_side_effects(CELEBRATE_SECS))
+        return {"ok": True}
 
-        if evt == "push_character":
-            path = req.get("path")
-            if not isinstance(path, str) or not path:
-                return {"ok": False, "error": "missing 'path'"}
-            if not self.ble.connected:
-                return {"ok": False, "error": "ble not connected"}
-            try:
-                from .folder_push import push_character
-                result = await push_character(self, path)
-            except Exception as e:  # noqa: BLE001
-                log.exception("push_character failed")
-                return {"ok": False, "error": f"{type(e).__name__}: {e}"}
-            return {"ok": True, **result}
+    async def _ipc_pretooluse(self, req: dict[str, Any]) -> dict[str, Any]:
+        return await self._handle_pretooluse(req)
 
-        if evt == "unpair":
-            # Tell the stick to erase its stored bond so the next pairing
-            # shows a fresh passkey (REFERENCE.md §Security and pairing).
-            # Macos side still needs a manual 'Forget' from System Settings.
-            if not self.ble.connected:
-                return {"ok": False, "error": "ble not connected"}
-            ok = await self.ble.send({"cmd": "unpair"})
-            log.info("unpair: sent cmd:unpair to stick (ble write %s)",
-                     "ok" if ok else "fail")
-            return {"ok": bool(ok)}
+    async def _ipc_permissionrequest(self, req: dict[str, Any]) -> dict[str, Any]:
+        return await self._handle_permission_request(req)
 
-        if evt == "sound":
-            # `cc-buddy-bridge sound [on|off|status]`
-            action = req.get("action")
-            if action in ("on", "off"):
-                self._set_sound(action == "on")
-            return {"ok": True, "sound": "on" if self._sound.on else "off", "connected": self.ble.connected}
+    async def _ipc_push_character(self, req: dict[str, Any]) -> dict[str, Any]:
+        path = req.get("path")
+        if not isinstance(path, str) or not path:
+            return {"ok": False, "error": "missing 'path'"}
+        if not self.ble.connected:
+            return {"ok": False, "error": "ble not connected"}
+        try:
+            from .folder_push import push_character
+            result = await push_character(self, path)
+        except Exception as e:  # noqa: BLE001
+            log.exception("push_character failed")
+            return {"ok": False, "error": f"{type(e).__name__}: {e}"}
+        return {"ok": True, **result}
 
-        if evt == "mic":
-            # `cc-buddy-bridge mic [on|off|status]`, and the menu-bar app's switch.
-            action = req.get("action")
-            if action in ("on", "off"):
-                if self._mic.set(action == "on"):
-                    log.info("mic: %s (owner's choice)", action)
-                self._apply_mic("your choice")
-            return self._mic_status()
+    async def _ipc_unpair(self, req: dict[str, Any]) -> dict[str, Any]:
+        # Tell the stick to erase its stored bond so the next pairing
+        # shows a fresh passkey (REFERENCE.md §Security and pairing).
+        # Macos side still needs a manual 'Forget' from System Settings.
+        if not self.ble.connected:
+            return {"ok": False, "error": "ble not connected"}
+        ok = await self.ble.send({"cmd": "unpair"})
+        log.info("unpair: sent cmd:unpair to stick (ble write %s)",
+                 "ok" if ok else "fail")
+        return {"ok": bool(ok)}
 
-        if evt == "get_state":
-            # Queried by the `cc-buddy-bridge hud` subcommand (or anyone else
-            # who wants a one-shot snapshot). Kept small on purpose.
-            pending = self.state.first_pending()
-            return {
-                "ok": True,
-                "state": {
-                    "ble_connected": self.ble.connected,
-                    "mic_listening": self._ears is not None and self._ears.listening,
-                    "sec": self._last_stick_sec,
-                    "battery_pct": self._last_stick_battery_pct,
-                    "total": self.state.total,
-                    "running": self.state.running_count,
-                    "waiting": self.state.waiting_count,
-                    "tokens_cumulative": self.state.tokens_cumulative,
-                    "tokens_today": self.state.tokens_today,
-                    "cost_cumulative": self.state.cost_cumulative,
-                    "cost_today": self.state.cost_today,
-                    "update_available": self._update_available,
-                    "pending_tool": pending.tool_name if pending else None,
-                    "last_entry": self.state.entries[0].text if self.state.entries else "",
-                },
-            }
+    async def _ipc_sound(self, req: dict[str, Any]) -> dict[str, Any]:
+        # `cc-buddy-bridge sound [on|off|status]`
+        action = req.get("action")
+        if action in ("on", "off"):
+            self._set_sound(action == "on")
+        return {"ok": True, "sound": "on" if self._sound.on else "off", "connected": self.ble.connected}
 
-        if evt == "posttooluse":
-            # Clear any lingering pending (defensive; normally cleared in _handle_pretooluse).
-            self.state.permission_resolved(req.get("tool_use_id", ""))
-            # A tool ran → any terminal-side permission prompt was answered.
-            self.state.input_received(req.get("session_id", ""))
-            tool_name = req.get("tool_name")
-            if isinstance(tool_name, str):
-                self.state.add_entry(f"+ {tool_name}")
-                self._ensure_session(req)
-                self.state.note_tool(req.get("session_id", ""), tool_name)
-            await self._push_heartbeat()
-            return {"ok": True}
+    async def _ipc_mic(self, req: dict[str, Any]) -> dict[str, Any]:
+        # `cc-buddy-bridge mic [on|off|status]`, and the menu-bar app's switch.
+        action = req.get("action")
+        if action in ("on", "off"):
+            if self._mic.set(action == "on"):
+                log.info("mic: %s (owner's choice)", action)
+            self._apply_mic("your choice")
+        return self._mic_status()
 
-        if evt == "notification":
-            # Only a session blocked on the user (a permission prompt, a question
-            # dialog) marks the session, so heartbeats carry waiting>0 — the
-            # firmware's attention animation + LED pulse. An idle reminder is
-            # news, not a request: it must not take over a live conversation.
-            kind = req.get("notification_type")
-            kind = kind if isinstance(kind, str) else None
-            waits = notification_waits(kind)
-            if waits:
-                self.state.needs_input(req.get("session_id", ""))
-            msg = req.get("message")
-            if isinstance(msg, str) and msg.strip():
-                self.state.add_entry(f"! {msg.strip()}")
-            log.info("notification: session=%s type=%s → %s",
-                     (req.get("session_id") or "?")[:8],
-                     kind or "?", "attention" if waits else "not waiting")
-            await self._push_heartbeat()
-            inlet = getattr(self, "_telegram", None)
-            if inlet is not None and inlet.claude:
-                asyncio.create_task(inlet.relay_notification(kind or "", msg if isinstance(msg, str) else "", waits))
-            return {"ok": True}
+    async def _ipc_get_state(self, req: dict[str, Any]) -> dict[str, Any]:
+        # Queried by the `cc-buddy-bridge hud` subcommand (or anyone else
+        # who wants a one-shot snapshot). Kept small on purpose.
+        pending = self.state.first_pending()
+        return {
+            "ok": True,
+            "state": {
+                "ble_connected": self.ble.connected,
+                "mic_listening": self._ears is not None and self._ears.listening,
+                "sec": self._last_stick_sec,
+                "battery_pct": self._last_stick_battery_pct,
+                "total": self.state.total,
+                "running": self.state.running_count,
+                "waiting": self.state.waiting_count,
+                "tokens_cumulative": self.state.tokens_cumulative,
+                "tokens_today": self.state.tokens_today,
+                "cost_cumulative": self.state.cost_cumulative,
+                "cost_today": self.state.cost_today,
+                "update_available": self._update_available,
+                "pending_tool": pending.tool_name if pending else None,
+                "last_entry": self.state.entries[0].text if self.state.entries else "",
+            },
+        }
 
-        return {"ok": False, "error": f"unknown evt: {evt!r}"}
+    async def _ipc_posttooluse(self, req: dict[str, Any]) -> dict[str, Any]:
+        # Clear any lingering pending (defensive; normally cleared in _handle_pretooluse).
+        self.state.permission_resolved(req.get("tool_use_id", ""))
+        # A tool ran → any terminal-side permission prompt was answered.
+        self.state.input_received(req.get("session_id", ""))
+        tool_name = req.get("tool_name")
+        if isinstance(tool_name, str):
+            self.state.add_entry(f"+ {tool_name}")
+            self._ensure_session(req)
+            self.state.note_tool(req.get("session_id", ""), tool_name)
+        await self._push_heartbeat()
+        return {"ok": True}
+
+    async def _ipc_notification(self, req: dict[str, Any]) -> dict[str, Any]:
+        # Only a session blocked on the user (a permission prompt, a question
+        # dialog) marks the session, so heartbeats carry waiting>0 — the
+        # firmware's attention animation + LED pulse. An idle reminder is
+        # news, not a request: it must not take over a live conversation.
+        kind = req.get("notification_type")
+        kind = kind if isinstance(kind, str) else None
+        waits = notification_waits(kind)
+        if waits:
+            self.state.needs_input(req.get("session_id", ""))
+        msg = req.get("message")
+        if isinstance(msg, str) and msg.strip():
+            self.state.add_entry(f"! {msg.strip()}")
+        log.info("notification: session=%s type=%s → %s",
+                 (req.get("session_id") or "?")[:8],
+                 kind or "?", "attention" if waits else "not waiting")
+        await self._push_heartbeat()
+        inlet = getattr(self, "_telegram", None)
+        if inlet is not None and inlet.claude:
+            asyncio.create_task(inlet.relay_notification(kind or "", msg if isinstance(msg, str) else "", waits))
+        return {"ok": True}
 
     async def _handle_permission_request(self, req: dict[str, Any]) -> dict[str, Any]:
         """A permission dialog Claude Code is about to show (hooks/permission_request.py). With the relay on,
@@ -2442,6 +2449,35 @@ class Daemon:
                 self._ack_waiters.remove(entry)
             except ValueError:
                 pass
+
+
+# Daemon._handle_ipc's dispatch table: event name -> handler (called as handler(daemon, req)).
+IPC_HANDLERS: dict[str, Any] = {
+    "expressions": Daemon._ipc_expressions,
+    "explore": Daemon._ipc_explore,
+    "lesson": Daemon._ipc_lesson,
+    "notes": Daemon._ipc_notes,
+    "trace": Daemon._ipc_trace,
+    "pose": Daemon._ipc_pose,
+    "move": Daemon._ipc_move,
+    "celebrate": Daemon._ipc_celebrate,
+    "species": Daemon._ipc_species,
+    "diag": Daemon._ipc_diag,
+    "identity": Daemon._ipc_identity,
+    "session_start": Daemon._ipc_session_start,
+    "session_end": Daemon._ipc_session_end,
+    "turn_begin": Daemon._ipc_turn_begin,
+    "turn_end": Daemon._ipc_turn_end,
+    "pretooluse": Daemon._ipc_pretooluse,
+    "permissionrequest": Daemon._ipc_permissionrequest,
+    "push_character": Daemon._ipc_push_character,
+    "unpair": Daemon._ipc_unpair,
+    "sound": Daemon._ipc_sound,
+    "mic": Daemon._ipc_mic,
+    "get_state": Daemon._ipc_get_state,
+    "posttooluse": Daemon._ipc_posttooluse,
+    "notification": Daemon._ipc_notification,
+}
 
 
 
