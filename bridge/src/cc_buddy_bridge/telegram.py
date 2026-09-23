@@ -60,6 +60,7 @@ from . import (
     claude_launch,
     codex_chat,
     composio_tools,
+    consent,
     rundown,
     second_brain,
     system_context,
@@ -402,15 +403,6 @@ def configured(environ: Any = None) -> TelegramConfig:
 
 
 # ---- who may speak ----------------------------------------------------------------------------
-
-APPROVE_PREFIXES = ("yes", "y", "ok", "sure", "go", "allow", "approve", "do it")
-
-
-def approves(answer: str) -> bool:
-    """The owner's reply says yes. One list for every yes/no that gates an action (a permission prompt, an
-    app's always-allow); the caller strips and lower-cases, as each did before."""
-    return answer.startswith(APPROVE_PREFIXES)
-
 
 @dataclass(frozen=True)
 class Inbound:
@@ -1317,12 +1309,7 @@ class TelegramInlet:
             return None
         finally:
             self._pending_answer = None
-        word = answer.strip().lower()
-        if approves(word):
-            return "allow"
-        if word.startswith(("no", "n", "deny", "stop", "don't", "dont", "block")):
-            return "deny"
-        return None
+        return consent.decision(answer) or None          # neither a clear yes nor a no: the dialog decides
 
     async def _stop(self, chat_id: int) -> None:
         if self._agent is not None and self.task_running:
@@ -1497,7 +1484,7 @@ class TelegramInlet:
         if decision.action == "ask":
             question = composio_tools.describe_for_confirmation(name, args) + "\n\nyes / no?"
             answer = (await self._ask_user(question, chat_id, title=APP_ASKS_TITLE)).strip().lower()
-            if not approves(answer):
+            if not consent.approves(answer):
                 return {"ok": False, "reason": "the owner said no; do not retry it"}
         return await asyncio.to_thread(self._apps.execute, name, args)
 

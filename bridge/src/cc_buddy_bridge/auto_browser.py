@@ -35,6 +35,7 @@ from typing import Any, Awaitable, Callable, Optional
 
 import httpx
 
+from . import consent
 from .agent_contract import AgentEvent
 
 log = logging.getLogger(__name__)
@@ -229,8 +230,8 @@ class AutoBrowserAgent:
                     return "auto-browser stopped at an approval it did not describe; nothing was approved."
                 question = _describe(approval)
                 self._emit("ask", question)
-                answer = (await self.ask_user(question + "\nyes / no?")).strip().lower().rstrip(".!")
-                if answer in ("yes", "y", "ok", "okay", "approve", "allow", "go", "do it", "sure"):
+                answer = await self.ask_user(question + "\nyes / no?")
+                if consent.approves(answer):
                     await self._post(client, f"/approvals/{aid}/approve", {"comment": "approved by the owner via buddy"}, 30.0)
                     approval_id = aid
                     continue

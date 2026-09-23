@@ -156,6 +156,13 @@ as "Claude is waiting on you":
   becomes a yes/no in the chat, through the `PermissionRequest` hook. Yes
   allows it and no denies it. If you don't answer, the dialog stays on the Mac
   as before. With the relay off, the hook does nothing.
+- **How a reply is read** (`consent.py`). One rule covers every yes/no that
+  gates an action: permission prompts, app actions and auto-browser approvals.
+  It fails closed. A reply is a yes only if its first word is a yes-word
+  ("yes", "y", "ok", "sure", "allow", "do it", "go ahead"…) *and* nothing in
+  it takes that back, so "yeah no", "ok wait" and "sure, but don't" are not
+  yeses. It is a no if its first word is a no-word. Anything else approves
+  nothing, and a permission prompt goes back to the dialog on the Mac.
 - The general "Claude is waiting on you" notice is skipped for 20 s after the
   question itself was sent, so you don't get it twice.
 
