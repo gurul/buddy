@@ -1159,7 +1159,7 @@ class Daemon:
             return "chrome" if browser_lane.is_web_goal(goal) else "codex"
 
         return {"make_auto": lambda: chrome_lane.ChromeLaneAgent(make_planner, make_inner, on_event, ask_user,
-                                                                  prepare=prepare),
+                                                                  prepare=prepare, lane_screenshot=lane.screenshot),
                 "route_body": route_body}
 
     async def _cancel_active_task(self, reason: str) -> None:

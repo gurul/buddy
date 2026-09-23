@@ -232,6 +232,31 @@ def devtools_endpoint(chrome_dir: Path, port: int = DEFAULT_DEBUG_PORT) -> Optio
     return f"ws://127.0.0.1:{port}{lines[1]}" if 0 < port < 65536 else None
 
 
+def ensure_chrome_window(run: Callable[..., Any] = None) -> bool:
+    """Chrome refuses a remote-debugging connection with 403 when it has NO window — the "Allow?" prompt has
+    nowhere to show (live, 2026-09-23: Chrome running, zero windows, 403 at once; one window, connected). On a
+    Mac, closing every window leaves Chrome running, so this is common: open a plain new window if there is
+    none. True when Chrome has a window afterwards."""
+    import subprocess
+
+    run = run or subprocess.run
+
+    def windows() -> int:
+        r = run(["osascript", "-e", 'if application "Google Chrome" is running then tell application "Google Chrome" '
+                 'to count windows'], capture_output=True, text=True, timeout=10)
+        try:
+            return int((r.stdout or "0").strip() or 0)
+        except ValueError:
+            return 0
+
+    if windows() > 0:
+        return True
+    run(["osascript", "-e", 'tell application "Google Chrome" to make new window'], capture_output=True, text=True,
+        timeout=10)
+    time.sleep(1.0)
+    return windows() > 0
+
+
 class AttachError(RuntimeError):
     """The owner's Chrome cannot be reached: remote debugging is off, or Chrome is not running."""
 
@@ -427,8 +452,17 @@ class BrowserLane:
                                   "chrome://inspect/#remote-debugging in Chrome and switch it on")
             from playwright.sync_api import sync_playwright
 
+            ensure_chrome_window()                         # no window: Chrome answers 403 instead of asking
             self._pw = sync_playwright().start()
-            self._browser = self._pw.chromium.connect_over_cdp(endpoint, timeout=CONSENT_TIMEOUT_MS)
+            try:
+                self._browser = self._pw.chromium.connect_over_cdp(endpoint, timeout=CONSENT_TIMEOUT_MS)
+            except Exception as e:
+                self._pw.stop()
+                self._pw = None
+                if "403" in str(e):
+                    raise AttachError("Chrome refused the connection (403): it was declined, or Chrome had no "
+                                      "window to ask in") from None
+                raise
             self._context = self._pick_profile(self.config.chrome_profile)   # the owner's profile: their logins
             page = self._context.new_page()                   # buddy's own tab; the owner's tabs are never touched
             page.bring_to_front()
@@ -627,8 +661,12 @@ class BrowserLane:
         return await self._run(lambda: self._ensure().open_url(url))
 
     def _screenshot(self) -> Optional[bytes]:
+        """The page itself (the browser viewport, full size), not the desktop. None when not connected: a
+        picture never opens a new connection (which would ask the owner for Chrome access)."""
+        if self._context is None:
+            return None
         try:
-            return self._ensure().page.screenshot(type="jpeg", quality=80)
+            return self._ensure().page.screenshot(type="jpeg", quality=85)
         except Exception:  # noqa: BLE001
             return None
 

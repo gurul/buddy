@@ -13,7 +13,7 @@ ok"), so the dialog's answer comes from them over Telegram and buddy presses the
   task goes to Codex, which already drives the owner's Chrome without this prompt.
 
 The buttons are Chrome web-UI controls: macOS Accessibility's AXPress presses them (a synthetic click does
-not), through System Events, which the daemon already has Accessibility permission for.
+not), through the AX API directly (pyobjc), with the daemon's own Accessibility permission.
 """
 
 from __future__ import annotations
@@ -21,7 +21,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import time
-from typing import Awaitable, Callable, Optional
+from typing import Any, Awaitable, Callable, Optional
 
 from . import consent
 
@@ -38,88 +38,88 @@ PRESS_FAILED_LINE = ("I couldn't press the button in Chrome: macOS may need to l
 QUESTION = ("buddy wants to control your Chrome (your logged-in browser) for a task: Chrome is asking "
             "\"Allow remote debugging?\". Allow it? yes / no")
 
-_FIND = '''
-on run argv
-  set wanted to item 1 of argv
-  tell application "System Events"
-    if not (exists process "Google Chrome") then return "none"
-    tell process "Google Chrome"
-      repeat with w in windows
-        set els to {}
-        try
-          set els to entire contents of w
-        end try
-        set seen to false
-        set hasAllow to false
-        repeat with e in els
-          try
-            set r to role of e as string
-            if r is "AXStaticText" and (value of e as string) is wanted then set seen to true
-            if r is "AXButton" and (name of e as string) is "Allow" then set hasAllow to true
-          end try
-        end repeat
-        if seen and hasAllow then return "found"
-      end repeat
-    end tell
-  end tell
-  return "none"
-end run
-'''
-
-_PRESS = '''
-on run argv
-  set wanted to item 1 of argv
-  set label to item 2 of argv
-  tell application "System Events"
-    tell process "Google Chrome"
-      repeat with w in windows
-        set els to {}
-        try
-          set els to entire contents of w
-        end try
-        set seen to false
-        repeat with e in els
-          try
-            if (role of e as string) is "AXStaticText" and (value of e as string) is wanted then set seen to true
-          end try
-        end repeat
-        if seen then
-          repeat with e in els
-            try
-              if (role of e as string) is "AXButton" and (name of e as string) is label then
-                perform action "AXPress" of e
-                return "pressed"
-              end if
-            end try
-          end repeat
-        end if
-      end repeat
-    end tell
-  end tell
-  return "none"
-end run
-'''
+# Chrome's dialog, as macOS Accessibility sees it (probed live, 2026-09-23): an AXHeading titled
+# "Allow remote debugging?" and AXButtons "Allow" / "Cancel" in the same window, several AXGroups deep. An
+# earlier AppleScript version looked for an AXStaticText and never matched the heading, so the phone was never
+# asked; the AX API is read directly now (pyobjc, the daemon's own Accessibility permission).
+MAX_NODES = 20000
 
 
-async def _osascript(script: str, *args: str) -> str:
-    proc = await asyncio.create_subprocess_exec("osascript", "-e", script, *args, stdout=asyncio.subprocess.PIPE,
-                                                stderr=asyncio.subprocess.PIPE)
-    out, err = await proc.communicate()
-    if proc.returncode != 0:
-        log.warning("chrome-consent: osascript failed (%s)", err.decode(errors="replace").strip()[:160])
-        return "error"
-    return out.decode(errors="replace").strip()
+def _ax():
+    from ApplicationServices import (
+        AXUIElementCopyAttributeValue,
+        AXUIElementCreateApplication,
+        AXUIElementPerformAction,
+    )
+
+    return AXUIElementCreateApplication, AXUIElementCopyAttributeValue, AXUIElementPerformAction
+
+
+def _chrome_pid() -> Optional[int]:
+    import subprocess
+
+    out = subprocess.run(["pgrep", "-x", "Google Chrome"], capture_output=True, text=True).stdout.split()
+    return int(out[0]) if out else None
+
+
+def _find_dialog(label: str = "") -> tuple[bool, Any]:
+    """(dialog showing?, the button labelled ``label`` in that dialog's window, or None). Walks Chrome's windows
+    only as deep as needed; never presses anything."""
+    create, get_attr, _ = _ax()
+    pid = _chrome_pid()
+    if pid is None:
+        return False, None
+
+    def attr(el: Any, name: str) -> Any:
+        err, value = get_attr(el, name, None)
+        return value if err == 0 else None
+
+    def label_of(el: Any) -> str:
+        return str(attr(el, "AXTitle") or attr(el, "AXDescription") or attr(el, "AXValue") or "")
+
+    for window in attr(create(pid), "AXWindows") or []:
+        heading, button, count, stack = False, None, 0, [window]
+        while stack and count < MAX_NODES:
+            el = stack.pop()
+            count += 1
+            role = attr(el, "AXRole")
+            text = label_of(el)
+            if role in ("AXHeading", "AXStaticText") and text.strip() == DIALOG_TEXT:
+                heading = True
+            elif role == "AXButton" and label and text.strip() == label and button is None:
+                button = el
+            stack.extend(attr(el, "AXChildren") or [])
+        if heading:
+            return True, button
+    return False, None
 
 
 async def dialog_showing() -> bool:
-    return await _osascript(_FIND, DIALOG_TEXT) == "found"
+    try:
+        showing, _ = await asyncio.to_thread(_find_dialog)
+    except Exception as e:  # noqa: BLE001 — no Accessibility, no pyobjc: "not showing", never a crash
+        log.warning("chrome-consent: cannot read Chrome's dialog (%s)", type(e).__name__)
+        return False
+    return showing
 
 
 async def press(label: str) -> bool:
     """Press Allow or Cancel on Chrome's own remote-debugging dialog. False when no such dialog is showing."""
     if label not in ("Allow", "Cancel"):
         raise ValueError(label)
-    return await _osascript(_PRESS, DIALOG_TEXT, label) == "pressed"
+
+    def act() -> bool:
+        showing, button = _find_dialog(label)
+        if not showing or button is None:
+            return False
+        _, _, perform = _ax()
+        return perform(button, "AXPress") == 0
+
+    try:
+        return await asyncio.to_thread(act)
+    except Exception as e:  # noqa: BLE001
+        log.warning("chrome-consent: could not press %s (%s)", label, type(e).__name__)
+        return False
 
 
 class ConsentBroker:

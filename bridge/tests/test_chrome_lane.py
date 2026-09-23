@@ -111,7 +111,8 @@ def test_with_the_lane_on_web_goals_take_the_chrome_body_and_the_rest_stay_codex
 
     from cc_buddy_bridge.daemon import Daemon
 
-    host = SimpleNamespace(_chrome_lane=object(), _telegram=None, _planner_create=lambda req: None,
+    host = SimpleNamespace(_chrome_lane=SimpleNamespace(screenshot=lambda: None), _telegram=None,
+                           _planner_create=lambda req: None,
                            _agent_cfg=SimpleNamespace())
     wiring = Daemon._chrome_body(host, lambda: None, lambda ev: None, None)
     route = wiring["route_body"]
@@ -185,3 +186,65 @@ def test_stop_while_waiting_for_chromes_allow_is_immediate() -> None:
 
     said, secs = asyncio.run(go())
     assert said == "Stopped." and secs < 1 and "codex" not in made and events[-1][0] == "cancelled"
+
+
+# ---- the browser picture ---------------------------------------------------------------------------------
+
+def test_a_lane_task_pictures_buddys_tab_never_the_desktop() -> None:
+    agent, _, _ = rig(("Done.", ""))
+
+    async def tab() -> bytes:
+        return b"JPEGBYTES"
+
+    agent._lane_screenshot = tab
+    asyncio.run(agent.run("open my github"))
+    assert asyncio.run(agent.browser_shot()) == (b"JPEGBYTES", ".jpg", "Your Chrome: buddy's tab")
+
+
+def test_after_codex_took_over_the_picture_is_codexs_tab() -> None:
+    from types import SimpleNamespace
+
+    agent, made, _ = rig(("", ""))
+    asyncio.run(agent.run("reply to Sam"))
+    made["codex"].browser_screenshot = SimpleNamespace(data=b"CODEXTAB", suffix=".png")
+    assert asyncio.run(agent.browser_shot())[:2] == (b"CODEXTAB", ".png")
+    made["codex"].browser_screenshot = None
+    assert asyncio.run(agent.browser_shot()) is None
+
+
+def test_the_telegram_screenshot_prefers_the_browser_and_falls_back_to_the_desktop(tmp_path) -> None:
+    from typing import Optional
+
+    from cc_buddy_bridge.telegram import TelegramConfig, TelegramInlet
+
+    sent: list[tuple[str, str]] = []
+
+    class Api:
+        async def send_photo(self, chat_id: int, path, caption: str = "") -> None:
+            sent.append((open(path, "rb").read()[:9].decode(), caption))
+
+    desk = tmp_path / "desk.jpg"
+
+    def screen() -> Optional[object]:
+        desk.write_bytes(b"DESKTOPXX")
+        return desk
+
+    inlet = TelegramInlet(TelegramConfig(enabled=True, token="1:A", owner_ids=frozenset({1})), Api(),
+                          lambda r: None, screen=screen)
+
+    class Lane:
+        provider = "chrome-lane"
+
+        async def browser_shot(self):
+            return b"JPEGBYTES", ".jpg", "Your Chrome: buddy's tab"
+
+    class Nothing:
+        provider = "chrome-lane"
+
+        async def browser_shot(self):
+            return None
+
+    assert asyncio.run(inlet._send_screen(1, "", agent=Lane()))["source"] == "chrome_lane"
+    assert sent[-1] == ("JPEGBYTES", "Your Chrome: buddy's tab")
+    asyncio.run(inlet._send_screen(1, "the screen", agent=Nothing()))
+    assert sent[-1] == ("DESKTOPXX", "the screen")                    # no browser picture: the desktop, as before

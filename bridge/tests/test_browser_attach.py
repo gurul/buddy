@@ -245,3 +245,26 @@ def test_a_lost_tab_in_the_owners_chrome_is_replaced_by_a_new_one_never_theirs()
     lane._page = SimpleNamespace(page=Page("buddy's old tab", alive=False))
     got = lane._ensure()
     assert got.page.name == "buddy's new tab" and opened == ["new"]
+
+
+def test_chrome_with_no_window_gets_one_before_connecting(monkeypatch) -> None:
+    calls: list[str] = []
+    counts = iter(["0", "1"])
+
+    def run(argv, capture_output=True, text=True, timeout=0):
+        script = argv[-1]
+        calls.append("make" if "make new window" in script else "count")
+        return SimpleNamespace(stdout=next(counts) if "count windows" in script else "")
+
+    monkeypatch.setattr(bl.time, "sleep", lambda s: None)
+    assert bl.ensure_chrome_window(run) is True and calls == ["count", "make", "count"]
+
+
+def test_chrome_with_a_window_is_left_alone() -> None:
+    calls: list[str] = []
+
+    def run(argv, capture_output=True, text=True, timeout=0):
+        calls.append(argv[-1])
+        return SimpleNamespace(stdout="2")
+
+    assert bl.ensure_chrome_window(run) is True and len(calls) == 1 and "make new window" not in calls[0]

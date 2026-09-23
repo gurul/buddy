@@ -1592,6 +1592,23 @@ class TelegramInlet:
 
     async def _send_screen(self, chat_id: int, caption: str, *, agent: Any = None) -> dict[str, Any]:
         agent = agent or (self._codex if self._codex_chat == chat_id else self._agent)
+        shooter = getattr(agent, "browser_shot", None)
+        if callable(shooter):
+            # The Chrome lane (chrome_lane.py): the page in the owner's Chrome, full size — never the desktop.
+            try:
+                shot = await shooter()
+            except Exception:  # noqa: BLE001
+                shot = None
+            if shot is not None:
+                data, suffix, label = shot
+                with tempfile.TemporaryDirectory(prefix='buddy-browser-') as folder:
+                    path = Path(folder) / ('browser' + suffix)
+                    await asyncio.to_thread(path.write_bytes, data)
+                    try:
+                        await self.api.send_photo(chat_id, path, (caption or label)[:MAX_CAPTION_CHARS])
+                    except (BotApiError, OSError):
+                        return {'ok': False, 'reason': 'The browser picture could not be delivered.'}
+                return {'ok': True, 'sent': True, 'source': 'chrome_lane'}
         if (getattr(agent, 'provider', None) == 'codex'
                 and (getattr(agent, 'browser_used', False) or getattr(agent, 'running', False))):
             shot = getattr(agent, 'browser_screenshot', None)

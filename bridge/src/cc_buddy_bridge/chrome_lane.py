@@ -37,9 +37,11 @@ class ChromeLaneAgent:
     def __init__(self, make_planner: Callable[[Callable[[AgentEvent], None], Callable[[str], Awaitable[str]]], Any],
                  make_fallback: Callable[[], Any], on_event: Callable[[AgentEvent], None],
                  ask_user: Callable[[str], Awaitable[str]],
-                 prepare: Optional[Callable[[str], Awaitable[Any]]] = None) -> None:
+                 prepare: Optional[Callable[[str], Awaitable[Any]]] = None,
+                 lane_screenshot: Optional[Callable[[], Awaitable[Optional[bytes]]]] = None) -> None:
         self._make_planner, self._make_fallback = make_planner, make_fallback
         self._prepare = prepare                       # connect (the owner's Allow) and pick the Chrome profile
+        self._lane_screenshot = lane_screenshot       # buddy's tab in the owner's Chrome, as JPEG bytes
         self.on_event, self.ask_user = on_event, ask_user
         self._current: Any = None                    # the planner, then (maybe) Codex
         self._cancel_reason: Optional[str] = None
@@ -66,6 +68,21 @@ class ChromeLaneAgent:
         if self._current is not None:
             self._current.cancel(reason=reason)
 
+    async def browser_shot(self) -> Optional[tuple[bytes, str, str]]:
+        """(image bytes, suffix, caption) of the browser this task used — never the desktop: buddy's tab in the
+        owner's Chrome (the page itself, full size), or Codex's captured tab once Codex took over. None when
+        there is none (the caller then says so or falls back)."""
+        if self.handed_on:
+            shot = getattr(self._current, "browser_screenshot", None)
+            if shot is not None:
+                return shot.data, shot.suffix, "The browser tab Codex worked in (last captured view)"
+            return None
+        if self._lane_screenshot is not None:
+            data = await self._lane_screenshot()
+            if data:
+                return data, ".jpg", "Your Chrome: buddy's tab"
+        return None
+
     def __getattr__(self, name: str) -> Any:          # browser_screenshot, ui_evidence … from whoever ran last
         if name.startswith("_") or self.__dict__.get("_current") is None:
             raise AttributeError(name)
@@ -89,7 +106,8 @@ class ChromeLaneAgent:
                     return self.final
             answer, note = await planner.run_in_browser(goal)
         except Exception as e:  # noqa: BLE001 — the lane never costs the task: Codex takes it
-            log.warning("chrome-lane: the lane failed (%s); Codex takes the task", type(e).__name__)
+            log.warning("chrome-lane: the lane failed (%s: %s); Codex takes the task", type(e).__name__,
+                        str(e).splitlines()[0][:300] if str(e) else "")
             answer, note = "", ""
         if self._cancel_reason is not None:
             self.final = answer or "Stopped."
