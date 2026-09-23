@@ -1,5 +1,15 @@
 # "hey buddy" — voice and computer control
 
+**Current computer-task backend (2026-09-22):** `start_task` in voice and text now
+uses `codex_computer.py`, the public Codex app-server protocol, and the installed
+`cua_repl.js` plugin. Codex progress reaches voice commentary/captions; permission
+questions wait for an explicit answer; steering and cancellation use Codex turn
+methods. Model settings come from Codex. The Python desktop worker, fast lanes,
+and `CC_BUDDY_AGENT_*` tuning described below are retained legacy internals and
+are no longer selected by the daemon task factory. They are not a fallback.
+See [integration evidence and limitations](../codex-computer-use/README.md).
+
+
 Say **"hey buddy"** and the robot listens. Ask it to do something on your Mac and
 it does it — opens the mail, finds a file, fills a form — talking back while it
 works, taking corrections mid-task, stopping on "stop". The robot is not the one
@@ -16,7 +26,7 @@ Mac microphone ─24 kHz─▶ ears.py ─── sherpa-onnx keyword spotter ("h
                                           │   stop_task / task_status / answer_question / go_explore /
                                           │   end_conversation
                                           ▼
-                                    computer_agent.py ── gpt-6-astra (Responses API, exec_py tool)
+                                    codex_computer.py ── Codex app-server, installed cua_repl.js
                                           │ code
                                           ▼
                                     desktop_worker.py ── PyAutoGUI on the real desktop (child process)

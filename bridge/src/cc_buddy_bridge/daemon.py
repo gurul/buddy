@@ -24,7 +24,7 @@ from .ble import BuddyBLE
 from .caption_pager import CaptionPager, PagerConfig
 from .chat_memory import ChatMemory, make_chat_client
 from .chat_memory import star as star_memory
-from .computer_agent import ComputerAgent, log_desktop_grants, make_response_creator
+from .codex_computer import CodexComputerAgent
 from .computer_agent import configured as agent_configured
 from .diary import DiaryTaker, Emote, Thought, build_emote_cmd, make_diary_client
 from .ears import Ears, keyword_id
@@ -252,7 +252,7 @@ class Daemon:
         self._ears: Optional[Ears] = None
         self._conversation: Optional[asyncio.Task[None]] = None
         self._agent_state = "idle"
-        self._active_agent: Optional[ComputerAgent] = None
+        self._active_agent: Optional[CodexComputerAgent] = None
         # The text door (telegram.py). None unless CC_BUDDY_TELEGRAM is on with a token and an owner id.
         self._telegram: Optional[telegram_mod.TelegramInlet] = None
         # The browser lane (browser_lane.py): buddy's own Chromium for web goals. None unless CC_BUDDY_BROWSER_LANE.
@@ -822,13 +822,8 @@ class Daemon:
         if not (os.environ.get("OPENAI_API_KEY") or "").strip():
             log.warning("voice: OPENAI_API_KEY not set — buddy will hear its name but cannot talk back "
                         "(put it in ~/.config/cc-buddy-bridge/env)")
-        log.info("agent: computer control %s (model %s, %d steps / %.0f s max, %.0f s per step, reasoning %s/%s)",
-                 "ready" if self._agent_cfg.enabled else "disabled (CC_BUDDY_COMPUTER_CONTROL=0)",
-                 self._agent_cfg.model, self._agent_cfg.max_turns, self._agent_cfg.max_secs,
-                 self._agent_cfg.exec_timeout_secs, self._agent_cfg.reasoning_effort,
-                 self._agent_cfg.plan_reasoning_effort)
-        if self._agent_cfg.enabled:
-            log_desktop_grants(prompt=True)
+        log.info("agent: Codex Computer Use %s; app permissions are requested by Codex per task",
+                 "ready" if self._agent_cfg.enabled else "disabled (CC_BUDDY_COMPUTER_CONTROL=0)")
 
     def _wake_suppressed(self) -> bool:
         """Reasons not to wake: the human is dictating, a conversation is already
@@ -1103,9 +1098,8 @@ class Daemon:
             notes=lambda: self._room_notes_taker(), terminal=Daemon._type_into_terminal,
             records=records_mod.RecordsReader(self._recall_cfg) if records_mod.configured().enabled else None)
 
-    def _make_agent(self, on_event: Any, ask_user: Any) -> ComputerAgent:
-        agent = ComputerAgent(make_response_creator(), config=self._agent_cfg, on_event=on_event, ask_user=ask_user,
-                              browser=getattr(self, "_browser", None))
+    def _make_agent(self, on_event: Any, ask_user: Any) -> CodexComputerAgent:
+        agent = CodexComputerAgent(on_event=on_event, ask_user=ask_user)
         self._active_agent = agent
         return agent
 

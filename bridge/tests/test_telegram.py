@@ -1411,3 +1411,149 @@ def test_telegram_reads_edits_and_undoes_the_same_note(tmp_path: Path) -> None:
     off = Rig(FakeApi(), FakeCreate())
     for name in ("edit_note", "undo_note"):
         assert asyncio.run(off.inlet._tool(name, {}, OWNER))["ok"] is False
+
+
+class FakeCodex:
+    def __init__(self):
+        self.connected = False
+        self.selected = []
+        self.sent = []
+        self.stops = 0
+        self.closed = 0
+        self.emit = None
+        self.fail = False
+        self.attach_wait = None
+
+    async def attach(self, id, emit):
+        self.selected.append(id)
+        self.emit = emit
+        if self.attach_wait:
+            await self.attach_wait.wait()
+        if self.fail:
+            raise telegram.codex_relay.RelayError('Mac app unavailable')
+        self.connected = True
+
+    async def send(self, text):
+        if self.fail:
+            raise telegram.codex_relay.RelayError('No confirmation; check the Mac app before retrying.')
+        self.sent.append(text)
+
+    async def interrupt(self):
+        self.stops += 1
+
+    async def close(self):
+        self.connected = False
+        self.closed += 1
+
+
+CODEX_TASK = telegram.codex_relay.DesktopTask('00000000-0000-4000-8000-000000000001', 'Build Buddy')
+
+
+def test_codex_selection_relay_escape_stop_and_off():
+    codex = FakeCodex()
+    api, create = FakeApi([update('codex on')]), FakeCreate(say('Buddy here'), say('back to Buddy'))
+    rig = Rig(api, create, codex=codex, codex_tasks=lambda: [CODEX_TASK])
+
+    async def during():
+        # to_thread task enumeration needs the worker thread to actually finish.
+        for _ in range(100):
+            if any('codex use 1' in text for _, text in api.sent):
+                break
+            await asyncio.sleep(0.001)
+        assert any('Build Buddy' in text for _, text in api.sent)
+        api.feed(update('codex use 1'))
+        await settle()
+        assert codex.selected == [CODEX_TASK.id]
+        api.feed(update('implement it'))
+        await settle()
+        assert codex.sent == ['implement it'] and not create.requests
+        await codex.emit('**Done**\n\nHere is the answer.')
+        assert api.titled[-1] == ('Codex', 'Build Buddy', '**Done**\n\nHere is the answer.')
+        api.feed(update('buddy: how are you?'))
+        await settle()
+        assert len(create.requests) == 1 and codex.sent == ['implement it']
+        api.feed(update('stop'))
+        await settle()
+        assert codex.stops == 1
+        api.feed(update('codex off'))
+        await settle()
+        count = len(api.sent)
+        await codex.emit('late output must not leak')
+        assert len(api.sent) == count and not codex.connected
+        api.feed(update('hello buddy'))
+        await settle()
+        assert len(create.requests) == 2
+    run_rig(rig, during)
+
+
+def test_codex_failure_never_falls_back_to_buddy():
+    codex = FakeCodex()
+    codex.fail = True
+    api, create = FakeApi([update('codex on ' + CODEX_TASK.id)]), FakeCreate()
+    rig = Rig(api, create, codex=codex)
+
+    async def during():
+        assert not codex.connected
+        api.feed(update('retry my work'), update('codex: explicit work'))
+        await settle()
+        assert not create.requests and not codex.sent
+        assert any('Mac app unavailable' in text for _, text in api.sent)
+    run_rig(rig, during)
+
+
+def test_codex_owner_binding_and_claude_switch():
+    codex = FakeCodex()
+    config = TelegramConfig(enabled=True, token=TOKEN, owner_ids=frozenset({OWNER, STRANGER}))
+    api = FakeApi([update('codex on ' + CODEX_TASK.id)])
+    rig = Rig(api, FakeCreate(), config=config, codex=codex)
+
+    async def during():
+        assert codex.connected
+        api.feed(update('codex: cannot steer', uid=STRANGER), update('codex off', uid=STRANGER))
+        await settle()
+        assert codex.connected and not codex.sent
+        await codex.emit('only for the original owner')
+        assert api.sent[-1] == (OWNER, 'only for the original owner')
+        api.feed(update('claude on'))
+        await settle()
+        assert rig.inlet.claude and not codex.connected
+        count = len(api.sent)
+        await codex.emit('late')
+        assert len(api.sent) == count
+    run_rig(rig, during)
+
+
+def test_codex_off_during_attach_prevents_late_enable():
+    async def go():
+        codex = FakeCodex()
+        codex.attach_wait = asyncio.Event()
+        api = FakeApi()
+        rig = Rig(api, FakeCreate(), codex=codex)
+        rig.inlet._dispatch(update('codex on ' + CODEX_TASK.id))
+        await settle()
+        rig.inlet._dispatch(update('codex off'))
+        codex.attach_wait.set()
+        await settle()
+        assert not codex.connected
+        assert not any(title == 'Codex on' for title, _, _ in api.titled)
+        await rig.inlet._shutdown()
+    asyncio.run(go())
+
+
+def test_codex_invalid_selection_status_and_explicit_prefix_off():
+    codex = FakeCodex()
+    api = FakeApi([update('codex use 99')])
+    rig = Rig(api, FakeCreate(), codex=codex)
+
+    async def during():
+        assert not codex.selected
+        assert any('not in the list' in text for _, text in api.sent)
+        api.feed(update('codex status'))
+        await settle()
+        assert any('not connected' in text for _, text in api.sent)
+        api.feed(update('codex off'))
+        await settle()
+        api.feed(update('codex: no accidental Buddy action'))
+        await settle()
+        assert not rig.create.requests and not codex.sent
+    run_rig(rig, during)
