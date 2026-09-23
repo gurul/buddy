@@ -2,11 +2,16 @@
   "name": "buddy-launch-video",
   "private": true,
   "version": "1.0.0",
-  "description": "A Remotion launch film for buddy, the desktop sidekick.",
+  "description": "Remotion launch films for buddy, the desktop sidekick.",
   "scripts": {
     "studio": "remotion studio src/index.tsx",
-    "render": "remotion render src/index.tsx LaunchVideo out/launch-video.mp4",
-    "render:still": "remotion still src/index.tsx LaunchVideo out/launch-video-still.png --frame=1770"
+    "render": "remotion render src/index.tsx BuddyLaunch out/buddy-launch.mp4",
+    "render:lessons": "remotion render src/index.tsx LaunchVideo out/launch-video.mp4",
+    "render:still": "remotion still src/index.tsx BuddyLaunch out/buddy-launch-still.png --frame=2760",
+    "sfx": "python3 scripts/make-chirps.py",
+    "typecheck": "tsc --noEmit -p .",
+    "verify": "node scripts/verify-launch-video.mjs && node scripts/verify-buddy-launch.mjs",
+    "verify:render": "node scripts/verify-rendered-video.mjs out/buddy-launch.mp4 93"
   },
   "dependencies": {
     "@remotion/cli": "4.0.524",

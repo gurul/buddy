@@ -3,6 +3,8 @@ import {spawnSync} from 'node:child_process';
 import {resolve} from 'node:path';
 
 const input = process.argv[2] ?? 'out/launch-video.mp4';
+// Expected length in seconds: 118 for the lessons cut, 93 for BuddyLaunch.
+const expected = Number(process.argv[3] ?? 118);
 const file = resolve(process.cwd(), input);
 if (!existsSync(file)) {
   console.error(`rendered launch video verification failed: missing ${file}`);
@@ -21,7 +23,7 @@ const streams = data.streams ?? [];
 const video = streams.find((s) => s.codec_type === 'video');
 const audio = streams.find((s) => s.codec_type === 'audio');
 const failures = [];
-if (!(duration > 115 && duration <= 120.1)) failures.push(`duration ${duration.toFixed(3)}s is outside 115–120.1s`);
+if (!(duration > expected - 3 && duration <= expected + 2.1)) failures.push(`duration ${duration.toFixed(3)}s is outside ${expected - 3}–${expected + 2.1}s`);
 if (!video || video.codec_name !== 'h264' || video.width !== 1920 || video.height !== 1080) failures.push('video stream is not 1920x1080 H.264');
 if (!audio || audio.codec_type !== 'audio') failures.push('audio stream is missing');
 

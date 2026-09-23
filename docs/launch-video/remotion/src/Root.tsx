@@ -36,7 +36,7 @@ const FPS = 30;
 const DURATION_SECONDS = 118;
 const TOTAL_FRAMES = DURATION_SECONDS * FPS;
 
-const C = {
+export const C = {
   paper: '#FBF5EC',
   sheet: '#FFFDF8',
   ink: '#1F3A78',
@@ -52,9 +52,9 @@ const C = {
   purple: '#A487D0',
 };
 
-type CSS = React.CSSProperties;
+export type CSS = React.CSSProperties;
 
-const fontFace = `
+export const fontFace = `
   @font-face { font-family: Grandstander; src: url(${staticFile('fonts/grandstander-700-900-latin.woff2')}) format('woff2'); font-weight: 700 900; }
   @font-face { font-family: Andika; src: url(${staticFile('fonts/andika-400-latin.woff2')}) format('woff2'); font-weight: 400; }
   @font-face { font-family: Andika; src: url(${staticFile('fonts/andika-700-latin.woff2')}) format('woff2'); font-weight: 700; }
@@ -64,26 +64,26 @@ const fontFace = `
 
 // ---------- motion helpers ----------
 
-const SPRINGS = {
+export const SPRINGS = {
   pop: {damping: 11, stiffness: 170, mass: 0.6},     // overshoots, for pills and buttons
   rise: {damping: 15, stiffness: 120, mass: 0.7},    // cards and text
   soft: {damping: 22, stiffness: 90, mass: 1},       // big things, no overshoot
 };
 
-function sp(frame: number, fps: number, delay = 0, config = SPRINGS.rise, duration?: number) {
+export function sp(frame: number, fps: number, delay = 0, config = SPRINGS.rise, duration?: number) {
   return spring({frame: Math.max(0, frame - delay), fps, config, durationInFrames: duration});
 }
 
-function fade(frame: number, start: number, end: number, easing = Easing.out(Easing.cubic)) {
+export function fade(frame: number, start: number, end: number, easing = Easing.out(Easing.cubic)) {
   return interpolate(frame, [start, end], [0, 1], {extrapolateLeft: 'clamp', extrapolateRight: 'clamp', easing});
 }
 
-function wave(frame: number, amp = 8, speed = 0.055, phase = 0) {
+export function wave(frame: number, amp = 8, speed = 0.055, phase = 0) {
   return Math.sin(frame * speed + phase) * amp;
 }
 
 // A one-off bump: 0 → 1 → 0 over `length` frames starting at `at`.
-function bump(frame: number, at: number, length = 14) {
+export function bump(frame: number, at: number, length = 14) {
   const t = (frame - at) / length;
   if (t <= 0 || t >= 1) return 0;
   return Math.sin(t * Math.PI);
@@ -95,7 +95,7 @@ function rnd(seed: number) {
   return x - Math.floor(x);
 }
 
-function useT() {
+export function useT() {
   const frame = useCurrentFrame();
   const {fps} = useVideoConfig();
   return {frame, fps};
@@ -157,7 +157,7 @@ function PaperBackground({accent}: {accent: string}) {
 }
 
 // Camera push: the whole scene scales 1 → 1.04 and drifts up 12 px over its life.
-function SceneFrame({children, accent, duration}: {children: React.ReactNode; accent: string; duration: number}) {
+export function SceneFrame({children, accent, duration}: {children: React.ReactNode; accent: string; duration: number}) {
   const frame = useCurrentFrame();
   const t = interpolate(frame, [0, duration], [0, 1], {extrapolateRight: 'clamp'});
   const scale = 1 + t * 0.04;
@@ -174,7 +174,7 @@ function SceneFrame({children, accent, duration}: {children: React.ReactNode; ac
 
 // Tilted paper sheet sweeping left → right across a scene seam. Placed in its own
 // 32-frame Sequence centred on the cut, so the seam is covered at local frame 16.
-function Wipe({color}: {color: string}) {
+export function Wipe({color}: {color: string}) {
   const frame = useCurrentFrame();
   const x = interpolate(frame, [0, 32], [-3400, 3400], {easing: Easing.inOut(Easing.cubic), extrapolateLeft: 'clamp', extrapolateRight: 'clamp'});
   return (
@@ -186,7 +186,7 @@ function Wipe({color}: {color: string}) {
 
 // ---------- type ----------
 
-function Words({text, delay = 0, step = 3, style, config = SPRINGS.rise, shadow = 6}: {text: string; delay?: number; step?: number; style?: CSS; config?: typeof SPRINGS.rise; shadow?: number}) {
+export function Words({text, delay = 0, step = 3, style, config = SPRINGS.rise, shadow = 6}: {text: string; delay?: number; step?: number; style?: CSS; config?: typeof SPRINGS.rise; shadow?: number}) {
   const {frame, fps} = useT();
   const lines = text.split('<br/>');
   let n = 0;
@@ -208,7 +208,7 @@ function Words({text, delay = 0, step = 3, style, config = SPRINGS.rise, shadow 
   );
 }
 
-function H1({text, size = 72, delay = 0, style}: {text: string; size?: number; delay?: number; style?: CSS}) {
+export function H1({text, size = 72, delay = 0, style}: {text: string; size?: number; delay?: number; style?: CSS}) {
   return (
     <div style={{font: `900 ${size}px/0.98 Grandstander`, letterSpacing: '-0.035em', color: C.ink, ...style}}>
       <Words text={text} delay={delay} />
@@ -217,7 +217,7 @@ function H1({text, size = 72, delay = 0, style}: {text: string; size?: number; d
 }
 
 // Handwriting write-on: a clip reveals the text left to right.
-function Kicker({children, color = C.inkSoft, delay = 0, size = 33, style}: {children: React.ReactNode; color?: string; delay?: number; size?: number; style?: CSS}) {
+export function Kicker({children, color = C.inkSoft, delay = 0, size = 33, style}: {children: React.ReactNode; color?: string; delay?: number; size?: number; style?: CSS}) {
   const frame = useCurrentFrame();
   const p = fade(frame, delay, delay + 22, Easing.inOut(Easing.quad));
   return (
@@ -225,7 +225,7 @@ function Kicker({children, color = C.inkSoft, delay = 0, size = 33, style}: {chi
   );
 }
 
-function Body({children, size = 25, delay = 0, style}: {children: React.ReactNode; size?: number; delay?: number; style?: CSS}) {
+export function Body({children, size = 25, delay = 0, style}: {children: React.ReactNode; size?: number; delay?: number; style?: CSS}) {
   const {frame, fps} = useT();
   const a = sp(frame, fps, delay, SPRINGS.soft, 30);
   return <div style={{font: `400 ${size}px/1.28 Andika`, color: C.ink, opacity: a, transform: `translateY(${(1 - a) * 18}px)`, ...style}}>{children}</div>;
@@ -233,7 +233,7 @@ function Body({children, size = 25, delay = 0, style}: {children: React.ReactNod
 
 // ---------- objects ----------
 
-function Card({children, color = C.sky, delay = 0, from = 'below', float = true, style, inner}: {children: React.ReactNode; color?: string; delay?: number; from?: 'below' | 'left' | 'right'; float?: boolean; style?: CSS; inner?: CSS}) {
+export function Card({children, color = C.sky, delay = 0, from = 'below', float = true, style, inner}: {children: React.ReactNode; color?: string; delay?: number; from?: 'below' | 'left' | 'right'; float?: boolean; style?: CSS; inner?: CSS}) {
   const {frame, fps} = useT();
   const a = sp(frame, fps, delay, SPRINGS.rise, 30);
   const off = from === 'left' ? -260 : from === 'right' ? 260 : 0;
@@ -259,7 +259,7 @@ function Card({children, color = C.sky, delay = 0, from = 'below', float = true,
   );
 }
 
-function Tag({children, color = C.teal, delay = 0}: {children: React.ReactNode; color?: string; delay?: number}) {
+export function Tag({children, color = C.teal, delay = 0}: {children: React.ReactNode; color?: string; delay?: number}) {
   const {frame, fps} = useT();
   const a = sp(frame, fps, delay, SPRINGS.pop, 24);
   return (
@@ -269,7 +269,7 @@ function Tag({children, color = C.teal, delay = 0}: {children: React.ReactNode; 
   );
 }
 
-function Pill({children, color, delay = 0, size = 21, lit = false, style}: {children: React.ReactNode; color: string; delay?: number; size?: number; lit?: boolean; style?: CSS}) {
+export function Pill({children, color, delay = 0, size = 21, lit = false, style}: {children: React.ReactNode; color: string; delay?: number; size?: number; lit?: boolean; style?: CSS}) {
   const {frame, fps} = useT();
   const a = sp(frame, fps, delay, SPRINGS.pop, 22);
   return (
@@ -280,7 +280,7 @@ function Pill({children, color, delay = 0, size = 21, lit = false, style}: {chil
 }
 
 // A pipeline node that pops in, then "lights up" (a scale bump and an ink shadow) at `litAt`.
-function Node({children, color, delay = 0, litAt, style}: {children: React.ReactNode; color: string; delay?: number; litAt?: number; style?: CSS}) {
+export function Node({children, color, delay = 0, litAt, style}: {children: React.ReactNode; color: string; delay?: number; litAt?: number; style?: CSS}) {
   const {frame, fps} = useT();
   const a = sp(frame, fps, delay, SPRINGS.pop, 22);
   const b = litAt === undefined ? 0 : bump(frame, litAt, 16);
@@ -292,7 +292,7 @@ function Node({children, color, delay = 0, litAt, style}: {children: React.React
   );
 }
 
-function Arrow({color = C.ink, direction = 'right', width = 118, delay = 0}: {color?: string; direction?: 'right' | 'down' | 'left'; width?: number; delay?: number}) {
+export function Arrow({color = C.ink, direction = 'right', width = 118, delay = 0}: {color?: string; direction?: 'right' | 'down' | 'left'; width?: number; delay?: number}) {
   const frame = useCurrentFrame();
   const p = fade(frame, delay, delay + 16, Easing.out(Easing.quad));
   const head = fade(frame, delay + 10, delay + 18, Easing.out(Easing.back(2)));
@@ -317,7 +317,7 @@ function Arrow({color = C.ink, direction = 'right', width = 118, delay = 0}: {co
 }
 
 // Expanding rings, for a chirp.
-function Chirp({at, x = 0, y = 0, color = C.pink}: {at: number; x?: number; y?: number; color?: string}) {
+export function Chirp({at, x = 0, y = 0, color = C.pink}: {at: number; x?: number; y?: number; color?: string}) {
   const frame = useCurrentFrame();
   return (
     <div style={{position: 'absolute', left: x, top: y, width: 0, height: 0, pointerEvents: 'none'}}>
@@ -330,7 +330,7 @@ function Chirp({at, x = 0, y = 0, color = C.pink}: {at: number; x?: number; y?: 
   );
 }
 
-function Robot({message = 'hey!', scale = 1, delay = 0, screenPink = C.screenPink, listening = false, chirp = true, type = true}: {message?: string; scale?: number; delay?: number; screenPink?: string; listening?: boolean; chirp?: boolean; type?: boolean}) {
+export function Robot({message = 'hey!', scale = 1, delay = 0, screenPink = C.screenPink, listening = false, chirp = true, type = true}: {message?: string; scale?: number; delay?: number; screenPink?: string; listening?: boolean; chirp?: boolean; type?: boolean}) {
   const {frame, fps} = useT();
   const id = useId().replace(/:/g, '');
   const a = sp(frame, fps, delay, SPRINGS.pop, 30);
@@ -374,21 +374,21 @@ function Robot({message = 'hey!', scale = 1, delay = 0, screenPink = C.screenPin
   );
 }
 
-function BrowserWindow({children, style}: {children: React.ReactNode; style?: CSS}) {
+export function BrowserWindow({children, style, title = "buddy · learning"}: {children: React.ReactNode; style?: CSS; title?: string}) {
   return (
     <div style={{background: C.sheet, border: `3px solid ${C.ink}`, borderRadius: 12, boxShadow: `12px 12px 0 ${C.sky}`, overflow: 'hidden', ...style}}>
       <div style={{height: 42, background: C.pinkSoft, borderBottom: `3px solid ${C.ink}`, display: 'flex', alignItems: 'center', gap: 10, padding: '0 16px'}}>
         <span style={{width: 13, height: 13, borderRadius: '50%', background: C.pink, border: `2px solid ${C.ink}`}} />
         <span style={{width: 13, height: 13, borderRadius: '50%', background: C.sun, border: `2px solid ${C.ink}`}} />
         <span style={{width: 13, height: 13, borderRadius: '50%', background: C.teal, border: `2px solid ${C.ink}`}} />
-        <span style={{marginLeft: 8, font: '700 15px Andika', color: C.inkSoft}}>buddy · learning</span>
+        <span style={{marginLeft: 8, font: '700 15px Andika', color: C.inkSoft}}>{title}</span>
       </div>
       {children}
     </div>
   );
 }
 
-function Speech({children, color, delay = 0, tilt = -1, style}: {children: React.ReactNode; color: string; delay?: number; tilt?: number; style?: CSS}) {
+export function Speech({children, color, delay = 0, tilt = -1, style}: {children: React.ReactNode; color: string; delay?: number; tilt?: number; style?: CSS}) {
   const {frame, fps} = useT();
   const a = sp(frame, fps, delay, SPRINGS.pop, 26);
   return (
@@ -526,7 +526,7 @@ function EverydayScene() {
   );
 }
 
-function NodeBox({title, detail, color, delay = 0, dashed = false}: {title: string; detail?: string; color: string; delay?: number; dashed?: boolean}) {
+export function NodeBox({title, detail, color, delay = 0, dashed = false}: {title: string; detail?: string; color: string; delay?: number; dashed?: boolean}) {
   const {frame, fps} = useT();
   const a = sp(frame, fps, delay, SPRINGS.pop, 22);
   const b = bump(frame, delay + 10, 16);
@@ -550,7 +550,7 @@ function Column({title, sub, color, delay, children, dashed = false, style}: {ti
 }
 
 // A dot that travels along a horizontal link, then repeats.
-function Packet({x, y, length, start, period = 70, color = C.pink}: {x: number; y: number; length: number; start: number; period?: number; color?: string}) {
+export function Packet({x, y, length, start, period = 70, color = C.pink}: {x: number; y: number; length: number; start: number; period?: number; color?: string}) {
   const frame = useCurrentFrame();
   if (frame < start) return null;
   const t = ((frame - start) % period) / period;
@@ -622,7 +622,7 @@ function TeacherScene() {
 }
 
 // Handwriting that writes itself: a clip reveal plus a pen tip riding the edge.
-function Handwriting({text, at, length = 30, width, style}: {text: string; at: number; length?: number; width: number; style?: CSS}) {
+export function Handwriting({text, at, length = 30, width, style}: {text: string; at: number; length?: number; width: number; style?: CSS}) {
   const frame = useCurrentFrame();
   const p = fade(frame, at, at + length, Easing.inOut(Easing.quad));
   const writing = frame >= at && frame <= at + length;
@@ -634,7 +634,7 @@ function Handwriting({text, at, length = 30, width, style}: {text: string; at: n
   );
 }
 
-function Cursor({path, style}: {path: {at: number; x: number; y: number}[]; style?: CSS}) {
+export function Cursor({path, style}: {path: {at: number; x: number; y: number}[]; style?: CSS}) {
   const frame = useCurrentFrame();
   const first = path[0];
   if (frame < first.at) return null;
@@ -793,7 +793,7 @@ function TwoWorldsScene() {
 }
 
 // Cut-paper confetti: small rects and circles falling with a spin.
-function Confetti({count = 46, start = 10}: {count?: number; start?: number}) {
+export function Confetti({count = 46, start = 10}: {count?: number; start?: number}) {
   const frame = useCurrentFrame();
   const colors = [C.sun, C.teal, C.pink, C.sky, C.pinkSoft];
   return (

@@ -1,8 +1,49 @@
-# buddy launch video
+# buddy launch films
+
+Two Remotion cuts share one motion system and brand (`src/Root.tsx`):
+
+| Composition | Length | What it is | Render |
+|---|---|---|---|
+| **BuddyLaunch** (`src/Pocket.tsx`) | 93 s | The holistic launch film: the whole buddy, desk to pocket. | `npm run render` → `out/buddy-launch.mp4` |
+| LaunchVideo (`src/Root.tsx`) | 118 s | The Sep 13 cut, built around the math lessons. The show-and-tell deck embeds it. | `npm run render:lessons` → `out/launch-video.mp4` |
+
+```bash
+npm ci
+npm run studio          # preview both
+npm run render          # BuddyLaunch, 1920×1080, 30 fps
+npm run typecheck && npm run verify && npm run verify:render
+```
+
+## BuddyLaunch
+
+Ten chapters. Lessons appear once, as one chip in the orbit; the film covers the whole
+product. Every claim maps to a source in the repo, and the three features that are off by
+default carry an **opt-in** tag.
+
+| # | Chapter | Starts | What moves | Source |
+|---|---|---|---|---|
+| 1 | hello | 0:00 | The robot assembles piece by piece, its screen powers on like a CRT, the wordmark stamps in | — |
+| 2 | senses | 0:06 | Wake word with sound waves; the eyes lead and the head follows a moving face; a scan finds the mug; a hand pats its head and its eyes turn to hearts | README "What buddy does", DESIGN.md gaze policy |
+| 3 | life | 0:17 | Day turns to night; it explores, snaps a photo that flies onto the diary page, the diary writes itself, moods change, it sleeps; the real widget render slides in | README, `widget/` |
+| 4 | pocket | 0:27 | The camera pushes through the robot's screen into the phone; app tiles fly into a `rundown` reply; a camera photo arrives | docs/stackchan/telegram.md |
+| 5 | chrome | 0:36 | Chrome raises "Allow remote debugging?", the phone's *yes* flies over and presses Allow, buddy opens its own tab, reads the page, and a screenshot flies back | docs/stackchan/routing.md, attach mode |
+| 6 | routes | 0:50 | Requests travel from the robot along three tracks: a code shortcut, your own Chrome, or Codex Computer Use with its three approval replies | routing.md, docs/codex-computer-use/README.md |
+| 7 | coding | 1:00 | `new claude` over four texts; a paper plane opens Warp; `claude on` relays a numbered question to the phone and the answer flies back; the robot goes working → needs you → done | telegram.md "Start a coding session" |
+| 8 | brain | 1:12 | Notes fly from the phone into the Obsidian vault; a todo is added, then checked off | docs/stackchan/second-brain.md |
+| 9 | orbit | 1:21 | Everything else orbits the robot while it winks | README |
+| 10 | outro | 1:27 | Wordmark, "On your desk. In your pocket.", phone · desk · Mac linked | — |
+
+The chapter list and timings live in `SCENE_LIST` in `src/Pocket.tsx`; start times are
+cumulative. Sound is the existing music bed plus robot chirps synthesised by
+`npm run sfx` (`scripts/make-chirps.py`, modelled on the firmware's `chirp.h`), placed in
+the `SFX` table. The example data in the film (the rundown counts, prices, file names) is
+illustrative.
+
+## LaunchVideo (the lessons cut)
 
 This is the 118-second, 16:9 Remotion cut for buddy. It starts with the shared problem—an answer is not the same as knowing what to do next—then balances the everyday desk companion with the teacher-like math loop.
 
-The film is grounded in the repository's current implementation:
+The film is grounded in the repository's implementation as of 2026-09-13:
 
 - `gpt-live-1` receives the voice conversation.
 - `gpt-6-astra` routes tools and drives guarded computer use.
@@ -12,17 +53,11 @@ The film is grounded in the repository's current implementation:
 
 The supplied instrumental is trimmed from 160 seconds to 118 seconds and fades out over the final three seconds. There is no VO asset in the folder, so the script is carried by burned-in show-and-tell typography and UI captions over the supplied music bed.
 
-```bash
-npm install
-npm run studio
-npm run render
-```
-
 ## Web export for the show-and-tell deck
 
 `docs/launch-video/reference/show-and-tell.html` plays the film on its second slide and
 seeks it from the chapter chips. The deck expects a smaller file next to it, so after
-`npm run render` build the web export (two-pass H.264, 720p, about 12.5 MB) and the
+`npm run render:lessons` build the web export (two-pass H.264, 720p, about 12.5 MB) and the
 ten chapter stills:
 
 ```bash
