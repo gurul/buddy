@@ -56,6 +56,15 @@ def update(text: Optional[str] = "hi", *, uid: int = OWNER, chat_id: Optional[in
     return {"update_id": update_id, key: msg}
 
 
+def tap_update(data: str, *, message_id: int = 1001, uid: int = OWNER, chat_id: Optional[int] = None,
+               chat_type: str = "private", update_id: int = 90, query_id: str = "q1") -> dict[str, Any]:
+    """A tap on an inline button, as getUpdates hands it over (Update.callback_query)."""
+    return {"update_id": update_id, "callback_query": {
+        "id": query_id, "from": {"id": uid, "is_bot": False, "first_name": "Someone"}, "chat_instance": "ci",
+        "data": data, "message": {"message_id": message_id, "date": int(NOW),
+                                  "chat": {"id": uid if chat_id is None else chat_id, "type": chat_type}}}}
+
+
 def say(text: str) -> dict[str, Any]:
     return {"id": "resp", "output": [{"type": "message", "role": "assistant",
                                       "content": [{"type": "output_text", "text": text}]}]}
@@ -83,6 +92,11 @@ class FakeApi:
         self.order: list[str] = []                                             # "typing" / "send", as they happened
         self.polls = 0
         self._more: Optional[asyncio.Event] = None
+        self.message_id = 1000                                                 # the last inline message's id
+        self.keyboards: list[tuple[int, list[list[tuple[str, str, str]]]]] = []   # (message id, rows) per inline send
+        self.edits: list[tuple[int, str]] = []                                 # editMessageText (message id, text)
+        self.dropped: list[int] = []                                           # editMessageReplyMarkup: buttons taken off
+        self.answered: list[tuple[str, str]] = []                              # answerCallbackQuery (query id, toast)
 
     def feed(self, *updates: dict[str, Any]) -> None:
         """A message that arrives later, while the poll is being held open."""
@@ -107,6 +121,33 @@ class FakeApi:
         self.titled.append((title, subtitle, text))
         self.buttons.append(list(buttons))
         self.order.append("send")
+
+    async def send_inline(self, chat_id: int, text: str, keyboard: Any, title: Optional[str] = None,
+                          subtitle: Optional[str] = None) -> int:
+        """An inline keyboard: recorded like any message (its labels in ``buttons``), and its rows kept so a
+        test can tap one (``tap``). Returns the message id a later edit names."""
+        self.sent.append((chat_id, text))
+        self.titled.append((title, subtitle, text))
+        self.buttons.append([label for row in keyboard for label, _, _ in row])
+        self.order.append("send")
+        self.message_id += 1
+        self.keyboards.append((self.message_id, [list(row) for row in keyboard]))
+        return self.message_id
+
+    async def edit_message(self, chat_id: int, message_id: int, text: str, title: Optional[str] = None,
+                           subtitle: Optional[str] = None) -> None:
+        self.edits.append((message_id, text))
+
+    async def drop_buttons(self, chat_id: int, message_id: int) -> None:
+        self.dropped.append(message_id)
+
+    async def answer_callback(self, query_id: str, text: str = "") -> None:
+        self.answered.append((query_id, text))
+
+    def key(self, label: str, message: int = -1) -> tuple[int, str]:
+        """(message id, callback key) of the button with this label on the ``message``-th inline keyboard."""
+        message_id, rows = self.keyboards[message]
+        return message_id, next(data for row in rows for text, data, _ in row if text == label)
 
     async def react(self, chat_id: int, message_id: int, emoji: str) -> None:
         self.reactions.append((chat_id, message_id, emoji))
@@ -2050,3 +2091,377 @@ def test_the_daemon_ends_the_relays_typing_at_the_stop_hook() -> None:
 
     asyncio.run(go())
     assert ended == ["/Users/g/repo"]
+
+
+# ---- inline buttons: callbacks, Allow/Deny, options, pickers (owner, 2026-09-23) ----------------
+
+async def jobs(rig: Rig) -> None:
+    await settle()
+    await asyncio.gather(*list(rig.inlet._jobs))
+
+
+async def tap(rig: Rig, key: str, message_id: int, **kw: Any) -> None:
+    rig.inlet._dispatch(tap_update(key, message_id=message_id, **kw))
+    await jobs(rig)
+
+
+def relay_rig(api: FakeApi, typed: list[str], **kw: Any) -> Rig:
+    async def terminal(cwd: str, text: str) -> str:
+        typed.append(text)
+        return ""
+
+    config = TelegramConfig(enabled=True, token=TOKEN, owner_ids=frozenset({OWNER}), ask_permissions=True)
+    rig = Rig(api, FakeCreate(), config=config, terminal=terminal, claude_sessions=lambda: ["/Users/g/repo"], **kw)
+    rig.inlet._relay_to("/Users/g/repo")
+    rig.inlet._chat_id = OWNER
+    return rig
+
+
+def test_a_tap_is_accepted_only_from_the_owner_in_their_private_chat() -> None:
+    ok, got = telegram.accept_tap(tap_update("k.1", message_id=7), CFG)
+    assert ok == OK and got == telegram.Tap(query_id="q1", chat_id=OWNER, user_id=OWNER, data="k.1", message_id=7)
+    assert telegram.accept_tap(tap_update("k.1", uid=STRANGER), CFG) == ("stranger", None)
+    assert telegram.accept_tap(tap_update("k.1", chat_id=-100, chat_type="group"), CFG) == ("not-private", None)
+    bot = tap_update("k.1")
+    bot["callback_query"]["from"]["is_bot"] = True
+    assert telegram.accept_tap(bot, CFG) == ("bot", None)
+    assert telegram.accept_tap({"callback_query": {"id": 5}}, CFG)[0] == "malformed"
+    assert telegram.accept_tap(update("hi"), CFG) == ("not-a-tap", None)
+    game = tap_update("k.1")
+    del game["callback_query"]["data"]
+    assert telegram.accept_tap(game, CFG)[1].data == ""               # answered "expired", never acted on
+    assert telegram.sender_id(tap_update("k.1", uid=STRANGER)) == STRANGER
+
+
+def test_the_real_requests_poll_for_taps_send_inline_keys_edit_and_answer() -> None:
+    bodies: list[tuple[str, dict[str, Any]]] = []
+
+    async def go() -> int:
+        def handler(request: httpx.Request) -> httpx.Response:
+            body = json.loads(request.content)
+            bodies.append((request.url.path.rsplit("/", 1)[-1], body))
+            result: Any = [] if request.url.path.endswith("getUpdates") else {"message_id": 77}
+            return httpx.Response(200, json={"ok": True, "result": result})
+
+        api = BotApi(TOKEN, client=httpx.AsyncClient(transport=httpx.MockTransport(handler)))
+        await api.get_updates(None)
+        sent = await api.send_inline(OWNER, "rm -rf build?", [[("Allow", "a1b2c3.1", "success"),
+                                                                ("Deny", "a1b2c3.2", "danger")]], title="Claude asks")
+        await api.edit_message(OWNER, 77, "rm -rf build?\n\nAllowed.", title="Claude asks")
+        await api.drop_buttons(OWNER, 78)
+        await api.answer_callback("q9", "Allowed." * 40)
+        await api.close()
+        return sent
+
+    assert asyncio.run(go()) == 77
+    methods = dict(bodies)
+    assert methods["getUpdates"]["allowed_updates"] == ["message", "callback_query"]
+    markup = methods["sendMessage"]["reply_markup"]
+    assert markup == {"inline_keyboard": [[{"text": "Allow", "callback_data": "a1b2c3.1", "style": "success"},
+                                           {"text": "Deny", "callback_data": "a1b2c3.2", "style": "danger"}]]}
+    assert methods["editMessageText"]["reply_markup"] == {"inline_keyboard": []}
+    assert methods["editMessageText"]["message_id"] == 77 and "Allowed." in methods["editMessageText"]["text"]
+    assert methods["editMessageReplyMarkup"] == {"chat_id": OWNER, "message_id": 78, "reply_markup": {"inline_keyboard": []}}
+    assert methods["answerCallbackQuery"]["callback_query_id"] == "q9"
+    assert len(methods["answerCallbackQuery"]["text"]) == telegram.MAX_TOAST_CHARS
+
+
+def test_a_button_key_fits_callback_data_and_is_new_at_every_start() -> None:
+    a, b = Rig(FakeApi(), FakeCreate()).inlet, Rig(FakeApi(), FakeCreate()).inlet
+    board = telegram._Keyboard(OWNER, telegram.ANSWER, list(telegram.ALLOW_DENY))
+    a._register(board)
+    assert all(1 <= len(k.encode()) <= 64 for k in board.keys) and len(set(board.keys)) == 2
+    assert a._tap_gen != b._tap_gen                                   # a restart's keys are unknown to the next
+
+
+def test_allow_and_deny_buttons_answer_a_permission_and_the_prompt_says_what_was_decided() -> None:
+    async def go() -> None:
+        api, typed = FakeApi(), []
+        rig = relay_rig(api, typed)
+        ask = asyncio.ensure_future(rig.inlet.decide_permission("Bash", "rm -rf build/", "/Users/g/repo"))
+        await jobs(rig)
+        assert api.buttons[-1] == ["Allow", "Deny"]
+        assert [s for _, _, s in api.keyboards[-1][1][0]] == ["success", "danger"]     # green, red
+        message_id, key = api.key("Allow")
+        await tap(rig, key, message_id, uid=STRANGER)                 # a stranger's tap does nothing at all
+        assert not ask.done() and api.answered == []
+        await tap(rig, key, message_id)
+        assert await ask == "allow"
+        await jobs(rig)
+        assert api.answered[-1] == ("q1", "Allowed.")
+        assert api.edits[-1] == (message_id, "```\nrm -rf build/\n```\n\nAllowed.")    # the buttons are gone
+        await tap(rig, key, message_id)                               # the same button again: spent
+        assert api.answered[-1][1] == telegram.TAP_EXPIRED_LINE and api.dropped[-1] == message_id
+        # Deny, then silence: each prompt ends saying so
+        ask = asyncio.ensure_future(rig.inlet.decide_permission("Bash", "sudo reboot"))
+        await jobs(rig)
+        await tap(rig, api.key("Deny")[1], api.keyboards[-1][0])
+        assert await ask == "deny"
+        rig.inlet._permission_timeout = 0.01
+        assert await rig.inlet.decide_permission("Bash", "sleep 1") is None
+        await jobs(rig)
+        assert api.edits[-1][1].endswith(telegram.PERMISSION_DEFERRED_LINE)
+        assert rig.create.requests == [] and typed == []
+        await rig.inlet._shutdown()
+
+    asyncio.run(go())
+
+
+def test_while_allow_deny_waits_other_text_goes_to_claude_and_a_typed_yes_still_answers() -> None:
+    """Relay weakness 3: the owner's next message used to be eaten as the answer, and lost."""
+    async def go() -> None:
+        api, typed = FakeApi(), []
+        rig = relay_rig(api, typed)
+        ask = asyncio.ensure_future(rig.inlet.decide_permission("Bash", "rm -rf build/"))
+        await jobs(rig)
+        await dispatch(rig, "also run the linter after", update_id=5)
+        assert typed == ["also run the linter after"] and not ask.done()     # to Claude; the prompt waits
+        await dispatch(rig, "no, leave it", update_id=6)
+        assert await ask == "deny" and typed == ["also run the linter after"]
+        ask = asyncio.ensure_future(rig.inlet.decide_permission("Bash", "pytest -q"))
+        await jobs(rig)
+        await dispatch(rig, "yes go", update_id=7)
+        assert await ask == "allow"
+        await jobs(rig)
+        assert api.edits[-1][1].endswith("Allowed.")
+        await rig.inlet._shutdown()
+
+    asyncio.run(go())
+
+
+def test_when_buttons_cannot_be_sent_the_prompt_is_plain_text_and_the_next_message_answers() -> None:
+    class NoInline(FakeApi):
+        async def send_inline(self, *a: Any, **kw: Any) -> int:
+            raise BotApiError(400, "Bad Request: BUTTON_DATA_INVALID")
+
+    async def go() -> None:
+        api, typed = NoInline(), []
+        rig = relay_rig(api, typed)
+        ask = asyncio.ensure_future(rig.inlet.decide_permission("Bash", "rm -rf build/"))
+        await jobs(rig)
+        assert api.titled[-1][2] == "```\nrm -rf build/\n```\n\nyes / no?" and api.buttons[-1] == []
+        assert rig.inlet._taps == {}
+        await dispatch(rig, "maybe later", update_id=5)                # today's rule: the next message answers
+        assert await ask is None and typed == []
+        await rig.inlet._shutdown()
+
+    asyncio.run(go())
+
+
+def test_a_button_from_before_a_restart_or_unknown_is_answered_expired_and_does_nothing() -> None:
+    async def go() -> None:
+        api, typed = FakeApi(), []
+        rig = relay_rig(api, typed)
+        ask = asyncio.ensure_future(rig.inlet.decide_permission("Bash", "rm -rf build/"))
+        await jobs(rig)
+        await tap(rig, "0ld0ld.1", 555)
+        await tap(rig, "", 556)
+        assert not ask.done()
+        assert api.answered == [("q1", telegram.TAP_EXPIRED_LINE)] * 2 and api.dropped == [555, 556]
+        ask.cancel()
+        await rig.inlet._shutdown()
+
+    asyncio.run(go())
+
+
+def test_a_tap_that_breaks_nothing_in_the_poll_loop() -> None:
+    class Broken(FakeApi):
+        async def answer_callback(self, query_id: str, text: str = "") -> None:
+            raise BotApiError(400, "query is too old")
+
+    api = Broken([tap_update("x.1", update_id=1), {"update_id": 2, "callback_query": "junk"},
+                  tap_update("x.2", uid=STRANGER, update_id=3), update("hi", update_id=4)])
+    rig = Rig(api, FakeCreate(say("Hello!")))
+    run_rig(rig)
+    assert api.sent == [(OWNER, "Hello!")]
+
+
+@pytest.mark.parametrize("question,labels", [
+    ("Codex: Allow Calendar?\nReply: yes to allow once; \"allow for task\"; \"always allow\" to remember this app "
+     "for future tasks; no to deny.", ["Allow once", "Allow for this task", "Always allow", "Deny"]),
+    ("Codex: Allow Calendar?\nReply: yes to allow once; no to deny.", ["Allow once", "Deny"]),
+    ("Codex asks to run this command in /r:\nls\n\nReply yes or no.", ["Allow", "Deny"]),
+    ("Create the event Lunch?\n\nyes / no?", ["Allow", "Deny"]),
+    ("buddy wants to control your Chrome. Allow it? yes / no", ["Allow", "Deny"]),
+    ("Should I go ahead: press Buy now?", ["Yes", "No"]),
+    ("Which account, work or personal?", []),
+    ("Codex: Pick one\nReply: blue; red.", []),
+])
+def test_only_questions_with_known_answers_get_buttons(question: str, labels: list[str]) -> None:
+    assert [c.label for c in telegram.answer_choices(question)] == labels
+
+
+def test_a_yes_no_task_question_gets_buttons_and_a_free_one_is_answered_in_words() -> None:
+    async def go() -> None:
+        api = FakeApi()
+        rig = Rig(api, FakeCreate())
+        asked = asyncio.ensure_future(rig.inlet._ask_user("Create the event Lunch?\n\nyes / no?", OWNER,
+                                                          title=telegram.APP_ASKS_TITLE))
+        await jobs(rig)
+        assert api.buttons[-1] == ["Allow", "Deny"] and api.titled[-1][0] == telegram.APP_ASKS_TITLE
+        await tap(rig, api.key("Deny")[1], api.keyboards[-1][0])
+        assert await asked == "no"
+        await jobs(rig)
+        assert api.edits[-1][1].endswith("Denied.") and api.answered[-1] == ("q1", "Denied.")
+        # a task's question keeps its rule: the next message is the answer, whatever it says
+        asked = asyncio.ensure_future(rig.inlet._ask_user("Should I go ahead: press Buy now?", OWNER))
+        await jobs(rig)
+        await dispatch(rig, "only if it is under 20 dollars", update_id=8)
+        assert await asked == "only if it is under 20 dollars"
+        await jobs(rig)
+        assert api.edits[-1][1].endswith(telegram.ANSWERED_LINE)
+        assert rig.create.requests == []                             # and that answer was not a new turn too
+        asked = asyncio.ensure_future(rig.inlet._ask_user("Which account?", OWNER))
+        await jobs(rig)
+        assert api.buttons[-1] == [] and api.titled[-1][2] == "Which account?"
+        asked.cancel()
+        await rig.inlet._shutdown()
+
+    asyncio.run(go())
+
+
+def dataclasses_replace(obj: Any, **kw: Any) -> Any:
+    import dataclasses
+
+    return dataclasses.replace(obj, **kw)
+
+
+def test_an_unanswered_question_with_buttons_says_so_and_loses_them() -> None:
+    async def go() -> None:
+        api = FakeApi()
+        rig = Rig(api, FakeCreate(), config=dataclasses_replace(CFG, ask_timeout_secs=0.01))
+        answer = await rig.inlet._ask_user("Reply yes or no.", OWNER)
+        await jobs(rig)
+        assert answer.startswith("no (no answer") and api.sent[-1] == (OWNER, telegram.UNANSWERED_LINE)
+        assert api.edits[-1][1].endswith(telegram.UNANSWERED_LINE) and rig.inlet._taps == {}
+        await rig.inlet._shutdown()
+
+    asyncio.run(go())
+
+
+def test_composio_asks_with_allow_and_deny_and_a_tap_decides() -> None:
+    class Apps:
+        started, names = True, frozenset({"COMPOSIO_MULTI_EXECUTE_TOOL"})
+
+        def __init__(self) -> None:
+            self.ran: list[str] = []
+
+        def tools(self) -> list[dict[str, Any]]:
+            return []
+
+        def execute(self, name: str, args: dict[str, Any]) -> dict[str, Any]:
+            self.ran.append(name)
+            return {"ok": True}
+
+    async def go() -> None:
+        api, apps = FakeApi(), Apps()
+        rig = Rig(api, FakeCreate(), apps=apps)
+        args = {"tools": [{"tool_slug": "GOOGLEDRIVE_DELETE_FILE", "arguments": {"file_id": "x"}}]}
+        result = asyncio.ensure_future(rig.inlet._app_tool("COMPOSIO_MULTI_EXECUTE_TOOL", args, OWNER))
+        await jobs(rig)
+        assert api.buttons[-1] == ["Allow", "Deny"] and api.titled[-1][0] == telegram.APP_ASKS_TITLE
+        await tap(rig, api.key("Allow")[1], api.keyboards[-1][0])
+        assert (await result) == {"ok": True} and apps.ran == ["COMPOSIO_MULTI_EXECUTE_TOOL"]
+        await rig.inlet._shutdown()
+
+    asyncio.run(go())
+
+
+def test_a_relayed_questions_options_are_buttons_that_type_the_number() -> None:
+    async def go() -> None:
+        api, typed = FakeApi(), []
+        rig = relay_rig(api, typed)
+        rig.inlet.relay_tool_call("AskUserQuestion", "Which database? (1. Postgres / 2. SQLite)")
+        await jobs(rig)
+        assert api.buttons[-1] == ["1. Postgres", "2. SQLite"]
+        assert "Reply with the option's number." in api.sent[-1][1]
+        message_id, key = api.key("2. SQLite")
+        await tap(rig, key, message_id)
+        assert typed == ["2"] and api.reactions == []                 # a tap has no message to react to
+        assert api.answered[-1] == ("q1", "Typed 2") and api.dropped[-1] == message_id
+        # a typed answer spends the buttons: a late tap types nothing
+        rig.inlet.relay_tool_call("AskUserQuestion", "Ship it? (1. Yes / 2. Not yet)")
+        await jobs(rig)
+        message_id, key = api.key("1. Yes")
+        await dispatch(rig, "2", update_id=11)
+        await jobs(rig)
+        assert typed == ["2", "2"] and message_id in api.dropped
+        await tap(rig, key, message_id)
+        assert typed == ["2", "2"] and api.answered[-1][1] == telegram.TAP_EXPIRED_LINE
+        # several questions at once are answered in turn in the terminal: no buttons
+        rig.inlet.relay_tool_call("AskUserQuestion", "A? (1. x / 2. y) | B? (1. z / 2. w)")
+        await jobs(rig)
+        assert api.buttons[-1] == []
+        # the relay switched off: the option buttons mean nothing now
+        rig.inlet.relay_tool_call("AskUserQuestion", "Go? (1. Yes / 2. No)")
+        await jobs(rig)
+        message_id, key = api.key("1. Yes")
+        await dispatch(rig, "claude off", update_id=12)
+        await tap(rig, key, message_id)
+        assert typed == ["2", "2"] and api.answered[-1][1] == telegram.TAP_EXPIRED_LINE
+        await rig.inlet._shutdown()
+
+    asyncio.run(go())
+
+
+def test_question_options_are_read_only_from_one_numbered_question() -> None:
+    assert telegram.question_options("Which? (1. A / B / 2. C)") == [(1, "A / B"), (2, "C")]
+    assert telegram.question_options("Which? (1. A)") == [(1, "A")]
+    assert telegram.question_options("Which? (2. A / 3. B)") == []
+    assert telegram.question_options("Just a question?") == []
+
+
+def test_the_claude_on_picker_is_inline_and_a_tap_joins_exactly_as_typing_does() -> None:
+    async def go() -> None:
+        api = FakeApi()
+        rig = Rig(api, FakeCreate(), claude_sessions=lambda: ["/r/buddy", "/r/era-maker"])
+        await dispatch(rig, "claude on")
+        assert api.buttons[-1] == ["buddy", "era-maker", "New claude"] and not rig.inlet.claude
+        message_id, key = api.key("era-maker")
+        await tap(rig, key, message_id)
+        assert rig.inlet.claude and rig.inlet._relay_pin == "/r/era-maker"
+        assert api.sent[-1] == (OWNER, telegram.CLAUDE_ON_LINE) and api.dropped[-1] == message_id
+        assert api.answered[-1] == ("q1", "era-maker")
+        await rig.inlet._shutdown()
+
+    asyncio.run(go())
+
+
+def test_the_new_claude_tree_is_inline_and_an_old_steps_button_has_expired(tmp_path: Path) -> None:
+    for area in ("personal", "work"):
+        (tmp_path / area / "buddy").mkdir(parents=True)
+    opened: list[tuple[Path, str]] = []
+
+    async def launcher(folder: Path, harness: str) -> str:
+        opened.append((folder, harness))
+        return "Opened."
+
+    async def go() -> None:
+        api = FakeApi()
+        rig = Rig(api, FakeCreate(), launcher=launcher, launch_root=tmp_path, launch_recent=lambda: [])
+        await dispatch(rig, "new claude")
+        first = api.keyboards[-1][0]
+        work = api.key("Work")[1]
+        await tap(rig, api.key("Personal")[1], first)
+        assert len(api.keyboards) == 2 and rig.inlet._launch is not None
+        await tap(rig, work, first)                                    # the first step's button: spent
+        assert api.answered[-1][1] == telegram.TAP_EXPIRED_LINE
+        await tap(rig, api.key("Cancel")[1], api.keyboards[-1][0])     # the typed word's own path
+        assert rig.inlet._launch is None and opened == []
+        await rig.inlet._shutdown()
+
+    asyncio.run(go())
+
+
+def test_the_codex_folder_menu_is_buttons_and_a_tap_starts_that_folder() -> None:
+    async def go() -> None:
+        codex, api = FakeCodex(), FakeApi()
+        rig = Rig(api, FakeCreate(), codex=codex, codex_folders=lambda: [CODEX_FOLDER, Path("/projects/car")])
+        await dispatch(rig, "codex on")
+        assert api.sent[-1] == (OWNER, "buddy\ncar") and api.buttons[-1] == ["buddy", "car"]
+        await tap(rig, api.key("car")[1], api.keyboards[-1][0])
+        assert codex.selected == [Path("/projects/car")] and rig.inlet._codex_chat == OWNER
+        assert not rig.create.requests
+        await rig.inlet._shutdown()
+
+    asyncio.run(go())

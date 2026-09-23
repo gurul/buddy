@@ -151,14 +151,23 @@ With `claude on`, what Claude Code asks you reaches the chat in full, not just
 as "Claude is waiting on you":
 
 - **A question with choices** (AskUserQuestion) arrives with its options
-  numbered: "Quit all? (1. Keep terminals / 2. Everything)". Reply with the
-  number; the relay types it into the dialog. buddy's PreToolUse hook covers
-  `AskUserQuestion` for this, and it only relays the question. A hook never
-  answers it.
+  numbered: "Quit all? (1. Keep terminals / 2. Everything)". Tap an option's
+  button, or reply with its number; either way the relay types the number into
+  the dialog. One question gets buttons; several questions in one call are
+  answered by number, one after another. The buttons stop working once you
+  type to Claude, the turn ends, or the relay is switched. buddy's PreToolUse
+  hook covers `AskUserQuestion` for this, and it only relays the question. A
+  hook never answers it.
 - **A permission dialog for any tool** (Edit, Write, WebFetch, an MCP tool)
-  becomes a yes/no in the chat, through the `PermissionRequest` hook. Yes
-  allows it and no denies it. If you don't answer, the dialog stays on the Mac
-  as before. With the relay off, the hook does nothing.
+  becomes a yes/no in the chat, through the `PermissionRequest` hook. It comes
+  with **Allow** (green) and **Deny** (red) buttons. A tap answers it, and so
+  does a typed yes or no. Anything else you type while it waits goes to Claude
+  as usual, and the prompt keeps waiting. After the answer, or after 240 s with
+  none, the message changes to say "Allowed.", "Denied." or that the dialog on
+  the Mac decides, and the buttons go. If you don't answer, the dialog stays on
+  the Mac as before. If Telegram refuses the buttons, the prompt is plain text
+  and your next message is the answer, as before. With the relay off, the hook
+  does nothing.
 - **How a reply is read** (`consent.py`). One rule covers every yes/no that
   gates an action: permission prompts, app actions and auto-browser approvals.
   It fails closed. A reply is a yes only if its first word is a yes-word
@@ -186,10 +195,13 @@ folders. The steps are code, with no model call, and each one is a short text:
    matched loosely, so `era maker` finds `era-maker`. If more than one folder
    matches, you get a numbered choice.
 
-Every question comes with **tap buttons** (a one-time Telegram reply keyboard):
+Every question comes with **tap buttons** under it (an inline keyboard):
 `Personal` / `Work` and the recent sessions, then `List` / `General`, then one
-button per folder. A tap sends the button's own text, such as `2. era-maker`,
-and the number picks. Typing still works.
+button per folder. A tap does exactly what typing the button's text does, such
+as `2. era-maker`, and the number picks. Only the latest question's buttons
+work: a tap on an older one says "This button has expired." Typing still
+works. If Telegram refuses inline buttons, the question comes with the old
+one-time reply keyboard instead.
 
 You can say everything in one message: `new claude work era hub api`. You can
 also just ask in plain words ("open up era maker in work"), and the text brain
@@ -221,7 +233,8 @@ is always listed.
 
 - **One session:** the chat joins it at once.
 - **Several:** "Which Claude session?" with a button per folder
-  (`claude on buddy`, `claude on era-maker`) and `new claude`. The chat then
+  (`buddy`, `era-maker`) and `New claude`. A tap is the same as typing
+  `claude on buddy` or `new claude`. The chat then
   follows only the session you picked: another session's text stays on the Mac.
 - **None:** it walks the steps above, opens the terminal, and joins that session
   when it opens.
@@ -262,8 +275,8 @@ verb) runs at once. A call that writes follows its toolkit's policy: **Gmail is
 read only** (a send, reply, label or delete is refused, never asked; the brain
 says so), **the calendar may write** (an event is created without a question),
 and **everything else asks you first** in this chat, as a one-line "Run
-SLACK_SEND_MESSAGE with to: …, subject: …? yes / no?" that only your next message
-answers. A call mixing toolkits takes the strictest. `CC_BUDDY_COMPOSIO_POLICY`
+SLACK_SEND_MESSAGE with to: …, subject: …? yes / no?" with **Allow** and **Deny**
+buttons. A tap answers it, or your next message does, as before. A call mixing toolkits takes the strictest. `CC_BUDDY_COMPOSIO_POLICY`
 changes any of this. The remote code tools (Composio's sandbox bash and
 workbench) always ask.
 
@@ -381,7 +394,8 @@ Flip it to `ask` if two seconds a command is a price you will pay.
   camera may still `look`, tasks and files still work. Zero model calls to
   enter or leave it.
 - **`codex on` / `codex off`** — `codex on` sends only the names of accessible
-  local folders saved in Codex, with debrief folders hidden. Duplicate names show full paths. No task titles,
+  local folders saved in Codex, with debrief folders hidden, and a button for
+  each: a tap is the same as typing `codex <folder>`. Duplicate names show full paths. No task titles,
   numbers, IDs or old prompts appear. `codex buddy` or `codex use buddy` starts a
   **fresh chat** in that folder. Each folder selection creates a new conversation.
   Full folder paths also work; unknown or inaccessible folders cannot start a chat.
@@ -439,9 +453,10 @@ Flip it to `ask` if two seconds a command is a price you will pay.
   because a prompt on the Mac has nobody at it. What Claude needs from you
   still arrives: a question it asks (`AskUserQuestion`, under a "Claude asks"
   title: "Which database? (Postgres / SQLite)"), and a command on your own
-  always-ask list (`rm`, `sudo`; `matchers.py`) as a yes/no that only your next
-  message answers, titled "Claude asks to run Bash" with the command as a code
-  block; silence there defers to Claude Code's own flow, never denies. With
+  always-ask list (`rm`, `sudo`; `matchers.py`) as a yes/no with Allow and
+  Deny buttons, titled "Claude asks to run Bash" with the command as a code
+  block. A tap or a typed yes/no answers it; other text still goes to Claude.
+  Silence there defers to Claude Code's own flow, never denies. With
   `CC_BUDDY_TELEGRAM_ASK=1` every call is asked that way. Off by default and
   off again after "claude off": nothing from the terminal leaves the Mac
   until you ask, and the Mac asks as it always did.
@@ -464,7 +479,12 @@ Flip it to `ask` if two seconds a command is a price you will pay.
   it true.
 - **An answer.** When a task needs a yes before something consequential, the
   question arrives in the chat. Your next message is the answer, and only the
-  answer. No reply in three minutes reads as no.
+  answer. No reply in three minutes reads as no. A question whose answers are
+  known also has buttons: **Allow** / **Deny** for a yes/no (app actions,
+  Chrome access, a Codex command), **Yes** / **No** for "Should I go ahead…",
+  and Codex's app-access choices (**Allow once**, **Allow for this task**,
+  **Always allow**, **Deny**). A tap is the same answer as typing it. After
+  the answer the question changes to say what was chosen, and its buttons go.
 
 One agent drives the mouse at a time. While a spoken conversation is open, or a
 task it started is running, a texted task is refused ("the Mac is theirs until
@@ -554,6 +574,7 @@ instruction; each is a branch in `telegram.accept` or the inlet, with a test.
 | A forwarded message never reaches a model (you get one fixed line back). | It is the easiest way to put someone else's instructions in front of an agent that can click. |
 | A message older than two minutes when it arrives is dropped. | Telegram holds undelivered messages for a day. A task texted while the daemon was down must not run when it comes back. |
 | Only your next message can answer a task's question. | "Only the human approves" ([routing](routing.md)) has to hold over chat too. |
+| A button tap acts only when it is from an owner id, in that owner's private chat, on a button this run of the daemon made and still needs. Every tap is answered; a stranger's tap is not. | A button's data is only a short key, and what it means stays on the Mac. A button from before a restart, or one already used, says "This button has expired." and does nothing. |
 | Edited messages, channel posts, other bots, stickers and voice notes reach no model. | Only new text from the owner is a request. |
 | A file leaves only from your home folder, never from a hidden path, symlinks followed first. | A chat that can reach a Mac must never be a way to read its secrets. |
 | What you wrote is never logged; neither is the token. | The log gets counts, seconds and numeric ids. The token is part of every Bot API URL, so HTTP errors are rewritten before they are raised (`BotApiError` never carries a URL) and every log record in the process is checked for the token as it is made (`hide_token`) — httpx logs each request line at INFO. |

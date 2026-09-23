@@ -20,7 +20,9 @@ they are code, not prompt:
 * A backlog is not replayed. Telegram keeps undelivered messages for a day; a
   task texted while the daemon was down must not run when it comes back.
 * Only the human approves. A task's question goes to the chat and the owner's
-  next message is its answer; nobody else's message can be.
+  next message is its answer; nobody else's message can be. A question with
+  known answers also gets inline buttons; a tap is accepted only from an owner
+  id in their private chat, with a key this run made (``accept_tap``, ``_on_tap``).
 * "stop" is code, not a model call: it works when the model is down.
 * What the owner wrote is never logged, and neither is the token. The token is
   part of every Bot API URL, so HTTP errors are rewritten before they are
@@ -48,6 +50,7 @@ import math
 import mimetypes
 import os
 import re
+import secrets
 import shutil
 import subprocess
 import tempfile
@@ -114,6 +117,20 @@ CLAUDE_NONE_LINE = "No Claude session is running. Let's start one; the chat join
 NEW_CLAUDE_BUTTON = "new claude"
 TYPED_REACTION = "👍"                # the line reached the terminal (a reaction, not a message)
 MAX_BUTTON_CHARS = 64
+# Inline buttons (owner, 2026-09-23): a tap sends nothing to the chat, so a yes/no or a pick can never be
+# mistaken for a message meant for Claude or buddy. The Bot API hands each tap back as a callback_query whose
+# callback_data is at most 64 bytes, so a button carries only a short key ("<generation>.<n>") and what the tap
+# means stays here, on the Mac (TelegramInlet._taps). The generation is new at every start: a button left on a
+# message from before a restart is answered "expired", never acted on.
+ALLOWED_UPDATES = ("message", "callback_query")
+MAX_LIVE_BUTTONS = 256              # keys kept at once; the oldest go first
+MAX_INLINE_BUTTONS = 24             # a picker shows at most this many; the full list is in its text
+MAX_TOAST_CHARS = 200               # answerCallbackQuery text
+TAP_EXPIRED_LINE = "This button has expired."
+TAP_ANSWERED_LINE = "Already answered."
+PERMISSION_DEFERRED_LINE = "No answer here, so the dialog on the Mac decides."
+ANSWERED_LINE = "Answered."
+UNANSWERED_LINE = "No answer, so I took that as a no."
 # The titles: a message that is not buddy's own voice says whose it is, or what it is, in bold on its
 # first line (telegram_format.compose). Buddy's own replies and one-liners carry none.
 TASK_DONE_TITLE = "Task result"
@@ -490,11 +507,110 @@ def accept(update: Any, config: TelegramConfig, now: float) -> tuple[str, Option
     return OK, Inbound(chat_id=chat_id, user_id=user_id, text=text.strip(), message_id=message_id)
 
 
+@dataclass(frozen=True)
+class Tap:
+    """A tap on one of buddy's inline buttons, from the owner, in their private chat."""
+    query_id: str
+    chat_id: int
+    user_id: int
+    data: str                        # the button's key; "" when the query carries none
+    message_id: int = 0              # the bot's message the button sits on; 0 when unknown
+
+
+def accept_tap(update: Any, config: TelegramConfig) -> tuple[str, Optional[Tap]]:
+    """Decide one callback_query update. Pure. The same rule as ``accept``: only an owner id, never a bot,
+    and only in the owner's own private chat. A tap has no date to check for staleness (its message's date
+    is when buddy sent it); a stale button is caught by its key instead (TelegramInlet._on_tap)."""
+    if not isinstance(update, dict):
+        return "malformed", None
+    query = update.get("callback_query")
+    if not isinstance(query, dict):
+        return "not-a-tap", None
+    sender, msg = query.get("from"), query.get("message")
+    if not isinstance(sender, dict) or not isinstance(query.get("id"), str):
+        return "malformed", None
+    user_id = sender.get("id")
+    if not isinstance(user_id, int) or isinstance(user_id, bool):
+        return "malformed", None
+    if user_id not in config.owner_ids:
+        return "stranger", None
+    if sender.get("is_bot"):
+        return "bot", None
+    chat = msg.get("chat") if isinstance(msg, dict) else None
+    if not isinstance(chat, dict) or chat.get("type") != "private" or chat.get("id") != user_id:
+        return "not-private", None           # a button in a group, or one whose chat Telegram did not say
+    message_id = msg.get("message_id") if isinstance(msg.get("message_id"), int) else 0
+    data = query.get("data")
+    return OK, Tap(query_id=query["id"], chat_id=user_id, user_id=user_id,
+                   data=data if isinstance(data, str) else "", message_id=message_id)
+
+
+@dataclass(frozen=True)
+class Choice:
+    """One inline button: its ``label``, what a tap means (``value``: the answer, the line to type, the
+    words to send), its colour, and the line the prompt is edited to once it is chosen."""
+    label: str
+    value: str
+    style: str = ""
+    done: str = ""
+
+
+ALLOW_DENY = (Choice("Allow", "yes", "success", "Allowed."), Choice("Deny", "no", "danger", "Denied."))
+YES_NO = (Choice("Yes", "yes", "success", "Yes."), Choice("No", "no", "danger", "No."))
+# A question that ends asking for a yes or a no (Composio's "yes / no?", Chrome's "yes / no", a Codex command's
+# "Reply yes or no.") gets Allow and Deny; the planner's own "Should I go ahead: …?" gets Yes and No.
+YES_NO_END = re.compile(r"(\byes\s*/\s*no\??|\breply yes or no\.?)\s*$", re.I)
+GO_AHEAD = re.compile(r"^should i go ahead\b", re.I)
+CODEX_REPLY = re.compile(r"\nReply: (?P<choices>[^\n]+?)\.?\s*$")
+CODEX_CHOICES = (   # codex_computer.py's app-access prompt, piece by piece; the value is what it accepts typed
+    ("yes to allow once", Choice("Allow once", "yes", "success", "Allowed once.")),
+    ('"allow for task"', Choice("Allow for this task", "allow for task", "primary", "Allowed for this task.")),
+    ('"always allow"', Choice("Always allow", "always allow", "primary", "Always allowed.")),
+    ("no to deny", Choice("Deny", "no", "danger", "Denied.")),
+)
+ASK_OPTIONS = re.compile(r"^(?P<question>.+?) \((?P<options>1\. .+)\)$", re.S)
+
+
+def answer_choices(question: str) -> tuple[Choice, ...]:
+    """The buttons a task's question gets, or none. Only a question whose answers are known is given
+    buttons: a free question ("which account?") is answered in words, as before."""
+    text = (question or "").strip()
+    codex = CODEX_REPLY.search(text)
+    if codex:
+        chosen = []
+        for piece in (p.strip() for p in codex.group("choices").split(";")):
+            match = next((c for start, c in CODEX_CHOICES if piece.startswith(start)), None)
+            if match is None:
+                return ()                    # a choice this code does not know: words only, never a guess
+            chosen.append(match)
+        return tuple(chosen)
+    if YES_NO_END.search(text):
+        return ALLOW_DENY
+    if GO_AHEAD.match(text):
+        return YES_NO
+    return ()
+
+
+def question_options(hint: str) -> list[tuple[int, str]]:
+    """An AskUserQuestion hint (hooks/pretooluse._question) → its numbered options, when it is one question.
+    Several questions ("… | …") are answered one after another in the terminal, so they get no buttons."""
+    body = " ".join(str(hint or "").split())
+    m = ASK_OPTIONS.match(body)
+    if m is None or " | " in body:
+        return []
+    options = []
+    for n, piece in enumerate(re.split(r" / (?=\d+\. )", m.group("options")), 1):
+        if not piece.startswith(f"{n}. ") or not piece[len(f"{n}. "):].strip():
+            return []
+        options.append((n, piece[len(f"{n}. "):].strip()))
+    return options
+
+
 def sender_id(update: Any) -> Optional[int]:
     """The numeric id behind an update, for the one log line a drop gets. Never the name, never the words."""
     if not isinstance(update, dict):
         return None
-    for key in ("message", "edited_message", "channel_post"):
+    for key in ("message", "edited_message", "channel_post", "callback_query"):
         msg = update.get(key)
         if isinstance(msg, dict) and isinstance(msg.get("from"), dict):
             uid = msg["from"].get("id")
@@ -736,7 +852,8 @@ class BotApi:
         return result if isinstance(result, dict) else {}
 
     async def get_updates(self, offset: Optional[int], timeout: int = POLL_TIMEOUT_SECS) -> list[dict[str, Any]]:
-        data: dict[str, Any] = {"timeout": timeout, "allowed_updates": ["message"]}
+        # "callback_query" is a tap on an inline button (TelegramInlet._on_tap); every other kind stays off.
+        data: dict[str, Any] = {"timeout": timeout, "allowed_updates": list(ALLOWED_UPDATES)}
         if offset is not None:
             data["offset"] = offset
         result = await self._call("getUpdates", data)
@@ -751,21 +868,69 @@ class BotApi:
         italic ``subtitle`` when an identifier helps, the body as HTML paragraphs) and sent in pieces
         under the Bot API limit. A piece Telegram will not parse goes again as plain text: a message is
         never lost to markup. ``buttons`` become a one-time reply keyboard under the last piece: a tap
-        sends that button's text as the owner's own message, so no callback path is needed."""
+        sends that button's text as the owner's own message, so no callback path is needed. It is what
+        a picker falls back to when its inline keyboard cannot be sent (TelegramInlet._send_choices)."""
+        markup = ({"keyboard": [[{"text": b[:MAX_BUTTON_CHARS]}] for b in buttons],
+                   "one_time_keyboard": True, "resize_keyboard": True} if buttons else None)
+        await self._send_pieces(chat_id, text, title, subtitle, markup)
+
+    async def send_inline(self, chat_id: int, text: str, keyboard: Sequence[Sequence[tuple[str, str, str]]],
+                          title: Optional[str] = None, subtitle: Optional[str] = None) -> int:
+        """A message with an inline keyboard under its last piece → that piece's message id, which is what a
+        later edit names. ``keyboard`` is rows of (label, callback_data, style); callback_data is a short key
+        the inlet maps to what the tap means (1-64 bytes, InlineKeyboardButton), and style is "success",
+        "danger", "primary" or "" for the app's own look. A tap sends nothing to the chat: it arrives as a
+        callback_query (get_updates)."""
+        rows = [[{"text": label[:MAX_BUTTON_CHARS], "callback_data": data, **({"style": style} if style else {})}
+                 for label, data, style in row] for row in keyboard]
+        return await self._send_pieces(chat_id, text, title, subtitle, {"inline_keyboard": rows})
+
+    async def _send_pieces(self, chat_id: int, text: str, title: Optional[str], subtitle: Optional[str],
+                           markup: Optional[dict[str, Any]]) -> int:
         pieces = fmt.split(fmt.compose(text, title, subtitle))
+        sent_id = 0
         for i, piece in enumerate(pieces):
             extra: dict[str, Any] = {}
-            if buttons and i == len(pieces) - 1:
-                extra["reply_markup"] = {"keyboard": [[{"text": b[:MAX_BUTTON_CHARS]}] for b in buttons],
-                                         "one_time_keyboard": True, "resize_keyboard": True}
+            if markup is not None and i == len(pieces) - 1:
+                extra["reply_markup"] = markup
             try:
-                await self._call("sendMessage", {"chat_id": chat_id, "text": piece, "parse_mode": fmt.PARSE_MODE,
-                                                 **extra})
+                result = await self._call("sendMessage", {"chat_id": chat_id, "text": piece,
+                                                          "parse_mode": fmt.PARSE_MODE, **extra})
             except BotApiError as e:
                 if e.code != 400 or "parse" not in e.description.lower():
                     raise
                 log.warning("telegram: Telegram would not parse a message (%s); sent as plain text", e.description[:80])
-                await self._call("sendMessage", {"chat_id": chat_id, "text": fmt.visible(piece), **extra})
+                result = await self._call("sendMessage", {"chat_id": chat_id, "text": fmt.visible(piece), **extra})
+            if isinstance(result, dict) and isinstance(result.get("message_id"), int):
+                sent_id = result["message_id"]
+        return sent_id
+
+    async def edit_message(self, chat_id: int, message_id: int, text: str, title: Optional[str] = None,
+                           subtitle: Optional[str] = None) -> None:
+        """Rewrite one of the bot's own messages (editMessageText) and take its inline keyboard away: the
+        empty ``inline_keyboard`` says so explicitly. Only the first piece: a prompt is short. Unparseable
+        markup goes again as plain text, as in send_message."""
+        piece = fmt.split(fmt.compose(text, title, subtitle))[0]
+        data: dict[str, Any] = {"chat_id": chat_id, "message_id": message_id, "reply_markup": {"inline_keyboard": []}}
+        try:
+            await self._call("editMessageText", {**data, "text": piece, "parse_mode": fmt.PARSE_MODE})
+        except BotApiError as e:
+            if e.code != 400 or "parse" not in e.description.lower():
+                raise
+            await self._call("editMessageText", {**data, "text": fmt.visible(piece)})
+
+    async def drop_buttons(self, chat_id: int, message_id: int) -> None:
+        """Take a message's inline keyboard away and leave its text (editMessageReplyMarkup)."""
+        await self._call("editMessageReplyMarkup", {"chat_id": chat_id, "message_id": message_id,
+                                                    "reply_markup": {"inline_keyboard": []}})
+
+    async def answer_callback(self, query_id: str, text: str = "") -> None:
+        """The answer every tap needs (answerCallbackQuery): until it comes, the owner's phone shows a
+        progress bar on the button. ``text`` is a toast of 0-200 characters, or nothing."""
+        data: dict[str, Any] = {"callback_query_id": query_id}
+        if text:
+            data["text"] = text[:MAX_TOAST_CHARS]
+        await self._call("answerCallbackQuery", data)
 
     async def react(self, chat_id: int, message_id: int, emoji: str) -> None:
         """A reaction on one of the owner's messages: the receipt, instead of a line saying it arrived."""
@@ -807,6 +972,24 @@ def _same_folder(a: str, b: str) -> bool:
 
 
 Create = Callable[[dict[str, Any]], Awaitable[dict[str, Any]]]
+
+# What a keyboard's tap does. ANSWER resolves the question waiting on it, exactly as a typed answer would;
+# TYPE types its value into the joined Claude terminal (an AskUserQuestion option); SAY feeds its value to
+# TelegramInlet._handle as if the owner had typed it (a picker), so a tap and a typed reply take one path.
+ANSWER, TYPE, SAY = "answer", "type", "say"
+
+
+@dataclass(eq=False)
+class _Keyboard:
+    """One message's inline buttons, while they mean something. Every keyboard is one-shot: the first tap
+    retires all its keys, so a second tap on the same message is "already answered" or "expired"."""
+    chat_id: Optional[int]
+    kind: str
+    choices: list[Choice]
+    future: Optional[asyncio.Future] = None                       # ANSWER: the question it answers
+    valid: Callable[[], bool] = field(default=lambda: True)       # still meaningful? (a picker's flow is open)
+    keys: list[str] = field(default_factory=list)
+    message_id: int = 0                                           # set once the message is sent
 
 
 class TelegramInlet:
@@ -850,8 +1033,12 @@ class TelegramInlet:
     question by ``relay_tool_call``) and waits on (``relay_notification``) is forwarded here, and plain
     text is typed into its terminal; "buddy: <text>" is for buddy. Only what the terminal shows in white
     travels: no thinking, no tool calls, no result tails (owner, 2026-09-21, "the gray stuff"). The relay is bypass: the daemon allows a tool call without asking (daemon.py), and only
-    the owner's always_ask commands (rm, sudo) become a yes/no here (``decide_permission``; silence defers
-    to Claude Code's own flow, never denies).
+    the owner's always_ask commands (rm, sudo) become a yes/no here (``decide_permission``, with Allow and
+    Deny buttons; silence defers to Claude Code's own flow, never denies).
+
+    Inline buttons (owner, 2026-09-23): yes/no prompts, a relayed question's options and the pickers ("claude
+    on", "new claude", the Codex folders) are buttons under the message. A tap arrives as a callback_query
+    (``_on_tap``), is always answered, and does exactly what typing its words would. Typing still works.
 
     The robot shows what the chat is doing — the phase on its face, a caption for each task step and the
     result — unless the owner has said "stealth mode": then it acts asleep (idle, no captions, no head)
@@ -933,6 +1120,16 @@ class TelegramInlet:
         self._task_goal = ""
         self._pending_answer: Optional[asyncio.Future] = None
         self._pending_answer_chat: Optional[int] = None
+        # A permission prompt with Allow/Deny buttons is strict: only a tap or a clear yes/no answers it, and
+        # any other text goes where it would have gone without the prompt (to Claude while relaying), so a
+        # message meant for Claude is never eaten as a non-answer (owner, 2026-09-23; relay weakness 3).
+        self._pending_strict = False
+        # Inline buttons: key -> (keyboard, choice). The generation makes keys from before a restart unknown.
+        self._taps: dict[str, tuple[_Keyboard, Choice]] = {}
+        self._tap_gen = secrets.token_hex(3)
+        self._tap_seq = 0
+        self._options_board: Optional[_Keyboard] = None       # the relayed question's option buttons
+        self._picker_board: Optional[_Keyboard] = None        # the latest picker (claude on, new claude, codex)
         self._stopped_from_chat = False
         self._jobs: set[asyncio.Task] = set()
         self._dropped_ids: set[int] = set()
@@ -949,7 +1146,8 @@ class TelegramInlet:
 
     @property
     def _awaiting_answer(self) -> bool:
-        """A question (a task's, or a permission yes/no) is waiting: the owner's next text is its answer."""
+        """A question (a task's, or a permission yes/no) is waiting. Whether a given text answers it is
+        ``_answers_pending``: any text for a task's question, only a clear yes/no for a prompt with buttons."""
         return self._pending_answer is not None and not self._pending_answer.done()
 
     async def run(self) -> None:
@@ -1088,6 +1286,16 @@ class TelegramInlet:
 
     def _dispatch(self, update: Any) -> None:
         """Decide one update and return at once: a turn is a job, so a slow one never stops the poll."""
+        if isinstance(update, dict) and "callback_query" in update:
+            verdict, tap = accept_tap(update, self.config)
+            if tap is None:
+                uid = sender_id(update)
+                if uid is not None and uid not in self._dropped_ids and len(self._dropped_ids) < 256:
+                    self._dropped_ids.add(uid)
+                    log.info("telegram: dropped a tap (%s) from user id %d", verdict, uid)
+                return
+            self._on_tap(tap)
+            return
         verdict, inbound = accept(update, self.config, self._wall())
         if inbound is None:
             uid = sender_id(update)
@@ -1102,8 +1310,23 @@ class TelegramInlet:
         if verdict == NOT_TEXT:
             self._spawn(self._say(inbound.chat_id, NOT_TEXT_LINE), "telegram-say")
             return
+        self._handle(inbound)
+
+    def _answers_pending(self, text: Optional[str]) -> bool:
+        """Is this message the answer to the question waiting on the owner? Any message is, for a task's
+        question and for a prompt sent without buttons (the next message is the answer). A strict prompt
+        (Allow/Deny buttons on the screen) takes only a clear yes or no; ``None`` (an image) never is."""
+        if not self._awaiting_answer:
+            return False
+        if not self._pending_strict:
+            return True
+        return text is not None and bool(consent.decision(text))
+
+    def _handle(self, inbound: Inbound) -> None:
+        """One accepted message from the owner, routed. A picker's tap comes here too, with the button's
+        words as its text (``_on_tap``), so a tap and a typed reply do exactly the same thing."""
         if inbound.image is not None:
-            if self._awaiting_answer:
+            if self._answers_pending(None):
                 self._spawn(self._say(inbound.chat_id, "Please answer the pending question in a separate text, then resend the image."), "telegram-say")
                 return
             for_buddy = BUDDY_PREFIX.match(inbound.text)
@@ -1158,6 +1381,7 @@ class TelegramInlet:
                 self._spawn(self._codex_command(inbound.chat_id, "disconnect", None, self._codex_epoch), "telegram-codex")
             self._note("user", inbound.text)
             if word in CLAUDE_OFF:
+                self._retire_options()
                 self.claude, self._relay_pin, self._join_after_launch = False, "", False
                 self._stop_typing(inbound.chat_id, "relay")
                 log.info("telegram: claude relay off")
@@ -1171,7 +1395,7 @@ class TelegramInlet:
             return
         if (self._codex_chat == inbound.chat_id
                 and word not in STEALTH_ON + STEALTH_OFF and not SCREEN_NOW.match(inbound.text)
-                and not self._awaiting_answer):
+                and not self._answers_pending(inbound.text)):
             for_buddy = BUDDY_PREFIX.match(inbound.text)
             if for_buddy is None:
                 self._spawn(self._codex_send(inbound.chat_id, inbound.text, self._codex_epoch), "telegram-codex")
@@ -1186,9 +1410,10 @@ class TelegramInlet:
             return
         if word in STEALTH_ON or word in STEALTH_OFF or SCREEN_NOW.match(inbound.text):
             pass                                          # buddy's own code words, relay or not
-        elif self.claude and not self._awaiting_answer:
+        elif self.claude and not self._answers_pending(inbound.text):
             # Relay on: the chat IS the terminal. A yes/no while Claude is asking answers Claude (below);
-            # "buddy: ..." is for buddy; everything else is typed into the session.
+            # "buddy: ..." is for buddy; everything else is typed into the session. With Allow/Deny on the
+            # screen, only a clear yes/no is the answer: other words still go to Claude, the prompt waits.
             for_buddy = BUDDY_PREFIX.match(inbound.text)
             if for_buddy is None:
                 self._note("user", inbound.text)
@@ -1209,7 +1434,7 @@ class TelegramInlet:
             self._note("user", inbound.text)
             self._spawn(self._screen_now(inbound.chat_id), "telegram-screen")
             return
-        if self._awaiting_answer:
+        if self._answers_pending(inbound.text):
             # A task is waiting on the human. This message is the answer, and only the answer.
             if self._pending_answer_chat is not None and self._pending_answer_chat != inbound.chat_id:
                 self._spawn(self._say(inbound.chat_id, "A question is waiting in another owner chat."), "telegram-say")
@@ -1225,7 +1450,7 @@ class TelegramInlet:
     async def _image(self, inbound: Inbound, target: str, epoch: int) -> None:
         try:
             image = await self.api.receive_image(inbound.image)
-            if self._awaiting_answer:
+            if self._answers_pending(None):
                 await self._say(inbound.chat_id, "A question is waiting. Answer it in text, then resend the image.")
                 return
             if target == "buddy":
@@ -1268,6 +1493,137 @@ class TelegramInlet:
         if not result.get("ok"):
             await self._say(chat_id, "I couldn't grab the screen: " + str(result.get("reason")))
 
+    # -- inline buttons --
+    def _register(self, board: _Keyboard) -> None:
+        """Give each of a keyboard's choices a fresh short key. Old keys are forgotten past MAX_LIVE_BUTTONS,
+        oldest first: a tap on one of those is "expired", as after a restart."""
+        board.keys = []
+        for choice in board.choices:
+            self._tap_seq += 1
+            key = f"{self._tap_gen}.{self._tap_seq}"
+            board.keys.append(key)
+            self._taps[key] = (board, choice)
+        while len(self._taps) > MAX_LIVE_BUTTONS:
+            del self._taps[next(iter(self._taps))]
+
+    def _retire(self, board: Optional[_Keyboard], *, drop: bool = False) -> None:
+        """Forget a keyboard's keys; with ``drop``, take its buttons off the message too (fail-soft)."""
+        if board is None:
+            return
+        for key in board.keys:
+            self._taps.pop(key, None)
+        if drop and board.message_id and board.chat_id is not None:
+            self._spawn(self._drop_buttons(board.chat_id, board.message_id), "telegram-edit")
+
+    async def _send_choices(self, chat_id: Optional[int], text: str, board: _Keyboard, *,
+                            title: Optional[str] = None, subtitle: Optional[str] = None,
+                            fallback: Sequence[str] = (), per_row: int = 1) -> bool:
+        """Send ``text`` with the keyboard's buttons under it → True. When Telegram (or a fake) will not take
+        an inline keyboard, the keys are forgotten and the message goes as it did before buttons: plain,
+        or with ``fallback`` as a reply keyboard. The message is never lost for want of its buttons."""
+        if chat_id is None:
+            return False
+        self._register(board)
+        rows: list[list[tuple[str, str, str]]] = []
+        for i, (choice, key) in enumerate(zip(board.choices, board.keys, strict=True)):
+            if i % per_row == 0:
+                rows.append([])
+            rows[-1].append((choice.label, key, choice.style))
+        try:
+            board.message_id = int(await self.api.send_inline(chat_id, text, rows, title=title, subtitle=subtitle) or 0)
+            return True
+        except asyncio.CancelledError:
+            self._retire(board)
+            raise
+        except Exception as e:  # noqa: BLE001 — no buttons is today's message, never no message
+            self._retire(board)
+            log.warning("telegram: inline buttons not sent (%s); sent as a plain message",
+                        e if isinstance(e, BotApiError) else type(e).__name__)
+            await self._say(chat_id, text, title=title, subtitle=subtitle, buttons=fallback)
+            return False
+
+    async def _offer_picker(self, chat_id: int, text: str, choices: Sequence[Choice], *,
+                            title: Optional[str] = None, subtitle: Optional[str] = None,
+                            valid: Callable[[], bool] = lambda: True, fallback: Sequence[str] = ()) -> None:
+        """A picker as inline buttons whose tap sends the button's words (SAY). Only the latest picker is
+        live: a new one retires the last, whose buttons would now answer the wrong question."""
+        self._retire(self._picker_board, drop=True)
+        board = _Keyboard(chat_id, SAY, list(choices)[:MAX_INLINE_BUTTONS], valid=valid)
+        self._picker_board = board
+        await self._send_choices(chat_id, text, board, title=title, subtitle=subtitle, fallback=fallback)
+
+    def _on_tap(self, tap: Tap) -> None:
+        """One tap from the owner, decided here, synchronously, so two quick taps cannot both act. Every tap
+        is answered (answerCallbackQuery), whatever it did. A key this run did not make, a keyboard already
+        used, one for another chat or one whose moment has passed is answered and does nothing."""
+        entry = self._taps.get(tap.data)
+        board = entry[0] if entry is not None else None
+        if (entry is None or board is None or board.chat_id != tap.chat_id
+                or (board.message_id and tap.message_id and board.message_id != tap.message_id)):
+            self._spawn(self._answer_tap(tap, TAP_EXPIRED_LINE, drop=True), "telegram-tap")
+            return
+        choice = entry[1]
+        self._retire(board)
+        if not board.valid():
+            self._spawn(self._answer_tap(tap, TAP_EXPIRED_LINE, drop=True), "telegram-tap")
+            return
+        log.info("telegram: a %s button was tapped", board.kind)          # the kind, never the words
+        if board.kind == ANSWER:
+            future = board.future
+            if future is None or future.done():
+                self._spawn(self._answer_tap(tap, TAP_ANSWERED_LINE, drop=True), "telegram-tap")
+                return
+            # Exactly what a typed answer does (_handle): the waiting question gets these words. The prompt's
+            # own code then edits the message to say what was decided.
+            future.set_result(choice.value)
+            self._note("user", choice.value)
+            self._spawn(self._answer_tap(tap, choice.done or choice.label), "telegram-tap")
+            return
+        self._spawn(self._answer_tap(tap, ("Typed " + choice.value) if board.kind == TYPE else choice.label,
+                                     drop=True), "telegram-tap")
+        if board.kind == TYPE:
+            self._spawn(self._type_to_claude(tap.chat_id, choice.value, tapped=True), "telegram-claude")
+        else:
+            self._handle(Inbound(chat_id=tap.chat_id, user_id=tap.user_id, text=choice.value))
+
+    async def _answer_tap(self, tap: Tap, text: str, *, drop: bool = False) -> None:
+        try:
+            await self.api.answer_callback(tap.query_id, text)
+        except asyncio.CancelledError:
+            raise
+        except Exception as e:  # noqa: BLE001 — the spinner times out on its own; the tap already acted
+            log.warning("telegram: could not answer a tap (%s)", e if isinstance(e, BotApiError) else type(e).__name__)
+        if drop and tap.message_id:
+            await self._drop_buttons(tap.chat_id, tap.message_id)
+
+    async def _drop_buttons(self, chat_id: int, message_id: int) -> None:
+        try:
+            await self.api.drop_buttons(chat_id, message_id)
+        except asyncio.CancelledError:
+            raise
+        except Exception as e:  # noqa: BLE001 — buttons left on a message only answer "expired"
+            log.debug("telegram: could not take buttons off a message (%s)", type(e).__name__)
+
+    async def _settle_prompt(self, board: _Keyboard, text: str, title: Optional[str],
+                             subtitle: Optional[str]) -> None:
+        """A decided prompt, rewritten to say what was decided, its buttons gone (fail-soft: the decision
+        stands whether or not the message changes)."""
+        if not board.message_id or board.chat_id is None:
+            return
+        try:
+            await self.api.edit_message(board.chat_id, board.message_id, text, title=title, subtitle=subtitle)
+        except asyncio.CancelledError:
+            raise
+        except Exception as e:  # noqa: BLE001
+            log.debug("telegram: could not edit a prompt (%s)", type(e).__name__)
+            await self._drop_buttons(board.chat_id, board.message_id)
+
+    def _retire_options(self) -> None:
+        """The relayed question's option buttons stop meaning anything once the owner types to Claude, the
+        turn ends, or the relay moves: a late tap would type a number into whatever comes next."""
+        board, self._options_board = self._options_board, None
+        self._retire(board, drop=True)
+
     # -- fresh Codex folder chats --
     async def _codex_command(self, chat_id: int, action: str, selection: Optional[str], epoch: int) -> None:
         async with self._codex_lock:
@@ -1288,7 +1644,14 @@ class TelegramInlet:
                 if epoch != self._codex_epoch:
                     return
                 if not selection:
-                    await self._say(chat_id, codex_chat.folder_menu(folders) or "No accessible saved folders.")
+                    menu = codex_chat.folder_menu(folders)
+                    if not menu:
+                        await self._say(chat_id, "No accessible saved folders.")
+                        return
+                    # Each folder a button whose tap sends "codex <folder>", as typing it would. A name two
+                    # folders share is listed by its full path, and the button sends the path.
+                    entries = menu.split("\n")
+                    await self._offer_picker(chat_id, menu, [Choice(Path(e).name or e, "codex " + e) for e in entries])
                     return
                 folder = codex_chat.select_folder(folders, selection)
                 self._codex_title = folder.name
@@ -1351,7 +1714,7 @@ class TelegramInlet:
             self._launch = None
         trigger = claude_launch.TRIGGER.match(inbound.text.strip())
         if trigger is None and (self._launch is None
-                                or self._awaiting_answer):
+                                or self._answers_pending(inbound.text)):
             return False
         if trigger is None and word in STOP_WORDS:
             self._launch = None
@@ -1370,7 +1733,15 @@ class TelegramInlet:
 
     async def _launch_step(self, chat_id: int, step: claude_launch.Step) -> None:
         log.info("telegram: new session step (%s)", "open" if step.folder else "ask")
-        await self._say(chat_id, step.text, title=step.title, buttons=step.buttons)
+        if step.buttons:
+            # Inline, and live only while this tree is the one open: a tap on an older step's button, or
+            # after the tree closed, is "expired" rather than an answer to a question no longer asked.
+            flow = self._launch
+            await self._offer_picker(chat_id, step.text, [Choice(b, b) for b in step.buttons], title=step.title,
+                                     valid=lambda: flow is not None and self._launch is flow and not flow.expired(),
+                                     fallback=step.buttons)
+        else:
+            await self._say(chat_id, step.text, title=step.title)
         if step.folder is None or step.harness is None:
             if step.done:
                 self._join_after_launch = False
@@ -1412,10 +1783,13 @@ class TelegramInlet:
         self.claude = False
         self._join_after_launch = True                   # the picker's "new claude" joins what it opens
         log.info("telegram: claude relay asks which of %d sessions", len(cwds))
-        self._spawn(self._say(inbound.chat_id, CLAUDE_PICK_LINE, title=CLAUDE_ON_TITLE,
-                              buttons=[f"claude on {n}" for n in names] + [NEW_CLAUDE_BUTTON]), "telegram-say")
+        words = [f"claude on {n}" for n in names] + [NEW_CLAUDE_BUTTON]
+        self._spawn(self._offer_picker(inbound.chat_id, CLAUDE_PICK_LINE,
+                                       [Choice(n, w) for n, w in zip(names + ["New claude"], words, strict=True)],
+                                       title=CLAUDE_ON_TITLE, fallback=words), "telegram-say")
 
     def _relay_to(self, cwd: str) -> None:
+        self._retire_options()
         self.claude, self._relay_pin, self._relay_cwd = True, cwd, cwd
         log.info("telegram: claude relay on")
 
@@ -1436,13 +1810,17 @@ class TelegramInlet:
         self._spawn(self._launch_step(chat_id, step), "telegram-launch")
 
     # -- the Claude Code relay --
-    async def _type_to_claude(self, chat_id: int, text: str, message_id: int = 0) -> None:
+    async def _type_to_claude(self, chat_id: int, text: str, message_id: int = 0, *, tapped: bool = False) -> bool:
+        """Type one line into the joined session → True when it went in. ``tapped``: an option button's
+        number, whose tap was already answered, so no reaction or "Typed." follows it."""
+        if not tapped:
+            self._retire_options()                         # typed instead: the option buttons are spent
         if not self.claude:
             await self._say(chat_id, CLAUDE_NOT_ON_LINE)
-            return
+            return False
         if self._terminal is None or not text:
             await self._say(chat_id, "I can't reach a terminal on this computer.")
-            return
+            return False
         try:
             said = await self._terminal(self._relay_pin or self._relay_cwd, text)
         except Exception as e:  # noqa: BLE001
@@ -1450,7 +1828,10 @@ class TelegramInlet:
             said = "I couldn't type that into the terminal."
         if said:
             await self._say(chat_id, said)
-            return
+            return False
+        if tapped:
+            self._keep_typing(chat_id, "relay", TYPING_RELAY_SECS)
+            return True
         # It went in: a reaction on the owner's own message says so (owner, 2026-09-23), not a line.
         try:
             if not message_id:
@@ -1462,16 +1843,19 @@ class TelegramInlet:
         # Claude is on it: "typing…" until it says something, asks, waits on the owner or ends its turn
         # (relay_text, relay_tool_call, relay_notification, decide_permission, relay_turn_ended), or the cap.
         self._keep_typing(chat_id, "relay", TYPING_RELAY_SECS)
+        return True
 
-    def relay_line(self, body: str, title: str = CLAUDE_TITLE, subtitle: str = "") -> None:
+    def relay_line(self, body: str, title: str = CLAUDE_TITLE, subtitle: str = "",
+                   options: Sequence[Choice] = ()) -> None:
         """One message for the phone (what Claude said, a question it asks), batched with its neighbours:
-        a burst of short messages under the same title is one text, not ten (``_flush_relay``)."""
+        a burst of short messages under the same title is one text, not ten (``_flush_relay``). ``options``
+        become buttons under it that type their value into the terminal (a question's numbered options)."""
         if not self.claude or self._chat_id is None:
             return
         body = body.strip()
         if not body:
             return
-        self._relay_lines.append((title, subtitle, body))
+        self._relay_lines.append((title, subtitle, body, tuple(options)))
         if self._relay_flush is None or self._relay_flush.done():
             self._relay_flush = self._spawn(self._flush_relay(), "telegram-relay")
 
@@ -1480,15 +1864,25 @@ class TelegramInlet:
         entries, self._relay_lines = self._relay_lines, []
         # Neighbours under one title become one message, their bodies as paragraphs; a change of title
         # (Claude said, then Claude asks) starts the next.
-        groups: list[tuple[str, str, list[str]]] = []
-        for title, subtitle, body in entries:
-            if groups and groups[-1][0] == title and groups[-1][1] == subtitle:
+        # A message with buttons takes nothing after it, so its buttons stay under the words they answer.
+        groups: list[tuple[str, str, list[str], list[tuple[Choice, ...]]]] = []
+        for title, subtitle, body, options in entries:
+            if groups and groups[-1][0] == title and groups[-1][1] == subtitle and not groups[-1][3][0]:
                 groups[-1][2].append(body)
+                groups[-1][3][0] = options
             else:
-                groups.append((title, subtitle, [body]))
-        for title, subtitle, bodies in groups:
-            if self._chat_id is not None:
+                groups.append((title, subtitle, [body], [options]))
+        for title, subtitle, bodies, (options,) in groups:
+            if self._chat_id is None:
+                continue
+            if not options:
                 await self._say(self._chat_id, "\n\n".join(bodies), title=title, subtitle=subtitle or None)
+                continue
+            self._retire_options()
+            board = _Keyboard(self._chat_id, TYPE, list(options), valid=lambda: self.claude)
+            self._options_board = board
+            await self._send_choices(self._chat_id, "\n\n".join(bodies), board, title=title,
+                                     subtitle=subtitle or None)
 
     def relay_tool_call(self, tool: str, hint: str) -> None:
         """A tool call the daemon saw. Only a question for the owner (AskUserQuestion) reaches the phone:
@@ -1496,10 +1890,12 @@ class TelegramInlet:
         if tool == "AskUserQuestion":
             self._stop_typing(self._chat_id, "relay")
             body = " ".join(str(hint).split()) or "(see the terminal)"
+            # One question's options become buttons; a tap types the option's number, as the reply does.
+            options = [Choice(f"{n}. {label}", str(n)) for n, label in question_options(body)]
             if "(1. " in body:
                 body += "\n\nReply with the option's number."
             self._last_ask_at = self._clock()
-            self.relay_line(body, title=CLAUDE_ASKS_TITLE)
+            self.relay_line(body, title=CLAUDE_ASKS_TITLE, options=options)
 
     async def relay_text(self, text: str, cwd: str = "") -> None:
         """What Claude Code just said, when the relay is on, with its paragraphs and lists as it wrote
@@ -1529,6 +1925,7 @@ class TelegramInlet:
         if cwd and self._relay_pin and not _same_folder(cwd, self._relay_pin):
             return
         self._stop_typing(self._chat_id, "relay")
+        self._retire_options()                             # the turn is over: its question was answered
 
     async def relay_notification(self, kind: str, message: str, waits: bool) -> None:
         if not self.claude or self._chat_id is None or not waits:
@@ -1540,9 +1937,14 @@ class TelegramInlet:
 
     async def decide_permission(self, tool: str, hint: str, cwd: str = "", *, always: bool = False) -> Optional[str]:
         """A permission prompt as a question in the chat. "allow" | "deny" | None (no answer: Claude Code's
-        own flow decides). Only the owner's next message answers, exactly as a task question. Asked only
-        with ``always`` (the daemon's always_ask class) or CC_BUDDY_TELEGRAM_ASK=1; otherwise the relay
-        allows without asking and this is never reached."""
+        own flow decides). Asked only with ``always`` (the daemon's always_ask class, or Jev's risky verdict)
+        or CC_BUDDY_TELEGRAM_ASK=1; otherwise the relay allows without asking and this is never reached.
+
+        It comes with Allow and Deny buttons (owner, 2026-09-23). A tap answers it; so does a typed clear
+        yes or no. Anything else the owner types meanwhile is not taken as the answer: it goes to Claude as
+        usual and the prompt keeps waiting (``_answers_pending``). When the buttons cannot be sent, the
+        prompt is plain text and the owner's next message is its answer, as before. Once decided, or when
+        it times out, the message is edited to say what happened and the buttons go."""
         if not self.claude or self._chat_id is None or not (always or self.config.ask_permissions):
             return None                                   # off by default: Claude Code's own flow decides
         if self._awaiting_answer:
@@ -1551,20 +1953,35 @@ class TelegramInlet:
             self._relay_cwd = cwd
         self._stop_typing(self._chat_id, "relay")          # asking is not working
         # The command as code, so nothing in it is read as markup; the repo under the title.
-        question = "```\n" + hint.strip()[:300] + "\n```\n\nyes / no?"
+        command = "```\n" + hint.strip()[:300] + "\n```"
+        question = command + "\n\nyes / no?"
         self._last_ask_at = self._clock()
         title = CLAUDE_PERMISSION_TITLE.format(tool=tool)
+        subtitle = Path(cwd).name if cwd else None
         loop = asyncio.get_running_loop()
-        self._pending_answer = loop.create_future()
+        future = self._pending_answer = loop.create_future()
+        self._pending_strict = False
+        board = _Keyboard(self._chat_id, ANSWER, list(ALLOW_DENY), future=future)
         self._note("buddy", f"{title}: {hint.strip()[:300]}")
+        outcome: Optional[str] = None
         try:
-            await self._say(self._chat_id, question, title=title, subtitle=Path(cwd).name if cwd else None)
-            answer = await asyncio.wait_for(self._pending_answer, timeout=self._permission_timeout)
+            buttons = await self._send_choices(self._chat_id, question, board, title=title, subtitle=subtitle,
+                                               per_row=2)
+            if self._pending_answer is future and not future.done():
+                self._pending_strict = buttons
+            answer = await asyncio.wait_for(future, timeout=self._permission_timeout)
+            outcome = consent.decision(answer) or None    # neither a clear yes nor a no: the dialog decides
         except asyncio.TimeoutError:
-            return None
+            outcome = None
         finally:
-            self._pending_answer = None
-        return consent.decision(answer) or None          # neither a clear yes nor a no: the dialog decides
+            if self._pending_answer is future:
+                self._pending_answer = None
+                self._pending_strict = False
+            self._retire(board)
+            line = {"allow": ALLOW_DENY[0].done, "deny": ALLOW_DENY[1].done}.get(outcome or "",
+                                                                                PERMISSION_DEFERRED_LINE)
+            self._spawn(self._settle_prompt(board, command + "\n\n" + line, title, subtitle), "telegram-edit")
+        return outcome
 
     async def _stop(self, chat_id: int) -> None:
         if self._agent is not None and self.task_running:
@@ -1757,7 +2174,7 @@ class TelegramInlet:
             return {"ok": False, "reason": decision.why}
         if decision.action == "ask":
             question = composio_tools.describe_for_confirmation(name, args) + "\n\nyes / no?"
-            answer = (await self._ask_user(question, chat_id, title=APP_ASKS_TITLE)).strip().lower()
+            answer = (await self._ask_user(question, chat_id, title=APP_ASKS_TITLE, choices=ALLOW_DENY)).strip().lower()
             if not consent.approves(answer):
                 return {"ok": False, "reason": "the owner said no; do not retry it"}
         return await asyncio.to_thread(self._apps.execute, name, args)
@@ -1830,22 +2247,41 @@ class TelegramInlet:
         elif state is not None:
             self._show(state)
 
-    async def _ask_user(self, question: str, chat_id: int, title: str = TASK_ASKS_TITLE) -> str:
+    async def _ask_user(self, question: str, chat_id: int, title: str = TASK_ASKS_TITLE,
+                        choices: Optional[Sequence[Choice]] = None) -> str:
+        """A question for the owner from a task, an app or Codex. The owner's next message is its answer,
+        whatever it says: a free question needs words. A question whose answers are known (``choices``, or
+        what ``answer_choices`` reads off its wording: a yes/no, Codex's app-access choices) also gets
+        buttons, and a tap is that same answer. Afterwards the question is edited to say what was chosen."""
         loop = asyncio.get_running_loop()
-        self._pending_answer = loop.create_future()
+        future = self._pending_answer = loop.create_future()
         self._pending_answer_chat = chat_id
+        self._pending_strict = False                       # a task's question: any next message answers it
         self._note("buddy", question)
+        choices = tuple(answer_choices(question) if choices is None else choices)
+        board = _Keyboard(chat_id, ANSWER, list(choices), future=future) if choices else None
         # Waiting on the owner is not working: no "typing…" under the question. It comes back with the answer.
         paused = self._end_typing(chat_id)
+        line = UNANSWERED_LINE
         try:
-            await self._say(chat_id, question, title=title)
-            return await asyncio.wait_for(self._pending_answer, timeout=self.config.ask_timeout_secs)
+            if board is not None:
+                await self._send_choices(chat_id, question, board, title=title, per_row=2 if len(choices) == 2 else 1)
+            else:
+                await self._say(chat_id, question, title=title)
+            answer = await asyncio.wait_for(future, timeout=self.config.ask_timeout_secs)
+            said = answer.strip().lower().rstrip(".!")
+            line = next((c.done or c.label for c in choices if c.value == said), ANSWERED_LINE)
+            return answer
         except asyncio.TimeoutError:
-            await self._say(chat_id, "No answer, so I took that as a no.")
+            await self._say(chat_id, UNANSWERED_LINE)
             return f"no (no answer within {int(self.config.ask_timeout_secs)} seconds)"
         finally:
-            self._pending_answer = None
-            self._pending_answer_chat = None
+            if self._pending_answer is future:
+                self._pending_answer = None
+                self._pending_answer_chat = None
+            if board is not None:
+                self._retire(board)
+                self._spawn(self._settle_prompt(board, question + "\n\n" + line, title, None), "telegram-edit")
             for reason, ticks in paused.items():
                 self._keep_typing(chat_id, reason, ticks * TYPING_EVERY_SECS)
 

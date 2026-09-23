@@ -118,11 +118,14 @@ Limits and gotchas:
   tapped Reply. The owner's answer then carries `reply_to_message`, so it can't
   be confused with an unrelated text.
 
-For buddy: **reply keyboards are in use.** `send_message(buttons=...)` sends a
-one-time, resized keyboard for the "new claude" tree and the "claude on"
-picker. A tap sends the text as the owner's message, so no callback path was
-needed. Inline keyboards are not in use. They would give yes/no prompts,
-option pickers and folder menus that can't be mistaken for a chat message.
+For buddy: **inline keyboards are in use** (2026-09-23). `BotApi.send_inline`
+sends yes/no prompts, AskUserQuestion options and the pickers ("claude on",
+"new claude", codex folders) with `callback_data` keys of the form
+`<generation>.<n>`; the meaning stays on the Mac (`TelegramInlet._taps`).
+`getUpdates` asks for `callback_query`, `accept_tap` checks the owner, and
+every tap gets `answerCallbackQuery`. The reply keyboard
+(`send_message(buttons=...)`) is now only the fallback for a picker whose
+inline keyboard Telegram refuses.
 ForceReply is not in use. It would tie a task's answer to its question.
 
 ## 2. Reactions
@@ -499,12 +502,16 @@ What the relay does now (`telegram.py` and `daemon.py`):
 3. **A pending yes/no eats the next message.** While `decide_permission` waits,
    any plain text is taken as the answer. A message meant for Claude is not
    typed. `consent.decision` finds no yes or no, the prompt goes back to the Mac
-   where nobody is, and the owner's message is lost.
+   where nobody is, and the owner's message is lost. *Fixed 2026-09-23:* the
+   prompt has Allow/Deny buttons, only a tap or a clear yes/no answers it, and
+   other text goes to Claude while it waits. Without buttons (Telegram refused
+   them) the old rule holds.
 4. **One question at a time.** A second permission while one is pending returns
    `None` at once and goes to the Mac dialog. With the owner away, that session
    stalls until the hook times out.
 5. **No word when a prompt times out.** After 240 s the phone is not told that
-   the dialog went back to the Mac.
+   the dialog went back to the Mac. *Fixed 2026-09-23:* the prompt is edited to
+   say the dialog on the Mac decides, and its buttons go.
 6. **Silent drops.** Text from a session other than the pinned one is dropped
    with no sign on the phone.
 7. **Long replies are cut.** Anything past 1500 characters becomes "the rest is
@@ -618,7 +625,11 @@ problem, not a Telegram one, but it is the most serious weakness in the relay.
    at startup. *Done 2026-09-23.*
 2. **Callback plumbing plus inline yes/no** for permission prompts, Composio,
    Jev and Codex app prompts. Stops a pending prompt eating the next message.
-3. **AskUserQuestion options and pickers as inline buttons.**
+   *Done 2026-09-23.*
+3. **AskUserQuestion options and pickers as inline buttons.** *Done
+   2026-09-23.* The pickers moved to inline buttons because they can't be
+   mistaken for a chat message and are taken away once used. A tap feeds the
+   same code path as typing the button's words.
 4. **`sendMessageDraft`** for relayed Claude output and think_hard, with a
    repeated `typing` action between drafts.
 5. **Task progress in one edited message**, with a Stop button.

@@ -67,7 +67,9 @@ The [Telegram door](docs/stackchan/telegram.md) is **off by default**. With it o
   session to the phone: it picks the only one, offers buttons when there are
   several, and opens a new one when there are none. Sessions whose terminal
   has closed are left out. A 👍 on your text means it was typed, and
-  "typing…" shows until Claude answers.
+  "typing…" shows until Claude answers. Permission prompts have **Allow** and
+  **Deny** buttons, and Claude's questions have a button per option. Other text
+  you type while a prompt waits still goes to Claude.
 - **A `/` menu** of the code words (`/claude_on`, `/new_claude`, `/codex`,
   `/rundown`, `/screenshot`, `/stealth`, `/wake`, `/stop` and more), in your
   chat only.
@@ -362,6 +364,7 @@ Every message is shaped for the phone by `telegram_format.py`.
 | Images | Send photos or image files with captions (still JPEG/PNG/WebP/GIF, up to 10 MB). See [image routing and retention](docs/stackchan/telegram.md#receiving-images). |
 | `rundown` | Today's email, calendar, Slack and Obsidian todos through the packaged [rundown skill](bridge/src/cc_buddy_bridge/skills/rundown/SKILL.md). Read-only; names disconnected sources, never result limits. |
 | `claude on` | Streams Claude Code's visible text to the phone (never the gray tool lines or thinking) and types your replies in; tool calls run as in bypass mode. Jev judges each relayed shell command for risk (shadow by default). |
+| Buttons | Yes/no prompts (Claude permissions, app actions, Codex approvals), Claude's question options and the pickers are inline buttons. A tap does what typing would; typing still works. |
 | `codex on` / `codex <folder>` | Starts a new Codex chat in a saved folder, with approvals relayed to Telegram. `stop` interrupts, `codex off` returns to buddy, `buddy:` addresses buddy directly. |
 | `new claude` | Opens a coding session in Warp from a few short texts. |
 | Records (`CC_BUDDY_RECORDS=1`) | Typed, git-tracked markdown records and a profile, written only by a nightly reconcile (`records.py`). |
