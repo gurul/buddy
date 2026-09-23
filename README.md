@@ -6,60 +6,69 @@
 
 **A small robot that lives on your desk, with a Mac as its host.** buddy listens for
 “hey buddy,” follows the person talking to it, helps with computer tasks, and keeps a
-diary of what it notices. Its eyes, head, LEDs and chirps express what it is doing
-and how it feels. It also has a learning workspace: a whiteboard and a tutor that
-helps you work through a problem one step at a time.
+diary of what it notices. Its eyes, head, LEDs and chirps show what it is doing and
+how it feels. Away from the desk, you can text it.
 
-The current robot is an **M5StackChan K151 (CoreS3 / ESP32-S3)** running custom
-Arduino firmware, connected over USB serial to a Python daemon. A native macOS app
-and desktop widget show its diary, memories and lessons. You can try the learning
-workspace without the robot, and its offline demo needs no API key.
+The robot is an **M5StackChan K151 (CoreS3 / ESP32-S3)** running custom Arduino
+firmware, connected over USB serial to a Python daemon on the Mac. A native macOS app
+and desktop widget show its diary, memories and lessons.
 
-- [What buddy does](#what-buddy-does)
-- [Learning workspace](#learning-workspace)
-- [Get started](#get-started)
-- [Technical summary](#technical-summary)
-- [Data and controls](#data-and-controls)
-- [Repository guide](#repository-guide)
-- [Development](#development)
-- [Credits](#credits)
+<p align="center">
+  <a href="docs/assets/buddy-launch.mp4"><img src="docs/assets/buddy-launch-poster.jpg" alt="Watch the buddy launch film (93 seconds)" width="80%"></a>
+  <br>
+  <a href="docs/assets/buddy-launch.mp4"><b>▶ Watch the launch film</b></a> · 93 s · <a href="docs/launch-video/remotion/README.md">how it was made</a>
+</p>
+
+**Contents:** [What buddy does](#what-buddy-does) ·
+[Get started](#get-started) · [How it works](#how-it-works) ·
+[Data and controls](#data-and-controls) · [Repository guide](#repository-guide) ·
+[Development](#development) · [Credits](#credits)
 
 ## What buddy does
+
+### On your desk
 
 - **Listens and responds.** Local wake-word detection starts a voice session. By
   default, replies appear as captions on the robot while it chirps; spoken audio
   through the Mac is optional. Web search and a reasoning backend handle questions
   that need more than a quick reply.
-- **Uses your Mac.** Simple app launches and web searches run through code shortcuts.
-  Labelled controls can be handled through macOS Accessibility; more complex tasks
-  use a model-driven screenshot and Python loop. You can redirect a task while it
-  runs or say “stop.” Consequential actions are routed to the planner, which is
-  instructed to ask before proceeding.
 - **Sees and moves.** Host-side face detection helps it follow a conversation
-  partner, distinguish its owner, and remember where they usually sit. It can look
+  partner, recognise its owner, and remember where they usually sit. It can look
   for an object, explore the room, take a photo on request, or dance.
 - **Has moods and a diary.** An on-board affect engine drives expressions, movement,
   LED patterns and chirps. The host keeps observations, selected thoughts and
   photos, a room/person profile, and nightly reflections. Conversation memories
   are stored separately as distilled notes; “remember that” promotes a spoken fact.
-- **Takes notes.** Start a room-note session with `cc-buddy-bridge take-notes start`;
-  stopping it produces a write-up of decisions, actions and open questions.
-- **Keeps your personal notes.** With the [second brain](docs/stackchan/second-brain.md)
-  enabled, Telegram can save notes, update an existing shopping list, check off
-  todos, and undo a note edit. Changes stay in the same Markdown file, with
-  previous contents saved for recovery.
-- **Starts coding sessions from your phone.** Text `new claude` on Telegram and
-  answer personal or work, then a folder. buddy opens Warp on the Mac with Claude Code
-  (personal) or era-code (work) running there. See
-  [Telegram](docs/stackchan/telegram.md#start-a-coding-session).
 - **Mirrors Claude Code.** Session hooks and transcript updates make buddy sleep,
   work, celebrate, or ask for attention. A tap can focus a waiting terminal;
   Claude Code permission prompts remain in that terminal.
 - **Shows its day.** The macOS menu-bar app, diary window and WidgetKit extension
-  expose thoughts, photos, feelings, conversation notes and saved lessons, with
+  show thoughts, photos, feelings, conversation notes and saved lessons, with
   microphone and daemon power controls.
 
-## Learning workspace
+### On your Mac
+
+- **Does computer tasks.** Voice and text tasks run through Codex Computer Use,
+  with progress, permission questions and “stop” relayed through buddy. See
+  [how a task is routed](#how-a-computer-task-is-routed).
+- **Takes notes.** `cc-buddy-bridge take-notes start` records a room-note session;
+  stopping it produces a write-up of decisions, actions and open questions.
+
+### From your phone (opt-in)
+
+The [Telegram door](docs/stackchan/telegram.md) is **off by default**. With it on:
+
+- **Chat, start or stop a Mac task,** answer the questions a task asks, and get a
+  photo from the robot's camera or a screenshot.
+- **`rundown`** summarises today's email, calendar, Slack mentions/DMs and Obsidian
+  todos. It only reads.
+- **`new claude`** opens Warp on the Mac with Claude Code (personal) or era-code
+  (work) in a folder you pick. **`claude on`** relays that terminal to the phone.
+- **Keeps your personal notes.** With the [second brain](docs/stackchan/second-brain.md)
+  on, a text saves a note, updates a list, checks off a todo, or undoes an edit in
+  your Markdown vault.
+
+### Learning workspace
 
 <p align="center">
   <img src="docs/assets/buddy-lesson.png" alt="A buddy lesson with a problem, whiteboard, hint, and controls to check work or show one step" width="80%">
@@ -71,29 +80,35 @@ before you start. Work on the **tldraw whiteboard**, type your ideas, or think o
 loud through the robot's voice session.
 
 The tutor is prompted to give a hint, check the first incorrect step, or show
-exactly one next step. Its explanations stay beside your work. A final step may
-finish the problem; the workflow is designed to avoid dumping the whole solution
-at once. Lessons, board revisions and feedback are saved to a searchable dashboard.
+exactly one next step, and its explanations stay beside your work. A final step may
+finish the problem; the workflow is designed to avoid giving the whole solution at
+once. Lessons, board revisions and feedback are saved to a searchable dashboard.
 
-The browser, voice agent and CLI share the same lesson when the daemon is running:
+Say “lesson” to open the workspace, or ask “hey buddy, teach me something.” The
+browser, voice agent and CLI share the same lesson while the daemon runs:
 
 ```bash
 cc-buddy-bridge lesson start --mode learn --topic "adding fractions" --level "Grade 4"
 cc-buddy-bridge lesson ideas --text "I think I add the tops"
-cc-buddy-bridge lesson hint
-cc-buddy-bridge lesson check
-cc-buddy-bridge lesson step
+cc-buddy-bridge lesson hint     # or: check, step
 ```
 
-Say “lesson” to open the workspace, or ask “hey buddy, teach me something.” Live
-lessons use OpenAI by default, with OpenRouter opt-in and optional Exa practice
-references. The offline demo uses fixed math examples and does not recognize
-handwriting or images. See [the learning guide](docs/learning.md) for the complete
-workflow, think-out-loud mode, configuration and current limits.
+Live lessons use OpenAI by default, with OpenRouter opt-in and optional Exa practice
+references. See [the learning guide](docs/learning.md) for the full workflow,
+think-out-loud mode, configuration and current limits.
+
+### Experimental
+
+- **Live Laya expressions.** Local Laya can choose eleven temporary eye expressions,
+  including a wink, from conversation and diary text, even while speaking. The Mac
+  runs the model and the board renders the cues; Laya controls the eyes only. This
+  owner-enabled mode uses the original checkpoint, because the tuned head did worse
+  on fresh examples. See [controls, limits and device verification](docs/stackchan/laya-expressions/README.md)
+  and the [expression-tuning study](docs/stackchan/laya-emotion/README.md).
 
 ## Get started
 
-### Try the learning workspace without hardware
+### 1. Try the learning workspace (no hardware)
 
 From the repository root, with **Python 3.11+**:
 
@@ -102,29 +117,23 @@ python3 tools/start_learning.py --demo --data-dir .demo-data --port 48767
 ```
 
 Open [the demo](http://127.0.0.1:48767/) and choose **Play workflow demo**, or work
-through an example yourself. No bridge installation or API key is required.
-There is also a [recorded walkthrough](docs/learning-demo/buddy-learning-demo.webm).
+through an example yourself. No bridge install or API key is needed. The offline
+demo uses fixed math examples and does not recognise handwriting or images. There
+is also a [recorded walkthrough](docs/learning-demo/buddy-learning-demo.webm).
 
-For live tutoring, put `OPENAI_API_KEY=...` in
-`~/.config/cc-buddy-bridge/env`, then run:
+For live tutoring, put `OPENAI_API_KEY=...` in `~/.config/cc-buddy-bridge/env`, then
+run `python3 tools/start_learning.py`. This serves
+[the learning dashboard](http://127.0.0.1:48766/); if the daemon already serves that
+port, use its dashboard instead. Standalone mode gives tutoring and the board; robot
+voice needs the daemon. Use `--env-file /path/to/env` for a settings file elsewhere,
+including in WSL.
 
-```bash
-python3 tools/start_learning.py
-```
+### 2. Set up the Mac host
 
-This serves [the learning dashboard](http://127.0.0.1:48766/). If the bridge daemon
-already serves that port, open its dashboard instead of starting a second server.
-Standalone mode provides tutoring and the board; robot voice requires the daemon.
-Use `--env-file /path/to/env` if the settings file is elsewhere, including in WSL.
-
-### Set up the Mac host
-
-The full robot experience targets **macOS**; the bridge declares Python 3.11+,
-with Python 3.12 used in the setup below. macOS Vision, Accessibility and the native
-widget are platform-specific. The bridge also contains Linux/Windows service and
-legacy BLE support; those do not provide the complete Mac experience.
-
-Run these commands from the repository root:
+The full robot experience targets **macOS** (the bridge declares Python 3.11+; the
+setup below uses 3.12). macOS Vision, Accessibility and the widget are
+platform-specific. The bridge also has Linux/Windows service and legacy BLE support,
+without the complete Mac experience.
 
 ```bash
 python3.12 -m venv bridge/.venv
@@ -139,8 +148,7 @@ touch ~/.config/cc-buddy-bridge/env
 chmod 600 ~/.config/cc-buddy-bridge/env
 ```
 
-Edit that environment file to add your credentials and settings, preserving any
-existing entries:
+Add your credentials to that file, keeping any existing entries:
 
 ```dotenv
 OPENAI_API_KEY=your-key-here
@@ -148,7 +156,7 @@ OPENAI_API_KEY=your-key-here
 # EXA_API_KEY=your-key-here
 ```
 
-Then install the Claude Code hooks and the login service:
+Install the Claude Code hooks and the login service:
 
 ```bash
 bridge/.venv/bin/cc-buddy-bridge install
@@ -156,190 +164,216 @@ bridge/.venv/bin/cc-buddy-bridge install --service --serial-port '/dev/cu.usbmod
 ```
 
 Grant the daemon's Python **Microphone**, **Accessibility** and **Screen Recording**
-in System Settings → Privacy & Security. The daemon logs the binary that needs
-permission. Restart the daemon after changing its environment file.
+in System Settings → Privacy & Security; the daemon logs which binary needs it.
+Restart the daemon after changing its environment file.
 
-### Build and connect the robot
+### 3. Build and connect the robot
 
-Use the [firmware build guide](docs/stackchan/build.md) to install the Arduino
+Follow the [firmware build guide](docs/stackchan/build.md) to install the Arduino
 libraries and back up the factory firmware before the first flash. The build uses
 ESP32 core **3.3.10**, M5Unified/M5GFX, RoboEyes, AnimatedGIF and StackChan-BSP.
 **StackChan-BSP must include commit `8d4d6fc`**: the `1.1.0` tag lacks
 `TouchSensor.recalibrate()` and does not compile this firmware. Reference clones
 under `vendor/` are gitignored; see [dependency setup](docs/stackchan/repos.md).
 
-Once those prerequisites are installed, from the repository root:
-
 ```bash
 arduino-cli core install esp32:esp32@3.3.10
 ./tools/flash_stackchan.sh
 ```
 
-The flash script compiles the firmware, archives its ELF, releases the serial port
-from the login service, uploads, and restarts that service if it was running.
-Connect the robot by USB, then check the wake word:
+The flash script compiles the firmware, archives its ELF, frees the serial port from
+the login service, uploads, and restarts the service if it was running. Connect the
+robot by USB and check the wake word:
 
 ```bash
-bridge/.venv/bin/cc-buddy-bridge ears-check
-# Say “hey buddy”.
+bridge/.venv/bin/cc-buddy-bridge ears-check   # then say “hey buddy”
 tail -f ~/Library/Logs/cc-buddy-bridge.log
 ```
 
-The speaker amplifier stays off between chirps to prevent idle hiss or whine.
-If an older build makes noise between beeps, reflash with the command above.
-Quiet is the default: the external 5 V supply stays off after boot to eliminate
-the confirmed idle whine. This disables the rear LEDs and top touch sensor;
-the screen and head motors retain their separate supplies.
-For noise that persists while muted, the [build guide](docs/stackchan/build.md)
-describes timed screen, motor, and power-output isolation tests.
-
 Try “hey buddy, what time is it?”, “hey buddy, open Safari”, or “hey buddy, go
-explore.” For the desktop widget and diary app, follow the separate
+explore.” For the widget and diary app, follow the
 [widget build and signing instructions](docs/stackchan/widget.md) (macOS 14+).
-If buddy wakes but stalls, see the [voice troubleshooting guide](docs/stackchan/voice.md#when-buddy-hears-you-and-then-sits-still).
-If it sees camera frames but stops following faces, see the
-[face-tracking troubleshooting notes](docs/stackchan/vision.md#following-whoever-is-talking).
 
-## Technical summary
+<details>
+<summary><b>Troubleshooting</b></summary>
+
+- **Wakes but stalls:** see the [voice troubleshooting guide](docs/stackchan/voice.md#when-buddy-hears-you-and-then-sits-still).
+- **Sees camera frames but stops following faces:** see the
+  [face-tracking notes](docs/stackchan/vision.md#following-whoever-is-talking).
+- **Noise between chirps:** the speaker amplifier stays off between chirps, and the
+  external 5 V supply stays off after boot to remove the confirmed idle whine. This
+  disables the rear LEDs and top touch sensor; the screen and head motors have their
+  own supplies. If an older build makes noise, reflash. For noise that persists while
+  muted, the [build guide](docs/stackchan/build.md) describes timed screen, motor and
+  power-output isolation tests.
+
+</details>
+
+## How it works
 
 buddy splits real-time embodiment from host-side perception, storage and model
 calls. The firmware keeps the face and body responsive; the Python daemon
 coordinates voice, tasks, lessons and memory.
 
-```text
-Mac microphone → local wake-word detector → voice session + reasoning backend
-                                                   │
-Claude Code hooks / CLI ── local IPC ──→ Python daemon
-                                                   ├─ task router → desktop worker
-                                                   ├─ learning service → browser whiteboard
-                                                   ├─ diary / conversation memory → macOS app + widget
-                                                   └─ memory bus → optional rosbridge / claude-mem
-                                                   │
-                                             USB serial (NDJSON)
-                                                   │
-                                      StackChan firmware: eyes, head,
-                                      LEDs, chirps, touch and camera
-                                                   │
-                                      camera frames → host vision / diary
+```mermaid
+flowchart TB
+  subgraph you["You"]
+    voice(["“hey buddy”"])
+    phone(["Phone · Telegram"])
+    cc(["Claude Code sessions"])
+  end
+
+  subgraph cloud["Services"]
+    tg["Telegram Bot API"]
+    models["OpenAI<br/>gpt-live-1 · gpt-6-astra · web search"]
+    apps["Composio apps<br/>(opt-in)"]
+  end
+
+  subgraph mac["Mac · Python daemon (cc-buddy-bridge)"]
+    wake["Local wake word<br/>sherpa-onnx"]
+    brain{{"Voice and text brain<br/>tools + routing"}}
+    vision["Vision<br/>faces · objects · scenes"]
+    memory[("Diary · memories<br/>lessons")]
+  end
+
+  subgraph hands["On the Mac"]
+    chrome["Your Chrome<br/>(attach, opt-in)"]
+    codex["Codex<br/>Computer Use"]
+    warp["Warp ·<br/>Claude Code"]
+    board["tldraw<br/>whiteboard"]
+    widget["Menu-bar app<br/>+ widget"]
+  end
+
+  subgraph robot["Robot · M5StackChan (ESP32-S3)"]
+    face["Eyes · head<br/>LEDs · chirps"]
+    senses["Camera · touch"]
+  end
+
+  voice --> wake --> brain
+  phone <--> tg
+  tg <-->|"long poll, outbound only"| brain
+  cc -->|"hooks"| brain
+  brain <--> models
+  brain <--> apps
+  brain -->|"web goals first"| chrome
+  brain -->|"start_task"| codex
+  brain -->|"new claude"| warp
+  brain <-->|"lessons"| board
+  brain --> memory --> widget
+  brain <-->|"USB serial · NDJSON"| face
+  senses -->|"frames, taps"| vision --> brain
+
+  classDef person fill:#F4C3D4,stroke:#1F3A78,color:#1F3A78
+  classDef svc fill:#FFFDF8,stroke:#1F3A78,color:#1F3A78,stroke-dasharray:4 3
+  classDef core fill:#F1C85B,stroke:#1F3A78,color:#1F3A78
+  classDef app fill:#79C6B2,stroke:#1F3A78,color:#1F3A78
+  classDef body fill:#1B2350,stroke:#1F3A78,color:#FF74D4
+  class voice,phone,cc person
+  class tg,models,apps svc
+  class wake,brain,vision,memory core
+  class chrome,codex,warp,board,widget app
+  class face,senses body
+  style you fill:#FBF5EC,stroke:#1F3A78
+  style cloud fill:#FBF5EC,stroke:#1F3A78
+  style mac fill:#FBF5EC,stroke:#1F3A78
+  style hands fill:#FBF5EC,stroke:#1F3A78
+  style robot fill:#FBF5EC,stroke:#1F3A78
 ```
 
 | Component | Implementation and responsibility |
 |---|---|
-| Robot firmware | Arduino C++ on ESP32-S3; M5StackChan BSP and M5Unified for hardware, RoboEyes for the face. Local state machines handle gaze, affect, conversation phases, motion and synthesized chirps. |
-| Host bridge | Python with `asyncio`; `cc-buddy-bridge` is the CLI and daemon entry point. Hooks and CLI commands use local JSON IPC; the current robot link uses newline-delimited JSON over USB serial. |
-| Voice and reasoning | sherpa-onnx keyword spotting with sounddevice audio input; the configured defaults are `gpt-live-1` for voice and `gpt-6-astra` for its reasoning backend. Captions are the default output. |
-| Desktop control | Buddy's voice and text `start_task` tool delegates to Codex app-server and its installed `cua_repl.js` Computer Use plugin. Progress, explicit permissions, results, steering and cancellation return through Buddy. No alternate UI driver is used if Codex is unavailable. |
+| Robot firmware | Arduino C++ on ESP32-S3; M5StackChan BSP and M5Unified for hardware, RoboEyes for the face. Local state machines handle gaze, affect, conversation phases, motion and synthesised chirps. |
+| Host bridge | Python with `asyncio`; `cc-buddy-bridge` is the CLI and daemon entry point. Hooks and CLI commands use local JSON IPC; the robot link is newline-delimited JSON over USB serial. |
+| Voice and reasoning | sherpa-onnx keyword spotting with sounddevice audio input; the configured defaults are `gpt-live-1` for voice and `gpt-6-astra` for reasoning. Captions are the default output. Voice, text and deep reasoning use OpenAI's built-in web search by default (`websearch.py`); Exa is opt-in. |
+| Desktop control | The voice and text `start_task` tool delegates to Codex app-server and its installed `cua_repl.js` Computer Use plugin. Progress, explicit permissions, results, steering and cancellation return through buddy. |
 | Vision and memory | macOS Vision for face detection, host-side identity/following logic, model-assisted scene observations and reflections, plus separate diary and conversation stores. |
 | Learning | Python HTTP service on `127.0.0.1:48766`, SQLite persistence, and a React/TypeScript tldraw canvas built with Vite. Tutor responses use a validated JSON shape for problems, feedback, steps and completion state. |
 | Native UI | SwiftUI menu-bar app and diary window, with a WidgetKit extension. The helper mirrors local data into an App Group snapshot for the widget. |
-| Memory integrations | In-process publish/subscribe bus; optional rosbridge-compatible WebSocket endpoint and claude-mem sink/recall integration. Neither external integration is required. |
+| Memory integrations | In-process publish/subscribe bus; optional rosbridge-compatible WebSocket endpoint and claude-mem sink/recall. Neither is required. |
 
-### How a computer request is routed
+### How a computer task is routed
 
-Voice and text `start_task(goal)` now create a fresh ephemeral Codex session through
-`codex_computer.py`. The adapter checks that `cua_repl.js` is present before starting
-the task. Codex operates native apps through its existing `cua` API; Buddy relays
-progress and permission choices. `stop_task` interrupts Codex even while a
-permission is pending. Native app prompts support `allow for task` and
-`always allow` when Codex offers them. Saved app grants belong to Codex and can
-be revoked in its Computer Use settings. Codex's model settings are inherited;
-`CC_BUDDY_CODEX_SITE_ACCESS=allow` honors the owner's preference to proceed through
-ordinary website-access prompts without another Telegram question (default: `ask`).
-It does not approve uploads, raw browser access, sign-in handoffs, or other actions.
-Browser tasks return a picture captured from their own browser tab; a missing
-capture is reported instead of sending an unrelated desktop screenshot.
-the adapter uses a read-only filesystem sandbox with approvals on request and a
-ten-minute task budget. `CC_BUDDY_CODEX_BIN` can select a Codex executable; otherwise
-the installed desktop app's bundled executable is preferred. The Computer Use
-plugin must already be installed and enabled. There is no fallback to the legacy
-worker. See [integration evidence and limits](docs/codex-computer-use/README.md).
+`start_task(goal)` creates a fresh, ephemeral Codex session through
+`codex_computer.py`, after checking that `cua_repl.js` is installed and enabled.
+Codex drives native apps through its `cua` API while buddy relays progress and
+permission choices.
 
-The following routes belong to the retained **legacy worker** (`computer_agent.py`),
-which the daemon's voice/text task factory no longer selects:
+- **Your own Chrome first (opt-in):** with `CC_BUDDY_BROWSER_ATTACH=1`, web goals try
+  your logged-in Chrome first. Chrome's “Allow remote debugging?” prompt is answered
+  from your phone (a no or silence cancels), buddy works in its own tab, and anything
+  unfinished goes to Codex. See [attach mode](docs/stackchan/routing.md#controlling-your-logged-in-chrome-attach-mode).
+- **Stopping:** `stop_task` interrupts Codex, even while a permission is pending.
+- **Permissions:** app prompts offer `yes`, `allow for task` and `always allow` when
+  Codex permits them. Saved grants belong to Codex and are revoked in its Computer
+  Use settings. `CC_BUDDY_CODEX_SITE_ACCESS=allow` skips the extra Telegram question
+  for ordinary website-access prompts (default `ask`); it never approves uploads,
+  raw browser access, sign-in handoffs or other actions.
+- **Pictures:** browser tasks return a capture of their own tab. A missing capture is
+  reported rather than replaced with an unrelated desktop screenshot.
+- **Limits:** a read-only filesystem sandbox, approvals on request, and a ten-minute
+  task budget. `CC_BUDDY_CODEX_BIN` selects a Codex executable (default: the desktop
+  app's bundled one). There is no fallback if Codex is unavailable.
 
-1. **Code shortcuts** handle recognized app launches and web searches (`task_router.py`).
+See [integration evidence and limits](docs/codex-computer-use/README.md).
+
+<details>
+<summary><b>The legacy worker</b> (<code>computer_agent.py</code>, kept but no longer selected)</summary>
+
+1. **Code shortcuts** handle recognised app launches and web searches (`task_router.py`).
 2. **Accessibility routing** handles requests fully described by a labelled UI control
    (`lane_router.py` over `fast_lane.py` and `ax_candidates.py`).
-3. **Plan once, execute with Jev** (optional, `CC_BUDDY_PLAN_EXEC=1`): the planner is asked
-   once for a typed plan (`plan_contract.py`), and `plan_executor.py` walks it with no planner
-   turn between steps or at the end. Each click is grounded on a fresh Accessibility snapshot
-   by the keyword gate and hosted Jev (`typed_ask.ask_jev_step`). Consequential steps stop and
-   ask you; a plan cannot approve them.
-4. **The planner** handles remaining work turn by turn using screenshots and Python desktop
-   helpers. It is also the floor under tier 3: a plan that cannot be made or finished falls
-   back to it with a note of what was already done.
+3. **Plan once, execute with Jev** (`CC_BUDDY_PLAN_EXEC=1`): the planner makes one typed
+   plan (`plan_contract.py`) and `plan_executor.py` walks it, grounding each click on a
+   fresh Accessibility snapshot with the keyword gate and hosted Jev
+   (`typed_ask.ask_jev_step`). Consequential steps stop and ask you; a plan cannot
+   approve them.
+4. **The planner** handles remaining work turn by turn with screenshots and Python
+   desktop helpers, and catches any plan that cannot be made or finished.
 
-Within that legacy worker, the first two routes are enabled by default. Tier 3 and the separate planner-delegated fast
-lane (`decider.py`, the `[fast]` extra) are **off by default**. Optional typed-decision backends include **local Laya
-via MLX** on Apple silicon and **hosted Jev**. Jev can also be enabled for narrowly
-scoped launch routing and spoken head movements. These options have different
-capabilities and data flows; they are not required for the default setup.
-Computer-control clicks use accurate OCR directly so labels missed by fast OCR do not
-burn repeated retries. A completed screen-wait budget is reused for the reply screenshot,
-including on animated pages; new input or an old frame requires a fresh wait.
-A **browser lane** (`browser_lane.py`, off by default) gives web goals a better body: Playwright
-drives buddy's own Chromium, the page's controls become the candidates, and the same
-plan executor, keyword gate and Jev decide each step ([routing](docs/stackchan/routing.md#the-browser-lane-playwright-as-the-hands-jev-as-the-judge)).
-For classic native desktop control, leave `CC_BUDDY_BROWSER_LANE=0` (the default);
-web tasks then use the screenshot and desktop-helper loop without Playwright.
-See [routing](docs/stackchan/routing.md) for the switches and measured evaluations,
-and [voice and computer control](docs/stackchan/voice.md) for worker details.
+Tiers 1–2 are on by default in that worker. Tier 3 and the planner-delegated fast lane
+(`decider.py`, the `[fast]` extra) are **off by default**. Optional typed-decision
+backends are **local Laya via MLX** on Apple silicon and **hosted Jev**, which can also
+drive narrowly scoped launch routing and spoken head moves. Clicks use accurate OCR
+directly, and a finished screen wait is reused for the reply screenshot. The
+**browser lane** (`browser_lane.py`, off by default; `CC_BUDDY_BROWSER_LANE=0`) drives
+buddy's own Chromium with Playwright; attach mode reuses it for your own Chrome.
 
-Telegram accepts **photos and image files with captions** (still JPEG/PNG/WebP/GIF,
-up to 10 MB). With `claude on` or a selected Codex folder chat, images go to that
-session as a private local file to inspect. Otherwise Buddy reads them directly.
-Use `buddy: <caption>` to address Buddy while a relay is active. See
-[image routing and retention](docs/stackchan/telegram.md#receiving-images).
+See [routing](docs/stackchan/routing.md) for switches and measured evaluations, and
+[voice and computer control](docs/stackchan/voice.md) for worker details.
 
-Text **`rundown`** (or `/rundown`) for today's email, calendar, Slack mentions/DMs,
-and Obsidian todos. The packaged [rundown skill](bridge/src/cc_buddy_bridge/skills/rundown/SKILL.md)
-uses the existing Composio connections and configured Obsidian vault, separates
-today's tasks from overdue and undated items, and reports disconnected sources.
-It only reads data and still addresses Buddy when the Codex/Claude relay is selected.
+</details>
 
-Away from the desk, the same agent can be reached by text: `telegram.py` long-polls
-the Telegram Bot API (outbound HTTPS only, no open port) and lets one allowlisted
-numeric Telegram id chat with buddy, start and stop a Mac task, answer a task's
-question and receive a photo from the robot. "claude on" turns the chat into a Claude
-Code terminal: what it says and asks streams to the phone (the white text, never the gray
-tool lines or thinking), what you text is typed in, and tool calls go through without
-asking, as in bypass mode. `codex on` sends only the accessible folders saved in
-Codex, hiding debrief folders. `codex buddy` (or `codex use buddy`) starts a **new chat** in that folder;
-every selection starts fresh, and subsequent messages keep that chat's context.
-No task number, existing task, or open Mac window is required. `stop` interrupts
-the current turn, `codex off` closes the chat and returns to Buddy, and `buddy:`
-addresses Buddy directly. Startup failures leave Buddy usable. `codex_chat.py`
-uses Codex's public app-server with workspace-write scope and on-request
-approvals relayed to Telegram; native app and website rules still apply.
-Every message is shaped for the phone by `telegram_format.py`:
-a bold title where the voice is not buddy's own, short paragraphs, markdown turned into
-Telegram HTML, split at 4096 on a paragraph boundary. It is **off by
-default** and needs a switch, a bot token and an owner id together. With `CC_BUDDY_RECORDS=1` the text brain
-also gets a memory layer (`records.py`): typed, git-tracked markdown records the owner
-can edit, a profile one-pager, and a read-only keyword search — written only by a nightly
-reconcile, never by the agent. With `CC_BUDDY_COMPOSIO=1` the owner's apps (Gmail read only,
-the calendar writable, Drive and the rest asked first) are reachable by API through Composio
-(`composio_tools.py`), and with `CC_BUDDY_SECOND_BRAIN=1` a text becomes a note in a local
-markdown vault Obsidian opens (`second_brain.py`, [docs](docs/stackchan/second-brain.md)).
-Voice, text and deep reasoning use OpenAI's built-in GPT web search by default (`websearch.py`); Exa is opt-in.
-They also receive a local clock snapshot and the owner's configured location/timezone in system context; see the [voice settings](docs/stackchan/voice.md#knobs).
-While the Claude relay is on, Jev judges each relayed shell command for risk before it runs
-(`typed_ask.py`; shadow by default). See [text buddy through Telegram](docs/stackchan/telegram.md).
+### The Telegram door
 
-A [local Laya expression-tuning study](docs/stackchan/laya-emotion/README.md)
-tests context-sensitive eyes and chirps. It includes trained experimental weights,
-reproducible evaluations, and research references. It remains offline: tuning did
-not improve fresh-scenario accuracy, and its confidence gate abstains.
+`telegram.py` long-polls the Telegram Bot API over outbound HTTPS, so there is no open
+port. It needs a switch, a bot token and one allowlisted numeric owner id together.
+Every message is shaped for the phone by `telegram_format.py`.
+
+| Feature | What it does |
+|---|---|
+| Chat and tasks | Chat with buddy, start and stop a Mac task, answer a task's question, receive a camera photo. |
+| Images | Send photos or image files with captions (still JPEG/PNG/WebP/GIF, up to 10 MB). See [image routing and retention](docs/stackchan/telegram.md#receiving-images). |
+| `rundown` | Today's email, calendar, Slack and Obsidian todos through the packaged [rundown skill](bridge/src/cc_buddy_bridge/skills/rundown/SKILL.md). Read-only; reports disconnected sources. |
+| `claude on` | Streams Claude Code's visible text to the phone (never the gray tool lines or thinking) and types your replies in; tool calls run as in bypass mode. Jev judges each relayed shell command for risk (shadow by default). |
+| `codex on` / `codex <folder>` | Starts a new Codex chat in a saved folder, with approvals relayed to Telegram. `stop` interrupts, `codex off` returns to buddy, `buddy:` addresses buddy directly. |
+| `new claude` | Opens a coding session in Warp from a few short texts. |
+| Records (`CC_BUDDY_RECORDS=1`) | Typed, git-tracked markdown records and a profile, written only by a nightly reconcile (`records.py`). |
+| Composio (`CC_BUDDY_COMPOSIO=1`) | Your apps by API (`composio_tools.py`): Gmail read-only, calendar writable, Drive and the rest asked first. |
+| Second brain (`CC_BUDDY_SECOND_BRAIN=1`) | Texts become notes in a local markdown vault Obsidian opens (`second_brain.py`). |
+
+buddy also gets a local clock snapshot and your configured location and timezone
+([voice settings](docs/stackchan/voice.md#knobs)). Full guide:
+[text buddy through Telegram](docs/stackchan/telegram.md).
 
 ## Data and controls
 
-Wake-word detection runs locally. Live voice, tutoring, reasoning and scene
-analysis use configured model providers; relevant audio, text, board images or
-camera frames are sent for those requests. The desktop planner receives screenshots.
-Local storage does not make those features offline. With the Telegram door on, what
-you text and what buddy replies also pass through Telegram's servers.
+Wake-word detection runs locally. Live voice, tutoring, reasoning and scene analysis
+use the configured model providers, and the relevant audio, text, board images or
+camera frames are sent for those requests. Computer tasks send screenshots. Local
+storage does not make those features offline. With the Telegram door on, your texts
+and buddy's replies also pass through Telegram's servers.
 
-Default persistent data lives under `~/.config/cc-buddy-bridge/`:
+Persistent data lives under `~/.config/cc-buddy-bridge/`:
 
 | Location | Contents |
 |---|---|
@@ -349,17 +383,13 @@ Default persistent data lives under `~/.config/cc-buddy-bridge/`:
 | `learning/` | `lessons.sqlite3` and saved lesson/whiteboard data |
 | `agent-runs/` | Desktop-task run logs |
 
-`cc-buddy-bridge mic off` disables microphone capture until re-enabled. The
-menu-bar app and desktop widget also provide a persistent **Turn buddy off / on**
-control for the daemon.
-
-Set `CC_BUDDY_ROSBRIDGE=1` to expose memory events at `ws://127.0.0.1:9090`, or
-`CC_BUDDY_CLAUDE_MEM=1` to save them to a local claude-mem worker. Both are off by
-default. The event bus excludes conversation transcripts and learner input such
-as ideas, strokes and images; lesson events contain metadata and buddy's feedback.
-This is separate from the context sent to the live tutor. The rosbridge endpoint
-has no authentication and defaults to loopback. See [memory-bus.md](docs/memory-bus.md)
-for topics, recall, delivery limits and configuration.
+- `cc-buddy-bridge mic off` disables microphone capture until re-enabled.
+- The menu-bar app and desktop widget have a persistent **Turn buddy off / on** control.
+- `CC_BUDDY_ROSBRIDGE=1` exposes memory events at `ws://127.0.0.1:9090` (no
+  authentication, loopback by default); `CC_BUDDY_CLAUDE_MEM=1` saves them to a local
+  claude-mem worker. Both are off by default. The event bus excludes conversation
+  transcripts and learner input; lesson events carry metadata and buddy's feedback.
+  See [memory-bus.md](docs/memory-bus.md).
 
 ## Repository guide
 
@@ -373,7 +403,7 @@ for topics, recall, delivery limits and configuration.
 | `widget/` | SwiftUI app, shared data readers, WidgetKit extension and Xcode project | [Widget setup](docs/stackchan/widget.md) |
 | `tools/` | Firmware flashing, standalone learning launcher and demo utilities | [Build](docs/stackchan/build.md), [learning](docs/learning.md) |
 | `docs/stackchan/` | Hardware notes, personality, vision and integration details | [Personality](docs/stackchan/personality.md), [vision](docs/stackchan/vision.md), [Claude Code](docs/stackchan/claude-code-integration.md) |
-| `docs/launch-video/` | Launch script, reference material and Remotion video project | [Video project](docs/launch-video/remotion/README.md) |
+| `docs/launch-video/` | Launch films (Remotion), script and reference material | [Video project](docs/launch-video/remotion/README.md) |
 | `past-experiments/` | Earlier boards, e-ink firmware and enclosure experiments | [Archive overview](past-experiments/README.md) |
 
 ## Development
@@ -386,26 +416,20 @@ bridge/.venv/bin/python -m pip install -e './bridge[dev]'
 (cd bridge && .venv/bin/ruff check src/ tests/)
 ```
 
-A plain test run never touches this Mac's real services. Tests marked `live`
-write to the real claude-mem worker or launch a real Chromium, so they run
-only when asked: `(cd bridge && CC_BUDDY_LIVE=1 .venv/bin/pytest -q -m live)`.
-The routing evals call Jev, which sends the request text to it, and they print
-their ship decision: `(cd bridge && .venv/bin/python tools/route_eval.py
-[--quit | --browser | --model jev --native])`.
+- **Live tests.** A plain run never touches this Mac's real services. Tests marked
+  `live` write to the real claude-mem worker or launch a real Chromium, so they run only
+  when asked: `(cd bridge && CC_BUDDY_LIVE=1 .venv/bin/pytest -q -m live)`.
+- **Routing evals.** These call Jev, which receives the request text, and print their
+  ship decision: `(cd bridge && .venv/bin/python tools/route_eval.py [--quit | --browser | --model jev --native])`.
+- **Whiteboard.** The served bundle is checked in. After changing the React/TypeScript
+  source, rebuild with `(cd bridge/web-canvas && npm ci && npm run build)`, which
+  writes into `bridge/src/cc_buddy_bridge/learning/web/canvas/`.
+- **Firmware.** Host tests live in `firmware/claude_pet_stackchan/host/`; the
+  [build guide](docs/stackchan/build.md) covers hardware setup and bench conventions.
+- **Learning.** Browser and live-tutor checks are in the [learning guide](docs/learning.md).
 
-The served whiteboard bundle is checked in. To rebuild it after changing the
-React/TypeScript source:
-
-```bash
-(cd bridge/web-canvas && npm ci && npm run build)
-```
-
-The build writes the bundle into `bridge/src/cc_buddy_bridge/learning/web/canvas/`.
-Firmware host tests live in `firmware/claude_pet_stackchan/host/`; the
-[build guide](docs/stackchan/build.md) covers hardware setup and bench conventions.
-Browser and live-tutor checks are described in the [learning guide](docs/learning.md).
-Hardware, live APIs and macOS-specific integrations require their own setup beyond
-the offline demo.
+Hardware, live APIs and macOS-specific integrations need their own setup beyond the
+offline demo.
 
 ## Credits
 
@@ -413,7 +437,7 @@ The lessons were built for the OpenAI, OpenRouter and CopilotKit *Agents,
 Everywhere: Bots, Channels & More* global hackathon by **Gurucharan Lingamallu,
 Swetank Griyage and Emaha Tekle**. The whiteboard began with Swetank's `smartboard`
 work; the tutor, voice integration and widget cards were developed on buddy and
-merged back here. The hackathon fork, launch film and presentation are in
+merged back here. The hackathon fork, first launch film and presentation are in
 [gurul/buddyTinkerer](https://github.com/gurul/buddyTinkerer). The cut-paper
 illustration above also comes from that project.
 
@@ -427,7 +451,3 @@ is cited in [personality.md](docs/stackchan/personality.md).
 See the [bridge license](bridge/LICENSE), [canvas attribution](bridge/web-canvas/LICENSE.md),
 [tldraw license](bridge/web-canvas/TLDRAW-LICENSE.md), and bundled font license
 notices for the respective components.
-
-### Live Laya expressions
-
-Buddy can now use local Laya to choose eleven temporary eye expressions—including a wink—from conversation and diary text, including while speaking. The Mac runs the model and the board renders the cues. Original chirps and caption babble are preserved; Laya controls eyes only. This owner-enabled experimental mode uses the original checkpoint because the tuned head performed worse on fresh examples. See [controls, limitations, and device verification](docs/stackchan/laya-expressions/README.md).
