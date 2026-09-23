@@ -42,6 +42,8 @@ permission forms are declined with an explanation.
 The adapter never falls back to Buddy's old desktop worker. See
 [the verified integration and limits](../codex-computer-use/README.md).
 
+What else the Bot API offers, and how buddy could use it: [telegram-bot-api.md](telegram-bot-api.md).
+
 ## Rundown
 
 Text `rundown`, `/rundown`, or `buddy: rundown` for today's **email, calendar,
