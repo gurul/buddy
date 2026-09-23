@@ -6,22 +6,14 @@ report's confusion counting."""
 
 from __future__ import annotations
 
-import importlib.util
 import json
-import sys
 from pathlib import Path
 
+import fastlane_eval as fe  # tools/ is on the pytest path (pyproject.toml)
 import pytest
 
 from cc_buddy_bridge import ax_candidates as ax
 from cc_buddy_bridge.decider import Decider
-
-TOOL = Path(__file__).resolve().parents[1] / "tools" / "fastlane_eval.py"
-_spec = importlib.util.spec_from_file_location("fastlane_eval", TOOL)
-assert _spec is not None and _spec.loader is not None
-fe = importlib.util.module_from_spec(_spec)
-sys.modules["fastlane_eval"] = fe
-_spec.loader.exec_module(fe)
 
 # ---- fakes -------------------------------------------------------------------------
 

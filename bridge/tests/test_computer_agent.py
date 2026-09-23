@@ -858,10 +858,7 @@ def test_jev_calls_during_a_run_are_billed(tmp_path: Path) -> None:
 
 
 def test_bill_report_sums_the_runs(tmp_path: Path) -> None:
-    import sys
-
-    sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "tools"))
-    import bill_report
+    import bill_report  # tools/ is on the pytest path (pyproject.toml)
 
     runs = tmp_path / "runs"
     runs.mkdir()

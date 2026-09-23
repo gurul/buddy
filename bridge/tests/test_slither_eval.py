@@ -10,15 +10,11 @@ from __future__ import annotations
 import asyncio
 import json
 import math
-import sys
 from pathlib import Path
 
 import numpy as np
 import pytest
-
-sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "tools"))
-
-import slither_eval as se  # noqa: E402
+import slither_eval as se  # tools/ is on the pytest path (pyproject.toml)
 
 # ---- fakes ---------------------------------------------------------------------------
 
