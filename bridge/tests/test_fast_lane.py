@@ -629,11 +629,11 @@ def test_semicolons_in_labels_cannot_forge_result_fields() -> None:
 
 
 def test_content_fields_are_not_offered_for_typing_unless_page_links_allowed() -> None:
-    from cc_buddy_bridge.fast_lane import _editable_pool
+    from cc_buddy_bridge.fast_lane import editable_pool
 
     s = snap(cand("1", "text field", "Part name", in_content=True), cand("2", "search field", "Search"))
-    assert [c.id for c in _editable_pool(s)] == ["2"]
-    assert [c.id for c in _editable_pool(s, allow_page_links=True)] == ["1", "2"]
+    assert [c.id for c in editable_pool(s)] == ["2"]
+    assert [c.id for c in editable_pool(s, allow_page_links=True)] == ["1", "2"]
 
 
 def test_dialog_open_beats_a_satisfied_done_when() -> None:

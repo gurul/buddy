@@ -37,7 +37,7 @@ from dataclasses import dataclass, field
 from typing import Any, Callable, Mapping, Optional, Sequence
 
 from .decider import render_option
-from .fast_lane import _editable_pool, _is_search_field, jev_context, run_delegate
+from .fast_lane import editable_pool, is_search_field, jev_context, run_delegate
 from .plan_contract import Expect, Plan, PlanStep
 from .typed_ask import JEV_STEP_GATES, StepAnswer, StepGates
 
@@ -265,7 +265,7 @@ def run_plan(plan: Plan, *, senses: Any, effectors: Any, asker: Optional[Callabl
                 out.ledger.append(entry)
                 return stop("partial", i, "focus_changed")
             entry.effect = "unverifiable"                        # pasted; only an `expect` can confirm it
-            typed = (_is_search_field(field_c), step.text_source, step.text)
+            typed = (is_search_field(field_c), step.text_source, step.text)
 
         elif step.kind == "press_key":
             submit = step.key in ("return",)
@@ -321,7 +321,7 @@ def _pick_field(step: PlanStep, senses: Any, asker: Optional[Callable[..., StepA
         return None, "", f"no_window ({type(e).__name__})"
     if snap.dialog_text:
         return None, "", "dialog_open"
-    pool = _editable_pool(snap)
+    pool = editable_pool(snap)
     if not pool:
         return None, "", "no_field"
     if len(pool) == 1:
