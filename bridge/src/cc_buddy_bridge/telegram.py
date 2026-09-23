@@ -300,9 +300,9 @@ TOOLS: list[dict[str, Any]] = [
                                                    "description": "The whole question, self-contained."}}},
     },
 ]
-TOOL_NAMES = ("start_task", "steer_task", "stop_task", "take_photo", "screenshot", "send_file", "list_files",
-              "look", "look_around", "find", "move_head", "go_explore", "set_sound", "remember", "take_notes",
-              "think_hard", "memory_search", "memory_get", websearch.TOOL_NAME)
+# What parse_response accepts: derived from what is offered, so a new tool cannot be offered and then refused
+# as "unexpected" (start_coding_session, 2026-09-23, was a hand-kept second list that missed it).
+TOOL_NAMES = (tuple(t["name"] for t in TOOLS) + tuple(t["name"] for t in MEMORY_TOOLS) + (websearch.TOOL_NAME,))
 
 # Composio (composio_tools.py), when it is on: the owner's apps by API, in seconds, where a Mac task takes
 # minutes. Appended to the instructions only while the session is up, so the model never hears of tools it
