@@ -312,7 +312,7 @@ class Daemon:
         # loop, so the first "hey buddy" does not (voice_agent.warm_live_import).
         threading.Thread(target=voice_agent.warm_live_import, name="warm-voice-sdk", daemon=True).start()
         await self.ipc.start()
-        if os.environ.get("CC_BUDDY_LEARNING", "1").lower() not in ("0", "false", "off"):
+        if os.environ.get("CC_BUDDY_LEARNING", "1").strip().lower() not in ("0", "false", "no", "off"):
             from .learning.server import start as start_learning
             loop = asyncio.get_running_loop()
             def learning_notice(text, stage):
