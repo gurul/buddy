@@ -116,6 +116,7 @@ CLAUDE_PERMISSION_TITLE = "Claude asks to run {tool}"
 RELAY_CUT_LINE = "_the rest is in the terminal_"
 DEFAULT_PERMISSION_TIMEOUT_SECS = 240.0    # the hook blocks 320 s at most; a silence defers, it never denies
 MAX_RELAY_CHARS = 1500
+ASKED_RECENTLY_SECS = 20.0         # "Claude is waiting on you" right after the question itself is an echo
 RELAY_BATCH_SECS = 1.2                     # relay lines are batched this long into one message (Telegram: ~1 msg/s)
 STEALTH_ON_LINE = "Stealth mode: I'll act asleep at the desk until you say wake up."
 STEALTH_OFF_LINE = "Awake again."
@@ -848,6 +849,7 @@ class TelegramInlet:
         self._relay_cwd: str = ""                          # the session Claude last spoke from
         self._relay_lines: list[tuple[str, str, str]] = []   # (title, subtitle, body) waiting for the next batch
         self._relay_flush: Optional[asyncio.Task] = None
+        self._last_ask_at = float("-inf")                  # a question or yes/no just went to the phone
         self._clock, self._wall, self._sleep = clock, wall, sleep
         self.turns: list[tuple[str, str]] = []           # ("user" | "buddy", text): this chat, until it goes quiet
         self._last_turn_at: Optional[float] = None
@@ -1245,7 +1247,11 @@ class TelegramInlet:
         """A tool call the daemon saw. Only a question for the owner (AskUserQuestion) reaches the phone:
         the terminal's gray lines, the call itself and its result tail, stay on the Mac (owner, 2026-09-21)."""
         if tool == "AskUserQuestion":
-            self.relay_line(" ".join(str(hint).split()) or "(see the terminal)", title=CLAUDE_ASKS_TITLE)
+            body = " ".join(str(hint).split()) or "(see the terminal)"
+            if "(1. " in body:
+                body += "\n\nReply with the option's number."
+            self._last_ask_at = self._clock()
+            self.relay_line(body, title=CLAUDE_ASKS_TITLE)
 
     async def relay_text(self, text: str, cwd: str = "") -> None:
         """What Claude Code just said, when the relay is on, with its paragraphs and lists as it wrote
@@ -1268,6 +1274,8 @@ class TelegramInlet:
     async def relay_notification(self, kind: str, message: str, waits: bool) -> None:
         if not self.claude or self._chat_id is None or not waits:
             return
+        if self._clock() - self._last_ask_at < ASKED_RECENTLY_SECS:
+            return                                        # the question itself was just sent: no vague echo
         await self._say(self._chat_id, message.strip(), title=CLAUDE_WAITS_TITLE)
 
     async def decide_permission(self, tool: str, hint: str, cwd: str = "", *, always: bool = False) -> Optional[str]:
@@ -1283,6 +1291,7 @@ class TelegramInlet:
             self._relay_cwd = cwd
         # The command as code, so nothing in it is read as markup; the repo under the title.
         question = "```\n" + hint.strip()[:300] + "\n```\n\nyes / no?"
+        self._last_ask_at = self._clock()
         title = CLAUDE_PERMISSION_TITLE.format(tool=tool)
         loop = asyncio.get_running_loop()
         self._pending_answer = loop.create_future()

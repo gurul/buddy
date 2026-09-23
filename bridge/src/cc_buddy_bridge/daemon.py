@@ -1113,6 +1113,7 @@ class Daemon:
         make_inner = ((lambda: warm.take(on_event, ask_user)) if warm is not None
                       else (lambda: CodexComputerAgent(on_event=on_event, ask_user=ask_user)))
         agent = app_reflex.ReflexFirstAgent(make_inner, on_event, asker=app_reflex.jev_asker(),
+                                            quit_asker=app_reflex.jev_quit_asker(),
                                             enabled=app_reflex.reflexes_on(),
                                             on_done=warm.kick if warm is not None else (lambda: None))
         self._active_agent = agent
@@ -1837,6 +1838,9 @@ class Daemon:
         if evt == "pretooluse":
             return await self._handle_pretooluse(req)
 
+        if evt == "permissionrequest":
+            return await self._handle_permission_request(req)
+
         if evt == "push_character":
             path = req.get("path")
             if not isinstance(path, str) or not path:
@@ -1939,6 +1943,24 @@ class Daemon:
 
         return {"ok": False, "error": f"unknown evt: {evt!r}"}
 
+    async def _handle_permission_request(self, req: dict[str, Any]) -> dict[str, Any]:
+        """A permission dialog Claude Code is about to show (hooks/permission_request.py). With the relay on,
+        the owner is on the phone and nobody is at the dialog: ask there, yes/no. No answer, relay off, or a
+        question dialog (AskUserQuestion is answered by typing the option, never by a hook): no decision."""
+        inlet = getattr(self, "_telegram", None)
+        tool_name = str(req.get("tool_name") or "tool")
+        if inlet is None or not inlet.claude or tool_name == "AskUserQuestion":
+            return {"ok": True}
+        hint = str(req.get("hint") or "")
+        decision = await inlet.decide_permission(tool_name, hint, str(req.get("cwd") or ""), always=True)
+        log.info("permissionrequest for %s (%s): %s", tool_name, hint[:60],
+                 f"answered from Telegram → {decision}" if decision in ("allow", "deny") else "no answer → the dialog")
+        if decision in ("allow", "deny"):
+            self.audit.record(session_id=req.get("session_id") or "unknown", tool_name=tool_name, hint=hint,
+                              matcher="permission_request", decision=decision, source="telegram")
+            return {"ok": True, "decision": decision}
+        return {"ok": True}
+
     async def _handle_pretooluse(self, req: dict[str, Any]) -> dict[str, Any]:
         tool_use_id = req.get("tool_use_id")
         if not isinstance(tool_use_id, str) or not tool_use_id:
@@ -1948,6 +1970,15 @@ class Daemon:
         hint = req.get("hint") or ""
         self._ensure_session(req)
         self.state.note_tool(session_id, tool_name)
+
+        # A question for the owner: relayed with its numbered options, and nothing else. It is answered by
+        # typing the option into the dialog, never by a decision here — and its text must not meet the
+        # command matchers below (a question that mentions "rm" is not an rm).
+        if tool_name == "AskUserQuestion":
+            relay = getattr(self, "_telegram", None)
+            if relay is not None and relay.claude:
+                relay.relay_tool_call(str(tool_name), hint)
+            return {"ok": True}
 
         # Read tool takes its own path: out-of-cwd reads card on the stick and
         # an approval grants the enclosing repo/dir. See read_policy.py.

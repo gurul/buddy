@@ -30,6 +30,10 @@ HOOK_TIMEOUT_SECS = 330  # must be > daemon's PERMISSION_WAIT_SECS + a small buf
 HOOK_DEFS: list[tuple[str, str, str | None, bool]] = [
     ("PreToolUse",        "cc_buddy_bridge.hooks.pretooluse",         "Bash", True),
     ("PreToolUse",        "cc_buddy_bridge.hooks.pretooluse",         "Read", True),
+    # A question for the owner: relayed to the phone with numbered options, never answered by a hook.
+    ("PreToolUse",        "cc_buddy_bridge.hooks.pretooluse",         "AskUserQuestion", True),
+    # Every permission dialog, whatever the tool: a yes/no on the phone while "claude on".
+    ("PermissionRequest", "cc_buddy_bridge.hooks.permission_request", "*",    True),
     ("PostToolUse",       "cc_buddy_bridge.hooks.posttooluse",        "*",    False),
     ("SessionStart",      "cc_buddy_bridge.hooks.session_start",      None,   False),
     ("SessionEnd",        "cc_buddy_bridge.hooks.session_end",        None,   False),

@@ -354,6 +354,105 @@ def fit_request_gates(answers: list[RequestAnswer], truths: list[str], planner_o
 
 # ---- jev on one step of a task: which control, and whether any control at all ---------------------------
 #
+# ---- jev on a quit: two absolute gates and the app, in one request ----------------------------------
+#
+# Asked only for a request that says "quit" and that the quit rules did not take (task_router.classify).
+# Same idiom as the launch question: each property its own noul, the app a choice over the installed list.
+
+def jev_quit_questions(apps: list[str]) -> dict[str, Any]:
+    app_options = {f"app{i}": name for i, name in enumerate(apps)}
+    app_options["none"] = "no installed application is to be quit"
+    return {
+        "quit_one": {"type": "noul", "instructions": (
+            "Is the request asking ONLY to quit one application, normally, and nothing else? Politeness and filler "
+            "such as 'for me' or 'on my Mac' do not count as something else. Answer no if it says force quit; if "
+            "anything else is to be done before or after; if what is to be quit is a tab, window, document, "
+            "process, game, call or other content rather than the application itself; if two applications are "
+            "named; if it is a question; or if it is conversation such as quitting a job or a habit.")},
+        "quit_all": {"type": "noul", "instructions": (
+            "Is the request asking ONLY to quit all open applications at once, and nothing else? Answer no if it "
+            "is limited to the tabs or windows of one application, if it says force quit, or if it is a question.")},
+        "app": {"type": "choice", "instructions": "Which installed application does the request ask to quit?",
+                "criteria": app_options},
+    }
+
+
+@dataclass(frozen=True)
+class QuitAnswer:
+    one: float
+    all: float
+    app: str
+    p_app: float
+    ms: float = 0.0
+    error: str = ""
+
+
+@dataclass(frozen=True)
+class QuitGates:
+    one: float = 0.9
+    all: float = 0.9
+    app: float = 0.9
+
+
+def ask_jev_quit(predict: Predict, goal: str, apps: list[str], clock: Callable[[], float]) -> QuitAnswer:
+    t0 = clock()
+    try:
+        result = predict({"about": "A spoken request to a desk robot that can operate the owner's Mac.",
+                          "request": " ".join(goal.split())}, jev_quit_questions(apps))
+        answers = result.get("answers") or {}
+    except Exception as e:  # noqa: BLE001 — a model that fails abstains: the planner takes the request
+        return QuitAnswer(0.0, 0.0, "", 0.0, (clock() - t0) * 1000.0, f"{type(e).__name__}: {e}"[:160])
+    key, p_app, _ = _choice(answers.get("app"))
+    name = apps[int(key[3:])] if key.startswith("app") and key[3:].isdigit() and int(key[3:]) < len(apps) else ""
+    return QuitAnswer(one=_noul(answers.get("quit_one")), all=_noul(answers.get("quit_all")), app=name,
+                      p_app=p_app, ms=(clock() - t0) * 1000.0)
+
+
+def decide_quit(a: QuitAnswer, g: QuitGates) -> str:
+    """An installed app's name, "*" for all, or "" (the planner's)."""
+    if a.error:
+        return ""
+    if a.all >= g.all and a.one < g.one:
+        return "*"
+    if a.one >= g.one and a.app and a.p_app >= g.app:
+        return a.app
+    return ""
+
+
+QUIT_GRID = (0.5, 0.6, 0.7, 0.8, 0.9, 0.95)
+
+
+def fit_quit_gates(answers: list[QuitAnswer], truths: list[str]) -> QuitGates:
+    """Cut-offs that get the most quits right with ZERO wrong ones (a wrong app quit, or any quit of a
+    request labelled otherwise). ``truths``: the app, "*", or "". Ties go to the stricter setting."""
+    best: Optional[tuple[int, float, float, float]] = None
+    chosen = QuitGates(1.01, 1.01, 1.01)
+    for one in QUIT_GRID:
+        for every in QUIT_GRID:
+            for app in QUIT_GRID:
+                g = QuitGates(one, every, app)
+                said = [decide_quit(a, g) for a in answers]
+                if any(s and s != t for s, t in zip(said, truths, strict=True)):
+                    continue
+                right = sum(1 for s, t in zip(said, truths, strict=True) if s and s == t)
+                key = (right, one, every, app)
+                if best is None or key > best:
+                    best, chosen = key, g
+    return chosen
+
+
+# Fitted 2026-09-23 by tools/route_eval.py --quit on the 37 quit-tuning requests that reach Jev (zero wrong
+# allowed), then scored once on the blind holdout_quit.json: alone 42/42, after the rules 45/45, 0 unsafe.
+JEV_QUIT_GATES = QuitGates(one=0.5, all=0.6, app=0.95)
+
+
+def make_jev_quit_asker(predict: Predict, clock: Callable[[], float]) -> Callable[[str, list[str]], str]:
+    """`asker(goal, apps) -> app to quit, "*" for all, or ""` under the shipped gates."""
+    def asker(goal: str, apps: list[str]) -> str:
+        return decide_quit(ask_jev_quit(predict, goal, apps, clock), JEV_QUIT_GATES)
+    return asker
+
+
 # ---- laya on a whole request: one short ranking, the app from a code shortlist ---------------------------
 #
 # laya's head holds 256 tokens, so the installed-app list (~100 names) cannot be its menu: code shortlists
