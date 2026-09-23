@@ -329,11 +329,11 @@ def test_mirror_survives_a_dead_worker(caplog) -> None:
 
 # ---- live ---------------------------------------------------------------------------------
 
-LIVE_URL = worker_url()
-
-
-@pytest.mark.skipif(not health(LIVE_URL), reason="claude-mem worker is not running")
+@pytest.mark.live
 def test_live_save_then_recall_by_title() -> None:
+    LIVE_URL = worker_url()                              # resolved only when the live test is asked for
+    if not health(LIVE_URL):
+        pytest.skip("claude-mem worker is not running")
     stamp = time.strftime("%Y%m%d-%H%M%S")
     title = f"buddy live probe {stamp}"
     bus = MemoryBus()

@@ -7,6 +7,7 @@ Playwright's browser is not installed. Everything else runs on fakes.
 from __future__ import annotations
 
 import asyncio
+import os
 from pathlib import Path
 from typing import Any
 
@@ -52,7 +53,12 @@ def _has_chromium() -> bool:
         return False
 
 
-live = pytest.mark.skipif(not _has_chromium(), reason="Playwright's Chromium is not installed")
+def live(test):
+    """A real headless Chromium: opt-in with CC_BUDDY_LIVE=1 (tests/conftest.py), and only then is Chromium
+    probed — no browser launch at import on a plain run."""
+    wanted = os.environ.get("CC_BUDDY_LIVE", "").strip().lower() in ("1", "true", "yes", "on")
+    probe = pytest.mark.skipif(wanted and not _has_chromium(), reason="Playwright's Chromium is not installed")
+    return pytest.mark.live(probe(test))
 
 
 @pytest.fixture
