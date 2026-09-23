@@ -35,7 +35,7 @@ from typing import Any, Awaitable, Callable, Optional
 
 import httpx
 
-from .computer_agent import AgentEvent
+from .agent_contract import AgentEvent
 
 log = logging.getLogger(__name__)
 
