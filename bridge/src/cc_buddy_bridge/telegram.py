@@ -41,6 +41,7 @@ text here, so the tests read what was said, not its markup.
 from __future__ import annotations
 
 import asyncio
+import dataclasses
 import json
 import logging
 import mimetypes
@@ -106,6 +107,11 @@ CLAUDE_ON_LINE = ("This chat is the terminal now. What you text is typed into Cl
                   "\"buddy: ...\" talks to me instead. \"claude off\" ends it.")
 CLAUDE_OFF_LINE = "Claude relay off."
 CLAUDE_NOT_ON_LINE = "The Claude relay is off. Say \"claude on\" first."
+CLAUDE_PICK_LINE = "Which Claude session? Tap one, or start a new one."
+CLAUDE_NONE_LINE = "No Claude session is running. Let's start one; the chat joins it once it opens."
+NEW_CLAUDE_BUTTON = "new claude"
+TYPED_REACTION = "👍"                # the line reached the terminal (a reaction, not a message)
+MAX_BUTTON_CHARS = 64
 # The titles: a message that is not buddy's own voice says whose it is, or what it is, in bold on its
 # first line (telegram_format.compose). Buddy's own replies and one-liners carry none.
 TASK_DONE_TITLE = "Task result"
@@ -413,6 +419,7 @@ class Inbound:
     user_id: int
     text: str
     image: Optional[telegram_images.Attachment] = None
+    message_id: int = field(default=0, compare=False)   # what a reaction lands on; 0 when unknown
 
 
 # accept() verdicts. OK carries an Inbound; the two *_LINE verdicts are the owner, so they get one fixed
@@ -442,18 +449,19 @@ def accept(update: Any, config: TelegramConfig, now: float) -> tuple[str, Option
     date = msg.get("date")
     if not isinstance(date, (int, float)) or now - float(date) > config.stale_secs:
         return "stale", None
-    inbound = Inbound(chat_id=chat_id, user_id=user_id, text="")
+    message_id = msg.get("message_id") if isinstance(msg.get("message_id"), int) else 0
+    inbound = Inbound(chat_id=chat_id, user_id=user_id, text="", message_id=message_id)
     if any(key in msg for key in ("forward_origin", "forward_from", "forward_from_chat", "forward_sender_name",
                                   "forward_date")):
         return FORWARDED, inbound
     image = telegram_images.attachment(msg)
     if image is not None:
         caption = msg.get("caption")
-        return OK, Inbound(chat_id, user_id, caption.strip() if isinstance(caption, str) else "", image)
+        return OK, Inbound(chat_id, user_id, caption.strip() if isinstance(caption, str) else "", image, message_id)
     text = msg.get("text")
     if not isinstance(text, str) or not text.strip():
         return NOT_TEXT, inbound
-    return OK, Inbound(chat_id=chat_id, user_id=user_id, text=text.strip())
+    return OK, Inbound(chat_id=chat_id, user_id=user_id, text=text.strip(), message_id=message_id)
 
 
 def sender_id(update: Any) -> Optional[int]:
@@ -712,19 +720,31 @@ class BotApi:
         return await telegram_images.download(self._client, self._call, self._token, item)
 
     async def send_message(self, chat_id: int, text: str, title: Optional[str] = None,
-                           subtitle: Optional[str] = None) -> None:
+                           subtitle: Optional[str] = None, buttons: Sequence[str] = ()) -> None:
         """One message, composed by telegram_format (a bold ``title`` when the voice is not buddy's, an
         italic ``subtitle`` when an identifier helps, the body as HTML paragraphs) and sent in pieces
         under the Bot API limit. A piece Telegram will not parse goes again as plain text: a message is
-        never lost to markup."""
-        for piece in fmt.split(fmt.compose(text, title, subtitle)):
+        never lost to markup. ``buttons`` become a one-time reply keyboard under the last piece: a tap
+        sends that button's text as the owner's own message, so no callback path is needed."""
+        pieces = fmt.split(fmt.compose(text, title, subtitle))
+        for i, piece in enumerate(pieces):
+            extra: dict[str, Any] = {}
+            if buttons and i == len(pieces) - 1:
+                extra["reply_markup"] = {"keyboard": [[{"text": b[:MAX_BUTTON_CHARS]}] for b in buttons],
+                                         "one_time_keyboard": True, "resize_keyboard": True}
             try:
-                await self._call("sendMessage", {"chat_id": chat_id, "text": piece, "parse_mode": fmt.PARSE_MODE})
+                await self._call("sendMessage", {"chat_id": chat_id, "text": piece, "parse_mode": fmt.PARSE_MODE,
+                                                 **extra})
             except BotApiError as e:
                 if e.code != 400 or "parse" not in e.description.lower():
                     raise
                 log.warning("telegram: Telegram would not parse a message (%s); sent as plain text", e.description[:80])
-                await self._call("sendMessage", {"chat_id": chat_id, "text": fmt.visible(piece)})
+                await self._call("sendMessage", {"chat_id": chat_id, "text": fmt.visible(piece), **extra})
+
+    async def react(self, chat_id: int, message_id: int, emoji: str) -> None:
+        """A reaction on one of the owner's messages: the receipt, instead of a line saying it arrived."""
+        await self._call("setMessageReaction", {"chat_id": chat_id, "message_id": message_id,
+                                                "reaction": [{"type": "emoji", "emoji": emoji}]})
 
     async def send_photo(self, chat_id: int, path: Path, caption: str = "") -> None:
         blob = await asyncio.to_thread(Path(path).read_bytes)
@@ -744,6 +764,13 @@ class BotApi:
 
 
 # ---- the inlet --------------------------------------------------------------------------------
+
+def _same_folder(a: str, b: str) -> bool:
+    try:
+        return Path(a).resolve() == Path(b).resolve()
+    except (OSError, RuntimeError):
+        return a == b
+
 
 Create = Callable[[dict[str, Any]], Awaitable[dict[str, Any]]]
 
@@ -774,7 +801,10 @@ class TelegramInlet:
     * ``on_star``       — (claim) -> str | None: star a fact for good (daemon._star_by_voice)
     * ``on_caption``    — (dict) -> None: a page on the robot's screen (daemon._on_caption)
     * ``notes``         — () -> RoomNotes: the room note-taker (daemon._room_notes_taker), for take_notes
-    * ``terminal``      — (cwd, text) -> str: type a line into the Claude Code terminal for that session
+    * ``terminal``      — (cwd, text) -> str: type a line into the Claude Code terminal for that session;
+                          "" when it went in (the owner's message gets a reaction), else the line to say
+    * ``claude_sessions`` — () -> [cwd]: the running Claude Code sessions' folders, newest first, for the
+                          "claude on" picker
     * ``launcher``      — (folder, harness) -> str: open a new coding session on the Mac
                           (claude_launch.open_session). "new claude" (code word) and the start_coding_session
                           tool walk claude_launch's tree: personal or work, then general or which folder;
@@ -812,6 +842,7 @@ class TelegramInlet:
                  launcher: Callable[[Path, str], Awaitable[str]] = claude_launch.open_session,
                  launch_root: Optional[Path] = None,
                  launch_recent: Callable[[], list[claude_launch.Recent]] = claude_launch.load_recent,
+                 claude_sessions: Callable[[], list[str]] = lambda: [],
                  codex: Optional[codex_chat.CodexChat] = None,
                  codex_folders: Callable[[], list[Path]] = codex_chat.accessible_folders,
                  permission_timeout_secs: float = DEFAULT_PERMISSION_TIMEOUT_SECS,
@@ -846,11 +877,14 @@ class TelegramInlet:
         self._terminal = terminal
         self._launcher, self._launch_root, self._launch_recent = launcher, launch_root, launch_recent
         self._launch: Optional[claude_launch.LaunchFlow] = None   # a new session's tree, being walked
+        self._claude_sessions = claude_sessions
+        self._join_after_launch = False                   # "claude on" with nothing running: join what opens
         self._permission_timeout = permission_timeout_secs
         self.stealth = False
         self.claude = False                               # the terminal relay
         self._chat_id: Optional[int] = next(iter(sorted(config.owner_ids)), None)   # a private chat's id is the user's
         self._relay_cwd: str = ""                          # the session Claude last spoke from
+        self._relay_pin: str = ""                          # the session picked at "claude on"; "" follows the last
         self._relay_lines: list[tuple[str, str, str]] = []   # (title, subtitle, body) waiting for the next batch
         self._relay_flush: Optional[asyncio.Task] = None
         self._last_ask_at = float("-inf")                  # a question or yes/no just went to the phone
@@ -962,11 +996,11 @@ class TelegramInlet:
             target = "buddy" if for_buddy else ("codex" if self._codex_chat == inbound.chat_id
                                                else "claude" if self.claude else "buddy")
             if for_buddy:
-                inbound = Inbound(inbound.chat_id, inbound.user_id, for_buddy.group(2).strip(), inbound.image)
+                inbound = dataclasses.replace(inbound, text=for_buddy.group(2).strip())
             self._spawn(self._image(inbound, target, self._codex_epoch), "telegram-image")
             return
         word = inbound.text.lower().rstrip(".! ")
-        if self._launch_dispatch(inbound, word):
+        if not re.match(r"/?claude (on|off)\b", word) and self._launch_dispatch(inbound, word):
             return
         if rundown.matches(inbound.text):
             self._spawn(self._turn(inbound), "telegram-rundown")
@@ -984,7 +1018,7 @@ class TelegramInlet:
                 self._codex_epoch += 1
                 self._codex_chat = None if action == "off" else inbound.chat_id
                 if action != "off":
-                    self.claude = False
+                    self.claude, self._relay_pin, self._join_after_launch = False, "", False
                     self._relay_lines.clear()
                     if self._relay_flush is not None:
                         self._relay_flush.cancel()
@@ -998,19 +1032,22 @@ class TelegramInlet:
             self._spawn(self._stop(inbound.chat_id), "telegram-stop")
             return
         self._chat_id = inbound.chat_id
-        if word in CLAUDE_ON or word in CLAUDE_OFF:
+        claude_on_target = re.fullmatch(r"/?claude on\s+(.+)", word)
+        if word in CLAUDE_ON or word in CLAUDE_OFF or claude_on_target:
             self._codex_epoch += 1
-            if word in CLAUDE_ON and self._codex_chat is not None:
+            if (word in CLAUDE_ON or claude_on_target) and self._codex_chat is not None:
                 if self._codex_chat != inbound.chat_id:
                     self._spawn(self._say(inbound.chat_id, "The Codex relay is in use by another owner chat."), "telegram-say")
                     return
                 self._codex_chat = None
                 self._spawn(self._codex_command(inbound.chat_id, "disconnect", None, self._codex_epoch), "telegram-codex")
-            self.claude = word in CLAUDE_ON
             self._note("user", inbound.text)
-            log.info("telegram: claude relay %s", "on" if self.claude else "off")
-            self._spawn(self._say(inbound.chat_id, CLAUDE_ON_LINE if self.claude else CLAUDE_OFF_LINE,
-                                  title=CLAUDE_ON_TITLE if self.claude else None), "telegram-say")
+            if word in CLAUDE_OFF:
+                self.claude, self._relay_pin, self._join_after_launch = False, "", False
+                log.info("telegram: claude relay off")
+                self._spawn(self._say(inbound.chat_id, CLAUDE_OFF_LINE), "telegram-say")
+                return
+            self._claude_on(inbound, claude_on_target.group(1).strip() if claude_on_target else "")
             return
         codex_text = re.match(r"^/?codex\s*:\s*(.+)$", inbound.text, re.I | re.S)
         if codex_text:
@@ -1023,12 +1060,13 @@ class TelegramInlet:
             if for_buddy is None:
                 self._spawn(self._codex_send(inbound.chat_id, inbound.text, self._codex_epoch), "telegram-codex")
                 return
-            inbound = Inbound(chat_id=inbound.chat_id, user_id=inbound.user_id, text=for_buddy.group(2).strip())
+            inbound = dataclasses.replace(inbound, text=for_buddy.group(2).strip())
             word = inbound.text.lower().rstrip(".! ")
         typed = CLAUDE_PREFIX.match(inbound.text)
         if typed:
             self._note("user", inbound.text)
-            self._spawn(self._type_to_claude(inbound.chat_id, typed.group(2).strip()), "telegram-claude")
+            self._spawn(self._type_to_claude(inbound.chat_id, typed.group(2).strip(), inbound.message_id),
+                        "telegram-claude")
             return
         if word in STEALTH_ON or word in STEALTH_OFF or SCREEN_NOW.match(inbound.text):
             pass                                          # buddy's own code words, relay or not
@@ -1038,9 +1076,10 @@ class TelegramInlet:
             for_buddy = BUDDY_PREFIX.match(inbound.text)
             if for_buddy is None:
                 self._note("user", inbound.text)
-                self._spawn(self._type_to_claude(inbound.chat_id, inbound.text), "telegram-claude")
+                self._spawn(self._type_to_claude(inbound.chat_id, inbound.text, inbound.message_id),
+                            "telegram-claude")
                 return
-            inbound = Inbound(chat_id=inbound.chat_id, user_id=inbound.user_id, text=for_buddy.group(2).strip())
+            inbound = dataclasses.replace(inbound, text=for_buddy.group(2).strip())
             word = inbound.text.lower().rstrip(".! ")
         if word in STEALTH_ON or word in STEALTH_OFF:
             self.stealth = word in STEALTH_ON
@@ -1095,11 +1134,16 @@ class TelegramInlet:
         except (BotApiError, OSError):
             await self._say(inbound.chat_id, "I couldn't receive that image. Please send it again.")
 
-    async def _say(self, chat_id: int, text: str, title: Optional[str] = None, subtitle: Optional[str] = None) -> None:
+    async def _say(self, chat_id: int, text: str, title: Optional[str] = None, subtitle: Optional[str] = None,
+                   buttons: Sequence[str] = ()) -> None:
         """Send one message. ``title`` names the voice or the event when it is not buddy's own reply
-        (telegram_format.compose); ``subtitle`` is an identifier that helps a person, or nothing."""
+        (telegram_format.compose); ``subtitle`` is an identifier that helps a person, or nothing;
+        ``buttons`` are tap-to-send replies."""
         try:
-            await self.api.send_message(chat_id, text, title=title, subtitle=subtitle)
+            if buttons:
+                await self.api.send_message(chat_id, text, title=title, subtitle=subtitle, buttons=list(buttons))
+            else:
+                await self.api.send_message(chat_id, text, title=title, subtitle=subtitle)
         except BotApiError as e:
             log.warning("telegram: could not send (%s)", e)
 
@@ -1210,18 +1254,73 @@ class TelegramInlet:
 
     async def _launch_step(self, chat_id: int, step: claude_launch.Step) -> None:
         log.info("telegram: new session step (%s)", "open" if step.folder else "ask")
-        await self._say(chat_id, step.text, title=step.title)
+        await self._say(chat_id, step.text, title=step.title, buttons=step.buttons)
         if step.folder is None or step.harness is None:
+            if step.done:
+                self._join_after_launch = False
             return
+        join, self._join_after_launch = self._join_after_launch, False
         try:
             said = await self._launcher(step.folder, step.harness)
         except Exception as e:  # noqa: BLE001
             log.warning("telegram: opening a coding session failed (%s)", type(e).__name__)
             said = "I couldn't open a terminal on the Mac."
+            join = False
+        if join and step.folder.is_dir():
+            self._relay_to(str(step.folder.resolve()))
+            await self._say(chat_id, CLAUDE_ON_LINE, title=CLAUDE_ON_TITLE, subtitle=step.folder.name)
+            return
         await self._say(chat_id, said)
 
+    # -- "claude on": which session --
+    def _claude_on(self, inbound: Inbound, target: str) -> None:
+        """"claude on" joins a running session: the only one straight away, a picker when there are several
+        (each a button), the new-session tree when there are none, then joins what it opens. "claude on
+        <name>" picks by folder name, and a name no session has starts that folder instead."""
+        self._join_after_launch = False
+        try:
+            cwds = list(dict.fromkeys(c for c in self._claude_sessions() if c))
+        except Exception as e:  # noqa: BLE001 — no list is only a shorter menu
+            log.warning("telegram: could not list Claude sessions (%s)", type(e).__name__)
+            cwds = []
+        names = [Path(c).name for c in cwds]
+        if target:
+            hits = claude_launch.match(target, names)
+            if hits:
+                return self._join(inbound.chat_id, cwds[names.index(hits[0])])
+            return self._start_then_join(inbound.chat_id, target)
+        if len(cwds) == 1:
+            return self._join(inbound.chat_id, cwds[0])
+        if not cwds:
+            return self._start_then_join(inbound.chat_id, "", CLAUDE_NONE_LINE)
+        self.claude = False
+        self._join_after_launch = True                   # the picker's "new claude" joins what it opens
+        log.info("telegram: claude relay asks which of %d sessions", len(cwds))
+        self._spawn(self._say(inbound.chat_id, CLAUDE_PICK_LINE, title=CLAUDE_ON_TITLE,
+                              buttons=[f"claude on {n}" for n in names] + [NEW_CLAUDE_BUTTON]), "telegram-say")
+
+    def _relay_to(self, cwd: str) -> None:
+        self.claude, self._relay_pin, self._relay_cwd = True, cwd, cwd
+        log.info("telegram: claude relay on")
+
+    def _join(self, chat_id: int, cwd: str) -> None:
+        self._relay_to(cwd)
+        self._spawn(self._say(chat_id, CLAUDE_ON_LINE, title=CLAUDE_ON_TITLE, subtitle=Path(cwd).name),
+                    "telegram-say")
+
+    def _start_then_join(self, chat_id: int, argument: str, intro: str = "") -> None:
+        self.claude = False
+        self._launch = self._new_launch()
+        step = self._launch.start(argument)
+        if step.done:
+            self._launch = None
+        self._join_after_launch = True
+        if intro:
+            step = dataclasses.replace(step, text=intro + "\n\n" + step.text)
+        self._spawn(self._launch_step(chat_id, step), "telegram-launch")
+
     # -- the Claude Code relay --
-    async def _type_to_claude(self, chat_id: int, text: str) -> None:
+    async def _type_to_claude(self, chat_id: int, text: str, message_id: int = 0) -> None:
         if not self.claude:
             await self._say(chat_id, CLAUDE_NOT_ON_LINE)
             return
@@ -1229,11 +1328,21 @@ class TelegramInlet:
             await self._say(chat_id, "I can't reach a terminal on this computer.")
             return
         try:
-            said = await self._terminal(self._relay_cwd, text)
+            said = await self._terminal(self._relay_pin or self._relay_cwd, text)
         except Exception as e:  # noqa: BLE001
             log.warning("telegram: typing to the terminal failed (%s)", type(e).__name__)
             said = "I couldn't type that into the terminal."
-        await self._say(chat_id, said)
+        if said:
+            await self._say(chat_id, said)
+            return
+        # It went in: a reaction on the owner's own message says so (owner, 2026-09-23), not a line.
+        try:
+            if not message_id:
+                raise BotApiError(0, "no message id")
+            await self.api.react(chat_id, message_id, TYPED_REACTION)
+        except (BotApiError, AttributeError) as e:
+            log.warning("telegram: could not react (%s); said it instead", e)
+            await self._say(chat_id, "Typed.")
 
     def relay_line(self, body: str, title: str = CLAUDE_TITLE, subtitle: str = "") -> None:
         """One message for the phone (what Claude said, a question it asks), batched with its neighbours:
@@ -1278,6 +1387,8 @@ class TelegramInlet:
         logged here either."""
         if not self.claude or self._chat_id is None:
             return
+        if cwd and self._relay_pin and not _same_folder(cwd, self._relay_pin):
+            return                                        # another session: the owner picked this one
         if cwd:
             self._relay_cwd = cwd
         body = str(text).strip()

@@ -11,6 +11,7 @@ from typing import Any, Optional
 import pytest
 
 from cc_buddy_bridge import claude_launch as cl
+from cc_buddy_bridge import telegram
 from cc_buddy_bridge.telegram import TelegramConfig, TelegramInlet
 
 OWNER = 4242
@@ -241,10 +242,12 @@ def test_recent_keeps_five_newest_without_duplicates(tmp_path: Path) -> None:
 class Api:
     def __init__(self) -> None:
         self.sent: list[str] = []
+        self.buttons: list[list[str]] = []
 
     async def send_message(self, chat_id: int, text: str, title: Optional[str] = None,
-                           subtitle: Optional[str] = None) -> None:
+                           subtitle: Optional[str] = None, buttons: Any = ()) -> None:
         self.sent.append(text)
+        self.buttons.append(list(buttons))
 
 
 def message(text: str, update_id: int = 1) -> dict[str, Any]:
@@ -334,3 +337,73 @@ def test_every_offered_tool_is_accepted_when_the_model_calls_it() -> None:
         response = {"output": [{"type": "function_call", "name": tool["name"], "call_id": "c1", "arguments": "{}"}]}
         calls, _, _ = telegram.parse_response(response)
         assert [c["name"] for c in calls] == [tool["name"]]
+
+
+# ---- tap buttons and "claude on" -----------------------------------------------------------------
+
+def test_every_question_offers_tap_buttons_and_a_tapped_number_picks(root: Path) -> None:
+    flow = cl.LaunchFlow(root, clock=lambda: 0.0)
+    step = flow.start()
+    assert step.buttons[:2] == ["Personal", "Work"] and step.buttons[-1] == "Cancel"
+    step = flow.answer("Work")
+    assert step.buttons == ["List", "General", "Cancel"]
+    step = flow.answer("List")
+    assert step.buttons[-2:] == ["General", "Cancel"]
+    tap = next(b for b in step.buttons if b.endswith(". era-hub-api"))
+    step = flow.answer(tap)                              # the button's own text, as Telegram sends it
+    assert step.done and step.folder == root / "work" / "era-hub-api"
+
+
+class JoinRig(Rig):
+    def __init__(self, root: Path, sessions: list[str]) -> None:
+        super().__init__(root)
+        self.inlet._claude_sessions = lambda: sessions
+
+
+def test_claude_on_with_nothing_running_walks_the_tree_then_joins_what_opens(root: Path) -> None:
+    async def go() -> JoinRig:
+        rig = JoinRig(root, [])
+        await rig.text("claude on")
+        assert rig.inlet.claude is False and rig.api.sent[-1].startswith(telegram.CLAUDE_NONE_LINE)
+        assert "Work" in rig.api.buttons[-1]
+        await rig.text("Work")
+        await rig.text("era maker")
+        return rig
+
+    rig = asyncio.run(go())
+    assert rig.opened == [(root / "work" / "era-maker", "era-code")]
+    assert rig.inlet.claude is True
+    assert rig.inlet._relay_pin == str((root / "work" / "era-maker").resolve())
+    assert rig.api.sent[-1] == telegram.CLAUDE_ON_LINE
+
+
+def test_claude_on_with_several_sessions_asks_which_and_follows_only_that_one(root: Path) -> None:
+    a, b = str(root / "personal" / "buddy"), str(root / "work" / "era-maker")
+
+    async def go() -> JoinRig:
+        rig = JoinRig(root, [a, b])
+        await rig.text("claude on")
+        assert rig.inlet.claude is False and rig.api.sent[-1] == telegram.CLAUDE_PICK_LINE
+        assert rig.api.buttons[-1] == ["claude on buddy", "claude on era-maker", telegram.NEW_CLAUDE_BUTTON]
+        await rig.text("claude on era-maker")
+        assert rig.inlet.claude and rig.inlet._relay_pin == b
+        before = len(rig.api.sent)
+        await rig.inlet.relay_text("from the other session", a)
+        await rig.inlet.relay_text("from the picked one", b)
+        await asyncio.gather(*list(rig.inlet._jobs))
+        assert rig.api.sent[before:] == ["from the picked one"]
+        await rig.text("claude off")
+        assert rig.inlet._relay_pin == "" and not rig.inlet.claude
+        return rig
+
+    asyncio.run(go())
+
+
+def test_claude_on_with_one_session_joins_it_at_once(root: Path) -> None:
+    async def go() -> JoinRig:
+        rig = JoinRig(root, [str(root / "personal" / "buddy")])
+        await rig.text("claude on")
+        return rig
+
+    rig = asyncio.run(go())
+    assert rig.inlet.claude and rig.api.sent == [telegram.CLAUDE_ON_LINE] and not rig.opened

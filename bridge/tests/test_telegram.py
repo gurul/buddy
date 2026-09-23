@@ -76,6 +76,8 @@ class FakeApi:
         self.sent: list[tuple[int, str]] = []
         self.titled: list[tuple[Optional[str], Optional[str], str]] = []    # (title, subtitle, body) as passed
         self.photos: list[tuple[int, str, str]] = []
+        self.buttons: list[list[str]] = []                                     # per message sent, [] for none
+        self.reactions: list[tuple[int, int, str]] = []
         self.polls = 0
         self._more: Optional[asyncio.Event] = None
 
@@ -97,9 +99,13 @@ class FakeApi:
         return batch
 
     async def send_message(self, chat_id: int, text: str, title: Optional[str] = None,
-                           subtitle: Optional[str] = None) -> None:
+                           subtitle: Optional[str] = None, buttons: Any = ()) -> None:
         self.sent.append((chat_id, text))
         self.titled.append((title, subtitle, text))
+        self.buttons.append(list(buttons))
+
+    async def react(self, chat_id: int, message_id: int, emoji: str) -> None:
+        self.reactions.append((chat_id, message_id, emoji))
 
     async def send_photo(self, chat_id: int, path: Path, caption: str = "") -> None:
         self.photos.append((chat_id, str(path), caption))
@@ -978,11 +984,12 @@ def test_the_claude_relay_is_off_until_said_and_forwards_only_while_on() -> None
 
     async def terminal(cwd: str, text: str) -> str:
         typed.append((cwd, text))
-        return "Typed into the terminal."
+        return ""                                                             # went in: a reaction, no line
 
     api = FakeApi([update("claude: run the tests", update_id=1)])
     rig = Rig(api, FakeCreate(call("move_head", {"yaw": -60, "pitch": None, "relative": False, "hold_secs": None}),
-                              say("Looking left."), say("On it.")), terminal=terminal, head=FakeHead())
+                              say("Looking left."), say("On it.")), terminal=terminal, head=FakeHead(),
+              claude_sessions=lambda: ["/Users/g/repo"])
 
     async def during() -> None:
         inlet = rig.inlet
@@ -1030,6 +1037,10 @@ def test_the_claude_relay_is_off_until_said_and_forwards_only_while_on() -> None
         await settle()
         assert typed == [("/Users/g/repo", "git status"), ("/Users/g/repo", "make it green"),
                          ("/Users/g/repo", "now run the tests please")]
+        # each typed line is acknowledged by a reaction on the owner's message, never a "typed" line
+        assert api.reactions == [(OWNER, 3, telegram.TYPED_REACTION), (OWNER, 4, telegram.TYPED_REACTION),
+                                 (OWNER, 5, telegram.TYPED_REACTION)]
+        assert not any(text.lower().startswith("typed") for _, text in api.sent)
         api.feed(update("buddy: look left", update_id=6))                       # for buddy, by prefix
         await settle()
         assert typed[-1] == ("/Users/g/repo", "now run the tests please") and len(rig.create.requests) == 2
@@ -1049,7 +1060,8 @@ def test_the_claude_relay_is_off_until_said_and_forwards_only_while_on() -> None
 def test_a_permission_prompt_is_answered_from_the_phone_and_silence_defers() -> None:
     api = FakeApi([update("claude on", update_id=1)])
     asking = TelegramConfig(enabled=True, token=TOKEN, owner_ids=frozenset({OWNER}), ask_permissions=True)
-    rig = Rig(api, FakeCreate(), config=asking, permission_timeout_secs=0.05)
+    rig = Rig(api, FakeCreate(), config=asking, permission_timeout_secs=0.05,
+              claude_sessions=lambda: ["/Users/g/repo"])
 
     async def during() -> None:
         inlet = rig.inlet
@@ -1609,7 +1621,8 @@ def test_codex_owner_binding_and_claude_switch():
     async def go():
         codex, api = FakeCodex(), FakeApi()
         config = TelegramConfig(enabled=True, token=TOKEN, owner_ids=frozenset({OWNER, STRANGER}))
-        rig = Rig(api, FakeCreate(), config=config, codex=codex, codex_folders=lambda: [CODEX_FOLDER])
+        rig = Rig(api, FakeCreate(), config=config, codex=codex, codex_folders=lambda: [CODEX_FOLDER],
+                  claude_sessions=lambda: ["/Users/g/repo"])
         await dispatch(rig, 'codex buddy')
         await dispatch(rig, 'codex: cannot steer', uid=STRANGER)
         await dispatch(rig, 'codex off', uid=STRANGER)
@@ -1672,3 +1685,46 @@ def test_question_answer_is_bound_to_the_requesting_chat():
         assert rig.inlet._pending_answer_chat is None
         await rig.inlet._shutdown()
     asyncio.run(go())
+
+
+def test_buttons_are_a_one_time_reply_keyboard_and_a_reaction_is_one_emoji() -> None:
+    """The real request bodies: buttons ride only the last piece, as a one-time reply keyboard whose taps
+    send their own text; a reaction is setMessageReaction with one emoji."""
+    async def go() -> list[tuple[str, dict[str, Any]]]:
+        calls: list[tuple[str, dict[str, Any]]] = []
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            calls.append((request.url.path.rsplit("/", 1)[-1], json.loads(request.content)))
+            return httpx.Response(200, json={"ok": True, "result": True})
+
+        api = BotApi(TOKEN, client=httpx.AsyncClient(transport=httpx.MockTransport(handler)))
+        await api.send_message(OWNER, "\n\n".join(["word " * 700] * 3), buttons=["claude on buddy", "new claude"])
+        await api.react(OWNER, 77, telegram.TYPED_REACTION)
+        await api.close()
+        return calls
+
+    calls = asyncio.run(go())
+    sends = [body for method, body in calls if method == "sendMessage"]
+    assert len(sends) >= 2 and all("reply_markup" not in b for b in sends[:-1])
+    assert sends[-1]["reply_markup"] == {"keyboard": [[{"text": "claude on buddy"}], [{"text": "new claude"}]],
+                                         "one_time_keyboard": True, "resize_keyboard": True}
+    assert calls[-1] == ("setMessageReaction", {"chat_id": OWNER, "message_id": 77,
+                                                "reaction": [{"type": "emoji", "emoji": telegram.TYPED_REACTION}]})
+
+
+def test_a_failed_reaction_falls_back_to_a_short_line() -> None:
+    class NoReactions(FakeApi):
+        async def react(self, chat_id: int, message_id: int, emoji: str) -> None:
+            raise BotApiError(400, "Bad Request: REACTION_INVALID")
+
+    async def terminal(cwd: str, text: str) -> str:
+        return ""
+
+    api = NoReactions([update("claude on", update_id=1), update("run it", update_id=2)])
+    rig = Rig(api, FakeCreate(), terminal=terminal, claude_sessions=lambda: ["/Users/g/repo"])
+
+    async def during() -> None:
+        await settle()
+        assert api.sent[-1] == (OWNER, "Typed.")
+
+    run_rig(rig, during)

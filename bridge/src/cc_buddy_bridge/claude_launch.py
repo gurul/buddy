@@ -52,6 +52,7 @@ TRIGGER = re.compile(r"^/?(?:new ?claude(?: session)?|claude ?new|start claude|c
 GENERAL_WORDS = ("general", "whole", "root", "all", "g", "the whole thing", "top")
 LIST_WORDS = ("list", "ls", "?", "show", "folders", "list them", "show me", "which", "options")
 _NUMBERED = re.compile(r"^(.+)-\d+$")    # era-maker-213: a worktree of era-maker, folded out of the list
+_TAPPED = re.compile(r"^(\d+)\.\s")     # "2. buddy (personal)": a tapped button carries its number
 
 
 def code_root(environ: Any = None) -> Path:
@@ -199,6 +200,7 @@ class Step:
     harness: Optional[str] = None
     done: bool = False
     title: str = "New Claude session"
+    buttons: list[str] = field(default_factory=list)   # tap targets on the phone; each sends its own text
 
 
 @dataclass
@@ -250,23 +252,29 @@ class LaunchFlow:
             return Step(f"I can't find {', '.join(self.areas)} under {self.root}.", done=True)
         self.area, self.choices = None, []
         text = " or ".join(a.capitalize() for a in areas) + "?"
+        buttons = [a.capitalize() for a in areas]
         recent = [r for r in self.recent if r.folder.is_dir()]
         if recent:
             self.choices = recent
-            text += "\n\nOr a recent one:\n" + "\n".join(
-                f"{i}. {self._label(r.folder)}" for i, r in enumerate(recent, 1))
+            numbered = [f"{i}. {self._label(r.folder)}" for i, r in enumerate(recent, 1)]
+            text += "\n\nOr a recent one:\n" + "\n".join(numbered)
+            buttons += numbered
         text += "\n\nA folder name works too. cancel stops."
-        return Step(text)
+        return Step(text, buttons=buttons + ["Cancel"])
 
     def _ask_scope(self, area: str) -> Step:
         self.area, self.choices = area, []
-        return Step(f"{area.capitalize()}: general, or which folder? Say list to see them.")
+        return Step(f"{area.capitalize()}: general, or which folder? Say list to see them.",
+                    buttons=["List", "General", "Cancel"])
 
     def answer(self, text: str) -> Step:
         self.asked_at = self.clock()
         said, harness = split_harness(text.strip().rstrip(".!"))
         if harness is not None:
             self.harness = harness
+        tapped = _TAPPED.match(said)
+        if tapped and self.choices:
+            said = tapped.group(1)
         word = said.lower()
         if word.isdigit() and self.choices:
             n = int(word)
@@ -305,8 +313,9 @@ class LaunchFlow:
         shown = menu(names)
         self.choices = [self.root / area / n for n, _ in shown]
         lines = [f"{i}. {n}" + (f" (+{k} numbered)" if k else "") for i, (n, k) in enumerate(shown, 1)]
-        return Step("\n".join(lines) + "\n\nReply a number or a name, or general.",
-                    title=f"{area.capitalize()} folders")
+        return Step("\n".join(lines) + "\n\nTap one, or reply a number or a name, or general.",
+                    title=f"{area.capitalize()} folders",
+                    buttons=[f"{i}. {n}" for i, (n, _) in enumerate(shown, 1)] + ["General", "Cancel"])
 
     def _pick(self, said: str, areas: Sequence[str]) -> Step:
         hits = [self.root / a / n for a in areas for n in match(said, folders(self.root / a))]
@@ -318,8 +327,8 @@ class LaunchFlow:
             return Step(f"No folder like \"{said}\" in {where}.{hint}")
         self.choices = hits[:MAX_CHOICES]
         more = f"\n…and {len(hits) - MAX_CHOICES} more; type more of the name." if len(hits) > MAX_CHOICES else ""
-        return Step("Which one?\n" + "\n".join(f"{i}. {self._label(p)}" for i, p in enumerate(self.choices, 1))
-                    + more)
+        numbered = [f"{i}. {self._label(p)}" for i, p in enumerate(self.choices, 1)]
+        return Step("Which one?\n" + "\n".join(numbered) + more, buttons=numbered + ["Cancel"])
 
     def _open(self, folder: Path) -> Step:
         self.choices = []

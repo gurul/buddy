@@ -1015,7 +1015,7 @@ class Daemon:
         script = f'tell application "System Events" to keystroke "{escaped}"\ntell application "System Events" to keystroke return'
         if await _osascript(script) is None:
             return "I couldn't type into the terminal (System Events refused — check Automation permissions)."
-        return "Typed into the terminal."
+        return ""                                         # typed: the phone reacts to the owner's message
 
     def _texted_task_running(self) -> bool:
         inlet = getattr(self, "_telegram", None)
@@ -1076,6 +1076,8 @@ class Daemon:
             scene=self._scene, head=self._head, on_explore=lambda: self._request_explore("requested from Telegram"),
             on_sound=self._set_sound, on_star=self._star_by_voice, on_caption=self._on_caption,
             notes=lambda: self._room_notes_taker(), terminal=Daemon._type_into_terminal,
+            claude_sessions=lambda: [s.cwd for s in sorted(self.state.sessions.values(),
+                                                           key=lambda s: s.started_at, reverse=True) if s.cwd],
             records=records_mod.RecordsReader(self._recall_cfg) if records_mod.configured().enabled else None)
 
     def _make_agent(self, on_event: Any, ask_user: Any) -> Any:

@@ -109,7 +109,7 @@ class Api:
         self.sent: list[tuple[Optional[str], str]] = []
 
     async def send_message(self, chat_id: int, text: str, title: Optional[str] = None,
-                           subtitle: Optional[str] = None) -> None:
+                           subtitle: Optional[str] = None, buttons: Any = ()) -> None:
         self.sent.append((title, text))
 
 

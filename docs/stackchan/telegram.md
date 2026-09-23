@@ -55,10 +55,11 @@ Todos come from open markdown checkboxes in `CC_BUDDY_VAULT` (the existing
 Second Brain/Obsidian vault). Dated due/scheduled/start markers and today's daily
 note identify today's items; overdue and undated items are separate. Completed
 items, future items, hidden folders, archives and symlinks are excluded. The scan
-is bounded to 5,000 files, 1 MiB per file and 200 tasks, with partial coverage
-reported. `CC_BUDDY_SECOND_BRAIN=1` supplies the vault; Composio supplies connected
-Gmail/Calendar/Slack accounts. Missing sources are reported rather than treated as
-empty. Rundown exposes only read/search tools and rejects mutations before execution.
+is bounded to 5,000 files, 1 MiB per file and 200 tasks. `CC_BUDDY_SECOND_BRAIN=1` supplies the vault; Composio supplies connected
+Gmail/Calendar/Slack accounts. A source that is not connected, or whose read failed
+outright, is named rather than treated as empty. Result limits, pagination and
+clipping are never mentioned: the rundown reports what it retrieved (owner,
+2026-09-23). Rundown exposes only read/search tools and rejects mutations before execution.
 It does not send messages, mark mail read, change calendar events or edit todos.
 The retrieved content is summarized by Buddy's configured OpenAI text model.
 
@@ -183,6 +184,11 @@ folders. The steps are code, with no model call, and each one is a short text:
    matched loosely, so `era maker` finds `era-maker`. If more than one folder
    matches, you get a numbered choice.
 
+Every question comes with **tap buttons** (a one-time Telegram reply keyboard):
+`Personal` / `Work` and the recent sessions, then `List` / `General`, then one
+button per folder. A tap sends the button's own text, such as `2. era-maker`,
+and the number picks. Typing still works.
+
 You can say everything in one message: `new claude work era hub api`. You can
 also just ask in plain words ("open up era maker in work"), and the text brain
 walks the same steps through its `start_coding_session` tool. `cancel` ends the
@@ -201,6 +207,19 @@ by its file path. With `CC_BUDDY_CLAUDE_TERMINAL=terminal`, Terminal.app runs
 `cd <folder> && <command>` instead. The folder is always one taken from the
 listing, never text from the chat, and it is shell-quoted. After the window
 opens, `claude on` connects the chat to it as usual.
+
+`claude on` itself starts from the sessions that are running (the daemon knows
+each one from its hooks):
+
+- **One session:** the chat joins it at once.
+- **Several:** "Which Claude session?" with a button per folder
+  (`claude on buddy`, `claude on era-maker`) and `new claude`. The chat then
+  follows only the session you picked: another session's text stays on the Mac.
+- **None:** it walks the steps above, opens the terminal, and joins that session
+  when it opens.
+
+`claude on <name>` picks a running session by folder name. If no running session
+matches, it starts that folder.
 
 ## Web search
 
@@ -390,7 +409,10 @@ Flip it to `ask` if two seconds a command is a price you will pay.
   of its result are not forwarded (owner, 2026-09-21). "Claude is waiting on
   you" arrives when a session blocks on you, and **what you text goes into
   the session's terminal**: the chat is the terminal. Plain text is raised into that
-  session (`focus_terminal.py`) and typed with Return through System Events;
+  session (`focus_terminal.py`) and typed with Return through System Events.
+  A 👍 reaction on your message says it went in; buddy sends no "typed" line
+  (owner, 2026-09-23), and only if the reaction fails does a short `Typed.`
+  arrive instead;
   `buddy: <text>` talks to buddy instead, and buddy's code words (`stop`,
   `screenshot`, `stealth mode`, `claude off`) still work. **The relay is
   bypass**: while it is on, the daemon's pretooluse hook allows a tool call

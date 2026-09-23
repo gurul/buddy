@@ -63,7 +63,10 @@ The [Telegram door](docs/stackchan/telegram.md) is **off by default**. With it o
 - **`rundown`** summarises today's email, calendar, Slack mentions/DMs and Obsidian
   todos. It only reads.
 - **`new claude`** opens Warp on the Mac with Claude Code (personal) or era-code
-  (work) in a folder you pick. **`claude on`** relays that terminal to the phone.
+  (work) in a folder you pick, with tap buttons. **`claude on`** relays a running
+  session to the phone: it picks the only one, offers buttons when there are
+  several, and opens a new one when there are none. A 👍 on your text means it
+  was typed.
 - **Keeps your personal notes.** With the [second brain](docs/stackchan/second-brain.md)
   on, a text saves a note, updates a list, checks off a todo, or undoes an edit in
   your Markdown vault.
@@ -353,7 +356,7 @@ Every message is shaped for the phone by `telegram_format.py`.
 |---|---|
 | Chat and tasks | Chat with buddy, start and stop a Mac task, answer a task's question, receive a camera photo. |
 | Images | Send photos or image files with captions (still JPEG/PNG/WebP/GIF, up to 10 MB). See [image routing and retention](docs/stackchan/telegram.md#receiving-images). |
-| `rundown` | Today's email, calendar, Slack and Obsidian todos through the packaged [rundown skill](bridge/src/cc_buddy_bridge/skills/rundown/SKILL.md). Read-only; reports disconnected sources. |
+| `rundown` | Today's email, calendar, Slack and Obsidian todos through the packaged [rundown skill](bridge/src/cc_buddy_bridge/skills/rundown/SKILL.md). Read-only; names disconnected sources, never result limits. |
 | `claude on` | Streams Claude Code's visible text to the phone (never the gray tool lines or thinking) and types your replies in; tool calls run as in bypass mode. Jev judges each relayed shell command for risk (shadow by default). |
 | `codex on` / `codex <folder>` | Starts a new Codex chat in a saved folder, with approvals relayed to Telegram. `stop` interrupts, `codex off` returns to buddy, `buddy:` addresses buddy directly. |
 | `new claude` | Opens a coding session in Warp from a few short texts. |
