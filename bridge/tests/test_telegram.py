@@ -1144,7 +1144,6 @@ def test_the_daemon_honours_the_phones_decision_and_defers_without_one() -> None
         assert bypass.asked == [] and bypass.lines == ["> Bash: rm -rf build/"]     # still shown, like the terminal
         # an out-of-cwd Read is a prompt on the Mac too: with the relay on it is allowed the same way
         d = daemon_with(Inlet(None))
-        d._read_scopes = set()
         d._handle_read_pretooluse = MethodType(Daemon._handle_read_pretooluse, d)
         read = {"tool_use_id": "t2", "session_id": "s1", "tool_name": "Read", "hint": "/etc/hosts", "cwd": "/r"}
         assert asyncio.run(d._handle_pretooluse(read)) == {"ok": True, "decision": "allow"}

@@ -13,7 +13,6 @@ from typing import TYPE_CHECKING, Any, Optional
 if TYPE_CHECKING:
     from .key_tap import KeyTapper
 
-from . import browser_lane as browser_lane_mod
 from . import follow as follow_mod
 from . import photos, voice_agent
 from . import recall as recall_mod
@@ -65,7 +64,7 @@ from .protocol import (
     build_time_sync,
     truncate_utf8_bytes,
 )
-from .read_policy import is_within, read_scope
+from .read_policy import is_within
 from .scene import SceneWatcher, make_scene_client
 from .scene import configured as scene_configured
 from .sound import SoundSetting, build_sound_cmd, quiet_caption
@@ -96,10 +95,6 @@ log = logging.getLogger(__name__)
 # and the name of a conversation task opened for listening (so a stop can cancel one still connecting).
 THINK_ALOUD_CALL_SECS = 12.0
 THINK_ALOUD_TASK = "think-aloud-conversation"
-
-# PERMISSION_WAIT_SECS moved to protocol.py — the wire `prompt.ttl` field is
-# derived from it, so it lives next to the serializer. Re-exported via the
-# import above for callers/tests that referenced it here.
 
 class Daemon:
     def __init__(
@@ -133,12 +128,6 @@ class Daemon:
         self.matchers = matchers if matchers is not None else load_matcher_config()
         # Per-decision append-only log; see audit.py
         self.audit = AuditLog()
-        # tool_use_id → Future resolving to "allow" | "deny"
-        # Read scopes (git-repo roots / parent dirs) the user has approved via
-        # a card swipe. Daemon-lifetime by design — restart forgets all grants.
-        self._read_scopes: set[str] = set()
-        # Command shapes granted "always" from the stick (card held at the
-        # approve edge). In-memory only — a bad grant dies with the daemon.
         # Hold-the-pet push-to-talk: holds Opt+Space (VoiceFlow) between the
         # stick's voice start/stop events. Lazily constructed on first use so
         # non-mac / Quartz-less hosts pay nothing.
@@ -247,7 +236,6 @@ class Daemon:
         # that is the diary's vision note taker, and clobbering it would cost
         # buddy its eyes.
         self._room_notes: Optional[RoomNotes] = None
-        self._notes_after_conversation = False
         self._agent_cfg = agent_configured()
         self._ears: Optional[Ears] = None
         self._conversation: Optional[asyncio.Task[None]] = None
@@ -255,8 +243,6 @@ class Daemon:
         self._active_agent: Optional[CodexComputerAgent] = None
         # The text door (telegram.py). None unless CC_BUDDY_TELEGRAM is on with a token and an owner id.
         self._telegram: Optional[telegram_mod.TelegramInlet] = None
-        # The browser lane (browser_lane.py): buddy's own Chromium for web goals. None unless CC_BUDDY_BROWSER_LANE.
-        self._browser: Optional[browser_lane_mod.BrowserLane] = None
         # "hey buddy, go explore": the voice tool sets this; the explore
         # starts when the conversation has closed, so the board is never
         # asked to hold a conversation pose and pan the room at once.
@@ -289,11 +275,6 @@ class Daemon:
         self._status_missed = 0
         self._ack_escalation = 0   # consecutive missed-ack episodes
         self._clean_polls = 0      # answered polls since the last escalation
-        # tool_use_id -> session cwd, for the card's swipe-up focus action.
-        # transcript_path → hash of the last assistant content we emitted as an
-        # entry. Used to distinguish "fresh turn" from "re-read old content"
-        # when the transcript file hasn't been flushed yet.
-        self._last_emitted_turn_key: dict[str, str] = {}
         # session_id → task that'll flip running→0 after a grace window.
         # Delays the turn_end so the stick's HUD stays drawn long enough to
         # display the @-entry the tailer just emitted. See firmware's
@@ -384,7 +365,6 @@ class Daemon:
         # record without waiting for a human to run anything.
         tasks.append(asyncio.create_task(self._chat_memory.curate_loop(self._shutdown),
                                          name="chat-memory-curate"))
-        self._browser = browser_lane_mod.make_lane(browser_lane_mod.configured())
         # codex_warm.py: one Codex agent started ahead of time, so a hard task's handoff is the turn only.
         from . import codex_warm
         warm_on, warm_age = codex_warm.configured()
@@ -415,8 +395,6 @@ class Daemon:
                 await asyncio.gather(self._expression_audition, return_exceptions=True)
             await self._send_cam(False)
             self._vision.stop()
-            if self._browser is not None:
-                await self._browser.close()
             for t in tasks:
                 t.cancel()
             for pend in list(self._pending_turn_ends.values()):
@@ -615,6 +593,13 @@ class Daemon:
         time sync, forced heartbeat, status poll. The board buffers serial RX
         during its boot-time panel clear, so no settling delay is needed."""
         log.info("board rebooted under a live link — resyncing time + state")
+        await Daemon._send_resync(self)
+
+    async def _send_resync(self) -> None:
+        """What a board needs after a reboot or a (re)connect, in this order (test_vision pins it): the time,
+        a forced heartbeat, a status poll, then listening, the agent's face, the camera and the sound. One
+        copy for both paths, so a step added for one is never missing from the other. Called through the
+        class: tests run these methods on a stub."""
         await self.ble.send(build_time_sync())
         await self._push_heartbeat(force=True)
         await self.ble.send({"cmd": "status"})
@@ -635,13 +620,7 @@ class Daemon:
             if not self.ble.connected:
                 await asyncio.sleep(0.5)
                 continue
-            await self.ble.send(build_time_sync())
-            await self._push_heartbeat(force=True)
-            await self.ble.send({"cmd": "status"})
-            await self._reset_listen()
-            await self._resync_agent()
-            await self._send_cam(True)
-            await self._send_sound()
+            await Daemon._send_resync(self)
             self._apply_mic("the robot connected")
             # Wait for the connection to drop before waiting again.
             while self.ble.connected and not self._shutdown.is_set():
@@ -990,16 +969,6 @@ class Daemon:
             self._room_notes = RoomNotes(self._recall_cfg, notes_configured(), make_notes_client(),
                                          self._ears, on_state=self._on_agent_state)
         return self._room_notes
-
-    def _notes_by_voice(self) -> None:
-        """The owner asked for notes out loud, inside a conversation.
-
-        The conversation has to end first: the wake word and the note taker both
-        want the microphone, and ears.py bypasses the spotter while anything is
-        subscribed. So buddy says it will, the session closes, and recording
-        starts on the way out.
-        """
-        self._notes_after_conversation = True
 
     def _star_by_voice(self, claim: str) -> Optional[str]:
         """The owner said "remember that" out loud. That is a human promoting.
@@ -2180,11 +2149,6 @@ class Daemon:
         # In-cwd reads never prompt anywhere; defer without noise.
         if not path or is_within(path, cwd):
             return {"ok": True}
-        scope = read_scope(path)
-        if scope is not None and scope in self._read_scopes:
-            log.info("read under approved scope %s → allow (%s)", scope, path)
-            self.audit.record(**audit_kwargs, decision="allow", source="read_scope")
-            return {"ok": True, "decision": "allow"}
         inlet = getattr(self, "_telegram", None)
         if inlet is not None and inlet.claude and str(req.get("permission_mode") or "") not in ("bypassPermissions", "dontAsk"):
             # The Claude relay is bypass (see _handle_pretooluse): a read is allowed, not carded.
@@ -2388,9 +2352,6 @@ class Daemon:
             # We're the central; we don't send these, but acknowledge defensively.
             return
 
-        if obj.get("ack") is not None:
-            return  # device acknowledging something we sent
-
         log.debug("ble: unhandled %r", obj)
 
     # ---- JSONL callback ----
@@ -2482,81 +2443,6 @@ class Daemon:
             except ValueError:
                 pass
 
-    async def _emit_turn_event(self, transcript_path: str) -> None:
-        """On turn_end: mirror the latest assistant text into the heartbeat's
-        ``entries`` list so the stick's transcript view shows it.
-
-        The reference firmware silently drops {"evt":"turn"} events (its JSON
-        parser only reads heartbeat fields), so the only thing that actually
-        shows up for the user is the synthetic entry we add below.
-
-        Polls for fresh content: Claude Code flushes assistant records to the
-        transcript JSONL *after* the Stop hook fires, so a naive read grabs
-        the PREVIOUS turn's content. We hash what we read and compare to the
-        last content we emitted; if unchanged, wait 200 ms and retry, up to
-        ~1.2 s total before giving up.
-        """
-        if not self.ble.connected:
-            return
-
-        # Claude Code's transcript writes are async w.r.t. the Stop hook — the
-        # hook fires before the final assistant record hits disk. Sleep a beat
-        # so our first read sees the just-finished turn; then poll for up to
-        # another ~1.2s if that wasn't enough (e.g., long response still being
-        # serialized). Dedupe by content hash so we never re-emit the same turn.
-        await asyncio.sleep(1.0)
-
-        import hashlib
-        import json as _json
-        last_key = self._last_emitted_turn_key.get(transcript_path)
-        content: list | None = None
-        content_key: str | None = None
-        for attempt in range(6):
-            if attempt > 0:
-                await asyncio.sleep(0.2)
-            try:
-                self.jsonl._process_file(transcript_path)
-            except Exception:  # noqa: BLE001
-                log.debug("turn event: process_file failed", exc_info=True)
-            candidate = self.jsonl.last_assistant_content(transcript_path)
-            if not candidate:
-                continue
-            key = hashlib.md5(
-                _json.dumps(candidate, sort_keys=True, ensure_ascii=False).encode("utf-8")
-            ).hexdigest()
-            if key != last_key:
-                content = candidate
-                content_key = key
-                break
-            log.debug("turn event: transcript content unchanged, retrying (attempt %d)", attempt + 1)
-
-        if not content:
-            log.info("turn end: no fresh content after 1s warmup + 1.2s polling")
-            return
-
-        text = _first_text_block(content)
-        if text:
-            log.info("turn end: adding entry '@ %s...' (state.entries len before=%d)",
-                     text[:30], len(self.state.entries))
-            self.state.add_entry(f"@ {truncate_utf8_bytes(text, _ENTRY_PAYLOAD_MAX_BYTES)}")
-            await self._push_heartbeat(force=True)
-            if content_key is not None:
-                self._last_emitted_turn_key[transcript_path] = content_key
-        else:
-            log.info("turn end: content found but no text block, skipping entry add")
-
-
-def _first_text_block(content: list) -> str:
-    """Pull the first text block out of an SDK content array. Returns '' if
-    the turn was purely tool_use / tool_result (no natural-language reply)."""
-    for block in content:
-        if not isinstance(block, dict):
-            continue
-        if block.get("type") == "text":
-            text = block.get("text")
-            if isinstance(text, str) and text.strip():
-                return text.strip()
-    return ""
 
 
 def _log_permission_config_summary(matchers: MatcherConfig) -> None:
