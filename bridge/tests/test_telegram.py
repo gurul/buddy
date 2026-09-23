@@ -2859,6 +2859,146 @@ def test_progress_falls_back_to_plain_messages_when_buttons_are_refused() -> Non
     assert api.edits == []
 
 
+# Review of the progress batch (owner, 2026-09-23): when editing does not work, the steps wait for the
+# paced flush, and work that ended inside that second used to drop them. A sleep that never returns holds
+# the flush open like a real second, so nothing is settled between the last step and the end.
+
+async def held_second(_secs: float) -> None:
+    await asyncio.Event().wait()
+
+
+def refuse_buttons(api: FakeApi) -> None:
+    async def refused(*a: Any, **kw: Any) -> int:
+        raise BotApiError(400, "Bad Request: inline keyboards are not allowed")
+
+    api.send_inline = refused  # type: ignore[method-assign]
+
+
+def test_a_last_step_is_sent_when_the_task_ends_inside_the_second_and_buttons_were_refused() -> None:
+    api = FakeApi([update("open the calculator")])
+    refuse_buttons(api)
+    rig = task_rig(api, sleep=held_second)
+
+    async def during() -> None:
+        rig.agents[0].on_event(AgentEvent("progress", "Clicked Pay"))
+        rig.agents[0].release.set()                                        # ends at once: no settle between
+
+    run_rig(rig, during)
+    assert api.sent == [(OWNER, ON_IT_LINE), (OWNER, "Clicked Pay"), (OWNER, "Calculator is open.")]
+
+
+def test_a_last_step_is_sent_after_earlier_ones_in_degraded_mode() -> None:
+    api = FakeApi([update("open the calculator")])
+    refuse_buttons(api)
+    rig = task_rig(api)
+
+    async def during() -> None:
+        rig.agents[0].on_event(AgentEvent("progress", "first"))
+        await settle()
+        rig.inlet._sleep = held_second                                     # the next step waits out its second
+        rig.agents[0].on_event(AgentEvent("progress", "LAST STEP"))
+        rig.agents[0].release.set()
+
+    run_rig(rig, during)
+    assert api.sent == [(OWNER, ON_IT_LINE), (OWNER, "first"), (OWNER, "LAST STEP"), (OWNER, "Calculator is open.")]
+
+
+def test_a_last_step_is_sent_when_the_closing_edit_fails() -> None:
+    api = FakeApi([update("open the calculator")])
+    api.fail_edits = BotApiError(400, "Bad Request: message can't be edited")
+    rig = task_rig(api, sleep=held_second)
+
+    async def during() -> None:
+        progress_id = api.message_id
+        rig.agents[0].on_event(AgentEvent("progress", "Clicked Pay"))
+        rig.agents[0].release.set()
+        await settle()
+        assert progress_id in api.dropped                                  # the Stop button still went
+
+    run_rig(rig, during)
+    assert api.sent == [(OWNER, ON_IT_LINE), (OWNER, "Clicked Pay"), (OWNER, "Calculator is open.")]
+
+
+def test_a_working_closing_edit_shows_the_last_step_and_sends_nothing_extra() -> None:
+    api = FakeApi([update("open the calculator")])
+    rig = task_rig(api, sleep=held_second)
+
+    async def during() -> None:
+        rig.agents[0].on_event(AgentEvent("progress", "Clicked Pay"))
+        rig.agents[0].release.set()
+
+    run_rig(rig, during)
+    assert api.sent == [(OWNER, ON_IT_LINE), (OWNER, "Calculator is open.")]
+    assert api.edits[-1][1] == ON_IT_LINE + "\n\n- Clicked Pay\n\n" + telegram.PROGRESS_DONE_LINE
+
+
+def test_a_flush_already_sending_steps_is_waited_for_not_cancelled() -> None:
+    api = FakeApi([update("open the calculator")])
+    refuse_buttons(api)
+    gate = asyncio.Event()
+    plain = api.send_message
+
+    async def slow(chat_id: int, text: str, *a: Any, **kw: Any) -> None:
+        if text == "Clicked Pay":
+            await gate.wait()                                              # the step is on its way when work ends
+        await plain(chat_id, text, *a, **kw)
+
+    api.send_message = slow  # type: ignore[method-assign]
+    rig = task_rig(api)
+
+    async def during() -> None:
+        rig.agents[0].on_event(AgentEvent("progress", "Clicked Pay"))
+        await settle()
+        rig.agents[0].release.set()
+        await settle()
+        assert api.sent == [(OWNER, ON_IT_LINE)]                           # the close waits for the step
+        gate.set()
+
+    run_rig(rig, during)
+    assert api.sent == [(OWNER, ON_IT_LINE), (OWNER, "Clicked Pay"), (OWNER, "Calculator is open.")]
+
+
+def test_a_step_during_a_refused_first_send_is_not_lost() -> None:
+    api = FakeApi([update("open the calculator")])
+    gate = asyncio.Event()
+
+    async def refused_later(*a: Any, **kw: Any) -> int:
+        await gate.wait()
+        raise BotApiError(400, "Bad Request: inline keyboards are not allowed")
+
+    api.send_inline = refused_later  # type: ignore[method-assign]
+    rig = task_rig(api)
+
+    async def during() -> None:
+        rig.agents[0].on_event(AgentEvent("progress", "Opening Calculator"))   # while "On it" is being sent
+        await settle()
+        gate.set()
+        await settle()
+        rig.agents[0].release.set()
+
+    run_rig(rig, during)
+    assert api.sent == [(OWNER, ON_IT_LINE), (OWNER, "Opening Calculator"), (OWNER, "Calculator is open.")]
+
+
+def test_a_codex_commentary_is_sent_when_the_turn_ends_inside_the_second_in_degraded_mode() -> None:
+    async def go() -> None:
+        codex, api = FakeCodex(), FakeApi()
+        refuse_buttons(api)
+        rig = Rig(api, FakeCreate(), codex=codex, codex_folders=lambda: [CODEX_FOLDER], sleep=held_second)
+        await dispatch(rig, "codex buddy")
+        await dispatch(rig, "fix the tests", update_id=3)
+        await settle()
+        assert api.sent[-1] == (OWNER, "Sent to Codex.")
+        await codex.emit("I fixed the flaky test.")
+        await codex.done("All tests pass.")                               # ends at once: no settle between
+        await settle()
+        assert [t for _, t in api.sent][-2:] == ["I fixed the flaky test.", "All tests pass."]
+        await dispatch(rig, "codex off")
+        await rig.inlet._shutdown()
+
+    asyncio.run(go())
+
+
 def test_stealth_hides_the_robot_not_the_progress_message() -> None:
     api = FakeApi([update("stealth mode", update_id=1), update("open the calculator", update_id=2)])
     captions: list[dict[str, Any]] = []

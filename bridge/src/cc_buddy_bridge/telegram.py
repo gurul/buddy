@@ -1060,6 +1060,7 @@ class _Progress:
     board: Optional[_Keyboard] = None                             # the Stop button
     lock: asyncio.Lock = field(default_factory=asyncio.Lock)      # the first send, edits and the close, in order
     flush: Optional[asyncio.Task] = None
+    pushing: bool = False                                         # the flush holds steps it took: never cancel it
 
     def text(self) -> str:
         return "\n\n".join([self.head] + (["\n".join("- " + s for s in self.steps)] if self.steps else []))
@@ -1773,9 +1774,11 @@ class TelegramInlet:
             if progress.closed:
                 return
             text = progress.text()
+            taken = len(progress.unsent)                   # the steps this send shows; later ones stay unsent
             sent = await self._send_choices(progress.chat_id, text, progress.board, title=progress.title,
                                             subtitle=progress.subtitle)
-            progress.shown, progress.edited_at, progress.unsent = text, self._clock(), []
+            progress.shown, progress.edited_at = text, self._clock()
+            del progress.unsent[:taken]
             if sent and progress.board is not None and progress.board.message_id:
                 progress.message_id = progress.board.message_id
             else:
@@ -1842,7 +1845,11 @@ class TelegramInlet:
                 text = progress.text()
                 if text == progress.shown and not progress.unsent:
                     return
-                await self._push_progress(progress, text)
+                progress.pushing = True                    # from here the steps are ours: the close waits
+                try:
+                    await self._push_progress(progress, text)
+                finally:
+                    progress.pushing = False
 
     async def _push_progress(self, progress: _Progress, text: str) -> None:
         progress.edited_at = self._clock()
@@ -1866,33 +1873,45 @@ class TelegramInlet:
                 log.warning("telegram: could not edit a progress message (%s); steps go as new messages",
                             e if isinstance(e, BotApiError) else type(e).__name__)
                 progress.broken = True
-        lines, progress.unsent = progress.unsent, []
         progress.shown = text
+        await self._say_unsent(progress)
+
+    async def _say_unsent(self, progress: _Progress) -> None:
+        """The steps no edit has shown, as one plain message: today's behaviour when editing does not work.
+        The long-step pointer is left out, since the step it points to already went on its own."""
+        lines = [s for s in progress.unsent if s != PROGRESS_LONG_STEP_LINE]
+        progress.unsent = []
         if lines:
             await self._say(progress.chat_id, "\n".join(lines), title=progress.title, subtitle=progress.subtitle)
 
     async def _close_progress(self, progress: Optional[_Progress], line: str) -> None:
         """The work is over: the progress message says ``line`` under its last steps and loses its Stop
-        button. Steps not yet shown are dropped, since the result comes next. Fail-soft throughout."""
+        button. That closing edit shows every step, so none waits for the paced flush. When there is no
+        message to edit (the buttons were refused) or the edit fails, the steps not yet shown go as one plain
+        message before the result: a step is never lost, least of all a Codex commentary (owner, 2026-09-23).
+        A flush waiting out its second is cancelled; one already sending steps is waited for, not cut off.
+        Fail-soft throughout."""
         if progress is None or progress.closed:
             return
         progress.closed = True
         self._retire(progress.board)
         flush = progress.flush
-        if flush is not None and not flush.done() and flush is not asyncio.current_task():
+        if flush is not None and not flush.done() and flush is not asyncio.current_task() and not progress.pushing:
             flush.cancel()
         async with progress.lock:
-            if not progress.message_id:
-                return
-            text = progress.text() + "\n\n" + line
-            try:
-                await self.api.edit_message(progress.chat_id, progress.message_id, text, title=progress.title,
-                                            subtitle=progress.subtitle)
-            except asyncio.CancelledError:
-                raise
-            except Exception as e:  # noqa: BLE001 — the result still goes; a stale Stop only answers "expired"
-                log.debug("telegram: could not close a progress message (%s)", type(e).__name__)
-                await self._drop_buttons(progress.chat_id, progress.message_id)
+            if progress.message_id:
+                text = progress.text() + "\n\n" + line
+                try:
+                    await self.api.edit_message(progress.chat_id, progress.message_id, text, title=progress.title,
+                                                subtitle=progress.subtitle)
+                    progress.unsent = []                   # every step is on the phone now
+                    return
+                except asyncio.CancelledError:
+                    raise
+                except Exception as e:  # noqa: BLE001 — the result still goes; a stale Stop only answers "expired"
+                    log.debug("telegram: could not close a progress message (%s)", type(e).__name__)
+                    await self._drop_buttons(progress.chat_id, progress.message_id)
+            await self._say_unsent(progress)
 
     # -- fresh Codex folder chats --
     async def _codex_command(self, chat_id: int, action: str, selection: Optional[str], epoch: int) -> None:
