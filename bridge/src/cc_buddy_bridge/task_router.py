@@ -48,7 +48,7 @@ from dataclasses import dataclass, field
 from typing import Iterable, Optional
 from urllib.parse import quote_plus
 
-from .lane_router import QUESTION_WORDS, normalise
+from .lane_router import is_question, normalise
 
 # The shipped default for CC_BUDDY_REFLEXES. tools/route_eval.py decides it on the labelled
 # requests (precision bar fixed in the tool) and --check-default asserts this constant.
@@ -394,9 +394,7 @@ def classify(goal: str, *, frontmost_app: str = "", apps: Iterable[str] = (), mo
     if not text:
         return Plan("astra", ("astra",), reasons=("empty",))
     if QUIT_WORD.search(text) and not FORCE.search(text):
-        words = re.findall(r"[a-z']+", text.casefold())
-        asks = (bool(words) and words[0].replace("'", "") in QUESTION_WORDS) or ("?" in text and not polite)
-        if not asks:
+        if not is_question(text, polite=polite):
             target = _quit(text.rstrip("?").strip(), installed)
             how = "the quit rules"
             if target is None and quit_model is not None:
@@ -414,9 +412,8 @@ def classify(goal: str, *, frontmost_app: str = "", apps: Iterable[str] = (), mo
         return Plan("astra", ("astra",), reasons=("consequential: only the planner can ask first",))
     if TYPING.search(text) and not _explicit_search(text):
         return Plan("astra", ("astra",), reasons=("text to type: the planner's",))
-    first = re.findall(r"[a-z']+", text.casefold())
     # "?" alone is politeness when the request began "can you …"; a question word in front is a question
-    question = (bool(first) and first[0].replace("'", "") in QUESTION_WORDS) or ("?" in text and not polite)
+    question = is_question(text, polite=polite)
     text = text.rstrip("?").strip()
     launched = _launch(text, apps)
     if launched is not None and not question:
