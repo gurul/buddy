@@ -97,7 +97,9 @@ STEALTH_OFF = ("stealth off", "wake up", "/wake", "stop stealth", "end stealth",
 CLAUDE_ON = ("claude on", "/claude on", "claude relay on", "relay claude")
 CLAUDE_OFF = ("claude off", "/claude off", "claude relay off", "stop relaying claude")
 CLAUDE_PREFIX = re.compile(r"^(claude|>)\s*:?\s+(.+)$", re.I | re.S)     # "claude: fix the tests" → typed into the terminal
-BUDDY_PREFIX = re.compile(r"^(hey )?buddy\s*[,:]\s*(.+)$", re.I | re.S)   # while relaying: this one is for buddy
+# While relaying, this one is for buddy: "buddy: …", "buddy, …", and "hey buddy …" with or without the comma
+# (live, 2026-09-23: "Hey buddy how many unread emails…" went to the Claude terminal for want of one).
+BUDDY_PREFIX = re.compile(r"^(hey buddy[\s,:!.]+|buddy\s*[,:]\s*)(.+)$", re.I | re.S)
 CLAUDE_ON_TITLE = "Claude relay on"
 CLAUDE_ON_LINE = ("This chat is the terminal now. What you text is typed into Claude Code; what it says and asks "
                   "comes back here, and its tool calls go through without asking, as in bypass mode.\n\n"

@@ -60,7 +60,7 @@ WRITE_VERBS = frozenset({"SEND", "CREATE", "DELETE", "REMOVE", "UPDATE", "EDIT",
 # Words that are also plain nouns: a write only in verb position (the first word after the toolkit). Live,
 # 2026-09-23: GMAIL_GET_LABEL (read the INBOX label, i.e. the unread count) was refused as a write under the
 # owner's "gmail: read" policy. Tools that change labels carry a real verb too: ADD_LABEL, MODIFY_…_LABELS.
-NOUN_TOO = frozenset({"LABEL"})
+NOUN_TOO = frozenset({"LABEL", "DRAFT", "ORDER", "RUN", "SCHEDULE"})   # GET_DRAFT, GET_ORDER, GET_A_WORKFLOW_RUN…
 READ_ONLY_SLUG = re.compile(r"^[A-Za-z0-9]+_[A-Za-z0-9_]+$")     # the shape; the words decide (is_read_only)
 
 # Per-toolkit policy for a call that WRITES (owner, 2026-09-21: "make gmail read only, allow write for

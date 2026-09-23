@@ -8,6 +8,8 @@ import json
 from types import SimpleNamespace
 from typing import Any, Optional
 
+import pytest
+
 from cc_buddy_bridge import installer
 from cc_buddy_bridge.daemon import Daemon
 from cc_buddy_bridge.hooks import permission_request, pretooluse
@@ -131,3 +133,18 @@ def test_the_question_goes_numbered_and_the_waiting_echo_is_dropped() -> None:
     api = asyncio.run(go())
     assert api.sent[0][0] == CLAUDE_ASKS_TITLE and "Reply with the option's number." in api.sent[0][1]
     assert len(api.sent) == 2 and api.sent[1][1] == "Claude needs your input"
+
+
+@pytest.mark.parametrize("text,for_buddy", [
+    ("Hey buddy how many unread emails are on Gmail", "how many unread emails are on Gmail"),   # live, 2026-09-23
+    ("hey buddy, stop", "stop"),
+    ("buddy: look left", "look left"),
+    ("Buddy, what time is it", "what time is it"),
+    ("buddy is broken fix it", None),          # a bare "buddy" still needs its comma or colon: this is for Claude
+    ("the buddy thing", None),
+])
+def test_what_reaches_buddy_while_relaying(text: str, for_buddy) -> None:
+    from cc_buddy_bridge.telegram import BUDDY_PREFIX
+
+    m = BUDDY_PREFIX.match(text)
+    assert (m.group(2) if m else None) == for_buddy

@@ -311,6 +311,17 @@ def test_execute_never_raises(tmp_path: Path, caplog: Any) -> None:
     ("GMAIL_MODIFY_THREAD_LABELS", False),
     ("GMAIL_LABEL_EMAIL", False),               # LABEL in verb position is still a write
     ("GMAIL_SEND_EMAIL", False),
+    ("GMAIL_GET_DRAFT", True),                  # the same trap for the other noun-verbs
+    ("GMAIL_LIST_DRAFTS", True),
+    ("GMAIL_CREATE_EMAIL_DRAFT", False),
+    ("GMAIL_SEND_DRAFT", False),
+    ("GITHUB_GET_A_WORKFLOW_RUN", True),
+    ("GITHUB_RUN_WORKFLOW", False),
+    ("SHOPIFY_GET_ORDER", True),
+    ("AMAZON_ORDER_ITEM", False),
+    ("GOOGLECALENDAR_GET_SCHEDULE", True),
+    ("GOOGLECALENDAR_SCHEDULE_MEETING", False),
+    ("GMAIL_FETCH_AND_DELETE_DRAFT", False),    # a real write verb anywhere still blocks
 ])
 def test_label_is_a_write_only_as_the_verb(slug: str, read: bool) -> None:
     from cc_buddy_bridge.composio_tools import is_read_only
