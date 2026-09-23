@@ -79,7 +79,7 @@ from typing import Any, Awaitable, Callable, Optional
 from . import head as head_mod
 from . import system_context, websearch
 from .caption_pager import CaptionPager, Event, PagerConfig, caption_instructions
-from .computer_agent import AgentConfig, AgentEvent, ComputerAgent
+from .computer_agent import AgentEvent, ComputerAgent
 from .intent import LEAVE, LESSON, LOOK, MUTE, REMEMBER, UNMUTE, fast_intent, normalize
 from .learning import LESSON_ACTIONS, run_lesson
 from .learning import think_aloud as think_aloud_mod
@@ -94,6 +94,7 @@ DEFAULT_MODEL = "gpt-live-1"
 DEFAULT_BACKEND_MODEL = "gpt-6-astra"
 DEFAULT_BACKEND_EFFORT = "low"
 DEFAULT_VOICE = "marin"
+PROGRESS_MIN_GAP_SECS = 1.5           # a task's progress line reaches the robot at most this often
 DEFAULT_IDLE_TIMEOUT_SECS = 20.0
 DEFAULT_MAX_SESSION_SECS = 600.0
 SPEAKER_TAIL_SECS = 0.4        # mic stays muted this long after the speaker drains (audio mode only)
@@ -580,11 +581,11 @@ class VoiceSession:
         agent_factory: Callable[[Callable[[AgentEvent], None], Callable[[str], Awaitable[str]]], ComputerAgent],
         on_state: Callable[[str], None],
         config: Optional[VoiceConfig] = None,
-        agent_config: Optional[AgentConfig] = None,
         clock: Callable[[], float] = time.monotonic,
         agent_enabled: bool = True,
         on_caption: Optional[Callable[[dict], None]] = None,
         caption_tick_secs: float = 0.05,
+        watchdog_secs: float = 0.5,                          # how often the idle / cap watchdog looks
         on_explore: Optional[Callable[[], None]] = None,
         turn_gap_secs: float = TURN_GAP_SECS,
         scene: Any = None,                                  # scene.SceneWatcher-like: start/stop/look/locate
@@ -666,13 +667,13 @@ class VoiceSession:
         # memory system only a human may star, and out loud is how the owner does
         # it — nothing about this goes through a terminal.
         self.on_star = on_star
-        self.agent_config = agent_config or AgentConfig()
         self._clock = clock
         # Captions: the pager decides which page is up and for how long; the
         # board only draws. Polled after every text event and by _pager_loop.
         self._pager = CaptionPager(PagerConfig(read_cps=self.config.caption_cps))
         self._captions = self.config.output == "captions" and on_caption is not None
         self._caption_tick = caption_tick_secs
+        self._watchdog_secs = watchdog_secs
         self._state_after_captions: Optional[str] = None
         self.agent_enabled = agent_enabled
         self.state = "idle"
@@ -977,7 +978,7 @@ class VoiceSession:
 
     async def _watchdog(self) -> None:
         while not self._ended.is_set():
-            await asyncio.sleep(0.5)
+            await asyncio.sleep(self._watchdog_secs)
             now = self._clock()
             # Think out loud waits through thinking pauses: a minute of quiet, not the idle timeout.
             quiet_secs = (think_aloud_mod.SILENCE_SECS if self._think_aloud is not None
@@ -1604,10 +1605,10 @@ class VoiceSession:
                 self._bg(self._speak("Codex progress: " + ev.text))
             # A helper sentence from the task ("opened Safari") as a caption page
             # while the robot is working — when nothing else is on screen and at
-            # least progress_min_gap_secs after the previous one.
+            # least PROGRESS_MIN_GAP_SECS after the previous one.
             if self._captions and not self._pager.busy and self.state in ("working", "done", "idle", "listening"):
                 now = self._clock()
-                if now - self._last_progress_at >= self.agent_config.progress_min_gap_secs:
+                if now - self._last_progress_at >= PROGRESS_MIN_GAP_SECS:
                     self._last_progress_at = now
                     self._pager.begin_reply(now)
                     self._pager.update(now, ev.text[:120], True)

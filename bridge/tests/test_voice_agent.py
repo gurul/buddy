@@ -194,6 +194,12 @@ def _spoke(text: str) -> dict:
     return {"type": "session.output_transcript.delta", "delta": text}
 
 
+# The watchdog looks every WATCHDOG_SECS in these tests (0.5 s in production); a wait of WATCHDOG_WAIT lets it
+# look at least twice. The decisions ride the fake clock, so only the number of looks matters, not real time.
+WATCHDOG_SECS = 0.05
+WATCHDOG_WAIT = 0.15
+
+
 def _session(conn: FakeConnection, agents: list[FakeAgent], clock: dict | None = None, **kw):
     states: list[str] = []
     clock = clock if clock is not None else {"now": 0.0}
@@ -204,6 +210,7 @@ def _session(conn: FakeConnection, agents: list[FakeAgent], clock: dict | None =
         return a
 
     mic: asyncio.Queue[bytes] = asyncio.Queue()
+    kw.setdefault("watchdog_secs", WATCHDOG_SECS)
     s = VoiceSession(conn, mic, FakeSpeaker(), factory, states.append,
                      config=kw.pop("config", VoiceConfig(idle_timeout_secs=20.0, max_session_secs=600.0,
                                                           output="audio")),
@@ -444,7 +451,7 @@ def test_idle_timeout_closes_the_session() -> None:
         task = asyncio.create_task(s.run())
         await asyncio.sleep(0.01)
         clock["now"] = 25.0                              # > idle_timeout 20 s, no task
-        await asyncio.sleep(0.6)                         # one watchdog tick
+        await asyncio.sleep(WATCHDOG_WAIT)                         # one watchdog tick
         assert s._ended.is_set()
         conn.feed(None)
         await task
@@ -462,10 +469,10 @@ def test_running_task_defers_idle_timeout_but_not_the_session_cap() -> None:
         task = asyncio.create_task(s.run())
         await asyncio.sleep(0.01)
         clock["now"] = 50.0
-        await asyncio.sleep(0.6)
+        await asyncio.sleep(WATCHDOG_WAIT)
         assert not s._ended.is_set()                     # task running: idle timeout does not apply
         clock["now"] = 101.0
-        await asyncio.sleep(0.6)
+        await asyncio.sleep(WATCHDOG_WAIT)
         assert s._ended.is_set()                         # session cap does
         conn.feed(None)
         await task
@@ -548,7 +555,7 @@ def test_conversation_stays_open_after_a_task_until_goodbye_or_idle() -> None:
         await asyncio.sleep(0.2)
         assert not s._ended.is_set()                   # still listening after the result
         clock["now"] = 30.0                            # past the 20 s idle timeout
-        await asyncio.sleep(0.7)                       # the watchdog checks every 0.5 s
+        await asyncio.sleep(WATCHDOG_WAIT)                       # the watchdog looks every WATCHDOG_SECS
         assert s._ended.is_set()
         conn.feed(None)
         await task
@@ -644,10 +651,10 @@ def test_idle_watchdog_waits_for_captions() -> None:
         await _quiet(clock)
         assert captions[-1]["hold_ms"] == 5700
         clock["now"] = 5.5                              # > idle 5 s, but the page is still held
-        await asyncio.sleep(0.6)
+        await asyncio.sleep(WATCHDOG_WAIT)
         assert not s._ended.is_set()
         clock["now"] = 7.0                              # page cleared at 6 s; idle since 0
-        await asyncio.sleep(0.6)
+        await asyncio.sleep(WATCHDOG_WAIT)
         assert s._ended.is_set() and captions[-1] == {"cmd": "caption", "clear": True}
         conn.feed(None)
         await task
@@ -1107,7 +1114,7 @@ def test_goodbye_in_the_owners_words_ends_the_session(words: str) -> None:
         clock["now"] += TURN_GAP_SECS + 0.1             # the goodbye goes quiet...
         await asyncio.sleep(0.1)
         clock["now"] += 1.0
-        await asyncio.sleep(0.7)                        # ...and the watchdog closes the session
+        await asyncio.sleep(WATCHDOG_WAIT)                        # ...and the watchdog closes the session
         assert s._ended.is_set()
         conn.feed(None)
         await task
@@ -1131,7 +1138,7 @@ def test_goodbye_closes_even_if_buddy_says_nothing_back() -> None:
         await asyncio.sleep(0.1)
         assert s._farewell and not s._ended.is_set()
         clock["now"] += FAREWELL_MAX_SECS
-        await asyncio.sleep(0.7)
+        await asyncio.sleep(WATCHDOG_WAIT)
         assert s._ended.is_set()
         conn.feed(None)
         await task
@@ -1156,7 +1163,7 @@ def test_the_classifier_catches_a_goodbye_the_phrase_table_does_not_know() -> No
         await asyncio.sleep(0.05)
         assert s._farewell
         clock["now"] += TURN_GAP_SECS + FAREWELL_QUIET_SECS + 0.5
-        await asyncio.sleep(0.7)
+        await asyncio.sleep(WATCHDOG_WAIT)
         assert s._ended.is_set()
         conn.feed(None)
         await task
@@ -1179,7 +1186,7 @@ def test_leave_the_tab_open_does_not_end_anything() -> None:
         conn.feed(_heard("leave the tab open"), _spoke("On it."))
         await asyncio.sleep(0.05)
         clock["now"] += 8.0
-        await asyncio.sleep(0.7)
+        await asyncio.sleep(WATCHDOG_WAIT)
         assert not s._farewell and not s._ended.is_set()
         conn.feed(_tool_call("end_conversation", "c9"), None)
         await task
@@ -1204,7 +1211,7 @@ def test_goodbye_during_a_task_stops_the_mic_and_waits_for_the_result() -> None:
         after = len([k for k in conn.kinds() if k == "session.input_audio.append"])
         assert after == before                                          # buddy stopped listening
         clock["now"] += FAREWELL_MAX_SECS + 1.0
-        await asyncio.sleep(0.7)
+        await asyncio.sleep(WATCHDOG_WAIT)
         assert not s._ended.is_set()                                    # still waiting on the task
         agent.release.set()
         await asyncio.sleep(0.02)
@@ -1212,7 +1219,7 @@ def test_goodbye_during_a_task_stops_the_mic_and_waits_for_the_result() -> None:
         conn.feed(_spoke("Spotify is playing."))
         await asyncio.sleep(0.01)
         clock["now"] += TURN_GAP_SECS + FAREWELL_QUIET_SECS + 0.2
-        await asyncio.sleep(0.7)
+        await asyncio.sleep(WATCHDOG_WAIT)
         assert s._ended.is_set()
         conn.feed(None)
         await task
@@ -1280,7 +1287,7 @@ def test_a_slow_look_holds_off_the_idle_close_and_never_logs_the_view(caplog) ->
             task = asyncio.create_task(s.run())
             await asyncio.sleep(0.02)
             clock["now"] += 60.0                       # far past the 20 s idle timeout
-            await asyncio.sleep(0.7)
+            await asyncio.sleep(WATCHDOG_WAIT)
             assert not s._ended.is_set()               # a look in flight is not idleness
             gate.set()
             await asyncio.sleep(0.05)
@@ -1586,10 +1593,10 @@ def test_listening_waits_through_pauses_and_stops_after_a_minute_of_silence() ->
         task = asyncio.create_task(s.run())
         await asyncio.sleep(0.02)
         clock["now"] = 45.0                   # past the 20 s idle timeout: a thinking pause, not the end
-        await asyncio.sleep(0.6)
+        await asyncio.sleep(WATCHDOG_WAIT)
         assert not s._ended.is_set()
         clock["now"] = 61.5
-        await asyncio.sleep(0.6)
+        await asyncio.sleep(WATCHDOG_WAIT)
         assert s._ended.is_set() and s.end_reason == "silence"
         conn.feed(None)
         await task
@@ -1609,7 +1616,7 @@ def test_listening_still_ends_at_the_session_cap() -> None:
         for t in (40.0, 80.0, 101.0):         # someone keeps talking: silence never closes it
             clock["now"] = t
             s._last_activity = t
-            await asyncio.sleep(0.6)
+            await asyncio.sleep(WATCHDOG_WAIT)
         assert s._ended.is_set() and s.end_reason == "cap"
         conn.feed(None)
         await task
@@ -1722,7 +1729,7 @@ def test_an_open_conversation_switches_to_listening_without_a_second_session() -
         out = await s.enter_think_aloud(LESSON)
         again = await s.enter_think_aloud(LESSON)
         clock["now"] = 30.0                   # past the conversation's idle timeout
-        await asyncio.sleep(0.6)
+        await asyncio.sleep(WATCHDOG_WAIT)
         assert not s._ended.is_set()
         s.stop_think_aloud()
         conn.feed(None)
