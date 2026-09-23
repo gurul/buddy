@@ -345,6 +345,57 @@ def quit_eval(data_dir: Path) -> int:
     return 0
 
 
+def browser_eval(data_dir: Path) -> int:
+    """Which body carries a non-reflex task (browser_router.py): Jev fitted on browser_tuning.json, scored
+    once on the blind browser_holdout.json. Bar: at least MIN_FIRED routed to auto-browser, precision
+    ≥ MIN_PRECISION, and zero unsafe (a task labelled for Codex, which has the owner's accounts and Mac,
+    sent to the isolated browser, which has neither)."""
+    import os
+    import statistics
+    import time
+
+    from cc_buddy_bridge import browser_router as br
+    from cc_buddy_bridge import jev
+    from cc_buddy_bridge.envfile import load_env_file
+
+    load_env_file()
+    url, key, model = jev.route_config(os.environ)
+    predict = jev.make_predict(url, key, model, timeout_s=8.0)
+    tuning = json.loads((data_dir / "browser_tuning.json").read_text(encoding="utf-8"))["cases"]
+    fit = [br.ask(predict, c["goal"], time.perf_counter) for c in tuning]
+    gates = br.fit(fit, [c["body"] for c in tuning])
+    print(f"browser router: cut-offs fitted on {len(tuning)} tuning requests (zero unsafe allowed): {gates}")
+    path = data_dir / "browser_holdout.json"
+    if not path.exists():
+        print("NO_HOLDOUT")
+        return 0
+    cases = json.loads(path.read_text(encoding="utf-8"))["cases"]
+    answers = [br.ask(predict, c["goal"], time.perf_counter) for c in cases]
+    ms = [a.ms for a in answers]
+    print(f"   latency ms p50 {statistics.median(ms):.0f}  p95 {sorted(ms)[int(0.95 * (len(ms) - 1))]:.0f}; "
+          f"errors {sum(1 for a in answers if a.error)}")
+    said = [br.decide(a, gates) for a in answers]
+    fired = [i for i, s_ in enumerate(said) if s_ == br.AUTO]
+    right = [i for i in fired if cases[i]["body"] == br.AUTO]
+    wanted = [i for i, c in enumerate(cases) if c["body"] == br.AUTO]
+    unsafe = [cases[i]["goal"] for i in fired if cases[i]["body"] != br.AUTO]
+    precision = len(right) / max(1, len(fired))
+    ok = len(fired) >= MIN_FIRED and precision >= MIN_PRECISION and not unsafe
+    print(f"== browser router / holdout: n={len(cases)}")
+    print(f"   routed to auto-browser {len(fired)}, right {len(right)}: precision {_pct(precision)}; coverage "
+          f"{_pct(len(right) / max(1, len(wanted)))}; unsafe {len(unsafe)} → {'passes' if ok else 'fails'} the bar")
+    for g in unsafe:
+        print(f"   UNSAFE {g!r}")
+    for i in wanted:
+        if i not in fired:
+            a = answers[i]
+            print(f"   miss   {cases[i]['goal']!r} (auto {a.p_auto:.2f} public {a.public:.2f} accounts {a.accounts:.2f} "
+                  f"mac {a.mac:.2f} show {a.show:.2f})")
+    print(f"BROWSER DECISION: {'ship' if ok else 'hold'} {gates}")
+    print("BROWSER_EVAL_COMPLETE")
+    return 0
+
+
 def _rows(cases: list[dict[str, Any]], apps: list[str], args: argparse.Namespace, choose: Any) -> list[Scored]:
     if args.model:
         return [score_model(c, choose) for c in cases]
@@ -359,12 +410,15 @@ def main(argv: Optional[list[str]] = None) -> int:
                    help="the model asked in its own idiom (typed_ask.py; jev: absolute nouls, the app from the installed "
                         "list; laya: one short ranking, the app from a code shortlist), cut-offs fitted on the tuning sets "
                         "only; alone and with the rules")
+    p.add_argument("--browser", action="store_true", help="score the Codex / auto-browser router (browser_holdout.json)")
     p.add_argument("--quit", action="store_true", help="score quitting: rules, Jev, rules then Jev (holdout_quit.json)")
     p.add_argument("--check-default", action="store_true", help="assert task_router.REFLEX_DEFAULT equals the decision")
     p.add_argument("--results-out")
     args = p.parse_args(argv)
     if args.quit:
         return quit_eval(Path(args.data).parent)
+    if args.browser:
+        return browser_eval(Path(args.data).parent)
     tuning = json.loads(Path(args.data).read_text(encoding="utf-8"))
     apps = list(tuning["apps"])
     holdout_path = Path(args.data).with_name("holdout.json")

@@ -32,7 +32,7 @@ import asyncio
 import logging
 import os
 import time
-from typing import Any, Callable, Iterable, Optional
+from typing import Any, Awaitable, Callable, Iterable, Optional
 
 from . import task_router
 from .computer_agent import AgentEvent
@@ -174,12 +174,17 @@ class ReflexFirstAgent:
                  on_done: Callable[[], None] = lambda: None, provider: str = "codex",
                  quit_asker: Optional[Callable[[str, list[str]], str]] = None,
                  quitter: Callable[[str], Any] = quit_app,
-                 quit_everything: Optional[Callable[[], Any]] = None) -> None:
+                 quit_everything: Optional[Callable[[], Any]] = None,
+                 make_auto: Optional[Callable[[], Any]] = None,
+                 route_body: Optional[Callable[[str], Awaitable[str]]] = None) -> None:
         self._make_inner, self._inner, self._on_event = make_inner, None, on_event
         self._apps, self._asker, self._opener, self._enabled = apps, asker, opener, enabled
         self._on_done, self.provider = on_done, provider
         self._quit_asker, self._quitter = quit_asker, quitter
         self._quit_everything = quit_everything or (lambda: quit_all(quit_keep()))
+        # browser_router.py: when auto-browser is on and up, Jev picks the body for a task the reflex declined
+        self._make_auto, self._route_body = make_auto, route_body
+        self.body = "codex"
         self._reflex_running = False
         self._cancel_reason: Optional[str] = None
         self.reflexed: Optional[str] = None               # the app opened here, for the log and the tests
@@ -187,6 +192,20 @@ class ReflexFirstAgent:
     @property
     def running(self) -> bool:
         return self._reflex_running or bool(getattr(self._inner, "running", False))
+
+    async def _choose_body(self, goal: str) -> Any:
+        """Codex, unless auto-browser is wired in and the router sends this task there. Never raises."""
+        if self._make_auto is not None and self._route_body is not None:
+            try:
+                body = await self._route_body(goal)
+            except Exception as e:  # noqa: BLE001 — a router that fails keeps the task with Codex
+                log.warning("app-reflex: the body router failed (%s); Codex takes it", type(e).__name__)
+                body = "codex"
+            if body == "auto_browser":
+                self.body, self.provider = "auto_browser", "auto-browser"
+                log.info("app-reflex: auto-browser takes this task")
+                return self._make_auto()
+        return self._make_inner()
 
     def cancel(self, reason: str = "") -> None:
         if self._inner is None:
@@ -246,7 +265,7 @@ class ReflexFirstAgent:
         if self._cancel_reason is not None:
             self._on_event(AgentEvent("cancelled", "Stopped."))
             return "Stopped."
-        self._inner = self._make_inner()
+        self._inner = await self._choose_body(goal)
         try:
             return await self._inner.run(goal)
         finally:

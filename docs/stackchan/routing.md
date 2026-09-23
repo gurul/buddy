@@ -208,6 +208,76 @@ agent:
   app-server dies.
 - `CC_BUDDY_CODEX_PREWARM=0` turns it off.
 
+## Two bodies for a web job: Codex or auto-browser
+
+A task that isn't a reflex usually goes to Codex, which drives your real Chrome
+(signed in to your accounts) and the rest of the Mac. [auto-browser](https://github.com/LvcidPsyche/auto-browser)
+(MIT, v1.7.0, read at commit `aa99c42`) is the other kind of body. It runs its
+own Chromium in a Docker container, with no accounts and no access to the Mac,
+works in the background, and reports back as text. It only browses the domains
+in its `ALLOWED_HOSTS`, and it queues posting, paying, uploading and
+destructive actions for approval. It has no published success scores, and it
+hands CAPTCHAs and logins to a human over noVNC.
+
+**Which body** (`browser_router.py`): Jev decides, asked the way TypeSafe's own
+docs recommend for a routing decision:
+
+- **State:** only the request. Adding context lowers Jev's accuracy.
+- **Options:** the two bodies are the options of one question, each described
+  with its `what`, `for` and `not_for`, taken from each tool's source and our
+  verified Codex notes.
+- **Yes/no questions**, one judgment each:
+  - Does it need your signed-in accounts?
+  - Does it need anything outside a browser?
+  - Do you want it shown on your own screen?
+  - Is it a public-web job that can be reported back as text?
+
+  Code combines the answers. auto-browser gets the task only when all four
+  conditions hold *and* the choice picks it, with probability ≥ 0.95. An
+  error, a timeout, or any doubt keeps the task with Codex.
+
+`tools/route_eval.py --browser` fits the cut-offs on `browser_tuning.json` (42
+authored requests) with zero unsafe routes allowed. An unsafe route is a task
+needing your accounts, Mac or screen sent to the sandbox. The cut-offs were
+then scored once on `browser_holdout.json`: 80 requests written blind, 27 of
+them deliberately hard. On 2026-09-23 it routed 28 to auto-browser, all 28
+correct, with **0 unsafe**, 77.8% coverage, and 204 ms p50. The eight misses
+stayed with Codex, which still does them in your real Chrome.
+
+**Adapter** (`auto_browser.py`):
+
+- It keeps the same run/steer/cancel/status contract as the Codex agent, so
+  voice and Telegram need no changes.
+- One fresh session per task, and up to `CC_BUDDY_AUTO_BROWSER_ROUNDS` goal-loop
+  calls of at most 20 steps each.
+- An `approval_required` pause reaches you as a yes/no. A yes approves that one
+  queued action and the next round executes it. A no rejects it and stops.
+- If it needs you to take over, it stops with the noVNC address.
+
+**It ships off, and turning it on needs Docker, which isn't installed on this
+Mac:**
+
+```
+git clone https://github.com/LvcidPsyche/auto-browser && cd auto-browser
+cp .env.example .env    # set ALLOWED_HOSTS (e.g. *), and a model key, e.g. OPENROUTER_API_KEY
+docker compose up --build
+```
+
+Then add these to `~/.config/cc-buddy-bridge/env`:
+
+| Variable | Default | What it does |
+|---|---|---|
+| `CC_BUDDY_AUTO_BROWSER` | `0` | `1` lets the router send tasks there, but only while `/healthz` answers |
+| `CC_BUDDY_AUTO_BROWSER_URL` | `http://127.0.0.1:8000` | The controller |
+| `CC_BUDDY_AUTO_BROWSER_TOKEN` | *(none)* | Its `API_BEARER_TOKEN`, if set |
+| `CC_BUDDY_AUTO_BROWSER_PROVIDER` | `openrouter` | Its goal loop's model provider; the key lives in *its* `.env` |
+| `CC_BUDDY_AUTO_BROWSER_MODEL` | *(its default)* | `provider_model` |
+| `CC_BUDDY_AUTO_BROWSER_STEPS` / `_ROUNDS` | `20` / `3` | Steps per call (at most 20), and calls per task |
+| `CC_BUDDY_AUTO_BROWSER_PROFILE` | `fast` | `governed`: every non-read action waits for your approval |
+
+With it on, but the stack down or no Jev key, every task stays with Codex, as
+before.
+
 ## Head moves
 
 "hey buddy, look left" takes about 3.2 s today (voice → backend → `move_head`; daemon log,
