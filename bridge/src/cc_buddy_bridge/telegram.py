@@ -67,7 +67,7 @@ from . import (
     websearch,
 )
 from . import telegram_format as fmt
-from .computer_agent import AgentEvent
+from .agent_contract import AgentEvent
 from .records import MEMORY_TOOLS
 from .telegram_format import MAX_MESSAGE_CHARS, plain  # noqa: F401 — the names other modules and tests use
 
@@ -402,6 +402,15 @@ def configured(environ: Any = None) -> TelegramConfig:
 
 
 # ---- who may speak ----------------------------------------------------------------------------
+
+APPROVE_PREFIXES = ("yes", "y", "ok", "sure", "go", "allow", "approve", "do it")
+
+
+def approves(answer: str) -> bool:
+    """The owner's reply says yes. One list for every yes/no that gates an action (a permission prompt, an
+    app's always-allow); the caller strips and lower-cases, as each did before."""
+    return answer.startswith(APPROVE_PREFIXES)
+
 
 @dataclass(frozen=True)
 class Inbound:
@@ -868,6 +877,11 @@ class TelegramInlet:
     def task_running(self) -> bool:
         return self._agent_task is not None and not self._agent_task.done()
 
+    @property
+    def _awaiting_answer(self) -> bool:
+        """A question (a task's, or a permission yes/no) is waiting: the owner's next text is its answer."""
+        return self._pending_answer is not None and not self._pending_answer.done()
+
     async def run(self) -> None:
         log.info("telegram: listening for %d owner id(s); text turns go to %s at %s effort",
                  len(self.config.owner_ids), self.config.model, self.config.effort)
@@ -936,7 +950,7 @@ class TelegramInlet:
             self._spawn(self._say(inbound.chat_id, NOT_TEXT_LINE), "telegram-say")
             return
         if inbound.image is not None:
-            if self._pending_answer is not None and not self._pending_answer.done():
+            if self._awaiting_answer:
                 self._spawn(self._say(inbound.chat_id, "Please answer the pending question in a separate text, then resend the image."), "telegram-say")
                 return
             for_buddy = BUDDY_PREFIX.match(inbound.text)
@@ -999,7 +1013,7 @@ class TelegramInlet:
             return
         if (self._codex_chat == inbound.chat_id
                 and word not in STEALTH_ON + STEALTH_OFF and not SCREEN_NOW.match(inbound.text)
-                and not (self._pending_answer is not None and not self._pending_answer.done())):
+                and not self._awaiting_answer):
             for_buddy = BUDDY_PREFIX.match(inbound.text)
             if for_buddy is None:
                 self._spawn(self._codex_send(inbound.chat_id, inbound.text, self._codex_epoch), "telegram-codex")
@@ -1013,7 +1027,7 @@ class TelegramInlet:
             return
         if word in STEALTH_ON or word in STEALTH_OFF or SCREEN_NOW.match(inbound.text):
             pass                                          # buddy's own code words, relay or not
-        elif self.claude and not (self._pending_answer is not None and not self._pending_answer.done()):
+        elif self.claude and not self._awaiting_answer:
             # Relay on: the chat IS the terminal. A yes/no while Claude is asking answers Claude (below);
             # "buddy: ..." is for buddy; everything else is typed into the session.
             for_buddy = BUDDY_PREFIX.match(inbound.text)
@@ -1035,7 +1049,7 @@ class TelegramInlet:
             self._note("user", inbound.text)
             self._spawn(self._screen_now(inbound.chat_id), "telegram-screen")
             return
-        if self._pending_answer is not None and not self._pending_answer.done():
+        if self._awaiting_answer:
             # A task is waiting on the human. This message is the answer, and only the answer.
             if self._pending_answer_chat is not None and self._pending_answer_chat != inbound.chat_id:
                 self._spawn(self._say(inbound.chat_id, "A question is waiting in another owner chat."), "telegram-say")
@@ -1051,7 +1065,7 @@ class TelegramInlet:
     async def _image(self, inbound: Inbound, target: str, epoch: int) -> None:
         try:
             image = await self.api.receive_image(inbound.image)
-            if self._pending_answer is not None and not self._pending_answer.done():
+            if self._awaiting_answer:
                 await self._say(inbound.chat_id, "A question is waiting. Answer it in text, then resend the image.")
                 return
             if target == "buddy":
@@ -1172,7 +1186,7 @@ class TelegramInlet:
             self._launch = None
         trigger = claude_launch.TRIGGER.match(inbound.text.strip())
         if trigger is None and (self._launch is None
-                                or (self._pending_answer is not None and not self._pending_answer.done())):
+                                or self._awaiting_answer):
             return False
         if trigger is None and word in STOP_WORDS:
             self._launch = None
@@ -1285,7 +1299,7 @@ class TelegramInlet:
         allows without asking and this is never reached."""
         if not self.claude or self._chat_id is None or not (always or self.config.ask_permissions):
             return None                                   # off by default: Claude Code's own flow decides
-        if self._pending_answer is not None and not self._pending_answer.done():
+        if self._awaiting_answer:
             return None                                   # one question at a time; this one defers
         if cwd:
             self._relay_cwd = cwd
@@ -1304,7 +1318,7 @@ class TelegramInlet:
         finally:
             self._pending_answer = None
         word = answer.strip().lower()
-        if word.startswith(("yes", "y", "ok", "sure", "go", "allow", "approve", "do it")):
+        if approves(word):
             return "allow"
         if word.startswith(("no", "n", "deny", "stop", "don't", "dont", "block")):
             return "deny"
@@ -1483,7 +1497,7 @@ class TelegramInlet:
         if decision.action == "ask":
             question = composio_tools.describe_for_confirmation(name, args) + "\n\nyes / no?"
             answer = (await self._ask_user(question, chat_id, title=APP_ASKS_TITLE)).strip().lower()
-            if not answer.startswith(("yes", "y", "ok", "sure", "go", "do it", "allow", "approve")):
+            if not approves(answer):
                 return {"ok": False, "reason": "the owner said no; do not retry it"}
         return await asyncio.to_thread(self._apps.execute, name, args)
 

@@ -8,6 +8,8 @@ import json
 from types import SimpleNamespace
 from typing import Any, Optional
 
+import pytest
+
 from cc_buddy_bridge import installer
 from cc_buddy_bridge.daemon import Daemon
 from cc_buddy_bridge.hooks import permission_request, pretooluse
@@ -131,3 +133,12 @@ def test_the_question_goes_numbered_and_the_waiting_echo_is_dropped() -> None:
     api = asyncio.run(go())
     assert api.sent[0][0] == CLAUDE_ASKS_TITLE and "Reply with the option's number." in api.sent[0][1]
     assert len(api.sent) == 2 and api.sent[1][1] == "Claude needs your input"
+
+
+@pytest.mark.parametrize("answer,yes", [("yes", True), ("yes please", True), ("ok", True), ("sure", True),
+                                        ("go ahead", True), ("allow", True), ("approve it", True), ("do it", True),
+                                        ("no", False), ("deny", False), ("stop", False), ("maybe later", False)])
+def test_one_approval_rule_for_every_gated_yes(answer: str, yes: bool) -> None:
+    from cc_buddy_bridge.telegram import approves
+
+    assert approves(answer) is yes
