@@ -386,6 +386,13 @@ bridge/.venv/bin/python -m pip install -e './bridge[dev]'
 (cd bridge && .venv/bin/ruff check src/ tests/)
 ```
 
+A plain test run never touches this Mac's real services. Tests marked `live`
+write to the real claude-mem worker or launch a real Chromium, so they run
+only when asked: `(cd bridge && CC_BUDDY_LIVE=1 .venv/bin/pytest -q -m live)`.
+The routing evals call Jev, which sends the request text to it, and they print
+their ship decision: `(cd bridge && .venv/bin/python tools/route_eval.py
+[--quit | --browser | --model jev --native])`.
+
 The served whiteboard bundle is checked in. To rebuild it after changing the
 React/TypeScript source:
 
