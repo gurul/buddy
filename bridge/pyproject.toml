@@ -97,7 +97,7 @@ cc-buddy-bridge = "cc_buddy_bridge.cli:main"
 where = ["src"]
 
 [tool.pytest.ini_options]
-pythonpath = ["src"]
+pythonpath = ["src", "tools"]
 testpaths = ["tests"]
 markers = ["live: touches a real service on this Mac (claude-mem, Chromium); runs only with CC_BUDDY_LIVE=1"]
 
