@@ -69,7 +69,9 @@ The [Telegram door](docs/stackchan/telegram.md) is **off by default**. With it o
   has closed are left out. A 👍 on your text means it was typed, and
   "typing…" shows until Claude answers. Permission prompts have **Allow** and
   **Deny** buttons, and Claude's questions have a button per option. Other text
-  you type while a prompt waits still goes to Claude.
+  you type while a prompt waits still goes to Claude. This holds for app
+  consents and Codex approvals too: only a tap or a plain answer ("yes", "no",
+  "allow for task") answers them.
 - **A `/` menu** of the code words (`/claude_on`, `/new_claude`, `/codex`,
   `/rundown`, `/screenshot`, `/stealth`, `/wake`, `/stop` and more), in your
   chat only.

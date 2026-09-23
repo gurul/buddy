@@ -1124,6 +1124,9 @@ class TelegramInlet:
         # any other text goes where it would have gone without the prompt (to Claude while relaying), so a
         # message meant for Claude is never eaten as a non-answer (owner, 2026-09-23; relay weakness 3).
         self._pending_strict = False
+        # A strict prompt's own button words, typed ("always allow", "allow for task"): an answer as well as a
+        # bare yes or no is. Empty when the prompt has no buttons beyond yes and no.
+        self._pending_words: frozenset[str] = frozenset()
         # Inline buttons: key -> (keyboard, choice). The generation makes keys from before a restart unknown.
         self._taps: dict[str, tuple[_Keyboard, Choice]] = {}
         self._tap_gen = secrets.token_hex(3)
@@ -1316,13 +1319,20 @@ class TelegramInlet:
         """Is this message the answer to the question waiting on the owner? Any message is, for a task's
         question and for a prompt sent without buttons (the next message is the answer). A strict prompt
         (Allow/Deny buttons on the screen) takes only a reply that is wholly a yes or a no
-        (``consent.bare_decision``): "ok, also update the README" opens with a yes-word but is a message for
-        Claude, and it must not allow an rm on the way (owner, 2026-09-23). ``None`` (an image) never is."""
+        (``consent.bare_decision``) or one of its buttons' words typed out: "ok, also update the README" opens
+        with a yes-word but is a message for Claude, and it must not allow an rm on the way (owner,
+        2026-09-23). Other text is not the answer only while a relay (Claude or Codex) is on to take it: with
+        no relay, the next message answers even a prompt with buttons, as it always has, so a task's
+        "yes, but the cheaper one" is still its answer. ``None`` (an image) never is."""
         if not self._awaiting_answer:
             return False
         if not self._pending_strict:
             return True
-        return text is not None and bool(consent.bare_decision(text))
+        if text is None:
+            return False
+        if consent.bare_decision(text) or text.strip().lower().rstrip(".!") in self._pending_words:
+            return True
+        return not (self.claude or self._codex_chat is not None)
 
     def _handle(self, inbound: Inbound) -> None:
         """One accepted message from the owner, routed. A picker's tap comes here too, with the button's
@@ -1966,6 +1976,7 @@ class TelegramInlet:
         # well be typing to Claude, and a non-strict prompt would take that text as its answer and lose it.
         # Only a send that falls back to plain text makes it non-strict (owner, 2026-09-23).
         self._pending_strict = True
+        self._pending_words = frozenset()                  # yes and no only: bare_decision reads those
         board = _Keyboard(self._chat_id, ANSWER, list(ALLOW_DENY), future=future)
         self._note("buddy", f"{title}: {hint.strip()[:300]}")
         outcome: Optional[str] = None
@@ -1982,6 +1993,7 @@ class TelegramInlet:
             if self._pending_answer is future:
                 self._pending_answer = None
                 self._pending_strict = False
+                self._pending_words = frozenset()
             self._retire(board)
             line = {"allow": ALLOW_DENY[0].done, "deny": ALLOW_DENY[1].done}.get(outcome or "",
                                                                                 PERMISSION_DEFERRED_LINE)
@@ -2254,23 +2266,34 @@ class TelegramInlet:
 
     async def _ask_user(self, question: str, chat_id: int, title: str = TASK_ASKS_TITLE,
                         choices: Optional[Sequence[Choice]] = None) -> str:
-        """A question for the owner from a task, an app or Codex. The owner's next message is its answer,
-        whatever it says: a free question needs words. A question whose answers are known (``choices``, or
+        """A question for the owner from a task, an app or Codex. A free question needs words: the owner's
+        next message is its answer, whatever it says. A question whose answers are known (``choices``, or
         what ``answer_choices`` reads off its wording: a yes/no, Codex's app-access choices) also gets
-        buttons, and a tap is that same answer. Afterwards the question is edited to say what was chosen."""
+        buttons, and a tap is that same answer. Afterwards the question is edited to say what was chosen.
+
+        A question with buttons is strict from the moment it is created, like ``decide_permission``: while a
+        relay is on, only a tap, a bare yes/no or a button's words typed answer it, and any other text goes
+        to Claude or Codex as usual. Before this a Composio consent or a Codex "Reply yes or no." took the
+        owner's next message for Claude as the answer, and "ok, also update the README" ran a Drive delete
+        (owner, 2026-09-23). Only a send that falls back to plain text makes it non-strict again."""
         loop = asyncio.get_running_loop()
         future = self._pending_answer = loop.create_future()
         self._pending_answer_chat = chat_id
-        self._pending_strict = False                       # a task's question: any next message answers it
-        self._note("buddy", question)
         choices = tuple(answer_choices(question) if choices is None else choices)
+        self._pending_strict = bool(choices)               # a free question: any next message answers it
+        self._pending_words = frozenset(c.value for c in choices)
+        self._note("buddy", question)
         board = _Keyboard(chat_id, ANSWER, list(choices), future=future) if choices else None
         # Waiting on the owner is not working: no "typing…" under the question. It comes back with the answer.
         paused = self._end_typing(chat_id)
         line = UNANSWERED_LINE
         try:
             if board is not None:
-                await self._send_choices(chat_id, question, board, title=title, per_row=2 if len(choices) == 2 else 1)
+                buttons = await self._send_choices(chat_id, question, board, title=title,
+                                                   per_row=2 if len(choices) == 2 else 1)
+                if not buttons and self._pending_answer is future and not future.done():
+                    self._pending_strict = False           # plain text after all: the next message answers
+                    self._pending_words = frozenset()
             else:
                 await self._say(chat_id, question, title=title)
             answer = await asyncio.wait_for(future, timeout=self.config.ask_timeout_secs)
@@ -2284,6 +2307,8 @@ class TelegramInlet:
             if self._pending_answer is future:
                 self._pending_answer = None
                 self._pending_answer_chat = None
+                self._pending_strict = False
+                self._pending_words = frozenset()
             if board is not None:
                 self._retire(board)
                 self._spawn(self._settle_prompt(board, question + "\n\n" + line, title, None), "telegram-edit")

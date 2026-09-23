@@ -2418,6 +2418,141 @@ def test_composio_asks_with_allow_and_deny_and_a_tap_decides() -> None:
     asyncio.run(go())
 
 
+class ConsentApps:
+    """A Composio stand-in that records what ran, for the consent prompts."""
+    started, names = True, frozenset({"COMPOSIO_MULTI_EXECUTE_TOOL"})
+
+    def __init__(self) -> None:
+        self.ran: list[str] = []
+
+    def tools(self) -> list[dict[str, Any]]:
+        return []
+
+    def execute(self, name: str, args: dict[str, Any]) -> dict[str, Any]:
+        self.ran.append(name)
+        return {"ok": True}
+
+
+DRIVE_DELETE = {"tools": [{"tool_slug": "GOOGLEDRIVE_DELETE_FILE", "arguments": {"file_id": "x"}}]}
+
+
+def test_while_a_composio_consent_waits_a_sentence_for_claude_goes_to_claude_and_nothing_runs() -> None:
+    """Review finding: _ask_user's Allow/Deny prompts were not strict, so with the relay on the owner's next
+    message for Claude was eaten as the consent, and "ok, also update the README" ran a Drive delete."""
+    async def go() -> None:
+        api, typed, apps = FakeApi(), [], ConsentApps()
+        rig = relay_rig(api, typed, apps=apps)
+        result = asyncio.ensure_future(rig.inlet._app_tool("COMPOSIO_MULTI_EXECUTE_TOOL", DRIVE_DELETE, OWNER))
+        await jobs(rig)
+        assert api.buttons[-1] == ["Allow", "Deny"]
+        await dispatch(rig, "ok, also update the README", update_id=5)
+        assert typed == ["ok, also update the README"] and not result.done() and apps.ran == []
+        await dispatch(rig, "no", update_id=6)                        # a bare no still answers by typing
+        assert (await result)["ok"] is False and apps.ran == []
+        # and a bare yes, typed, allows as a tap would
+        result = asyncio.ensure_future(rig.inlet._app_tool("COMPOSIO_MULTI_EXECUTE_TOOL", DRIVE_DELETE, OWNER))
+        await jobs(rig)
+        await dispatch(rig, "yes", update_id=7)
+        assert (await result) == {"ok": True} and typed == ["ok, also update the README"]
+        await rig.inlet._shutdown()
+
+    asyncio.run(go())
+
+
+def test_text_sent_while_a_composio_consent_is_still_on_its_way_goes_to_claude() -> None:
+    """Strict from creation, as decide_permission is: a message typed during the send is not the answer."""
+    class Slow(FakeApi):
+        def __init__(self) -> None:
+            super().__init__()
+            self.gate, self.sending = asyncio.Event(), asyncio.Event()
+
+        async def send_inline(self, *a: Any, **kw: Any) -> int:
+            self.sending.set()
+            await self.gate.wait()
+            return await super().send_inline(*a, **kw)
+
+    async def go() -> None:
+        api, typed, apps = Slow(), [], ConsentApps()
+        rig = relay_rig(api, typed, apps=apps)
+        result = asyncio.ensure_future(rig.inlet._app_tool("COMPOSIO_MULTI_EXECUTE_TOOL", DRIVE_DELETE, OWNER))
+        await api.sending.wait()
+        await dispatch(rig, "ok, also update the README", update_id=5)
+        assert typed == ["ok, also update the README"] and not result.done()
+        api.gate.set()
+        await jobs(rig)
+        await tap(rig, api.key("Deny")[1], api.keyboards[-1][0])
+        assert (await result)["ok"] is False and apps.ran == []
+        await rig.inlet._shutdown()
+
+    asyncio.run(go())
+
+
+def test_a_composio_consent_whose_buttons_fail_is_answered_by_the_next_message_as_before() -> None:
+    class NoInline(FakeApi):
+        async def send_inline(self, *a: Any, **kw: Any) -> int:
+            raise BotApiError(400, "Bad Request: BUTTON_DATA_INVALID")
+
+    async def go() -> None:
+        api, typed, apps = NoInline(), [], ConsentApps()
+        rig = relay_rig(api, typed, apps=apps)
+        result = asyncio.ensure_future(rig.inlet._app_tool("COMPOSIO_MULTI_EXECUTE_TOOL", DRIVE_DELETE, OWNER))
+        await jobs(rig)
+        assert api.buttons[-1] == [] and not rig.inlet._pending_strict
+        await dispatch(rig, "not now", update_id=5)                    # plain text: the next message answers
+        assert (await result)["ok"] is False and typed == [] and apps.ran == []
+        await rig.inlet._shutdown()
+
+    asyncio.run(go())
+
+
+def codex_relay_rig(api: FakeApi) -> tuple[Rig, FakeCodex]:
+    codex = FakeCodex()
+    codex.connected = True
+    rig = Rig(api, FakeCreate(), codex=codex)
+    rig.inlet._codex_chat = OWNER
+    rig.inlet._chat_id = OWNER
+    return rig, codex
+
+
+def test_while_a_codex_yes_no_waits_codex_relay_text_goes_to_codex() -> None:
+    """The same finding on the Codex relay: a command approval ("Reply yes or no.") ate the owner's next
+    message for Codex, and a sentence opening with "ok" approved the command."""
+    async def go() -> None:
+        api = FakeApi()
+        rig, codex = codex_relay_rig(api)
+        asked = asyncio.ensure_future(rig.inlet._ask_user(
+            "Codex asks to run this command in /r:\nrm -rf build\n\nReply yes or no.", OWNER))
+        await jobs(rig)
+        assert api.buttons[-1] == ["Allow", "Deny"]
+        await dispatch(rig, "ok, also update the README", update_id=5)
+        assert codex.sent == ["ok, also update the README"] and not asked.done()
+        await dispatch(rig, "no", update_id=6)
+        assert await asked == "no" and codex.sent == ["ok, also update the README"]
+        await rig.inlet._shutdown()
+
+    asyncio.run(go())
+
+
+def test_a_codex_app_access_prompt_takes_its_button_words_typed_and_sends_other_text_to_codex() -> None:
+    async def go() -> None:
+        api = FakeApi()
+        rig, codex = codex_relay_rig(api)
+        question = ('Codex: Allow Calendar?\nReply: yes to allow once; "allow for task"; "always allow" to '
+                    'remember this app for future tasks; no to deny.')
+        asked = asyncio.ensure_future(rig.inlet._ask_user(question, OWNER))
+        await jobs(rig)
+        await dispatch(rig, "what calendar is it using?", update_id=5)
+        assert codex.sent == ["what calendar is it using?"] and not asked.done()
+        await dispatch(rig, "Allow for task.", update_id=6)
+        assert await asked == "Allow for task."
+        await jobs(rig)
+        assert api.edits[-1][1].endswith("Allowed for this task.")
+        assert not rig.inlet._pending_strict and rig.inlet._pending_words == frozenset()
+        await rig.inlet._shutdown()
+
+    asyncio.run(go())
+
+
 def test_a_relayed_questions_options_are_buttons_that_type_the_number() -> None:
     async def go() -> None:
         api, typed = FakeApi(), []

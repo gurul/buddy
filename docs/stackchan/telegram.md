@@ -279,7 +279,9 @@ read only** (a send, reply, label or delete is refused, never asked; the brain
 says so), **the calendar may write** (an event is created without a question),
 and **everything else asks you first** in this chat, as a one-line "Run
 SLACK_SEND_MESSAGE with to: …, subject: …? yes / no?" with **Allow** and **Deny**
-buttons. A tap answers it, or your next message does, as before. A call mixing toolkits takes the strictest. `CC_BUDDY_COMPOSIO_POLICY`
+buttons. A tap answers it, or a typed yes or no. With the relay off, your next
+message answers it, as before. With the relay on, other text goes to Claude and
+nothing runs until you answer. A call mixing toolkits takes the strictest. `CC_BUDDY_COMPOSIO_POLICY`
 changes any of this. The remote code tools (Composio's sandbox bash and
 workbench) always ask.
 
@@ -487,8 +489,12 @@ Flip it to `ask` if two seconds a command is a price you will pay.
   known also has buttons: **Allow** / **Deny** for a yes/no (app actions,
   Chrome access, a Codex command), **Yes** / **No** for "Should I go ahead…",
   and Codex's app-access choices (**Allow once**, **Allow for this task**,
-  **Always allow**, **Deny**). A tap is the same answer as typing it. After
-  the answer the question changes to say what was chosen, and its buttons go.
+  **Always allow**, **Deny**). A tap is the same answer as typing it. While the
+  Claude or Codex relay is on, a question with buttons takes only a tap, a
+  plain yes or no, or a button's words typed ("allow for task"). Other text
+  goes to Claude or Codex, and the question keeps waiting. With no relay on,
+  your next message is still the answer. After the answer the question
+  changes to say what was chosen, and its buttons go.
 
 One agent drives the mouse at a time. While a spoken conversation is open, or a
 task it started is running, a texted task is refused ("the Mac is theirs until
