@@ -222,3 +222,11 @@ def test_the_routing_doc_states_the_shipped_defaults_and_names_every_knob() -> N
     voice = (root / "docs" / "stackchan" / "voice.md").read_text(encoding="utf-8")
     assert "CC_BUDDY_REFLEXES" in voice and "CC_BUDDY_ROUTER_MODEL" in voice and "routing.md" in voice
     assert "routing.md" in (root / "README.md").read_text(encoding="utf-8")
+
+
+def test_is_question_is_one_rule_for_both_routers() -> None:
+    from cc_buddy_bridge.lane_router import is_question
+
+    assert is_question("what's playing?") and is_question("is Slack open") and is_question("open it?")
+    assert not is_question("open it?", polite=True)          # "can you open it?" is a request
+    assert not is_question("open Spotify")

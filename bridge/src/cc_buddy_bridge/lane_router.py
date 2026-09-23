@@ -94,14 +94,20 @@ def split_clauses(goal: str) -> list[str]:
     return [c for c in (part.strip() for part in CLAUSE_SPLIT.split(normalise(goal))) if objective_tokens(c)]
 
 
+def is_question(text: str, *, polite: bool = False) -> bool:
+    """A question, not a request: a question word first, or a "?" — unless the request began politely ("can
+    you …?"), where the "?" is manners. One rule for the lane (lane_router) and the classifier (task_router)."""
+    first = re.findall(r"[a-z']+", text.casefold())
+    return (bool(first) and first[0].replace("'", "") in QUESTION_WORDS) or ("?" in text and not polite)
+
+
 def refuse_reason(goal: str) -> str:
     """"" when the goal may be tried, else question | empty | too_long."""
     text = normalise(goal)
     tokens = objective_tokens(text)
     if not tokens:
         return "empty"
-    first = re.findall(r"[a-z']+", text.casefold())
-    if "?" in text or (first and first[0].replace("'", "") in QUESTION_WORDS):
+    if is_question(text):
         return "question"
     if len(tokens) > MAX_GOAL_TOKENS:
         return "too_long"
