@@ -55,7 +55,7 @@ from pathlib import Path
 from typing import Any, Awaitable, Callable, Optional
 from urllib.parse import quote_plus
 
-from . import browser_lane, pricing, task_router
+from . import browser_lane, consent, pricing, task_router
 from . import jev as jev_mod
 from .agent_contract import AgentEvent  # noqa: F401 — defined there, re-exported for importers of this module
 from .fast_lane import DECIDE_MODES, DEFAULT_DECIDE, FAST_LANE_DEFAULT, LANE_FIRST_DEFAULT
@@ -777,6 +777,36 @@ class ComputerAgent:
                 "goal": self.goal, "last": self.last_commentary, "final": self.final}
 
     # -- the loop --
+    async def run_in_browser(self, goal: str) -> tuple[str, str]:
+        """Only the browser lane's turn (``_browser_first``): plan once against the lane's page and execute it,
+        asking the human before any sensitive step. No desktop worker, no screenshot loop. Returns (answer,
+        "") when the plan finished or the human said no, ("", note) when it did part of the job — the caller
+        hands the rest, with the note, to another agent (chrome_lane.py: Codex). Never raises for a lane
+        failure; a cancel stops it like ``run``."""
+        if self.browser is None:
+            return "", ""
+        self._t0 = self._clock()
+        self.goal, self.running, self.turn, self.final = goal, True, 0, None
+        self._cancel.clear()
+        self._cancel_reason = ""
+        self._acted = False
+        self._bill_tokens = {"in": 0, "cached": 0, "out": 0}
+        self._bill_calls = 0
+        self._jev_before = jev_mod.METER.snapshot()
+        self._open_log(goal)
+        try:
+            answer, note = await self._browser_first(goal, None)
+        except Cancelled:
+            reason = self._cancel_reason
+            answer, note = ("Stopped." if not reason else f"Stopped: {reason}."), ""
+            self._log({"cancelled": reason})
+        finally:
+            self.running = False
+        self.final = answer or None
+        self._log({"final": answer, "browser_only": True, "handed_on": bool(not answer and note)})
+        self._log({"bill": self.bill()})
+        return answer, note
+
     async def run(self, goal: str) -> str:
         self._t0 = self._clock()
         self.goal = goal
@@ -1211,7 +1241,7 @@ class ComputerAgent:
             self._emit("ask", question, 0)
             said = await self._ask(question)
             self._log({"turn": 0, "ask": question, "answer": said})
-            if not said.strip().lower().startswith(("yes", "yeah", "yep", "sure", "ok", "go", "do it")):
+            if not consent.approves(said):                  # fail-closed: "yeah no" is not a yes
                 return f"Okay, I stopped before that: {what}.", ""
             approved[str(start)] = what
         if result.get("status") == "complete" and result.get("sentence"):

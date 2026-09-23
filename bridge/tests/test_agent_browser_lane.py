@@ -108,3 +108,55 @@ def test_a_partial_browser_plan_tells_the_loop_what_was_done(tmp_path: Path) -> 
     assert asyncio.run(a.run("open google news and show me the top headline")) == "Done."
     second = json.dumps(client.requests[1])
     assert "a plan already did, in order: open url https://news.google.com" in second and "do not repeat" in second
+
+
+# ---- run_in_browser: only the browser's turn, for chrome_lane.py -----------------------------------------
+
+WEB_PARTIAL = {"status": "partial", "next_index": 1, "reason": "the button was not there", "confirm": "", "sentence": "",
+               "ledger": [{"index": 1, "step": "open url https://news.google.com", "effect": "confirmed"}]}
+WEB_ASK = {"status": "needs_human", "next_index": 1, "reason": "", "confirm": "click Place order", "sentence": "",
+           "ledger": [{"index": 1, "step": "open url https://news.google.com", "effect": "confirmed"}]}
+
+
+def _browser_agent(tmp_path: Path, results: list[dict], answers: list[str] = (), fail: bool = False):
+    client = FakeClient([_plan_response(WEB_PLAN)])
+    lane = FakeLane(results, fail=fail)
+    a, events = _agent(client, PlanWorker([]), tmp_path, config=_cfg(tmp_path), browser=lane)
+    replies = list(answers)
+
+    async def ask(q: str) -> str:
+        return replies.pop(0)
+
+    a.ask_user = ask
+    return a, lane, events
+
+
+def test_run_in_browser_finishes_with_the_answer(tmp_path: Path) -> None:
+    a, lane, _ = _browser_agent(tmp_path, [WEB_DONE])
+    assert asyncio.run(a.run_in_browser("open google news and show me the top headline")) == ("Here is the top headline.", "")
+    assert lane.outlines == 1 and a.running is False
+
+
+def test_run_in_browser_hands_on_what_it_did_when_it_cannot_finish(tmp_path: Path) -> None:
+    a, _, _ = _browser_agent(tmp_path, [WEB_PARTIAL])
+    answer, note = asyncio.run(a.run_in_browser("open google news and click Top stories"))
+    assert answer == "" and "open url https://news.google.com" in note and "do not repeat" in note
+
+
+def test_run_in_browser_with_a_broken_browser_hands_everything_on(tmp_path: Path) -> None:
+    a, _, _ = _browser_agent(tmp_path, [], fail=True)
+    assert asyncio.run(a.run_in_browser("open google news")) == ("", "")
+
+
+def test_a_sensitive_step_needs_a_clear_yes(tmp_path: Path) -> None:
+    a, lane, _ = _browser_agent(tmp_path, [WEB_ASK], answers=["yikes, no"])
+    answer, _ = asyncio.run(a.run_in_browser("buy the thing"))
+    assert answer == "Okay, I stopped before that: click Place order." and len(lane.runs) == 1
+    a, lane, _ = _browser_agent(tmp_path, [WEB_ASK, WEB_DONE], answers=["yes"])
+    answer, _ = asyncio.run(a.run_in_browser("buy the thing"))
+    assert answer == "Here is the top headline." and lane.runs[1]["approved"] == {"1": "click Place order"}
+
+
+def test_run_in_browser_without_a_browser_does_nothing(tmp_path: Path) -> None:
+    a, _ = _agent(FakeClient([]), PlanWorker([]), tmp_path, config=_cfg(tmp_path))
+    assert asyncio.run(a.run_in_browser("anything")) == ("", "")
