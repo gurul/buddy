@@ -114,26 +114,15 @@ def refuse_reason(goal: str) -> str:
     return ""
 
 
-_APPS_CACHE: Optional[frozenset[str]] = None
-
-
 def installed_app_names(dirs: Iterable[str] = APP_DIRS, listdir: Callable[[str], list[str]] = os.listdir,
                         ) -> frozenset[str]:
-    """Case-folded names of the .app bundles in the usual places. Read once per process."""
-    global _APPS_CACHE
-    if _APPS_CACHE is not None and dirs is APP_DIRS and listdir is os.listdir:
-        return _APPS_CACHE
-    names: set[str] = set()
-    for d in dirs:
-        try:
-            entries = listdir(os.path.expanduser(d))
-        except OSError:
-            continue
-        names.update(e[:-4].casefold() for e in entries if e.endswith(".app"))
-    found = frozenset(names)
-    if dirs is APP_DIRS and listdir is os.listdir:
-        _APPS_CACHE = found
-    return found
+    """Case-folded names of the .app bundles in the usual places: a folded view of task_router.installed_apps,
+    the one scanner and the one cache, so the two routers can never disagree about what is installed."""
+    from . import task_router  # task_router imports this module at its top
+
+    if tuple(dirs) == tuple(APP_DIRS) and listdir is os.listdir:
+        return frozenset(n.casefold() for n in task_router.installed_apps())
+    return frozenset(n.casefold() for n in task_router.installed_apps(tuple(dirs), listdir=listdir))
 
 
 def names_other_app(goal: str, frontmost_app: str, apps: Iterable[str]) -> str:
