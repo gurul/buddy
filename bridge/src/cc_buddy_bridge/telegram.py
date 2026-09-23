@@ -181,9 +181,14 @@ TYPING_RELAY_SECS = 300.0            # a relayed line, until Claude says somethi
 # go as new messages again, as before. The result is a NEW message (an edit does not notify), sent as a reply
 # to the owner's request (reply_parameters, allow_sending_without_reply), so it says which request it answers.
 PROGRESS_EDIT_SECS = 1.0             # at most one edit per this long, per progress message
-PROGRESS_LINES = 6                   # the latest steps shown; older ones scroll off
-MAX_PROGRESS_LINE_CHARS = 160
-STOP_BUTTON = "Stop"                 # a tap does exactly what texting "stop" does
+# Steps are kept whole: in the Codex relay a step is Codex's own commentary, and the chat is its terminal, so
+# nothing of it may be cut (owner, 2026-09-23, review of the progress batch). The message holds every step
+# while it fits. Near the Bot API's 4096-character limit (an edit carries one piece only) the oldest steps
+# scroll off; one the phone never showed goes as a message of its own first. A single step too long for the
+# message at all goes as its own message, and the progress message says so in PROGRESS_LONG_STEP_LINE.
+MAX_PROGRESS_CHARS = MAX_MESSAGE_CHARS - 96    # the composed HTML, room left for the closing line
+PROGRESS_LONG_STEP_LINE = "(a long step, sent in full below)"
+STOP_BUTTON = "Stop"                 # a tap stops the work this message belongs to, as texting "stop" does
 PROGRESS_DONE_LINE = "Finished. The result is below."
 PROGRESS_STOPPED_LINE = "Stopped."
 PROGRESS_CLOSED_LINE = "Closed."
@@ -1012,7 +1017,11 @@ Create = Callable[[dict[str, Any]], Awaitable[dict[str, Any]]]
 # What a keyboard's tap does. ANSWER resolves the question waiting on it, exactly as a typed answer would;
 # TYPE types its value into the joined Claude terminal (an AskUserQuestion option); SAY feeds its value to
 # TelegramInlet._handle as if the owner had typed it (a picker), so a tap and a typed reply take one path.
-ANSWER, TYPE, SAY = "answer", "type", "say"
+# STOP is a progress message's Stop button: it calls the keyboard's ``on_stop`` with the chat, which stops
+# the very work that message belongs to. It is not SAY "stop": inside a Codex chat that word interrupts Codex,
+# so a computer task started there with "buddy: ..." could not be stopped from its own button (owner,
+# 2026-09-23, review of the progress batch).
+ANSWER, TYPE, SAY, STOP = "answer", "type", "say", "stop"
 
 
 @dataclass(eq=False)
@@ -1024,6 +1033,7 @@ class _Keyboard:
     choices: list[Choice]
     future: Optional[asyncio.Future] = None                       # ANSWER: the question it answers
     valid: Callable[[], bool] = field(default=lambda: True)       # still meaningful? (a picker's flow is open)
+    on_stop: Optional[Callable[[int], None]] = None               # STOP: stops this message's work, by chat id
     keys: list[str] = field(default_factory=list)
     message_id: int = 0                                           # set once the message is sent
 
@@ -1033,7 +1043,8 @@ class _Progress:
     """One running piece of work's progress message: a computer task started from the chat, or one Codex
     relay turn. ``head`` is what it says before any step ("On it…", "Sent to Codex."); ``steps`` are the
     latest few; ``unsent`` are the steps no edit has shown yet, which go as a new message if editing fails.
-    ``request_id`` is the owner's message that asked for the work: the result replies to it."""
+    ``request_id`` is the owner's message that asked for the work: the result replies to it. Steps are
+    whole; ``text`` shows them all, and ``_progress_step`` scrolls the oldest off near the message limit."""
     chat_id: int
     head: str
     title: Optional[str] = None
@@ -1698,6 +1709,9 @@ class TelegramInlet:
                                      drop=True), "telegram-tap")
         if board.kind == TYPE:
             self._spawn(self._type_to_claude(tap.chat_id, choice.value, tapped=True), "telegram-claude")
+        elif board.kind == STOP:
+            if board.on_stop is not None:
+                board.on_stop(tap.chat_id)
         else:
             self._handle(Inbound(chat_id=tap.chat_id, user_id=tap.user_id, text=choice.value))
 
@@ -1740,15 +1754,17 @@ class TelegramInlet:
         self._retire(board, drop=True)
 
     # -- one progress message per piece of work, edited in place --
-    def _open_progress(self, chat_id: int, head: str, *, title: Optional[str] = None,
-                       subtitle: Optional[str] = None, request_id: int = 0) -> _Progress:
+    def _open_progress(self, chat_id: int, head: str, on_stop: Callable[[int], None], *,
+                       title: Optional[str] = None, subtitle: Optional[str] = None,
+                       request_id: int = 0) -> _Progress:
         """Start a progress message for work that is starting now → its handle. It is sent at once (a job)
-        with a Stop button whose tap sends "stop", exactly as typing it would (a SAY keyboard: it goes
-        through _handle, so a Codex chat is interrupted and a task is cancelled, as the word does). The
-        button is live only while the work is: after the close, a tap is "expired"."""
+        with a Stop button (a STOP keyboard) whose tap calls ``on_stop``: it stops this work, as texting
+        "stop" would (a task is cancelled, a Codex turn interrupted), and never some other work that the
+        typed word would reach first. The button is live only while the work is: after the close, a tap is
+        "expired"."""
         progress = _Progress(chat_id, head, title=title, subtitle=subtitle, request_id=request_id)
-        progress.board = _Keyboard(chat_id, SAY, [Choice(STOP_BUTTON, "stop", "danger")],
-                                   valid=lambda: not progress.closed)
+        progress.board = _Keyboard(chat_id, STOP, [Choice(STOP_BUTTON, "stop", "danger")],
+                                   valid=lambda: not progress.closed, on_stop=on_stop)
         self._spawn(self._send_progress(progress), "telegram-progress")
         return progress
 
@@ -1766,16 +1782,45 @@ class TelegramInlet:
                 progress.broken = True                     # sent plain, or not at all: nothing to edit later
 
     def _progress_step(self, progress: Optional[_Progress], line: str) -> None:
-        """One step of the work (a task's narration, a Codex commentary). It is added to the progress message
-        by an edit, paced to one per PROGRESS_EDIT_SECS; the same step twice in a row is shown once."""
-        line = " ".join(str(line or "").split())[:MAX_PROGRESS_LINE_CHARS]
+        """One step of the work (a task's narration, a Codex commentary), whole. It is added to the progress
+        message by an edit, paced to one per PROGRESS_EDIT_SECS; the same step twice in a row is shown once.
+        Nothing is cut: a step too long for the message goes as its own message, and near the limit the
+        oldest steps scroll off, each one the phone never showed sent as its own message first."""
+        line = str(line or "").strip()
         if progress is None or progress.closed or not line or (progress.steps and progress.steps[-1] == line):
             return
-        progress.steps.append(line)
-        del progress.steps[:-PROGRESS_LINES]
-        progress.unsent.append(line)
+        if progress.broken:
+            progress.steps.append(line)                    # edits failed: each step goes as a message anyway
+            progress.unsent.append(line)
+        elif not self._progress_fits(progress, [line], alone=True):
+            self._spawn(self._say(progress.chat_id, line, title=progress.title, subtitle=progress.subtitle),
+                        "telegram-progress")
+            if progress.steps and progress.steps[-1] == PROGRESS_LONG_STEP_LINE:
+                return                                     # the pointer is already the latest line
+            progress.steps.append(PROGRESS_LONG_STEP_LINE)
+            progress.unsent.append(PROGRESS_LONG_STEP_LINE)
+        else:
+            progress.steps.append(line)
+            progress.unsent.append(line)
+        while len(progress.steps) > 1 and not self._progress_fits(progress):
+            if len(progress.unsent) >= len(progress.steps):      # never shown: it goes on its own, not lost
+                gone = progress.unsent.pop(0)
+                if gone != PROGRESS_LONG_STEP_LINE:
+                    self._spawn(self._say(progress.chat_id, gone, title=progress.title, subtitle=progress.subtitle),
+                                "telegram-progress")
+            progress.steps.pop(0)
         if progress.flush is None or progress.flush.done():
             progress.flush = self._spawn(self._flush_progress(progress), "telegram-progress")
+
+    @staticmethod
+    def _progress_fits(progress: _Progress, extra: Sequence[str] = (), *, alone: bool = False) -> bool:
+        """True when the progress message, with ``extra`` steps and its longest closing line, is one piece
+        under the limit once composed as HTML (escaping makes it longer than the words). With ``alone``,
+        the steps already there are left out: would ``extra`` fit even after they all scroll off?"""
+        steps = ([] if alone else progress.steps) + list(extra)
+        text = "\n\n".join([progress.head] + (["\n".join("- " + s for s in steps)] if steps else []))
+        closing = max((PROGRESS_DONE_LINE, PROGRESS_STOPPED_LINE, PROGRESS_CLOSED_LINE), key=len)
+        return len(fmt.compose(text + "\n\n" + closing, progress.title, progress.subtitle)) <= MAX_PROGRESS_CHARS
 
     def _stop_rows(self, progress: _Progress) -> Optional[list[list[tuple[str, str, str]]]]:
         """The Stop button's row while its key is live, else None (a tapped or retired button stays gone)."""
@@ -1950,8 +1995,11 @@ class TelegramInlet:
                     await self._say(chat_id, CODEX_SENT_LINE)
                     return
                 await self._end_codex_progress(PROGRESS_CLOSED_LINE)
-                self._codex_progress = self._open_progress(chat_id, CODEX_SENT_LINE, title=CODEX_TITLE,
-                                                           subtitle=self._codex_title, request_id=message_id)
+                # Its Stop interrupts this Codex chat, under this epoch: a later chat is never reached.
+                self._codex_progress = self._open_progress(
+                    chat_id, CODEX_SENT_LINE,
+                    lambda cid: self._spawn(self._codex_send(cid, "", epoch, interrupt=True), "telegram-codex"),
+                    title=CODEX_TITLE, subtitle=self._codex_title, request_id=message_id)
             except (codex_chat.CodexUnavailable, OSError, TimeoutError) as exc:
                 log.warning('telegram: codex send failed error=%s', type(exc).__name__)
                 if not self._codex.connected:
@@ -2251,6 +2299,14 @@ class TelegramInlet:
             self._spawn(self._settle_prompt(board, command + "\n\n" + line, title, subtitle), "telegram-edit")
         return outcome
 
+    async def _stop_task(self, progress: _Progress, chat_id: int) -> None:
+        """The Stop button on a task's progress message: that task stops, exactly as "stop" typed outside a
+        Codex chat. A Codex chat that is on is left alone; the button belongs to the task."""
+        if self._task_progress is progress:
+            await self._stop(chat_id)
+        else:
+            await self._say(chat_id, NOTHING_TO_STOP_LINE)
+
     async def _stop(self, chat_id: int) -> None:
         if self._agent is not None and self.task_running:
             # Said now, by code: the agent can take seconds to unwind, and its own "I stopped" would
@@ -2463,7 +2519,9 @@ class TelegramInlet:
         self._stopped_from_chat = False
         # One message for the task's progress, "On it" with a Stop button, edited as steps come (owner,
         # 2026-09-23). It stands for the "On it" reply a started task used to get.
-        progress = self._task_progress = self._open_progress(chat_id, ON_IT_LINE, request_id=self._turn_request)
+        progress = self._task_progress = self._open_progress(
+            chat_id, ON_IT_LINE, lambda cid: self._spawn(self._stop_task(progress, cid), "telegram-stop"),
+            request_id=self._turn_request)
         self._note("buddy", ON_IT_LINE)
         self._agent = self._agent_factory(lambda ev: self._on_agent_event(ev, chat_id, progress),
                                           lambda question: self._ask_user(question, chat_id))

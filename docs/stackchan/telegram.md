@@ -355,8 +355,13 @@ Flip it to `ask` if two seconds a command is a price you will pay.
 - **One progress message per task.** The "On it" message has a red **Stop**
   button under it. Each step the task reports is added to that same message
   (it is edited, at most once a second), so a busy task no longer fills the
-  chat. The latest six steps show. A tap on Stop does exactly what texting
-  `stop` does. When the task ends, the message says "Finished" or "Stopped" and
+  chat. Steps are never cut short. When the message gets near Telegram's
+  4096-character limit, the oldest steps scroll off; a step you never saw goes
+  as its own message first. A step too long for the message comes whole as its
+  own message, and the progress message says "(a long step, sent in full
+  below)". A tap on Stop stops that task, as texting `stop` does. It stops the
+  task even inside a Codex chat, where the typed word would interrupt Codex
+  instead. When the task ends, the message says "Finished" or "Stopped" and
   the button goes. The result comes as a new message, so your phone notifies,
   and it is a reply to the message that asked for the task. If Telegram will
   not edit the message, each step comes as its own message, as before. If it
@@ -422,7 +427,8 @@ Flip it to `ask` if two seconds a command is a price you will pay.
   Plain messages (or `codex: message`) continue the new chat, retaining its context.
   During a running turn they steer it. Each message that starts a turn gets one
   progress message under **Codex** ("Sent to Codex.", then Codex's public steps,
-  edited in place) with a **Stop** button that works like `stop`. The final
+  edited in place, whole, with the same scroll-off rule as a task) with a
+  **Stop** button that interrupts that turn, like `stop`. The final
   answer is a new message replying to yours. Reasoning and tool output stay out
   of Telegram. Browser tasks
   send the captured image from their own tab using the same validation as Buddy's

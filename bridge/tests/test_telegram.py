@@ -2939,6 +2939,91 @@ def test_codex_off_closes_an_open_progress_message() -> None:
     asyncio.run(go())
 
 
+def test_a_tasks_stop_button_stops_the_task_even_inside_a_codex_chat() -> None:
+    # Review of the progress batch (owner, 2026-09-23): the button used to replay the word "stop", which a
+    # Codex chat takes first, so the Codex turn was interrupted and the task kept running.
+    async def go() -> None:
+        codex, api = FakeCodex(), FakeApi()
+        rig = Rig(api, FakeCreate(call("start_task", {"goal": "open the calculator"})), codex=codex,
+                  codex_folders=lambda: [CODEX_FOLDER])
+        await dispatch(rig, "codex buddy")
+        await dispatch(rig, "buddy: open the calculator", update_id=3)
+        await settle()
+        assert rig.inlet.task_running
+        progress_id, key = api.key("Stop")
+        await tap(rig, key, progress_id)
+        assert codex.stops == 0                                            # the Codex chat is left alone
+        assert rig.agents[0].cancel_reason == "stopped from Telegram"
+        assert api.sent[-1] == (OWNER, STOPPED_LINE)
+        rig.agents[0].release.set()
+        await settle()
+        assert not rig.inlet.task_running
+        assert api.edits[-1] == (progress_id, ON_IT_LINE + "\n\n" + telegram.PROGRESS_STOPPED_LINE)
+        await dispatch(rig, "codex off")
+        await rig.inlet._shutdown()
+
+    asyncio.run(go())
+
+
+def test_a_long_codex_commentary_is_kept_whole_in_the_progress_message() -> None:
+    async def go() -> None:
+        codex, api = FakeCodex(), FakeApi()
+        rig = Rig(api, FakeCreate(), codex=codex, codex_folders=lambda: [CODEX_FOLDER])
+        await dispatch(rig, "codex buddy")
+        await dispatch(rig, "fix the tests", update_id=3)
+        progress_id, _ = api.key("Stop")
+        long_step = "I read the failing test first. " * 16 + "Then I fixed it."   # about 500 characters
+        await codex.emit(long_step)
+        await jobs(rig)
+        assert api.edits[-1] == (progress_id, "Sent to Codex.\n\n- " + long_step.strip())
+        await dispatch(rig, "codex off")
+        await rig.inlet._shutdown()
+
+    asyncio.run(go())
+
+
+def test_a_step_too_long_for_the_message_goes_whole_as_its_own_message() -> None:
+    async def go() -> None:
+        codex, api = FakeCodex(), FakeApi()
+        rig = Rig(api, FakeCreate(), codex=codex, codex_folders=lambda: [CODEX_FOLDER])
+        await dispatch(rig, "codex buddy")
+        await dispatch(rig, "fix the tests", update_id=3)
+        progress_id, _ = api.key("Stop")
+        huge = "word " * 1200                                               # 6000 characters: past the limit
+        await codex.emit(huge)
+        await jobs(rig)
+        assert (OWNER, huge.strip()) in api.sent                          # whole, as a message of its own
+        assert api.edits[-1] == (progress_id, "Sent to Codex.\n\n- " + telegram.PROGRESS_LONG_STEP_LINE)
+        await dispatch(rig, "codex off")
+        await rig.inlet._shutdown()
+
+    asyncio.run(go())
+
+
+def test_steps_scroll_off_near_the_limit_and_none_is_lost() -> None:
+    async def go() -> None:
+        codex, api = FakeCodex(), FakeApi()
+        rig = Rig(api, FakeCreate(), codex=codex, codex_folders=lambda: [CODEX_FOLDER])
+        await dispatch(rig, "codex buddy")
+        await dispatch(rig, "fix the tests", update_id=3)
+        progress_id, _ = api.key("Stop")
+        steps = [f"step {i}: " + "x" * 400 for i in range(20)]           # 8000 characters, all before one edit
+        for step in steps:
+            await codex.emit(step)
+        await jobs(rig)
+        shown = api.edits[-1][1]
+        assert api.edits[-1][0] == progress_id
+        assert len(telegram.fmt.compose(shown)) <= telegram.MAX_PROGRESS_CHARS
+        assert "step 0:" not in shown and ("- " + steps[-1]) in shown       # the oldest scrolled off
+        sent = [text for _, text in api.sent]
+        for step in steps:                                                 # every step reached the phone
+            assert step in sent or ("- " + step) in shown
+        await dispatch(rig, "codex off")
+        await rig.inlet._shutdown()
+
+    asyncio.run(go())
+
+
 def test_the_bot_api_sends_reply_links_reply_boxes_and_keeps_buttons_on_an_edit() -> None:
     async def go() -> list[tuple[str, dict[str, Any]]]:
         seen: list[tuple[str, dict[str, Any]]] = []
