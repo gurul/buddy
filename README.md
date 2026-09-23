@@ -48,6 +48,10 @@ workspace without the robot, and its offline demo needs no API key.
   enabled, Telegram can save notes, update an existing shopping list, check off
   todos, and undo a note edit. Changes stay in the same Markdown file, with
   previous contents saved for recovery.
+- **Starts coding sessions from your phone.** Text `new claude` on Telegram and
+  answer personal or work, then a folder. buddy opens Warp on the Mac with Claude Code
+  (personal) or era-code (work) running there. See
+  [Telegram](docs/stackchan/telegram.md#start-a-coding-session).
 - **Mirrors Claude Code.** Session hooks and transcript updates make buddy sleep,
   work, celebrate, or ask for attention. A tap can focus a waiting terminal;
   Claude Code permission prompts remain in that terminal.
@@ -239,6 +243,11 @@ progress and permission choices. `stop_task` interrupts Codex even while a
 permission is pending. Native app prompts support `allow for task` and
 `always allow` when Codex offers them. Saved app grants belong to Codex and can
 be revoked in its Computer Use settings. Codex's model settings are inherited;
+`CC_BUDDY_CODEX_SITE_ACCESS=allow` honors the owner's preference to proceed through
+ordinary website-access prompts without another Telegram question (default: `ask`).
+It does not approve uploads, raw browser access, sign-in handoffs, or other actions.
+Browser tasks return a picture captured from their own browser tab; a missing
+capture is reported instead of sending an unrelated desktop screenshot.
 the adapter uses a read-only filesystem sandbox with approvals on request and a
 ten-minute task budget. `CC_BUDDY_CODEX_BIN` can select a Codex executable; otherwise
 the installed desktop app's bundled executable is preferred. The Computer Use
@@ -277,7 +286,7 @@ See [routing](docs/stackchan/routing.md) for the switches and measured evaluatio
 and [voice and computer control](docs/stackchan/voice.md) for worker details.
 
 Telegram accepts **photos and image files with captions** (still JPEG/PNG/WebP/GIF,
-up to 10 MB). With `claude on` or a selected `codex on` task, images go to that
+up to 10 MB). With `claude on` or a selected Codex folder chat, images go to that
 session as a private local file to inspect. Otherwise Buddy reads them directly.
 Use `buddy: <caption>` to address Buddy while a relay is active. See
 [image routing and retention](docs/stackchan/telegram.md#receiving-images).
@@ -294,11 +303,15 @@ numeric Telegram id chat with buddy, start and stop a Mac task, answer a task's
 question and receive a photo from the robot. "claude on" turns the chat into a Claude
 Code terminal: what it says and asks streams to the phone (the white text, never the gray
 tool lines or thinking), what you text is typed in, and tool calls go through without
-asking, as in bypass mode. `codex on` lists recent Codex tasks in the Mac app;
-`codex use 1` connects to one, then messages and completed answers relay through
-Telegram. `stop` interrupts it, `codex off` disconnects, and `buddy:` talks to Buddy.
-Codex retains its Mac app permissions; approvals stay in the app. This experimental
-relay requires the Mac app to be running with the selected local task open. Every message is shaped for the phone by `telegram_format.py`:
+asking, as in bypass mode. `codex on` sends only the accessible folders saved in
+Codex, hiding debrief folders. `codex buddy` (or `codex use buddy`) starts a **new chat** in that folder;
+every selection starts fresh, and subsequent messages keep that chat's context.
+No task number, existing task, or open Mac window is required. `stop` interrupts
+the current turn, `codex off` closes the chat and returns to Buddy, and `buddy:`
+addresses Buddy directly. Startup failures leave Buddy usable. `codex_chat.py`
+uses Codex's public app-server with workspace-write scope and on-request
+approvals relayed to Telegram; native app and website rules still apply.
+Every message is shaped for the phone by `telegram_format.py`:
 a bold title where the voice is not buddy's own, short paragraphs, markdown turned into
 Telegram HTML, split at 4096 on a paragraph boundary. It is **off by
 default** and needs a switch, a bot token and an owner id together. With `CC_BUDDY_RECORDS=1` the text brain

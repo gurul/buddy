@@ -70,7 +70,7 @@ album is delivered separately. Voice notes, animations and other documents are
 not accepted. Owner/private-chat, freshness and forwarded-message checks apply
 before downloading; bytes and decoded dimensions are validated before use.
 
-With `claude on` or a selected `codex on` task, the caption and a local image path
+With `claude on` or a selected Codex folder chat, the caption and a local image path
 are sent to that same session with an instruction to read the image. The image
 is not silently routed to Buddy. This uses the existing text relay and the
 recipient's image-reading tool, with its normal file permissions; it does not
@@ -138,6 +138,42 @@ token without an owner id is off. A door with no allowlist never opens.
 | `CC_BUDDY_SECOND_BRAIN` | `0` | `1`: your own notes, todos and journals as a local markdown vault, captured from this chat ([second-brain.md](second-brain.md)). |
 | `CC_BUDDY_VAULT` | `~/Documents/Second Brain` | The vault's folder (open it in Obsidian). |
 | `CC_BUDDY_COMMAND_RISK` | `shadow` | The Auto Mode gate behind the Claude relay ([below](#the-auto-mode-gate-jev-judges-a-relayed-command)): `off`, `shadow` (judged and logged, never acted on), `ask` (a risky verdict is your yes/no). |
+| `CC_BUDDY_CODE_ROOT` | `~/Documents` | Where `new claude` looks for project folders. |
+| `CC_BUDDY_CODE_AREAS` | `personal,work` | The first question's answers: folders under the root, comma separated. |
+| `CC_BUDDY_CLAUDE_TERMINAL` | `warp` if installed | `warp` or `terminal` (Terminal.app): where a new session opens. |
+
+## Start a coding session
+
+`new claude` (also `start claude`, `claude new`, `/newclaude`) opens a new
+terminal window on the Mac with a coding agent running in one of your project
+folders. The steps are code, with no model call, and each one is a short text:
+
+1. **Personal or Work?** Recent sessions are listed underneath as numbers, and
+   a folder name works here too. Most of the time you already know the folder.
+2. **General, or which folder?** `general` opens the area itself, a name opens
+   that folder, and `list` shows the folders with a number for each. Numbered
+   worktrees (`era-maker-213`) are folded under their base folder. Names are
+   matched loosely, so `era maker` finds `era-maker`. If more than one folder
+   matches, you get a numbered choice.
+
+You can say everything in one message: `new claude work era hub api`. You can
+also just ask in plain words ("open up era maker in work"), and the text brain
+walks the same steps through its `start_coding_session` tool. `cancel` ends the
+steps, and an unanswered question is dropped after five minutes.
+
+**Which program starts** comes from the area, so buddy never asks: personal runs
+`claude --dangerously-skip-permissions` and work runs
+`era-code claude --dangerously-skip-permissions`. To switch for one session, say
+the other one explicitly: "…but in claude instead of era code", "buddy in
+era-code", "atlas with claude".
+
+In Warp, buddy rewrites one launch configuration,
+`~/.warp/launch_configurations/buddy-claude.yaml`, and opens it with
+`warp://launch/buddy-claude`. Warp finds a configuration by its `name:`, not
+by its file path. With `CC_BUDDY_CLAUDE_TERMINAL=terminal`, Terminal.app runs
+`cd <folder> && <command>` instead. The folder is always one taken from the
+listing, never text from the chat, and it is shell-quoted. After the window
+opens, `claude on` connects the chat to it as usual.
 
 ## Web search
 
@@ -248,12 +284,17 @@ Flip it to `ask` if two seconds a command is a price you will pay.
   and captions it as it does for the voice, and the picture arrives in the chat.
 - **The screen** — "screenshot", "show me the screen", "what's on the screen".
   A message that is only that is answered by code, no model call, mid-task or
-  not (like `stop`): macOS `screencapture` (the same call PyAutoGUI makes),
-  sent as a photo. Longer requests go through the brain's `screenshot` tool. A task whose request asked
-  to *see* something ("give me a screenshot of the headline") arrives with the
-  screen it left, so you can check the result; a task that did not ask gets
-  the words only. Needs Screen Recording for the daemon's python, which the
-  desktop worker already has.
+  not (like `stop`). For Codex browser tasks, it sends the last captured view
+  from that task's browser tab, labeled with its tab ID. Completed browser tasks
+  automatically include this picture. A missing capture is reported; the desktop
+  is never substituted. For other tasks, macOS `screencapture` sends the screen
+  as a photo and requires Screen Recording for the daemon's Python. Longer
+  requests go through the brain's `screenshot` tool. Native tasks that ask to
+  *see* something include the desktop picture when they finish.
+- **Website access** — `CC_BUDDY_CODEX_SITE_ACCESS=allow` accepts the runtime's
+  ordinary site-access prompts without another Telegram question. Default `ask`.
+  Native-app grants, strict safety reviews, uploads, full CDP, authentication
+  handoffs, and other action approvals are separate.
 - **A file** — "send me the report on my Desktop", "what's the newest thing in
   Downloads". `send_file` sends any regular file under your home folder as a
   Telegram document (50 MB limit); `list_files` lists a folder newest first so
@@ -276,39 +317,40 @@ Flip it to `ask` if two seconds a command is a price you will pay.
   and `go_explore` refuse ("stealth mode: the robot is playing asleep"); the
   camera may still `look`, tasks and files still work. Zero model calls to
   enter or leave it.
-- **`codex on` / `codex off`** — connect Telegram to a Codex task in the Mac
-  ChatGPT/Codex app. `codex on` lists the ten most recently updated local tasks;
-  `codex use 1` selects a numbered task, or `codex on <full task ID>` selects it
-  directly. Open the task in the Mac app first. `codex status` reports the
-  connection. Plain messages (or `codex: message`) go to that task; messages
-  during an active turn steer it. Completed public answers return under a
-  **Codex** title. Thinking, tool output, historical answers and partial streaming
-  text stay on the Mac. A task already running when attached forwards its answer
-  when it finishes.
+- **`codex on` / `codex off`** — `codex on` sends only the names of accessible
+  local folders saved in Codex, with debrief folders hidden. Duplicate names show full paths. No task titles,
+  numbers, IDs or old prompts appear. `codex buddy` or `codex use buddy` starts a
+  **fresh chat** in that folder. Each folder selection creates a new conversation.
+  Full folder paths also work; unknown or inaccessible folders cannot start a chat.
+  The Mac needs to be awake, but no existing task or open app window is required.
 
-  `buddy: ...`, screenshot and stealth commands still address Buddy. `stop`
-  interrupts the selected Codex turn; `codex off` disconnects without stopping
-  work. Switching to `claude on` disconnects Codex, and selecting Codex turns off
-  the Claude relay. The connection belongs to the owner chat that selected it.
-  After a daemon restart or disconnect, select the task again. Failed or
-  unconfirmed sends never fall through to Buddy and are never retried
-  automatically: check the task before sending again.
+  Plain messages (or `codex: message`) continue the new chat, retaining its context.
+  During a running turn they steer it. Public progress and final answers return
+  under **Codex**; reasoning and tool output stay out of Telegram. Browser tasks
+  send the captured image from their own tab using the same validation as Buddy's
+  computer tasks. `codex status` reports the folder, `stop` interrupts the turn
+  while keeping the chat, and `codex off` stops active work and closes the session.
+  `buddy: ...`, screenshot and stealth commands still address Buddy. Switching to
+  `claude on` closes the Codex session. Another owner chat cannot control it.
 
-  Codex keeps the task's model, reasoning and permission settings. Pending
-  approvals or questions produce a notice; answer them **in the Mac app**.
-  Telegram's Claude permission/bypass settings do not apply to Codex.
+  If startup fails, the next ordinary message goes to Buddy. A failed work message
+  is never replayed through Buddy or automatically retried. After restart, select
+  a folder again for a fresh chat. Codex stores the conversation in its own thread
+  storage; Buddy keeps no extra raw-chat log. Diagnostics record connection stages
+  and errors without message text. Earlier raw Telegram texts cannot be recovered
+  from those logs.
 
-  Implementation: `codex_relay.py` reads task metadata from the local state
-  database in read-only mode and follows the app owner through
-  `$CODEX_HOME/ipc/ipc.sock` (default `~/.codex/ipc/ipc.sock`). It does not run a
-  second app server, take ownership, or type into whichever window is focused.
-  This is an **experimental private desktop IPC integration**, verified against
-  the installed September 2026 app's state-stream v11/start-turn v2/interrupt v4
-  protocol. It fails closed on incompatible versions. App upgrades can break it.
-  Remote hosts and ordinary ChatGPT conversations are not supported. Snapshot
-  refreshes coalesce desktop patches over 1.2 seconds; existing history is seeded
-  without replay. Tests use a fake framed Unix socket owner; the live smoke
-  check only attaches and reads state, without starting a model turn.
+  Implementation: `codex_chat.py` owns a new persistent thread through the public
+  `codex app-server` JSON protocol. It reads saved local project roots from
+  `~/.codex/.codex-global-state.json`, deduplicates them and checks filesystem
+  access. It does not select or resume any existing desktop task. Routine file
+  work is scoped to the selected workspace; approval policy is `on-request`.
+  Command approvals show the command and folder in Telegram and require an exact
+  affirmative reply. Unsupported permission forms are declined. Native app
+  persistence and ordinary website access use the existing Computer Use adapter.
+  The model uses Codex's configured default. Desktop-only app tools and the
+  built-in browser are unavailable in this standalone runtime; Chrome is the
+  default task browser. This does not bypass ChatGPT's native UI restriction.
 
 - **`claude on` / `claude off`** — the Claude Code relay, explicit only. While
   on: the chat shows what the terminal prints in white, as it happens: what
@@ -337,7 +379,7 @@ Flip it to `ask` if two seconds a command is a price you will pay.
   until you ask, and the Mac asks as it always did.
 - **One shape for every message** (`telegram_format.py`). A message that is
   not buddy's own reply opens with a bold title that says whose it is or what
-  it is: "Task done" or "Task failed" with the goal in italics under it, "The
+  it is: "Task result" or "Task failed" with the goal in italics under it, "The
   task asks", "Before I do that" (an app action to confirm), "Claude" with the
   repo under it, "Claude asks", "Claude is waiting on you", "Claude asks to
   run Bash". Then a blank line, then the body in short paragraphs: a model's

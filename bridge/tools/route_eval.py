@@ -183,22 +183,33 @@ def load_model(name: str) -> Callable[[str], tuple[str, float]]:
     return choose
 
 
-def native_jev(tuning: dict[str, Any], seen: list[dict[str, Any]], holdout: Optional[dict[str, Any]], apps: list[str]) -> int:
-    """Jev in its own idiom, fitted on every set that has been read, tested on the one that has not."""
+def native_jev(tuning: dict[str, Any], seen: list[dict[str, Any]], holdout: Optional[dict[str, Any]], apps: list[str],
+               model_name: str = "jev") -> int:
+    """A model in its own idiom (typed_ask.py), fitted on every set that has been read, tested on the one
+    that has not. Jev: absolute nouls, the app from the installed list. laya: one short ranking, the app
+    from a code shortlist, on this Mac."""
     import os
     import statistics
     import time
 
-    from cc_buddy_bridge import jev
     from cc_buddy_bridge import typed_ask as ta
     from cc_buddy_bridge.envfile import load_env_file
 
     load_env_file()
-    url, key, model = jev.route_config(os.environ)
-    predict = jev.make_predict(url, key, model, timeout_s=8.0)
+    if model_name == "laya":
+        from cc_buddy_bridge.decider import DEFAULT_MODEL_PATH, Decider
+
+        predict = Decider.load(DEFAULT_MODEL_PATH, style="compact")._predict
+        asker = ta.ask_laya_request
+    else:
+        from cc_buddy_bridge import jev
+
+        url, key, model = jev.route_config(os.environ)
+        predict = jev.make_predict(url, key, model, timeout_s=8.0)
+        asker = ta.ask_jev_request
 
     def ask(cases: list[dict[str, Any]]) -> list[ta.RequestAnswer]:
-        return [ta.ask_jev_request(predict, c["goal"], apps, time.perf_counter) for c in cases]
+        return [asker(predict, c["goal"], apps, time.perf_counter) for c in cases]
 
     def complete_truth(c: dict[str, Any]) -> str:        # this arm only ever fires a COMPLETE reflex
         return c["kind"] if c["tiers"] == ["reflex"] and c["kind"] in ("launch", "search") else "other"
@@ -208,7 +219,7 @@ def native_jev(tuning: dict[str, Any], seen: list[dict[str, Any]], holdout: Opti
     gates = ta.fit_request_gates(fit_answers, [complete_truth(c) for c in fit_cases],
                                  [tuple(c["tiers"]) == PLANNER_ONLY for c in fit_cases],
                                  [a.app == c.get("app") for a, c in zip(fit_answers, fit_cases, strict=True)])
-    print(f"jev native: cut-offs fitted on {len(fit_cases)} seen requests (zero unsafe, zero wrong allowed): {gates}")
+    print(f"{model_name} native: cut-offs fitted on {len(fit_cases)} seen requests (zero unsafe, zero wrong allowed): {gates}")
     if holdout is None:
         print("NO_HOLDOUT")
         return 0
@@ -234,7 +245,7 @@ def native_jev(tuning: dict[str, Any], seen: list[dict[str, Any]], holdout: Opti
 
     jev_said = [ta.decide_request(a, gates) for a in answers]
     jev_app_ok = [a.app == c.get("app") for a, c in zip(answers, cases, strict=True)]
-    score("jev NATIVE alone", jev_said, jev_app_ok)
+    score(f"{model_name} NATIVE alone", jev_said, jev_app_ok)
     plans = [tr.classify(c["goal"], apps=apps) for c in cases]
     rule_said = [p.kind if p.complete else "other" for p in plans]
     rule_ok = [p.app == c.get("app") for p, c in zip(plans, cases, strict=True)]
@@ -253,7 +264,7 @@ def native_jev(tuning: dict[str, Any], seen: list[dict[str, Any]], holdout: Opti
         else:
             both.append("other")
             both_ok.append(True)
-    score("rules, then jev NATIVE for a bare launch the rules did not recognise", both, both_ok)
+    score(f"rules, then {model_name} NATIVE for a bare launch the rules did not recognise", both, both_ok)
     print("ROUTE_NATIVE_EVAL_COMPLETE")
     return 0
 
@@ -269,8 +280,9 @@ def main(argv: Optional[list[str]] = None) -> int:
     p.add_argument("--data", default=str(DEFAULT_DATA), help="the TUNING set; holdout.json beside it decides")
     p.add_argument("--model", choices=("laya", "jev"), help="score a typed-decision model instead of the rules")
     p.add_argument("--native", action="store_true",
-                   help="with --model jev: Jev asked in its own idiom (typed_ask.py: absolute nouls in one request, the "
-                        "app chosen from the installed list), cut-offs fitted on the tuning sets only; alone and with the rules")
+                   help="the model asked in its own idiom (typed_ask.py; jev: absolute nouls, the app from the installed "
+                        "list; laya: one short ranking, the app from a code shortlist), cut-offs fitted on the tuning sets "
+                        "only; alone and with the rules")
     p.add_argument("--check-default", action="store_true", help="assert task_router.REFLEX_DEFAULT equals the decision")
     p.add_argument("--results-out")
     args = p.parse_args(argv)
@@ -285,8 +297,8 @@ def main(argv: Optional[list[str]] = None) -> int:
         path = Path(args.data).with_name(seen)
         if path.exists():
             burned_sets.append((f"{seen[:-5]} (seen: now tuning)", json.loads(path.read_text(encoding="utf-8"))))
-    if args.model == "jev" and args.native:
-        return native_jev(tuning, [d for _n, d in burned_sets], holdout, apps)
+    if args.model and args.native:
+        return native_jev(tuning, [d for _n, d in burned_sets], holdout, apps, args.model)
     choose = load_model(args.model) if args.model else None
     if args.model:
         arm = f"model {args.model} alone (acts at p ≥ {ACT_AT:.2f}, else abstains)"

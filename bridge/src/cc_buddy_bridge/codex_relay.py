@@ -8,6 +8,7 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import json
+import logging
 import os
 import sqlite3
 import stat
@@ -20,6 +21,7 @@ from pathlib import Path
 from typing import Any
 
 MAX_FRAME = 32 * 1024 * 1024
+log = logging.getLogger(__name__)
 
 
 class RelayError(Exception):
@@ -30,6 +32,60 @@ class RelayError(Exception):
 class DesktopTask:
     id: str
     title: str
+    cwd: str = ''
+
+
+def select_task(tasks: list[DesktopTask], selection: str) -> DesktopTask:
+    """Tasks are newest first. A folder selects its latest task, never another folder."""
+    selected = selection.strip().strip('"\'').rstrip('/')
+    try:
+        uuid.UUID(selected)
+        return next((t for t in tasks if t.id == selected), DesktopTask(selected, selected))
+    except ValueError:
+        pass
+    key = str(Path(selected).expanduser()).casefold()
+    matches = [t for t in tasks if t.cwd and
+               (t.cwd.rstrip('/').casefold() == key or Path(t.cwd).name.casefold() == key)]
+    folders = {t.cwd.rstrip('/') for t in matches}
+    if len(folders) > 1:
+        raise RelayError('More than one folder has that name. Use the full folder path:\n' +
+                         '\n'.join('codex use ' + p for p in sorted(folders)))
+    if matches:
+        return matches[0]
+    matches = [t for t in tasks if t.title.casefold() == selected.casefold()]
+    if len(matches) == 1:
+        return matches[0]
+    raise RelayError('No unique task matches that folder or title. Use codex on to see folders.')
+
+
+def folder_menu(tasks: list[DesktopTask]) -> str:
+    seen: set[str] = set()
+    lines = []
+    for task in tasks:
+        key = task.cwd or task.id
+        if key in seen:
+            continue
+        seen.add(key)
+        # SQLite's title can be the entire first prompt, including attachment
+        # paths. Show folders here; the attached desktop supplies its UI title.
+        if not task.cwd:
+            continue
+        folder = Path(task.cwd).name
+        ambiguous = any(t.cwd != task.cwd and Path(t.cwd).name == folder for t in tasks if t.cwd)
+        lines.append(task.cwd if ambiguous else folder)
+        if len(lines) == 20:
+            break
+    return '\n'.join(lines)
+
+
+def _internal_source(source: str) -> bool:
+    try:
+        parsed = json.loads(source)
+    except (ValueError, TypeError):
+        parsed = source
+    # Guardian/review sessions have no agent_nickname. Source is the discriminator
+    # used by Codex for these tasks, including future subagent kinds.
+    return isinstance(parsed, dict) and 'subagent' in parsed or parsed == 'subagent'
 
 
 def recent_tasks(home: Path | None = None) -> list[DesktopTask]:
@@ -40,11 +96,12 @@ def recent_tasks(home: Path | None = None) -> list[DesktopTask]:
         raise RelayError('No Codex tasks found. Open a task in the Mac app first.')
     try:
         with contextlib.closing(sqlite3.connect(databases[0].as_uri() + '?mode=ro', uri=True)) as db:
-            rows = db.execute('SELECT id, title FROM threads WHERE archived = 0 '
-                              'AND agent_nickname IS NULL ORDER BY updated_at DESC LIMIT 10').fetchall()
+            rows = db.execute('SELECT id, title, cwd, source FROM threads WHERE archived = 0 '
+                              'AND agent_nickname IS NULL ORDER BY updated_at DESC').fetchall()
     except sqlite3.Error as exc:
         raise RelayError('Could not read the Mac app task list.') from exc
-    return [DesktopTask(id, title or id) for id, title in rows]
+    return [DesktopTask(id, title or id, cwd or '') for id, title, cwd, source in rows
+            if not _internal_source(source)]
 
 
 class CodexRelay:
@@ -80,7 +137,7 @@ class CodexRelay:
         try:
             uuid.UUID(thread_id)
         except ValueError as exc:
-            raise RelayError('Use a task number from codex on, or a full Codex task ID.') from exc
+            raise RelayError('Use a folder from codex on, or a full Codex task ID.') from exc
         self.thread_id = thread_id
         self._failed, self._seeded = False, False
         self._ready.clear()
@@ -91,25 +148,32 @@ class CodexRelay:
         self._messages = asyncio.Queue()
         self.client_id = 'initializing-client'
         sock = self.home / 'ipc' / 'ipc.sock'
+        stage = 'socket'
         try:
             info = sock.stat()
             if not stat.S_ISSOCK(info.st_mode) or info.st_uid != os.getuid():
                 raise RelayError('The Codex socket is not owned by this Mac user.')
             reader, self._writer = await asyncio.open_unix_connection(str(sock))
             self._reader_job = asyncio.create_task(self._read(reader))
+            stage = 'initialize'
             hello = await self._request('initialize', {'clientType': 'buddy-telegram'}, version=0)
             self.client_id = hello['result']['clientId']
+            stage = 'owner-discovery'
             owner = await self._request('thread-owner-discovery', {'hostId': 'local', 'conversationId': thread_id})
             self.owner = owner['handledByClientId']
+            stage = 'snapshot'
             await self._follow(True)
             await asyncio.wait_for(self._ready.wait(), self.timeout)
             if self._failed:
                 raise RelayError('The Mac app disconnected while attaching. Try codex on again.')
             self._delivery_job = asyncio.create_task(self._deliver(emit))
+            log.info('codex relay: attached task=%s', thread_id)
         except asyncio.CancelledError:
             await self.close()
             raise
         except (OSError, TimeoutError, KeyError, RelayError) as exc:
+            log.warning('codex relay: attach failed task=%s stage=%s error=%s', thread_id, stage,
+                        type(exc).__name__)
             await self.close()
             if isinstance(exc, RelayError):
                 raise
@@ -136,9 +200,14 @@ class CodexRelay:
             await self._write(message)
             response = await asyncio.wait_for(future, self.timeout)
             if response.get('resultType') != 'success':
+                log.warning('codex relay: request rejected method=%s', method)
                 raise RelayError('The Mac app could not confirm the request. Check the selected task before retrying.')
             return response
         except (TimeoutError, OSError) as exc:
+            log.warning('codex relay: request unconfirmed method=%s error=%s', method, type(exc).__name__)
+            if method in ('initialize', 'thread-owner-discovery'):
+                raise RelayError('Could not connect to that task in the Mac app. '
+                                 'Open it and retry codex <folder>. No work message was sent.') from exc
             raise RelayError('No confirmation from the Mac app. Check the task before retrying; it may have received the message.') from exc
         finally:
             self._pending.pop(request_id, None)
