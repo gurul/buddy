@@ -224,13 +224,29 @@ Claude Code hooks / CLI ── local IPC ──→ Python daemon
 | Robot firmware | Arduino C++ on ESP32-S3; M5StackChan BSP and M5Unified for hardware, RoboEyes for the face. Local state machines handle gaze, affect, conversation phases, motion and synthesized chirps. |
 | Host bridge | Python with `asyncio`; `cc-buddy-bridge` is the CLI and daemon entry point. Hooks and CLI commands use local JSON IPC; the current robot link uses newline-delimited JSON over USB serial. |
 | Voice and reasoning | sherpa-onnx keyword spotting with sounddevice audio input; the configured defaults are `gpt-live-1` for voice and `gpt-6-astra` for its reasoning backend. Captions are the default output. |
-| Desktop control | A tiered request router, macOS Accessibility inspection, and a separate worker process for PyAutoGUI/Pillow operations. The fallback planner uses `gpt-6-astra`, with a default limit of 25 turns and 180 seconds. |
+| Desktop control | Buddy's voice and text `start_task` tool delegates to Codex app-server and its installed `cua_repl.js` Computer Use plugin. Progress, explicit permissions, results, steering and cancellation return through Buddy. No alternate UI driver is used if Codex is unavailable. |
 | Vision and memory | macOS Vision for face detection, host-side identity/following logic, model-assisted scene observations and reflections, plus separate diary and conversation stores. |
 | Learning | Python HTTP service on `127.0.0.1:48766`, SQLite persistence, and a React/TypeScript tldraw canvas built with Vite. Tutor responses use a validated JSON shape for problems, feedback, steps and completion state. |
 | Native UI | SwiftUI menu-bar app and diary window, with a WidgetKit extension. The helper mirrors local data into an App Group snapshot for the widget. |
 | Memory integrations | In-process publish/subscribe bus; optional rosbridge-compatible WebSocket endpoint and claude-mem sink/recall integration. Neither external integration is required. |
 
 ### How a computer request is routed
+
+Voice and text `start_task(goal)` now create a fresh ephemeral Codex session through
+`codex_computer.py`. The adapter checks that `cua_repl.js` is present before starting
+the task. Codex operates native apps through its existing `cua` API; Buddy relays
+progress and permission choices. `stop_task` interrupts Codex even while a
+permission is pending. Native app prompts support `allow for task` and
+`always allow` when Codex offers them. Saved app grants belong to Codex and can
+be revoked in its Computer Use settings. Codex's model settings are inherited;
+the adapter uses a read-only filesystem sandbox with approvals on request and a
+ten-minute task budget. `CC_BUDDY_CODEX_BIN` can select a Codex executable; otherwise
+the installed desktop app's bundled executable is preferred. The Computer Use
+plugin must already be installed and enabled. There is no fallback to the legacy
+worker. See [integration evidence and limits](docs/codex-computer-use/README.md).
+
+The following routes belong to the retained **legacy worker** (`computer_agent.py`),
+which the daemon's voice/text task factory no longer selects:
 
 1. **Code shortcuts** handle recognized app launches and web searches (`task_router.py`).
 2. **Accessibility routing** handles requests fully described by a labelled UI control
@@ -244,7 +260,7 @@ Claude Code hooks / CLI ── local IPC ──→ Python daemon
    helpers. It is also the floor under tier 3: a plan that cannot be made or finished falls
    back to it with a note of what was already done.
 
-The first two routes are enabled by default. Tier 3 and the separate planner-delegated fast
+Within that legacy worker, the first two routes are enabled by default. Tier 3 and the separate planner-delegated fast
 lane (`decider.py`, the `[fast]` extra) are **off by default**. Optional typed-decision backends include **local Laya
 via MLX** on Apple silicon and **hosted Jev**. Jev can also be enabled for narrowly
 scoped launch routing and spoken head movements. These options have different
@@ -260,13 +276,29 @@ web tasks then use the screenshot and desktop-helper loop without Playwright.
 See [routing](docs/stackchan/routing.md) for the switches and measured evaluations,
 and [voice and computer control](docs/stackchan/voice.md) for worker details.
 
+Telegram accepts **photos and image files with captions** (still JPEG/PNG/WebP/GIF,
+up to 10 MB). With `claude on` or a selected `codex on` task, images go to that
+session as a private local file to inspect. Otherwise Buddy reads them directly.
+Use `buddy: <caption>` to address Buddy while a relay is active. See
+[image routing and retention](docs/stackchan/telegram.md#receiving-images).
+
+Text **`rundown`** (or `/rundown`) for today's email, calendar, Slack mentions/DMs,
+and Obsidian todos. The packaged [rundown skill](bridge/src/cc_buddy_bridge/skills/rundown/SKILL.md)
+uses the existing Composio connections and configured Obsidian vault, separates
+today's tasks from overdue and undated items, and reports disconnected sources.
+It only reads data and still addresses Buddy when the Codex/Claude relay is selected.
+
 Away from the desk, the same agent can be reached by text: `telegram.py` long-polls
 the Telegram Bot API (outbound HTTPS only, no open port) and lets one allowlisted
 numeric Telegram id chat with buddy, start and stop a Mac task, answer a task's
 question and receive a photo from the robot. "claude on" turns the chat into a Claude
 Code terminal: what it says and asks streams to the phone (the white text, never the gray
 tool lines or thinking), what you text is typed in, and tool calls go through without
-asking, as in bypass mode. Every message is shaped for the phone by `telegram_format.py`:
+asking, as in bypass mode. `codex on` lists recent Codex tasks in the Mac app;
+`codex use 1` connects to one, then messages and completed answers relay through
+Telegram. `stop` interrupts it, `codex off` disconnects, and `buddy:` talks to Buddy.
+Codex retains its Mac app permissions; approvals stay in the app. This experimental
+relay requires the Mac app to be running with the selected local task open. Every message is shaped for the phone by `telegram_format.py`:
 a bold title where the voice is not buddy's own, short paragraphs, markdown turned into
 Telegram HTML, split at 4096 on a paragraph boundary. It is **off by
 default** and needs a switch, a bot token and an owner id together. With `CC_BUDDY_RECORDS=1` the text brain

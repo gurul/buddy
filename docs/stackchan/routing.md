@@ -1,5 +1,10 @@
 # Routing: who carries a request
 
+**Current daemon route (2026-09-22):** voice and Telegram `start_task` use
+`codex_computer.py` and Codex's installed Computer Use plugin. This page documents
+the retained legacy worker and its experiments; the daemon does not select it or
+fall back to it. See [the Codex integration](../codex-computer-use/README.md).
+
 buddy has three engines that can decide something, and a fourth tier that is no model at all.
 They are not interchangeable, and the first version of this work went wrong by treating two of
 them as if they were. This page says what each one is, how it has to be asked, what was

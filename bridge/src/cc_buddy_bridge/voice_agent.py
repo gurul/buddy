@@ -274,7 +274,7 @@ TOOLS: list[dict[str, Any]] = [
          "topic": {"type": "string"}, "level": {"type": "string"}, "text": {"type": "string"}},
          "required": ["action"], "additionalProperties": False}},
     {"type": "function", "name": "start_task",
-     "description": "Start a computer-use task on the owner's Mac: it clicks and types for them. Last resort — "
+     "description": "Delegate a UI task to Codex's existing Computer Use on the owner's Mac. Last resort — "
                     "only for a request the Mac itself must carry out or show, never for a question. Returns "
                     "immediately; the task runs in the background.",
      "parameters": {"type": "object", "properties": {"goal": {"type": "string",
@@ -1600,6 +1600,8 @@ class VoiceSession:
 
     def _on_agent_event(self, ev: AgentEvent) -> None:
         if ev.kind == "progress":
+            if getattr(self.agent, "provider", None) == "codex" and not self._ended.is_set():
+                self._bg(self._speak("Codex progress: " + ev.text))
             # A helper sentence from the task ("opened Safari") as a caption page
             # while the robot is working — when nothing else is on screen and at
             # least progress_min_gap_secs after the previous one.

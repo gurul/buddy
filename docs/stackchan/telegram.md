@@ -21,11 +21,77 @@ your phone ── Telegram ──▶ api.telegram.org ◀── long poll (outbo
                                                                  remember · think_hard · web_search (+ memory_search · memory_get)
                                                                                    │ start_task
                                                                                    ▼
-                                              computer_agent.py — the same agent, tiers and approval rules as the voice
+                                              codex_computer.py → Codex app-server → installed cua_repl.js
 ```
 
 There is no port to open, no webhook and no public URL. The daemon calls
 Telegram; nothing calls the Mac.
+
+Computer tasks now use Codex's existing Computer Use through the public app-server
+protocol. `start_task`, `steer_task`, and `stop_task` keep their existing interface.
+Codex commentary is relayed as **Codex progress**, and app permission requests wait
+for an explicit reply. Native app-access prompts offer `yes` (once),
+`allow for task`, or `always allow` when Codex permits those choices; `no` denies.
+`always allow` saves the app in Codex's own Always-allowed apps list for future
+tasks, including after Buddy restarts. Revoke saved grants in Codex desktop's
+**Settings → Computer Use → Always-allowed apps**. Buddy does not keep a second
+allowlist. Managed restrictions, app-risk warnings and sensitive-action approvals
+remain in force; audio and unknown request types cannot gain an app-wide grant.
+A timeout, unsupported scope or unrecognized answer does not approve. Unknown
+permission forms are declined with an explanation.
+The adapter never falls back to Buddy's old desktop worker. See
+[the verified integration and limits](../codex-computer-use/README.md).
+
+## Rundown
+
+Text `rundown`, `/rundown`, or `buddy: rundown` for today's **email, calendar,
+Slack, and Obsidian todos**. This command addresses Buddy even while either relay
+is selected. It loads the packaged `skills/rundown/SKILL.md` each time and obtains
+fresh app data through the existing Composio session. Email includes today's inbox
+and older unread items needing attention; Slack focuses on mentions, DMs, and
+recent requests. Calendar queries use local midnight through the next midnight.
+
+Todos come from open markdown checkboxes in `CC_BUDDY_VAULT` (the existing
+Second Brain/Obsidian vault). Dated due/scheduled/start markers and today's daily
+note identify today's items; overdue and undated items are separate. Completed
+items, future items, hidden folders, archives and symlinks are excluded. The scan
+is bounded to 5,000 files, 1 MiB per file and 200 tasks, with partial coverage
+reported. `CC_BUDDY_SECOND_BRAIN=1` supplies the vault; Composio supplies connected
+Gmail/Calendar/Slack accounts. Missing sources are reported rather than treated as
+empty. Rundown exposes only read/search tools and rejects mutations before execution.
+It does not send messages, mark mail read, change calendar events or edit todos.
+The retrieved content is summarized by Buddy's configured OpenAI text model.
+
+## Receiving images
+
+Send a Telegram photo or an image file, optionally with a caption. Still JPEG,
+PNG, WebP and GIF are accepted, up to 10 MB and 25 megapixels. Each photo in an
+album is delivered separately. Voice notes, animations and other documents are
+not accepted. Owner/private-chat, freshness and forwarded-message checks apply
+before downloading; bytes and decoded dimensions are validated before use.
+
+With `claude on` or a selected `codex on` task, the caption and a local image path
+are sent to that same session with an instruction to read the image. The image
+is not silently routed to Buddy. This uses the existing text relay and the
+recipient's image-reading tool, with its normal file permissions; it does not
+add a private attachment endpoint. Claude's official
+[image workflow](https://code.claude.com/docs/en/common-workflows#work-with-images)
+documents passing a local image path. Codex can inspect it using `view_image`.
+These relays target sessions running on this Mac; remote sessions cannot read
+its temporary files. `buddy: <caption>` addresses Buddy instead.
+
+Without a relay, image bytes go directly to Buddy's configured OpenAI model as
+an `input_image` data URL. The Telegram download URL/token never goes to the
+model. Image bytes are not included in Buddy's text conversation history; a
+later independent Buddy turn needs the image resent. An image caption cannot
+answer a pending permission question or run chat commands such as `stop`.
+Answer the question in a separate text and resend the image afterward.
+
+Relay images are stored in a private `buddy-telegram-images-<uid>` directory
+under the Mac's temporary directory, with owner-only permissions. Files older
+than 24 hours are removed on the next image save, with a 100-file limit. They
+remain available long enough for queued turns to read them. Relay confirmation
+means the message was submitted, not that the recipient has inspected it.
 
 ## Set it up
 
@@ -65,6 +131,7 @@ token without an owner id is off. A door with no allowlist never opens.
 | `CC_BUDDY_WEB_SEARCH_MODEL` | `openai/gpt-5.4-nano` | The OpenRouter model that carries the Exa results back (the cheapest with the web plugin, 2026-09-21). |
 | `CC_BUDDY_WEB_SEARCH_RESULTS` | `5` | Results per search, 1 to 10 (Exa's first price tier). |
 | `CC_BUDDY_COMPOSIO` | `0` | `1`: the owner's apps through Composio ([below](#the-apps-composio)). Needs `COMPOSIO_API_KEY` in the env file. |
+| `CC_BUDDY_CODEX_BIN` | desktop app bundled Codex, then `codex` on PATH | Executable for computer-task delegation. Computer Use must be enabled in its installed plugins. |
 | `CC_BUDDY_COMPOSIO_POLICY` | `gmail=read,googlecalendar=write,googledrive=ask` | What a WRITING app call may do, per toolkit: `read` refuses it, `write` runs it, `ask` is your yes/no in the chat (the default for any toolkit not named). Reads always run. |
 | `CC_BUDDY_COMPOSIO_STATE` | `~/.config/cc-buddy-bridge/composio.json` | Where the session id is kept between restarts. |
 | `CC_BUDDY_COMPOSIO_TIMEOUT_SECS` | `60` | One app call's timeout. |
@@ -209,6 +276,40 @@ Flip it to `ask` if two seconds a command is a price you will pay.
   and `go_explore` refuse ("stealth mode: the robot is playing asleep"); the
   camera may still `look`, tasks and files still work. Zero model calls to
   enter or leave it.
+- **`codex on` / `codex off`** — connect Telegram to a Codex task in the Mac
+  ChatGPT/Codex app. `codex on` lists the ten most recently updated local tasks;
+  `codex use 1` selects a numbered task, or `codex on <full task ID>` selects it
+  directly. Open the task in the Mac app first. `codex status` reports the
+  connection. Plain messages (or `codex: message`) go to that task; messages
+  during an active turn steer it. Completed public answers return under a
+  **Codex** title. Thinking, tool output, historical answers and partial streaming
+  text stay on the Mac. A task already running when attached forwards its answer
+  when it finishes.
+
+  `buddy: ...`, screenshot and stealth commands still address Buddy. `stop`
+  interrupts the selected Codex turn; `codex off` disconnects without stopping
+  work. Switching to `claude on` disconnects Codex, and selecting Codex turns off
+  the Claude relay. The connection belongs to the owner chat that selected it.
+  After a daemon restart or disconnect, select the task again. Failed or
+  unconfirmed sends never fall through to Buddy and are never retried
+  automatically: check the task before sending again.
+
+  Codex keeps the task's model, reasoning and permission settings. Pending
+  approvals or questions produce a notice; answer them **in the Mac app**.
+  Telegram's Claude permission/bypass settings do not apply to Codex.
+
+  Implementation: `codex_relay.py` reads task metadata from the local state
+  database in read-only mode and follows the app owner through
+  `$CODEX_HOME/ipc/ipc.sock` (default `~/.codex/ipc/ipc.sock`). It does not run a
+  second app server, take ownership, or type into whichever window is focused.
+  This is an **experimental private desktop IPC integration**, verified against
+  the installed September 2026 app's state-stream v11/start-turn v2/interrupt v4
+  protocol. It fails closed on incompatible versions. App upgrades can break it.
+  Remote hosts and ordinary ChatGPT conversations are not supported. Snapshot
+  refreshes coalesce desktop patches over 1.2 seconds; existing history is seeded
+  without replay. Tests use a fake framed Unix socket owner; the live smoke
+  check only attaches and reads state, without starting a model turn.
+
 - **`claude on` / `claude off`** — the Claude Code relay, explicit only. While
   on: the chat shows what the terminal prints in white, as it happens: what
   Claude says (the text blocks of each assistant message, from the transcript
@@ -358,11 +459,12 @@ Your messages and buddy's replies pass through Telegram's servers (bot chats are
 not end-to-end encrypted). Each turn is one or more Responses API calls with
 `store=False`: the turn is stateless, the model's own tool calls and encrypted
 reasoning are sent back each round instead of a `previous_response_id`, and
-nothing you texted is kept on OpenAI's side. A texted task sends screenshots to
+Responses API conversation state is not stored. This is not a guarantee of zero
+data retention under the provider's other policies. A texted task sends screenshots to
 the planner exactly as a spoken one does.
 
 ## Not done
 
 - No evaluation set for the text brain exists, so it ships off (`GATES.md`).
-- Text only: voice notes and pictures you send are answered with one fixed line.
+- Voice notes, animations and non-image incoming documents are not supported.
 - One owner conversation. Several owner ids share one chat history.
