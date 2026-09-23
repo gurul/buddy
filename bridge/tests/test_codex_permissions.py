@@ -4,7 +4,7 @@ from copy import deepcopy
 
 import pytest
 
-from cc_buddy_bridge.codex_computer import CodexComputerAgent, app_persistence
+from cc_buddy_bridge.codex_computer import CodexComputerAgent, app_persistence, browser_origin
 
 
 def request():
@@ -17,7 +17,7 @@ def request():
                   'tool_params': {'app': 'com.apple.calculator'}, 'riskLevel': 'low'}}}
 
 
-def answer(text, msg=None):
+def answer(text, msg=None, site_access='ask'):
     async def go():
         questions, responses, events = [], [], []
         async def ask(question):
@@ -25,7 +25,7 @@ def answer(text, msg=None):
             return text
         async def send(response):
             responses.append(response)
-        agent = CodexComputerAgent(on_event=events.append, ask_user=ask)
+        agent = CodexComputerAgent(on_event=events.append, ask_user=ask, site_access=site_access)
         agent.thread_id = 'thread'
         agent._send = send
         await agent._answer_request(msg or request())
@@ -86,3 +86,64 @@ def test_risk_warning_is_preserved_and_forms_still_fail_closed():
     bad['params']['threadId'] = 'other'
     reply, questions, _ = answer('always allow', bad)
     assert 'error' in reply and not questions
+
+
+def site_request():
+    msg = request()
+    msg['params']['message'] = 'Allow Browser Use to access https://example.com?'
+    msg['params']['_meta'] = {
+        'codex_approval_kind': 'mcp_tool_call', 'codex_sensitive_action': True,
+        'codex_request_type': 'approval_request', 'connector_id': 'browser-use',
+        'persist': 'always', 'tool_name': 'access_browser_origin',
+        'tool_params': {'origin': 'https://example.com'}, 'origin': 'https://example.com'}
+    return msg
+
+
+def test_owner_site_preference_avoids_prompt_without_saving_or_forging_review():
+    msg = site_request()
+    assert browser_origin(msg['params']) == 'https://example.com'
+    reply, questions, events = answer('no', msg, site_access='allow')
+    assert reply['result'] == {'action': 'accept', 'content': {}}
+    assert not questions and not events
+    reply, questions, _ = answer('no', msg, site_access='ask')
+    assert questions and reply['result']['action'] == 'decline'
+    reply, questions, _ = answer('no', request(), site_access='allow')
+    assert questions and reply['result']['action'] == 'decline'
+
+
+@pytest.mark.parametrize('change', [
+    {'tool_name': 'access_browser_origin_with_raw_cdp'},
+    {'tool_name': 'upload_browser_files'}, {'tool_name': 'webmcp.tool'},
+    {'codex_strict_auto_review': True}, {'codex_requires_user_input': True},
+    {'full_cdp_access': True}, {'file_transfer': 'upload'},
+    {'sensitive_data': 'browsing_history'}, {'riskLevel': 'high'},
+    {'connector_id': 'computer-use'}, {'codex_approval_kind': 'browser_auth'},
+    {'tool_params': {'origin': 'https://example.com', 'action': 'send'}},
+    {'origin': 'https://different.example'}, {'codex_request_type': 'unknown'},
+])
+def test_site_preference_does_not_approve_other_permissions(change):
+    msg = site_request()
+    msg['params']['_meta'].update(change)
+    assert browser_origin(msg['params']) is None
+    reply, _, _ = answer('no', msg, site_access='allow')
+    assert reply['result']['action'] == 'decline'
+
+
+@pytest.mark.parametrize('origin', ['file:///tmp/a', 'https://example.com/path',
+    'https://user:secret@example.com', 'https://example.com?token=secret',
+    'https://example.com#action', 'https://example.com:bad', '', 'https://example.com\n'])
+def test_only_bare_http_origins_receive_site_preference(origin):
+    msg = site_request()
+    msg['params']['_meta'].update(origin=origin, tool_params={'origin': origin})
+    assert browser_origin(msg['params']) is None
+    assert answer('no', msg, site_access='allow')[0]['result']['action'] == 'decline'
+
+
+def test_site_preference_does_not_approve_stale_threads_or_forms():
+    msg = site_request()
+    msg['params']['threadId'] = 'other'
+    assert 'error' in answer('yes', msg, site_access='allow')[0]
+    msg = site_request()
+    msg['params']['requestedSchema']['properties']['password'] = {'type': 'string'}
+    reply, questions, _ = answer('yes', msg, site_access='allow')
+    assert reply['result']['action'] == 'decline' and not questions

@@ -1,7 +1,11 @@
 """Protocol contract tests; a separate recorded native-app check proves the real plugin."""
 import asyncio
+import base64
+import io
 from types import SimpleNamespace
 from unittest.mock import patch
+
+from PIL import Image
 
 from cc_buddy_bridge.codex_computer import CodexComputerAgent, external_environment
 from cc_buddy_bridge.daemon import Daemon
@@ -186,5 +190,54 @@ def test_steering_and_disconnect():
 def test_daemon_factory_routes_shared_task_contract_to_codex():
     host = SimpleNamespace()
     agent = Daemon._make_agent(host, lambda e: None, lambda q: None)
-    assert isinstance(agent, CodexComputerAgent)
+    # Codex behind the launch reflex (app_reflex.py): built on handoff, with Codex's contract.
+    assert agent.provider == 'codex' and agent._inner is None
+    assert isinstance(agent._make_inner(), CodexComputerAgent)
     assert host._active_agent is agent
+
+
+def browser_result(tab_id='7', state_id='7', data=None):
+    out = io.BytesIO()
+    Image.new('RGB', (16, 12), 'blue').save(out, format='PNG')
+    return {'content': [
+        {'type': 'text', 'text': f'BUDDY_BROWSER_CAPTURE {{"tabId":"{tab_id}"}}'},
+        {'type': 'text', 'text': f'Browser tab: {state_id}, Title: "Example", URL: "https://example.com/".\n0 AXWebArea Example'},
+        {'type': 'image', 'mimeType': 'image/png', 'data': data or base64.b64encode(out.getvalue()).decode()},
+    ]}
+
+
+def notify_browser(agent, result, thread='thread'):
+    agent._notification({'method': 'item/completed', 'params': {'threadId': thread, 'item': {
+        'id': 'capture', 'type': 'mcpToolCall', 'server': 'cua_repl', 'tool': 'js',
+        'status': 'completed', 'result': result}}})
+
+
+def test_browser_image_is_bound_to_the_observed_task_tab_and_verified_bytes():
+    agent = CodexComputerAgent(on_event=lambda e: None, ask_user=lambda q: None)
+    agent.thread_id = 'thread'
+    notify_browser(agent, browser_result(), thread='other')
+    assert not agent.browser_used and agent.browser_screenshot is None
+    notify_browser(agent, browser_result())
+    assert agent.browser_used and agent.browser_tab_id == '7'
+    assert agent.browser_screenshot.mime == 'image/png'
+    assert agent.ui_evidence and 'Browser tab: 7,' in agent.ui_evidence[-1]['state']
+    with Image.open(io.BytesIO(agent.browser_screenshot.data)) as im:
+        assert im.size == (16, 12) and im.getpixel((0, 0)) == (0, 0, 255)
+    for bad in (browser_result(state_id='8'), browser_result(data='invalid!'),
+                browser_result(data=base64.b64encode(b'not an image').decode()),
+                {**browser_result(), 'isError': True},
+                {'content': browser_result()['content'][1:]},
+                {'content': browser_result()['content'][:1] + browser_result()['content'][2:]}):
+        notify_browser(agent, browser_result())  # a known good image must be invalidated
+        assert agent.browser_screenshot is not None
+        notify_browser(agent, bad)
+        assert agent.browser_screenshot is None
+
+
+def test_new_cua_action_invalidates_previous_browser_picture():
+    agent = CodexComputerAgent(on_event=lambda e: None, ask_user=lambda q: None)
+    agent.thread_id = 'thread'
+    notify_browser(agent, browser_result())
+    agent._notification({'method': 'item/started', 'params': {'threadId': 'thread',
+        'item': {'type': 'mcpToolCall', 'server': 'cua_repl', 'tool': 'js'}}})
+    assert agent.browser_screenshot is None and agent.browser_used

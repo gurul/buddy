@@ -385,6 +385,12 @@ class Daemon:
         tasks.append(asyncio.create_task(self._chat_memory.curate_loop(self._shutdown),
                                          name="chat-memory-curate"))
         self._browser = browser_lane_mod.make_lane(browser_lane_mod.configured())
+        # codex_warm.py: one Codex agent started ahead of time, so a hard task's handoff is the turn only.
+        from . import codex_warm
+        warm_on, warm_age = codex_warm.configured()
+        self._codex_warm = codex_warm.WarmCodex(CodexComputerAgent, enabled=warm_on and self._agent_cfg.enabled,
+                                                max_age=warm_age)
+        tasks.append(asyncio.create_task(self._codex_warm.refresh_loop(), name="codex-warm"))
         self._telegram = self._make_telegram()
         if self._telegram is not None:
             tasks.append(asyncio.create_task(self._telegram.run(), name="telegram"))
@@ -1098,8 +1104,17 @@ class Daemon:
             notes=lambda: self._room_notes_taker(), terminal=Daemon._type_into_terminal,
             records=records_mod.RecordsReader(self._recall_cfg) if records_mod.configured().enabled else None)
 
-    def _make_agent(self, on_event: Any, ask_user: Any) -> CodexComputerAgent:
-        agent = CodexComputerAgent(on_event=on_event, ask_user=ask_user)
+    def _make_agent(self, on_event: Any, ask_user: Any) -> Any:
+        """Codex computer use, behind the launch reflex (app_reflex.py): "open Spotify" is `open -a`,
+        with Jev for wording the rules do not know; everything else is Codex's, as before."""
+        from . import app_reflex
+
+        warm = getattr(self, "_codex_warm", None)       # codex_warm.py: a Codex agent already started
+        make_inner = ((lambda: warm.take(on_event, ask_user)) if warm is not None
+                      else (lambda: CodexComputerAgent(on_event=on_event, ask_user=ask_user)))
+        agent = app_reflex.ReflexFirstAgent(make_inner, on_event, asker=app_reflex.jev_asker(),
+                                            enabled=app_reflex.reflexes_on(),
+                                            on_done=warm.kick if warm is not None else (lambda: None))
         self._active_agent = agent
         return agent
 

@@ -738,6 +738,85 @@ def test_the_owner_can_ask_for_the_screen_and_a_failed_capture_is_said(tmp_path:
 
 # ---- files -----------------------------------------------------------------------------------
 
+def test_codex_browser_picture_uses_task_bytes_not_desktop_and_cleans_up():
+    import io
+    from types import SimpleNamespace
+
+    from PIL import Image
+
+    from cc_buddy_bridge import telegram_images
+
+    async def go():
+        image = io.BytesIO()
+        Image.new('RGB', (12, 8), 'blue').save(image, format='PNG')
+        captured = []
+
+        class Api(FakeApi):
+            async def send_photo(self, chat_id, path, caption=''):
+                captured.append((chat_id, Path(path).read_bytes(), caption, Path(path)))
+
+        def forbidden_desktop():
+            raise AssertionError('must not capture the unrelated desktop')
+
+        rig = Rig(Api(), FakeCreate(), screen=forbidden_desktop)
+        agent = SimpleNamespace(provider='codex', browser_used=True, browser_tab_id='7',
+                                browser_screenshot=telegram_images.validate(image.getvalue()), running=False)
+        async def run(goal):
+            return 'Example Domain is open.'
+        agent.run = run
+        rig.inlet._agent = agent
+        await rig.inlet._run_agent('open example.com', OWNER)
+        assert captured[0][:2] == (OWNER, image.getvalue())
+        assert 'tab 7' in captured[0][2] and not captured[0][3].exists()
+        assert (await rig.inlet._send_screen(OWNER, ''))['source'] == 'task_browser'
+        assert len(captured) == 2
+        agent.browser_screenshot = None
+        result = await rig.inlet._send_screen(OWNER, '')
+        assert not result['ok'] and len(captured) == 2
+        await rig.inlet._run_agent('open example.com', OWNER)
+        assert "couldn't send the task picture" in rig.api.sent[-1][1]
+        assert len(captured) == 2
+
+    asyncio.run(go())
+
+
+def test_browser_picture_delivery_failure_is_reported_and_temp_file_removed():
+    import io
+    from types import SimpleNamespace
+
+    from PIL import Image
+
+    from cc_buddy_bridge import telegram_images
+
+    async def go():
+        paths = []
+        class Api(FakeApi):
+            async def send_photo(self, chat_id, path, caption=''):
+                paths.append(Path(path))
+                raise OSError('offline')
+        image = io.BytesIO()
+        Image.new('RGB', (12, 8), 'blue').save(image, format='PNG')
+        rig = Rig(Api(), FakeCreate())
+        rig.inlet._agent = SimpleNamespace(provider='codex', browser_used=True, browser_tab_id='7',
+            browser_screenshot=telegram_images.validate(image.getvalue()), running=False)
+        assert not (await rig.inlet._send_screen(OWNER, ''))['ok']
+        assert paths and not paths[0].exists()
+    asyncio.run(go())
+
+
+def test_finished_native_codex_task_can_still_send_desktop_picture(tmp_path):
+    from types import SimpleNamespace
+
+    async def go():
+        shot = tmp_path / 'native.jpg'
+        shot.write_bytes(b'native picture')
+        rig = Rig(FakeApi(), FakeCreate(), screen=lambda: shot)
+        rig.inlet._agent = SimpleNamespace(provider='codex', browser_used=False, running=False)
+        assert (await rig.inlet._send_screen(OWNER, 'native task'))['ok']
+        assert rig.api.photos == [(OWNER, str(shot), 'native task')]
+        assert not shot.exists()
+    asyncio.run(go())
+
 def test_files_leave_only_from_the_owners_home_and_never_from_a_hidden_folder(tmp_path: Path) -> None:
     home = tmp_path / "home"
     (home / "Desktop").mkdir(parents=True)
@@ -1343,7 +1422,8 @@ def test_the_second_brain_is_offered_and_captures_from_the_chat(tmp_path: Path) 
     api = FakeApi([update("note: the pasta place on 5th is great", update_id=1)])
     rig = Rig(api, FakeCreate(call("capture_note", {"text": "the pasta place on 5th is great", "kind": "note"}),
                               say("Saved to your inbox.")), vault=vault)
-    run_rig(rig)
+    # Wait for the actual filesystem-backed turn, not a fixed number of scheduler yields.
+    asyncio.run(rig.inlet._turn(telegram.Inbound(OWNER, OWNER, "note: the pasta place on 5th is great")))
     first = rig.create.requests[0]
     assert [t["name"] for t in first["tools"] if t.get("name") in second_brain.SECOND_BRAIN_TOOL_NAMES] == \
         list(second_brain.SECOND_BRAIN_TOOL_NAMES)
@@ -1424,18 +1504,19 @@ class FakeCodex:
         self.fail = False
         self.attach_wait = None
 
-    async def attach(self, id, emit):
-        self.selected.append(id)
+    async def start(self, folder, emit, picture=None):
+        self.selected.append(folder)
         self.emit = emit
         if self.attach_wait:
             await self.attach_wait.wait()
         if self.fail:
-            raise telegram.codex_relay.RelayError('Mac app unavailable')
+            raise telegram.codex_chat.CodexUnavailable('Codex unavailable. Buddy is still available.')
         self.connected = True
 
     async def send(self, text):
         if self.fail:
-            raise telegram.codex_relay.RelayError('No confirmation; check the Mac app before retrying.')
+            self.connected = False
+            raise telegram.codex_chat.CodexUnavailable('No confirmation; work was not retried.')
         self.sent.append(text)
 
     async def interrupt(self):
@@ -1446,114 +1527,145 @@ class FakeCodex:
         self.closed += 1
 
 
-CODEX_TASK = telegram.codex_relay.DesktopTask('00000000-0000-4000-8000-000000000001', 'Build Buddy')
+CODEX_FOLDER = Path('/projects/buddy')
+
+
+async def dispatch(rig, text, **kw):
+    rig.inlet._dispatch(update(text, **kw))
+    await asyncio.gather(*list(rig.inlet._jobs))
 
 
 def test_codex_selection_relay_escape_stop_and_off():
-    codex = FakeCodex()
-    api, create = FakeApi([update('codex on')]), FakeCreate(say('Buddy here'), say('back to Buddy'))
-    rig = Rig(api, create, codex=codex, codex_tasks=lambda: [CODEX_TASK])
-
-    async def during():
-        # to_thread task enumeration needs the worker thread to actually finish.
-        for _ in range(100):
-            if any('codex use 1' in text for _, text in api.sent):
-                break
-            await asyncio.sleep(0.001)
-        assert any('Build Buddy' in text for _, text in api.sent)
-        api.feed(update('codex use 1'))
-        await settle()
-        assert codex.selected == [CODEX_TASK.id]
-        api.feed(update('implement it'))
-        await settle()
+    async def go():
+        codex, api = FakeCodex(), FakeApi()
+        create = FakeCreate(say('Buddy here'), say('back to Buddy'))
+        rig = Rig(api, create, codex=codex, codex_folders=lambda: [CODEX_FOLDER])
+        await dispatch(rig, 'codex on')
+        assert api.sent == [(OWNER, 'buddy')]
+        assert rig.inlet._codex_chat is None and not codex.selected
+        await dispatch(rig, 'codex buddy')
+        assert codex.selected == [CODEX_FOLDER]
+        await dispatch(rig, 'implement it')
         assert codex.sent == ['implement it'] and not create.requests
-        await codex.emit('**Done**\n\nHere is the answer.')
-        assert api.titled[-1] == ('Codex', 'Build Buddy', '**Done**\n\nHere is the answer.')
-        api.feed(update('buddy: how are you?'))
-        await settle()
+        await codex.emit('Here is the answer.')
+        assert api.titled[-1] == ('Codex', 'buddy', 'Here is the answer.')
+        await dispatch(rig, 'buddy: how are you?')
         assert len(create.requests) == 1 and codex.sent == ['implement it']
-        api.feed(update('stop'))
-        await settle()
+        await dispatch(rig, 'stop')
         assert codex.stops == 1
-        api.feed(update('codex off'))
-        await settle()
+        await dispatch(rig, 'codex off')
         count = len(api.sent)
         await codex.emit('late output must not leak')
         assert len(api.sent) == count and not codex.connected
-        api.feed(update('hello buddy'))
-        await settle()
+        await dispatch(rig, 'hello buddy')
         assert len(create.requests) == 2
-    run_rig(rig, during)
+        await rig.inlet._shutdown()
+    asyncio.run(go())
 
 
-def test_codex_failure_never_falls_back_to_buddy():
-    codex = FakeCodex()
-    codex.fail = True
-    api, create = FakeApi([update('codex on ' + CODEX_TASK.id)]), FakeCreate()
-    rig = Rig(api, create, codex=codex)
+@pytest.mark.parametrize('command', ['codex buddy', 'codex use buddy', 'codex on buddy', '/codex buddy'])
+def test_codex_connects_by_folder_without_a_number(command):
+    async def go():
+        codex, api = FakeCodex(), FakeApi()
+        rig = Rig(api, FakeCreate(), codex=codex, codex_folders=lambda: [CODEX_FOLDER])
+        await dispatch(rig, command)
+        await dispatch(rig, command)
+        assert codex.selected == [CODEX_FOLDER, CODEX_FOLDER]  # each selection starts fresh
+        assert api.sent[-1] == (OWNER, 'New Codex chat in buddy. Send your message.')
+        assert not rig.create.requests
+        await rig.inlet._shutdown()
+    asyncio.run(go())
 
-    async def during():
-        assert not codex.connected
-        api.feed(update('retry my work'), update('codex: explicit work'))
-        await settle()
-        assert not create.requests and not codex.sent
-        assert any('Mac app unavailable' in text for _, text in api.sent)
-    run_rig(rig, during)
+
+def test_codex_failure_returns_to_buddy_without_replaying_failed_work(caplog):
+    async def go():
+        codex, api = FakeCodex(), FakeApi()
+        codex.fail = True
+        rig = Rig(api, FakeCreate(say('Hello')), codex=codex, codex_folders=lambda: [CODEX_FOLDER])
+        with caplog.at_level(logging.INFO):
+            await dispatch(rig, 'codex buddy')
+        assert not codex.connected and rig.inlet._codex_chat is None
+        assert not rig.create.requests
+        assert 'codex startup failed error=CodexUnavailable' in caplog.text
+        assert 'codex buddy' not in caplog.text
+        await dispatch(rig, 'Hi')
+        assert len(rig.create.requests) == 1
+        await dispatch(rig, 'codex: explicit work')
+        assert not codex.sent and len(rig.create.requests) == 1
+        codex.fail = False
+        await dispatch(rig, 'codex buddy')
+        codex.fail = True
+        await dispatch(rig, 'private work')
+        assert not codex.sent and rig.inlet._codex_chat is None
+        assert len(rig.create.requests) == 1  # no replay via Buddy on send failure
+        await rig.inlet._shutdown()
+    asyncio.run(go())
 
 
 def test_codex_owner_binding_and_claude_switch():
-    codex = FakeCodex()
-    config = TelegramConfig(enabled=True, token=TOKEN, owner_ids=frozenset({OWNER, STRANGER}))
-    api = FakeApi([update('codex on ' + CODEX_TASK.id)])
-    rig = Rig(api, FakeCreate(), config=config, codex=codex)
-
-    async def during():
-        assert codex.connected
-        api.feed(update('codex: cannot steer', uid=STRANGER), update('codex off', uid=STRANGER))
-        await settle()
+    async def go():
+        codex, api = FakeCodex(), FakeApi()
+        config = TelegramConfig(enabled=True, token=TOKEN, owner_ids=frozenset({OWNER, STRANGER}))
+        rig = Rig(api, FakeCreate(), config=config, codex=codex, codex_folders=lambda: [CODEX_FOLDER])
+        await dispatch(rig, 'codex buddy')
+        await dispatch(rig, 'codex: cannot steer', uid=STRANGER)
+        await dispatch(rig, 'codex off', uid=STRANGER)
         assert codex.connected and not codex.sent
         await codex.emit('only for the original owner')
         assert api.sent[-1] == (OWNER, 'only for the original owner')
-        api.feed(update('claude on'))
-        await settle()
+        await dispatch(rig, 'claude on')
         assert rig.inlet.claude and not codex.connected
         count = len(api.sent)
         await codex.emit('late')
         assert len(api.sent) == count
-    run_rig(rig, during)
+        await rig.inlet._shutdown()
+    asyncio.run(go())
 
 
-def test_codex_off_during_attach_prevents_late_enable():
+def test_codex_off_during_start_prevents_late_enable():
     async def go():
         codex = FakeCodex()
         codex.attach_wait = asyncio.Event()
         api = FakeApi()
-        rig = Rig(api, FakeCreate(), codex=codex)
-        rig.inlet._dispatch(update('codex on ' + CODEX_TASK.id))
+        rig = Rig(api, FakeCreate(), codex=codex, codex_folders=lambda: [CODEX_FOLDER])
+        rig.inlet._dispatch(update('codex buddy'))
         await settle()
         rig.inlet._dispatch(update('codex off'))
         codex.attach_wait.set()
-        await settle()
+        await asyncio.gather(*list(rig.inlet._jobs))
         assert not codex.connected
-        assert not any(title == 'Codex on' for title, _, _ in api.titled)
+        assert not any('New Codex chat' in text for _, text in api.sent)
         await rig.inlet._shutdown()
     asyncio.run(go())
 
 
 def test_codex_invalid_selection_status_and_explicit_prefix_off():
-    codex = FakeCodex()
-    api = FakeApi([update('codex use 99')])
-    rig = Rig(api, FakeCreate(), codex=codex)
-
-    async def during():
-        assert not codex.selected
-        assert any('not in the list' in text for _, text in api.sent)
-        api.feed(update('codex status'))
-        await settle()
-        assert any('not connected' in text for _, text in api.sent)
-        api.feed(update('codex off'))
-        await settle()
-        api.feed(update('codex: no accidental Buddy action'))
-        await settle()
+    async def go():
+        codex, api = FakeCodex(), FakeApi()
+        rig = Rig(api, FakeCreate(), codex=codex, codex_folders=lambda: [CODEX_FOLDER])
+        await dispatch(rig, 'codex use 99')
+        assert not codex.selected and rig.inlet._codex_chat is None
+        assert any('not available' in text for _, text in api.sent)
+        await dispatch(rig, 'codex status')
+        assert any('No Codex chat' in text for _, text in api.sent)
+        await dispatch(rig, 'codex off')
+        await dispatch(rig, 'codex: no accidental Buddy action')
         assert not rig.create.requests and not codex.sent
-    run_rig(rig, during)
+        await rig.inlet._shutdown()
+    asyncio.run(go())
+
+
+def test_question_answer_is_bound_to_the_requesting_chat():
+    async def go():
+        api = FakeApi()
+        config = TelegramConfig(enabled=True, token=TOKEN, owner_ids=frozenset({OWNER, STRANGER}))
+        rig = Rig(api, FakeCreate(), config=config)
+        question = asyncio.create_task(rig.inlet._ask_user('Approve the command?', OWNER))
+        await settle()
+        await dispatch(rig, 'yes', uid=STRANGER)
+        assert not question.done()
+        await dispatch(rig, 'no')
+        assert await question == 'no'
+        assert rig.inlet._pending_answer_chat is None
+        await rig.inlet._shutdown()
+    asyncio.run(go())

@@ -28,6 +28,20 @@ Computer Use remains subject to its separate app and OS permissions.
   never writes the approvals file or maintains an auto-approval cache.
 - Other Codex user questions relay through the same path. Unhandled permission
   forms and operations are declined with a user-facing explanation.
+- `CC_BUDDY_CODEX_SITE_ACCESS=allow` accepts only recognized ordinary HTTP(S)
+  origin-access requests (`browser-use` / `access_browser_origin`), per the
+  owner's preference. The default is `ask`. This does not save global site grants,
+  impersonate automated review, approve native apps, raw CDP, uploads, history,
+  authentication handoffs, strict safety checks, or consequential actions.
+  Managed denials remain enforced by the browser runtime.
+- Browser tasks capture their selected tab in the final Computer Use call. Buddy
+  accepts a picture only when the capture's tab ID matches the browser state in
+  that same successful tool result and the image bytes validate. Later Computer
+  Use actions invalidate the picture. Telegram sends this picture automatically
+  after a browser task, including requests that did not explicitly say screenshot.
+  Follow-up screenshot requests use the last captured task view and label it as
+  such. If unavailable, Buddy reports that instead of capturing the desktop.
+  Browser state also counts as UI evidence; it is not native-app state.
 - `steer_task` uses `turn/steer`; `stop_task` cancels pending questions and sends
   `turn/interrupt`, with process termination as bounded cleanup. No prompt retry
   is attempted after a disconnect or ambiguous error.
@@ -47,12 +61,14 @@ progress, question, and completion interfaces. The daemon previously supplied
 `ComputerAgent`, a separate Responses/PyAutoGUI worker. That worker remains in
 the repository but is not the default voice/text task backend anymore.
 
-Existing uncommitted `codex_relay.py` work follows a selected desktop task via
-private `$CODEX_HOME/ipc/ipc.sock`, using state-stream v11/start-turn v2/interrupt
-v4. It forwards final answers and notices of pending app input, not a supported
-external Computer Use API. It was preserved; this adapter does not use it.
-`codex on` remains that experimental relay. Use `codex off` (or `buddy:`) to send
-a normal Buddy computer request instead.
+Telegram folder chats now use `codex_chat.py`, a persistent session through the
+public app-server. `codex on` lists accessible saved folder names only;
+`codex buddy` creates a new chat in that folder. It does not attach an existing
+Mac task or depend on private desktop IPC. Subsequent messages retain context;
+`stop` interrupts a turn and `codex off` closes the session. Failed startup
+returns to Buddy. The earlier `codex_relay.py` remains as legacy code and is not
+used by Telegram. Its task catalog needed source filtering because internal
+review tasks can have no agent nickname; they caused the reported attach timeout.
 
 Installed metadata inspected:
 
@@ -83,6 +99,10 @@ and a real driver repair were not exercised by that smoke test.
 ## Limits and fallback behavior
 
 Computer Use must already be installed/enabled and the OS grants must exist.
+In the 2026-09-23 live browser check, the standalone session could use Chrome's
+browser API but reported `Browser is not available: iab` for the built-in browser.
+Buddy therefore uses Chrome when the owner has not specified a browser. Explicit
+built-in-browser requests report its unavailability rather than substitute one.
 Missing tools, denied requests, unsupported forms, and disconnects are reported;
 Buddy does not substitute its old worker. Some app-server builds or desktop
 plugin updates may behave differently. Capability discovery runs on every task.
@@ -139,7 +159,7 @@ lint and `git diff --check` passed.
 Buddy's idle launch agent was restarted on 2026-09-22 at 19:46 PDT. Its status
 socket returned healthy, startup reported Codex Computer Use ready, and Telegram
 reported listening for the configured owner. Relay selection is in memory;
-select `claude on` or `codex on` / `codex use <number>` again after restart.
+select `claude on` or `codex <folder>` again after restart.
 
 ## Remembered app permissions
 
@@ -171,3 +191,13 @@ for Calculator: the first Buddy adapter session received one native permission
 request and forwarded `_meta.persist: "always"`; a separate fresh app-server
 session received zero requests. Both observed Calculator's displayed value `4`
 from fresh native UI. See [permission-smoke.json](permission-smoke.json).
+
+## In front of Codex: app launches and a warm agent
+
+A bare "open <App>" never reaches Codex. `app_reflex.py` opens it with
+`open -a`: the rules take it first, and Jev handles wording they don't know.
+The Codex agent is built only for everything else. That agent is usually
+already started: `codex_warm.py` keeps one prewarmed, meaning its app-server,
+thread and `cua_repl` check are done, so the handoff starts the turn straight
+away. The measurements and the model comparison are in
+[routing.md](../stackchan/routing.md#opening-an-app-in-front-of-codex).

@@ -10,7 +10,14 @@ from pathlib import Path
 
 import pytest
 
-from cc_buddy_bridge.codex_relay import CodexRelay, RelayError, recent_tasks
+from cc_buddy_bridge.codex_relay import (
+    CodexRelay,
+    DesktopTask,
+    RelayError,
+    folder_menu,
+    recent_tasks,
+    select_task,
+)
 
 TASK = '00000000-0000-4000-8000-000000000001'
 
@@ -235,14 +242,44 @@ def test_missing_app_and_bad_id(tmp_path):
 def test_readonly_task_catalog_filters_archived_and_agents(tmp_path):
     path = tmp_path / 'state_5.sqlite'
     with sqlite3.connect(path) as db:
-        db.execute('CREATE TABLE threads (id, title, archived, agent_nickname, updated_at)')
-        db.executemany('INSERT INTO threads VALUES (?, ?, ?, ?, ?)', [
-            (TASK, 'My task', 0, None, 20), ('other', 'Older', 0, None, 10),
-            ('archived', 'Archived', 1, None, 30), ('agent', 'Agent', 0, 'worker', 40),
+        db.execute('CREATE TABLE threads (id, title, archived, agent_nickname, updated_at, cwd, source)')
+        db.executemany('INSERT INTO threads VALUES (?, ?, ?, ?, ?, ?, ?)', [
+            (TASK, 'My task', 0, None, 20, '/projects/buddy', 'vscode'),
+            ('other', 'Older', 0, None, 10, '/projects/buddy', 'cli'),
+            ('archived', 'Archived', 1, None, 30, '/archived', 'vscode'),
+            ('agent', 'Agent', 0, 'worker', 40, '/agent', 'vscode'),
+            ('guardian', '', 0, None, 50, '/projects/buddy', '{"subagent":{"other":"guardian"}}'),
+            ('review', 'Private review prompt', 0, None, 60, '/internal', '{"subagent":"review"}'),
+            ('subagent', 'Another helper', 0, None, 70, '/internal', 'subagent'),
         ])
     before = path.read_bytes()
     assert [t.title for t in recent_tasks(tmp_path)] == ['My task', 'Older']
+    assert select_task(recent_tasks(tmp_path), 'buddy').id == TASK
+    assert folder_menu(recent_tasks(tmp_path)) == 'buddy'
+    # Positive control: the old nickname-only query selects the hidden guardian.
+    with sqlite3.connect(path) as db:
+        assert db.execute("SELECT id FROM threads WHERE cwd='/projects/buddy' AND archived=0 "
+                          "AND agent_nickname IS NULL ORDER BY updated_at DESC").fetchone()[0] == 'guardian'
     assert path.read_bytes() == before
+
+
+def test_folder_selection_latest_exact_paths_and_no_numbered_menu():
+    tasks = [DesktopTask(TASK, 'Newest Buddy task', '/projects/buddy'),
+             DesktopTask('older', 'Older Buddy task', '/projects/buddy'),
+             DesktopTask('notes', 'Notes task', '/projects/My Notes')]
+    for name in ('buddy', 'Buddy', '/projects/buddy/', '"/projects/buddy"'):
+        assert select_task(tasks, name) == tasks[0]
+    assert select_task(tasks, 'My Notes') == tasks[2]
+    assert select_task(tasks, 'Older Buddy task') == tasks[1]
+    assert select_task(tasks, TASK) == tasks[0]
+    assert folder_menu(tasks) == 'buddy\nMy Notes'
+    with pytest.raises(RelayError, match='No unique task'):
+        select_task(tasks, 'missing')
+    tasks.append(DesktopTask('other-buddy', 'Another Buddy', '/elsewhere/buddy'))
+    with pytest.raises(RelayError, match='full folder path'):
+        select_task(tasks, 'buddy')
+    assert select_task(tasks, '/elsewhere/buddy').id == 'other-buddy'
+    assert folder_menu(tasks) == '/projects/buddy\nMy Notes\n/elsewhere/buddy'
 
 
 def test_failed_attach_closes_and_discovery_declines_capabilities():

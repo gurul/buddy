@@ -354,6 +354,64 @@ def fit_request_gates(answers: list[RequestAnswer], truths: list[str], planner_o
 
 # ---- jev on one step of a task: which control, and whether any control at all ---------------------------
 #
+# ---- laya on a whole request: one short ranking, the app from a code shortlist ---------------------------
+#
+# laya's head holds 256 tokens, so the installed-app list (~100 names) cannot be its menu: code shortlists
+# the apps whose name the words come close to (at most LAYA_APP_SHORTLIST, plus "none"), and laya ranks
+# those. The kind of request is one relative choice of short rivals — laya's strength — and the gates read
+# its probabilities, fitted like Jev's (fit_request_gates), never borrowed.
+
+LAYA_REQUEST_KINDS = {"open": "just open an app", "open_then": "open an app, then more",
+                      "search": "search the web", "send": "send or buy", "remove": "quit or delete",
+                      "write": "type or write", "ask": "ask a question", "look": "look at the screen",
+                      "other": "something else"}
+LAYA_RISKY_KINDS = ("send", "remove", "write")
+LAYA_APP_SHORTLIST = 8
+
+
+def app_shortlist(goal: str, apps: list[str], limit: int = LAYA_APP_SHORTLIST) -> list[str]:
+    """Installed apps whose name, or a word of it, is close to a word the owner said."""
+    import difflib
+
+    said = re.findall(r"[a-z0-9]+", goal.casefold())
+    joined = " ".join(said)
+    scored: list[tuple[float, str]] = []
+    for app in apps:
+        name = " ".join(re.findall(r"[a-z0-9]+", app.casefold()))
+        if not name:
+            continue
+        if f" {name} " in f" {joined} ":
+            scored.append((2.0, app))
+            continue
+        words = [w for w in name.split() if len(w) >= 3]
+        best = max((difflib.SequenceMatcher(None, w, s).ratio() for w in words for s in said), default=0.0)
+        if best >= 0.8:
+            scored.append((best, app))
+    scored.sort(key=lambda t: (-t[0], len(t[1])))
+    return [a for _s, a in scored[:limit]]
+
+
+def ask_laya_request(predict: Predict, goal: str, apps: list[str], clock: Callable[[], float]) -> RequestAnswer:
+    t0 = clock()
+    short = app_shortlist(goal, apps)
+    questions: dict[str, Any] = {"kind": {"type": "choice", "instructions": "what is the owner asking for?",
+                                          "criteria": dict(LAYA_REQUEST_KINDS)}}
+    if short:
+        questions["app"] = {"type": "choice", "instructions": "which app?",
+                            "criteria": {**{f"app{i}": name for i, name in enumerate(short)}, "none": "no app"}}
+    try:
+        result = predict({"owner said": " ".join(goal.split())}, questions)
+        answers = result.get("answers") or {}
+    except Exception as e:  # noqa: BLE001 — a model that fails abstains
+        return RequestAnswer(0.0, "", 0.0, 0.0, 1.0, (clock() - t0) * 1000.0, f"{type(e).__name__}: {e}"[:160])
+    _k, _p, kinds = _choice(answers.get("kind"))
+    key, p_app, _ = _choice(answers.get("app")) if short else ("", 0.0, {})
+    name = short[int(key[3:])] if key.startswith("app") and key[3:].isdigit() and int(key[3:]) < len(short) else ""
+    return RequestAnswer(launch_only=kinds.get("open", 0.0), app=name, p_app=p_app,
+                         web_search=kinds.get("search", 0.0),
+                         risky=sum(kinds.get(k, 0.0) for k in LAYA_RISKY_KINDS), ms=(clock() - t0) * 1000.0)
+
+
 # The click path's question. Asked laya's way — one relative choice over the menu, a reserved "abstain"
 # among the options — a model can always prefer a bad control to abstaining: abstain is one more rival in
 # the same softmax. So the step is asked the way the request is: the target is a CHOICE over the controls

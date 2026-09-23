@@ -123,6 +123,56 @@ The lane's router is measured separately (`tools/fastlane_eval.py --router`, see
 [voice.md](voice.md#lane-first-the-router-before-the-planner)): 23 of 23 on holdout, 1.16 s and
 1.54 s live against 13.1 s.
 
+## Opening an app in front of Codex
+
+Computer use now goes to Codex (`codex_computer.py`), and a Codex turn costs seconds
+before it does anything. A bare "open Spotify" doesn't need that, so
+`app_reflex.ReflexFirstAgent` wraps the agent the daemon builds (voice and Telegram
+alike):
+
+1. **The rules** (`task_router.classify`, code, microseconds) take the wording they
+   know.
+2. **Jev** (`CC_BUDDY_ROUTER_MODEL=jev`, over `CC_BUDDY_JEV_ROUTE`) is asked only
+   when the rules find no reflex and no gate has fired. It can only name an
+   installed app, under the shipped `JEV_REQUEST_GATES`.
+3. **A complete bare launch** runs `open -a <App>`. Anything else goes to Codex
+   unchanged, and so does a failed `open` or a Jev error. The Codex agent is
+   only built at that handoff, so an app launch never uses up the warm one
+   (below). `CC_BUDDY_REFLEXES=0` turns this off.
+
+Chosen by `tools/route_eval.py --model {jev,laya} --native` on 2026-09-23. Each
+model was asked in its own idiom (`typed_ask.py`), with cut-offs fitted on the 270
+seen requests (zero unsafe, zero wrong allowed). The table scores complete
+reflexes on the 110-request holdout nobody tuned on:
+
+| Arm | Fired / right | Coverage | Unsafe | Latency |
+|---|---|---|---|---|
+| **Rules, then Jev** (shipped) | 44 / 44 | 95.7% | 0 | µs when the rules hit, ~0.2 s otherwise |
+| Jev alone | 42 / 42 | 91.3% | 0 | 207 ms p50, 298 ms p95 |
+| Rules, then laya | 35 / 35 | 76.1% | 0 | µs, or 10 ms |
+| Rules alone (pure code) | 34 / 34 | 73.9% | 0 | µs |
+| laya alone | 21 / 9 | 19.6% | 1 | 10 ms p50 |
+
+laya gets a 256-token head, so the app is a choice over a code shortlist of close
+names. Even at the strictest cut-offs it fired on "Open Calendar and switch to
+week view." Pure code is the fastest arm but misses a quarter of launches
+("Get me Preview.", "Take me to Safari."). Jev closes most of that gap without
+one unsafe fire, and costs ~0.2 s only on the requests the rules didn't
+recognise.
+
+**Codex warm-up** (`codex_warm.py`). Before a cold Codex run uses the goal, it
+spends 4.8 to 11 s on the app-server, `initialize`, an ephemeral thread and the
+`cua_repl` check (all measured 2026-09-23). `WarmCodex` does that ahead of time and
+hands the ready agent to the next task that needs Codex. That task starts its
+turn at once, and handing the agent over measured about 0 ms. Rules for the warm
+agent:
+
+- There is at most one, and it is used once.
+- The next one is warmed after a task ends, never during it.
+- It is replaced after `CC_BUDDY_CODEX_WARM_SECS` (default 900) or if its
+  app-server dies.
+- `CC_BUDDY_CODEX_PREWARM=0` turns it off.
+
 ## Head moves
 
 "hey buddy, look left" takes about 3.2 s today (voice → backend → `move_head`; daemon log,
