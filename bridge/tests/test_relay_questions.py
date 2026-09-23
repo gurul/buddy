@@ -148,3 +148,33 @@ def test_what_reaches_buddy_while_relaying(text: str, for_buddy) -> None:
 
     m = BUDDY_PREFIX.match(text)
     assert (m.group(2) if m else None) == for_buddy
+
+
+def test_a_restart_during_a_texted_task_tells_the_owner() -> None:
+    from cc_buddy_bridge.telegram import RESTART_LINE
+
+    class Api:
+        def __init__(self) -> None:
+            self.sent: list[str] = []
+
+        async def send_message(self, chat_id, text, title=None, subtitle=None) -> None:
+            self.sent.append(text)
+
+    class Agent:
+        cancelled = ""
+
+        def cancel(self, reason: str = "") -> None:
+            self.cancelled = reason
+
+    async def go() -> tuple[Api, Agent]:
+        api, agent = Api(), Agent()
+        inlet = TelegramInlet(CFG, api, lambda r: None)
+        inlet._agent = agent
+        inlet._agent_task = asyncio.get_running_loop().create_future()      # running
+        inlet._task_chat, inlet._task_goal = 4242, "search amazon for AA batteries"
+        await inlet._shutdown()
+        return api, agent
+
+    api, agent = asyncio.run(go())
+    assert agent.cancelled == "the daemon is stopping"
+    assert api.sent == [RESTART_LINE.format(goal="search amazon for AA batteries")]

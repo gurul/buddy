@@ -129,6 +129,7 @@ NOT_TEXT_LINE = "Send text, a photo, or a still JPEG, PNG, WebP, or GIF image fi
 FORWARDED_LINE = "I don't act on forwarded messages. Type it to me in your own words."
 HELLO_LINE = "Hi! It's buddy. Text me like you'd talk to me at the desk."
 STOPPED_LINE = "Stopped."
+RESTART_LINE = "buddy restarted, so your task ({goal}) was stopped before it finished. Send it again."
 NOTHING_TO_STOP_LINE = "Nothing is running."
 ON_IT_LINE = "On it. I'll text you the result."
 FAILED_LINE = "Something went wrong on my side. Try me again in a moment."
@@ -859,6 +860,8 @@ class TelegramInlet:
         self._turn_lock = asyncio.Lock()
         self._agent: Any = None
         self._agent_task: Optional[asyncio.Task] = None
+        self._task_chat: Optional[int] = None             # the running task's chat and words, for a restart notice
+        self._task_goal = ""
         self._pending_answer: Optional[asyncio.Future] = None
         self._pending_answer_chat: Optional[int] = None
         self._stopped_from_chat = False
@@ -911,6 +914,14 @@ class TelegramInlet:
     async def _shutdown(self) -> None:
         if self._agent is not None and self.task_running:
             self._agent.cancel(reason="the daemon is stopping")
+            # A restart used to end a texted task in silence (live, 2026-09-23: a Chrome task died with two
+            # restarts from another session's firmware flash, and the owner waited). Say so, briefly.
+            chat, goal = self._task_chat, self._task_goal
+            if chat is not None:
+                try:
+                    await asyncio.wait_for(self._say(chat, RESTART_LINE.format(goal=goal[:120])), timeout=3)
+                except Exception:  # noqa: BLE001 — shutting down: best effort only
+                    pass
         for job in list(self._jobs):
             job.cancel()
         await asyncio.gather(*self._jobs, return_exceptions=True)
@@ -1521,6 +1532,7 @@ class TelegramInlet:
         self._stopped_from_chat = False
         self._agent = self._agent_factory(lambda ev: self._on_agent_event(ev, chat_id),
                                           lambda question: self._ask_user(question, chat_id))
+        self._task_chat, self._task_goal = chat_id, goal
         self._agent_task = self._spawn(self._run_agent(goal, chat_id), "telegram-agent")
         return {"ok": True, "goal": goal, "note": "started, not finished; the result is texted when it is done"}
 
