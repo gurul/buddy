@@ -298,7 +298,7 @@ def gate(choice: Choice, item: Optional[MenuItem], *, thresholds: Thresholds, ap
 
 # ---- helpers ---------------------------------------------------------------------------
 
-def _is_search_field(c: Candidate) -> bool:
+def is_search_field(c: Candidate) -> bool:
     if c.role == "search field":
         return True
     return c.role in ("text field", "combo box") and SEARCH_FIELD_WORDS.search(c.label) is not None
@@ -308,7 +308,7 @@ def _same_control(a: Candidate, b: Candidate) -> bool:
     return a.role == b.role and a.label == b.label and a.frame == b.frame
 
 
-def _editable_pool(snapshot: Snapshot, allow_page_links: bool = False) -> list[Candidate]:
+def editable_pool(snapshot: Snapshot, allow_page_links: bool = False) -> list[Candidate]:
     """Fields the lane may type into: never secure, never in a dialog, and page-content fields
     (a web form) only when the caller allowed page content."""
     return [c for c in snapshot.elements if c.editable and c.enabled and c.label.strip() and not c.secure
@@ -657,13 +657,13 @@ def run_delegate(objective: str, *, senses: Any, effectors: Any, decider: Any, t
             return run.escalate("no_window")
         if snapshot.dialog_text:
             return run.escalate(f'dialog_open: "{_q(snapshot.dialog_text)}"')
-        if len(pressable(snapshot)) < 2 and not _editable_pool(snapshot):
+        if len(pressable(snapshot)) < 2 and not editable_pool(snapshot):
             snapshot, snapshot_ms = _timed_snapshot(run, senses)       # one re-snapshot
             if not snapshot.elements and snapshot.node_count == 0:
                 return run.escalate("no_window")
             if snapshot.dialog_text:
                 return run.escalate(f'dialog_open: "{_q(snapshot.dialog_text)}"')
-            if len(pressable(snapshot)) < 2 and not _editable_pool(snapshot):
+            if len(pressable(snapshot)) < 2 and not editable_pool(snapshot):
                 return run.escalate("no_candidate")
         items, dropped_cap, blocked = _build_menu(run, snapshot, allow_page_links=allow_page_links)
         tokens = objective_tokens(objective)
@@ -800,7 +800,7 @@ def run_delegate(objective: str, *, senses: Any, effectors: Any, decider: Any, t
                 run.approve_used = True
         elif item.kind == "type":
             run.text_state = "applied"
-            if item.candidate is not None and _is_search_field(item.candidate):
+            if item.candidate is not None and is_search_field(item.candidate):
                 run.search_typed = True
         else:
             run.key_state = "applied"
