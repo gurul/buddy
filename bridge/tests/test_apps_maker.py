@@ -647,6 +647,9 @@ class FakeMiniApp:
     def app_url(self, slug: str) -> str:
         return f"{self.url}/apps/{slug}/" if self.url else ""
 
+    def chat_url(self, slug: str) -> str:
+        return f"{self.url}/?chat={slug}" if self.url else ""
+
 
 class Chat:
     def __init__(self, photo_fails: bool = False) -> None:
@@ -675,6 +678,7 @@ def door_for(tmp_path: Path, generate=None, url="https://quiet-owl.trycloudflare
 
 
 OPEN = ("Open Habit Tracker", "https://quiet-owl.trycloudflare.com/apps/habit-tracker/")
+CHANGE = ("Change", "https://quiet-owl.trycloudflare.com/?chat=habit-tracker")
 
 
 def test_a_build_from_the_chat_arrives_as_the_apps_picture_with_an_open_button(tmp_path: Path) -> None:
@@ -730,7 +734,7 @@ def test_the_chat_door_changes_undoes_renames_deletes_and_lists(tmp_path: Path) 
 
     out, store = asyncio.run(go())
     assert out["make"]["ok"] and out["change"]["ok"] and "v2" in out["v2"]
-    assert chat.sent[1] == (7, "✅ Habit Tracker is updated.\nCheck in daily and keep streaks.", [OPEN])
+    assert chat.sent[1] == (7, "✅ Habit Tracker is updated.\nCheck in daily and keep streaks.", [OPEN, CHANGE])
     assert out["undo"]["ok"] and out["undo"]["earlier_versions_left"] == 0
     assert chat.sent[2][1] == "Habit Tracker is back to how it was before its last change."
     assert not out["undo_again"]["ok"] and "no earlier version" in out["undo_again"]["reason"]
@@ -979,9 +983,9 @@ def test_a_chat_change_that_fails_says_why_and_that_the_app_is_unchanged(tmp_pat
         await asyncio.gather(*spawned)
 
     asyncio.run(go())
-    assert chat.said[0] == ("I couldn't change Habit Tracker; it is unchanged: Claude could not be reached. Check "
-                            "the Mac's internet connection.")
-    assert chat.said[1].startswith("I couldn't build that app: Claude could not be reached.")
+    assert chat.sent[0][1:] == ("I couldn't change Habit Tracker; it is unchanged: Claude could not be reached. "
+                                "Check the Mac's internet connection.", [CHANGE])
+    assert chat.said[0].startswith("I couldn't build that app: Claude could not be reached.")   # no app, no chat
 
 
 def test_a_chat_build_says_when_it_is_tested_and_fixed_and_what_may_still_be_wrong(tmp_path: Path,
@@ -1042,3 +1046,479 @@ def test_back_on_an_apps_first_view_goes_home_and_elsewhere_runs_the_apps_own_ha
     assert shown_on_home is True                                 # Back shows on the app's first view too
     assert inner == {"backs": 1, "url": "https://app.test/apps/x/?t=abc", "slug": "x"}   # the app's own back
     assert url == "https://app.test/"                            # then home, to buddy's list
+
+
+# ---- journeys: the maker writes them, the store versions them, the check walks them -------------------------
+
+JOURNEY = [{"name": "Add one", "steps": [{"do": "tap", "target": "Add"}], "expect": ["1 habit"]}]
+
+
+def with_journeys(page: str, journeys: list[dict[str, Any]] = JOURNEY) -> str:
+    return fenced(page) + "\n```journeys\n" + json.dumps(journeys) + "\n```\n"
+
+
+class JourneyCheck(FakeCheck):
+    """FakeCheck that also records the journeys it was given, and fails a journey on a marked page."""
+
+    def __init__(self, fail: str = "\0") -> None:
+        super().__init__()
+        self.fail = fail
+        self.given: list[Any] = []
+
+    async def __call__(self, html: str, *, seed: Any = None, journeys: Any = None) -> CheckReport:
+        self.given.append(journeys)
+        bad = self.fail in html and journeys and journeys[0].expect == ("1 habit",)
+        issues = ['Journey "Add one": after all 1 steps the screen does not show "1 habit".'] if bad else []
+        return CheckReport(ok=not issues, issues=issues, taps=3, fields=1, saves=2, screenshot=b"\xff\xd8jpeg")
+
+
+def test_the_prompt_asks_for_journeys_and_the_skeletons_parse() -> None:
+    from cc_buddy_bridge import jev_verify
+
+    for must in ("```journeys", '"do": "tap"', "literal", "fresh app with no saved data", "aria-label"):
+        assert must in MAKER_PROMPT, must
+    found, problems = jev_verify.parse_journeys(json.loads(apps_maker.SKELETON_JOURNEYS))
+    assert problems == [] and len(found) == 3 and apps_maker.SKELETON_JOURNEYS in MAKER_PROMPT
+
+
+def test_a_build_keeps_its_journeys_and_undo_restores_the_pair(tmp_path: Path) -> None:
+    check = JourneyCheck()
+    first = [{**JOURNEY[0], "name": "First"}]
+    maker, _, store = maker_for(tmp_path, Script(with_journeys(doc("v1"), first), with_journeys(doc("v2"))), check)
+    made = asyncio.run(maker.make("habit tracker"))
+    slug = made.app.slug
+    assert [j.name for j in store.journeys(slug)] == ["First"] and check.given[0][0].name == "First"
+    made2 = asyncio.run(maker.edit(slug, "add a thing"))
+    assert made2.ok and [j.name for j in store.journeys(slug)] == ["Add one"]
+    edit_prompt_text = maker._generate.calls[1][0]["content"]
+    assert "Its journeys now:" in edit_prompt_text and '"First"' in edit_prompt_text
+    assert (tmp_path / "apps" / slug / "versions" / "1.journeys.json").is_file()
+    store.revert(slug)
+    assert "v1" in store.html(slug) and [j.name for j in store.journeys(slug)] == ["First"]
+
+
+def test_an_app_without_journeys_still_builds_and_is_checked_by_the_script_alone(tmp_path: Path) -> None:
+    check = JourneyCheck()
+    maker, _, store = maker_for(tmp_path, Script(fenced(doc("v1"))), check)
+    made = asyncio.run(maker.make("habit tracker"))
+    assert made.ok and store.journeys(made.app.slug) is None and check.given == [None]
+
+
+def test_a_failed_journey_goes_to_the_repair_round_and_a_journey_only_fix_is_rechecked(tmp_path: Path) -> None:
+    check = JourneyCheck(fail="v1")
+    maker, _, store = maker_for(tmp_path, Script(with_journeys(doc("v1")), with_journeys(doc("v2"))), check)
+    made = asyncio.run(maker.make("habit tracker"))
+    repair = maker._generate.calls[1][2]["content"]
+    assert 'Journey "Add one"' in repair and "Never change a journey to get around" in repair
+    assert made.ok and made.rounds == 1 and "v2" in store.html(made.app.slug)
+    # a repair that only rewrites the journeys keeps the last file and checks it again with them
+    check2 = JourneyCheck(fail="v1")
+    fixed = [{**JOURNEY[0], "expect": ["other"]}]
+    maker2, _, store2 = maker_for(tmp_path / "b", Script(with_journeys(doc("v1")),
+                                                         "```journeys\n" + json.dumps(fixed) + "\n```"), check2)
+    made2 = asyncio.run(maker2.make("habit tracker"))
+    assert len(check2.given) == 2 and check2.given[1][0].expect == ("other",)
+    assert store2.journeys(made2.app.slug)[0].expect == ("other",)
+
+
+def test_a_malformed_journeys_block_is_a_problem_the_repair_sees(tmp_path: Path) -> None:
+    gen = Script(fenced(doc("v1")) + "\n```journeys\n[not json\n```", with_journeys(doc("v1")))
+    maker, _, store = maker_for(tmp_path, gen, JourneyCheck())
+    made = asyncio.run(maker.make("habit tracker"))
+    assert "Journeys block: The journeys block is not valid JSON" in gen.calls[1][2]["content"]
+    assert made.ok and store.journeys(made.app.slug) is not None
+
+
+def test_the_skeleton_walks_its_own_journeys_with_a_literal_verifier() -> None:
+    pytest.importorskip("playwright.async_api")
+    from test_jev_verify import LiteralJev
+
+    from cc_buddy_bridge import jev_verify
+    from cc_buddy_bridge.app_check import check_app
+
+    found, _ = jev_verify.parse_journeys(json.loads(apps_maker.SKELETON_JOURNEYS))
+    r = asyncio.run(check_app(SKELETON, journeys=found, verifier=jev_verify.Verifier(LiteralJev())))
+    assert r.journeys.passed == 3, r.journeys.as_dict()
+    assert r.ok and "journeys 3/3" in r.summary()
+
+
+def test_an_old_versions_journeys_go_with_it_when_it_is_pruned(tmp_path: Path) -> None:
+    from cc_buddy_bridge import jev_verify
+
+    store = AppStore(tmp_path / "apps")
+    found, _ = jev_verify.parse_journeys(JOURNEY)
+    info = store.save(doc("v0"), "make it", journeys=found)
+    for n in range(1, apps_maker.MAX_VERSIONS + 3):
+        store.save(doc(f"v{n}"), f"change {n}", info.slug, journeys=found if n % 2 else None)
+    vdir = tmp_path / "apps" / info.slug / "versions"
+    pages = {p.stem for p in vdir.glob("*.html")}
+    kept = {p.name.split(".")[0] for p in vdir.glob("*.journeys.json")}
+    assert len(pages) == apps_maker.MAX_VERSIONS and kept <= pages          # no journeys outlive their page
+    assert store.journeys(info.slug) is None                                # the last save had none
+
+
+# ---- the app's change chat: what each build did, kept in meta.json ----------------------------------------------
+
+class WalkedCheck(FakeCheck):
+    """FakeCheck whose report carries Jev's journeys: ``passed`` of ``total`` walked, or not run (``why``)."""
+
+    def __init__(self, passed: int = 3, total: int = 3, why: str = "") -> None:
+        super().__init__()
+        self.passed, self.total, self.why = passed, total, why
+
+    async def __call__(self, html: str, *, seed: Any = None, journeys: Any = None) -> CheckReport:
+        from cc_buddy_bridge.jev_verify import JourneyResult, JourneyRun
+
+        results = [JourneyResult(f"j{i}", "passed" if i < self.passed else "step", steps=2)
+                   for i in range(self.total)] if not self.why else []
+        run = JourneyRun(results=results, total=self.total, not_run=self.why)
+        issues = run.issues()
+        return CheckReport(ok=not issues, issues=issues, taps=3, fields=1, saves=2, journeys=run)
+
+
+def test_each_build_records_its_version_check_journeys_and_cost_for_the_change_chat(tmp_path: Path) -> None:
+    gen = Script(with_journeys(DOC), with_journeys(doc("v2")))
+    maker, _, store = maker_for(tmp_path, gen, WalkedCheck())
+    asyncio.run(maker.make("a habit tracker"))
+    asyncio.run(maker.edit("habit-tracker", "make the buttons bigger"))
+    thread = store.thread("habit-tracker")
+    assert [(i["kind"], i["text"]) for i in thread] == [("request", "a habit tracker"),
+                                                         ("request", "make the buttons bigger")]
+    first, second = thread[0]["result"], thread[1]["result"]
+    assert first["ok"] and first["version"] == 1 and second["version"] == 2
+    assert first["check"] == "passed: 1 fields filled, 3 taps, 2 saves, journeys 3/3" and first["tested"]
+    assert first["journeys"] == {"passed": 3, "total": 3, "not_run": ""}
+    assert first["usd"] == pytest.approx(ONE, abs=1e-4) and first["problems"] == 0 and first["rounds"] == 0
+    assert set(first) == set(apps_maker._RESULT_KEYS)
+    meta = json.loads((tmp_path / "apps" / "habit-tracker" / "meta.json").read_text())
+    assert meta["version"] == 2 and len(meta["builds"]) == 2
+    assert [r["text"] for r in store.requests("habit-tracker")] == ["a habit tracker", "make the buttons bigger"]
+
+
+def test_a_journey_that_did_not_run_or_failed_is_in_the_record(tmp_path: Path) -> None:
+    maker, _, store = maker_for(tmp_path, Script(with_journeys(DOC)), WalkedCheck(why="Jev did not answer"))
+    asyncio.run(maker.make("a habit tracker"))
+    maker._check = WalkedCheck(passed=1, total=2)
+    maker.max_repairs = 0
+    asyncio.run(maker.edit("habit-tracker", "add categories"))
+    first, second = (i["result"] for i in store.thread("habit-tracker"))
+    assert first["journeys"] == {"passed": 0, "total": 3, "not_run": "Jev did not answer"}
+    assert second["journeys"] == {"passed": 1, "total": 2, "not_run": ""} and second["problems"] == 1
+    assert second["issues"][0] == '"j1" did not go through.'           # the owner's line, not the repair's
+
+
+def test_a_change_that_saved_nothing_is_recorded_but_is_not_a_request(tmp_path: Path) -> None:
+    gen = Script(fenced(DOC), "Sorry, I can't.", ConnectionError("down"))
+    maker, _, store = maker_for(tmp_path, gen, max_repairs=0)
+    asyncio.run(maker.make("a habit tracker"))
+    gen.answers = ["Sorry, I can't."]
+    made = asyncio.run(maker.edit("habit-tracker", "add a chart"))
+    gen.answers = [ConnectionError("down")]
+    with pytest.raises(ConnectionError):
+        asyncio.run(maker.edit("habit-tracker", "make it purple"))
+    thread = store.thread("habit-tracker")
+    assert not made.ok and [i["text"] for i in thread] == ["a habit tracker", "add a chart", "make it purple"]
+    chart, purple = thread[1]["result"], thread[2]["result"]
+    assert not chart["ok"] and chart["reason"] == "Claude did not return a complete app" and chart["version"] is None
+    assert chart["usd"] == pytest.approx(ONE, abs=1e-4)                           # it cost money and did nothing
+    assert not purple["ok"] and purple["reason"] == "the build stopped before it finished" and purple["usd"] == 0
+    # the next build's prompt hears only what the app was changed to do
+    assert [r["text"] for r in store.requests("habit-tracker")] == ["a habit tracker"]
+    assert store.info("habit-tracker").versions == 0 and "hi" in store.html("habit-tracker")
+
+
+def test_the_thread_keeps_undos_and_requests_from_before_results_and_stays_bounded(tmp_path: Path) -> None:
+    store = AppStore(tmp_path / "apps")
+    d = tmp_path / "apps" / "habit-tracker"
+    d.mkdir(parents=True)
+    (d / "index.html").write_text(DOC)
+    (d / "meta.json").write_text(json.dumps({                     # an app built before results were recorded
+        "title": "Habit Tracker", "created": "2026-09-20T10:00:00", "updated": "2026-09-21T10:00:00",
+        "requests": [{"at": "2026-09-20T10:00:00", "text": "a habit tracker"},
+                     {"at": "2026-09-21T10:00:00", "text": "add streaks"},
+                     {"at": "2026-09-21T11:00:00", "text": "(undo)"}]}))
+    store.save(doc("v3"), "add a chart", "habit-tracker", build={"ok": True, "check": "passed"})
+    thread = store.thread("habit-tracker")
+    assert [(i["kind"], i["text"], i["result"] is not None) for i in thread] == [
+        ("request", "a habit tracker", False), ("request", "add streaks", False), ("undo", "(undo)", False),
+        ("request", "add a chart", True)]
+    assert thread[-1]["result"]["version"] == 3                   # two builds before it (the undo is not one)
+    store.revert("habit-tracker")
+    assert store.thread("habit-tracker")[-1]["kind"] == "undo"
+    for n in range(apps_maker.MAX_BUILDS + 5):
+        store.record_build("habit-tracker", f"try {n}", {"ok": False, "reason": "no"})
+    meta = json.loads((d / "meta.json").read_text())
+    assert len(meta["builds"]) == apps_maker.MAX_BUILDS and meta["builds"][-1]["request"] == f"try {apps_maker.MAX_BUILDS + 4}"
+    with pytest.raises(KeyError):
+        store.thread("no-such-app")
+    with pytest.raises(KeyError):
+        store.record_build("no-such-app", "x", {"ok": False})
+
+
+# ---- the way into an app's change chat from inside the app (buddy.js) -------------------------------------------
+
+def test_inside_an_app_a_pencil_and_telegrams_settings_item_lead_to_its_change_chat() -> None:
+    pytest.importorskip("playwright.async_api")
+    from playwright.async_api import async_playwright
+
+    from cc_buddy_bridge.apps_maker import BUDDY_JS
+
+    stub = """window.Telegram = { WebApp: { isVersionAtLeast: (v) => parseFloat(v) <= 7.0,
+      BackButton: { show() {}, hide() {}, onClick() {}, offClick() {} },
+      SettingsButton: (() => { const cbs = []; const b = { isVisible: false, show() { b.isVisible = true; return b; },
+        onClick(f) { cbs.push(f); return b; }, press() { cbs.forEach((f) => f()); } }; return b; })() } };"""
+    # An app whose own CSS would hide or restyle a plain injected button, and that re-renders its whole body.
+    hostile_css = """<style>* { visibility: hidden !important; position: static !important; }
+      button { display: none !important; } html, body { overflow: hidden; }</style>"""
+    body = """<h1>A very long app title that runs</h1><script>document.body.innerHTML = '<p>re-rendered</p>';</script>"""
+    page_html = (f"<html><head><script>{stub}</script><script>{BUDDY_JS}</script>{hostile_css}</head>"
+                 f"<body>{body}</body></html>")
+
+    async def go():
+        async with async_playwright() as p:
+            b = await p.chromium.launch()
+            page = await b.new_page(viewport={"width": 390, "height": 760}, has_touch=True)
+            await page.route("https://app.test/**", lambda r: r.fulfill(
+                status=200, content_type="text/html", body=page_html if "/apps/" in r.request.url else "HOME"))
+            await page.goto("https://app.test/apps/habit-tracker/?t=abc")
+            seen = await page.evaluate("""() => { const host = document.querySelector('buddy-change');
+              const r = host.getBoundingClientRect(), s = getComputedStyle(host);
+              const top = document.elementFromPoint(r.x + r.width / 2, r.y + r.height / 2);
+              return { w: r.width, h: r.height, right: innerWidth - r.right, top: r.top, visible: s.visibility,
+                       topmost: top === host, count: document.querySelectorAll('buddy-change').length,
+                       settings: Telegram.WebApp.SettingsButton.isVisible,
+                       wide: document.documentElement.scrollWidth > innerWidth }; }""")
+            async with page.expect_navigation():
+                await page.touchscreen.tap(390 - 6 - 22, 6 + 22)
+            tapped = page.url
+            await page.goto("https://app.test/apps/habit-tracker/?t=abc")
+            async with page.expect_navigation():
+                await page.evaluate("Telegram.WebApp.SettingsButton.press()")
+            settings = page.url
+            await b.close()
+            return seen, tapped, settings
+
+    seen, tapped, settings = asyncio.run(go())
+    assert seen == {"w": 44, "h": 44, "right": 6, "top": 6, "visible": "visible", "topmost": True, "count": 1,
+                    "settings": True, "wide": False}
+    assert tapped == "https://app.test/?chat=habit-tracker" and settings == "https://app.test/?chat=habit-tracker"
+
+
+def test_without_telegrams_settings_item_the_pencil_still_leads_there() -> None:
+    pytest.importorskip("playwright.async_api")
+    from playwright.async_api import async_playwright
+
+    from cc_buddy_bridge.apps_maker import BUDDY_JS
+
+    old = "window.Telegram = { WebApp: { isVersionAtLeast: (v) => parseFloat(v) <= 6.9 } };"
+    page_html = f"<html><head><script>{old}</script><script>{BUDDY_JS}</script></head><body>app</body></html>"
+
+    async def go():
+        async with async_playwright() as p:
+            b = await p.chromium.launch()
+            page = await b.new_page()
+            errors: list[str] = []
+            page.on("pageerror", lambda e: errors.append(str(e)))
+            await page.route("https://app.test/**", lambda r: r.fulfill(status=200, content_type="text/html",
+                                                                        body=page_html))
+            await page.goto("https://app.test/apps/x/?t=abc")
+            label = await page.evaluate("document.querySelector('buddy-change') !== null")
+            await b.close()
+            return label, errors
+
+    present, errors = asyncio.run(go())
+    assert present and errors == []
+
+
+def test_a_change_from_the_chat_door_brings_a_change_button_to_its_chat(tmp_path: Path) -> None:
+    chat = Chat()
+
+    async def go():
+        door, store, spawned = door_for(tmp_path, Script(fenced(DOC), fenced(doc("v2"))))
+        await door.handle("make_app", {"request": "habit tracker"}, 7, chat.send, chat.say, chat.send_photo)
+        await asyncio.gather(*spawned)
+        await door.handle("change_app", {"app": "habit tracker", "change": "add categories"}, 7, chat.send, chat.say,
+                          chat.send_photo)
+        await asyncio.gather(*spawned)
+
+    asyncio.run(go())
+    made, changed = chat.photos
+    assert made[3] == [OPEN] and changed[3] == [OPEN, CHANGE]            # Open stays Open <app>; Change is second
+
+
+# ---- review round 3: each of these failed on the code before its fix ----------------------------------------
+
+TWO = [{"name": "Add one", "steps": [{"do": "tap", "target": "Add"}], "expect": ["1 habit"]},
+       {"name": "Add two", "steps": [{"do": "tap", "target": "Add"}, {"do": "tap", "target": "Add"}],
+        "expect": ["2 habits"]}]
+
+
+def test_an_empty_journeys_block_never_drops_the_journeys_in_hand(tmp_path: Path) -> None:
+    check = JourneyCheck()
+    gen = Script(with_journeys(DOC, TWO), fenced(doc("v2")) + "\n```journeys\n[]\n```", fenced(doc("v2")))
+    maker, _, store = maker_for(tmp_path, gen, check, max_repairs=1)
+    asyncio.run(maker.make("a habit tracker"))
+    made = asyncio.run(maker.edit("habit-tracker", "bigger buttons"))
+    assert [j.name for j in check.given[1]] == ["Add one", "Add two"]             # walked with the ones in hand
+    assert "Journeys block: The journeys block holds no journey" in gen.calls[2][2]["content"]
+    assert made.ok and [j.name for j in store.journeys("habit-tracker")] == ["Add one", "Add two"]
+
+
+def test_a_broken_journeys_block_stays_a_problem_until_a_good_one_comes(tmp_path: Path) -> None:
+    gen = Script(fenced(doc("v1")) + "\n```journeys\n[not json\n```",
+                 f"{apps_maker.EDIT_START}\nv1\n{apps_maker.EDIT_MID}\nv1b\n{apps_maker.EDIT_END}")
+    maker, _, store = maker_for(tmp_path, gen, JourneyCheck(), max_repairs=1)
+    made = asyncio.run(maker.make("habit tracker"))
+    assert any(i.startswith("Journeys block: The journeys block is not valid JSON") for i in made.issues), made.issues
+
+
+def test_a_repair_that_leaves_a_journey_out_still_walks_it(tmp_path: Path) -> None:
+    check = JourneyCheck(fail="v1")
+    gen = Script(with_journeys(doc("v1"), TWO), with_journeys(doc("v2"), TWO[1:]))
+    maker, _, store = maker_for(tmp_path, gen, check, max_repairs=1)
+    made = asyncio.run(maker.make("habit tracker"))
+    assert [j.name for j in check.given[1]] == ["Add two", "Add one"]             # never weakened by a repair
+    assert made.ok and {j.name for j in store.journeys(made.app.slug)} == {"Add one", "Add two"}
+
+
+def test_an_edits_journeys_never_carry_the_owners_saved_data_to_jev(tmp_path: Path) -> None:
+    check = JourneyCheck()
+    leaky = [{"name": "Split", "steps": [{"do": "type", "target": "Name", "value": "Priya"},
+                                         {"do": "tap", "target": "Add"}], "expect": ["Priya owes $4.20"]},
+             {"name": "Clean", "steps": [{"do": "type", "target": "Name", "value": "Alex"},
+                                         {"do": "tap", "target": "Add"}], "expect": ["Alex owes $3.00"]},
+             {"name": "Default", "steps": [{"do": "tap", "target": "Groceries"}], "expect": ["Groceries"]}]
+    page = doc("v2").replace("</body>", "<p>Groceries</p></body>")        # the app's own default: not the owner's
+    gen = Script(with_journeys(DOC, TWO), with_journeys(page, leaky), with_journeys(page, leaky[1:]))
+    maker, _, store = maker_for(tmp_path, gen, check, max_repairs=1)
+    asyncio.run(maker.make("a splitter"))
+    store.save_data("habit-tracker", {"v": 1, "people": ["Priya", "Sam"], "cats": ["Groceries"],
+                                      "exp": [{"what": "Dinner at the corner place", "amt": 420}]})
+    made = asyncio.run(maker.edit("habit-tracker", "add categories"))
+    walked = [j.name for j in check.given[1]]
+    assert walked == ["Clean", "Default"]                                    # "Split" never reaches the verifier
+    repair = gen.calls[2][2]["content"]
+    assert 'Journeys block: journey "Split" uses the owner\'s saved data' in repair and "Priya" not in repair
+    assert made.ok and [j.name for j in store.journeys("habit-tracker")] == ["Clean", "Default"]
+
+
+def test_the_prompt_asks_for_result_text_invented_values_a_free_corner_and_option_picks() -> None:
+    journeys_part = MAKER_PROMPT[MAKER_PROMPT.index("<journeys>"):MAKER_PROMPT.index("</journeys>")]
+    assert "toast" in journeys_part and "the value the journey entered" in journeys_part
+    assert "made-up example values" in journeys_part and "never from the saved data" in journeys_part
+    assert "a group of option buttons" in journeys_part
+    assert "top-right 56x56px" in MAKER_PROMPT and "padding-right: 56px" in MAKER_PROMPT
+
+
+def rate_limited() -> Exception:
+    import anthropic
+
+    request = httpx.Request("POST", "https://api.anthropic.com/v1/messages")
+    return anthropic.RateLimitError("slow down", response=httpx.Response(429, request=request), body=None)
+
+
+def test_a_change_that_stops_on_an_api_error_records_why_and_what_it_already_cost(tmp_path: Path) -> None:
+    gen = Script(fenced(DOC), ("```html\n<!doctype html><html><body>cut", "max_tokens"), rate_limited())
+    maker, _, store = maker_for(tmp_path, gen, max_repairs=1)
+    asyncio.run(maker.make("a habit tracker"))
+    gen.answers = [("```html\n<!doctype html><html><body>cut", "max_tokens"), rate_limited()]
+    with pytest.raises(Exception, match="slow down"):
+        asyncio.run(maker.edit("habit-tracker", "add a chart"))
+    res = store.thread("habit-tracker")[-1]["result"]
+    assert res["reason"] == "Claude is rate-limited right now. Try again in a minute"
+    assert res["usd"] == pytest.approx(ONE, abs=1e-4) and res["rounds"] == 1
+
+
+def test_the_owner_reads_journey_problems_in_plain_words_and_long_lines_end_in_an_ellipsis() -> None:
+    from cc_buddy_bridge.jev_verify import JourneyResult, JourneyRun
+
+    failed = JourneyResult("Split a dinner", "step", steps=6, step=3, step_words='tap "Add expense"',
+                           reason='tap "Add expense": could not find "Add expense" to tap (the controls on screen: '
+                                  + ", ".join(f'"Control {n}"' for n in range(14)) + ").",
+                           evidence='"' + "Expense Splitter | People " * 30 + '"')
+    run = JourneyRun(results=[failed], total=1)
+    long_one = "Uncaught error while tapping: " + "x" * 400
+    report = CheckReport(ok=False, issues=run.issues() + [long_one], journeys=run)
+    rec = apps_maker.build_record(ok=True, report=report, issues=report.issues, usd=0.1, secs=5, rounds=1)
+    assert rec["issues"][0] == 'Couldn\'t tap "Add expense" in "Split a dinner".'
+    assert len(rec["issues"][1]) == 300 and rec["issues"][1].endswith("…")
+    assert apps_maker.owner_issues(report, report.issues)[0] == rec["issues"][0]
+
+
+def test_a_chat_build_caption_names_a_journey_problem_in_plain_words(tmp_path: Path) -> None:
+    from cc_buddy_bridge.jev_verify import JourneyResult, JourneyRun
+
+    class Failing(FakeCheck):
+        async def __call__(self, html: str, *, seed: Any = None, journeys: Any = None) -> CheckReport:
+            run = JourneyRun(results=[JourneyResult("Add one", "expect", steps=1,
+                                                    expects=[{"text": "1 habit", "score": 0.1, "shown": False}],
+                                                    evidence='"' + "No habits yet " * 40 + '"')], total=1)
+            return CheckReport(ok=False, issues=run.issues(), journeys=run, screenshot=b"\xff\xd8jpeg")
+
+    chat = Chat()
+
+    async def go():
+        door, store, spawned = door_for(tmp_path, Script(with_journeys(DOC)))
+        door._app.maker._check = Failing()
+        door._app.maker.max_repairs = 0
+        await door.handle("make_app", {"request": "habit tracker"}, 7, chat.send, chat.say, chat.send_photo)
+        await asyncio.gather(*spawned)
+
+    asyncio.run(go())
+    assert 'It may still have a problem: After "Add one", the screen didn\'t show "1 habit".' in chat.photos[0][2]
+
+
+def test_a_chat_change_that_fails_still_offers_its_change_chat(tmp_path: Path) -> None:
+    chat = Chat()
+
+    async def go():
+        door, store, spawned = door_for(tmp_path, Script("Sorry, I can't."))
+        door._app.maker.max_repairs = 0
+        store.save(DOC, "x")
+        await door.handle("change_app", {"app": "habit tracker", "change": "add a chart"}, 7, chat.send, chat.say)
+        await door.handle("change_app", {"app": "habit tracker", "change": "add a chart"}, 7, chat.send, chat.say)
+        await asyncio.gather(*spawned)
+        door._app.maker._generate = Script(rate_limited())
+        await door.handle("change_app", {"app": "habit tracker", "change": "add a chart"}, 7, chat.send, chat.say)
+        await asyncio.gather(*spawned)
+
+    asyncio.run(go())
+    lines = [(text, buttons) for _, text, buttons in chat.sent]
+    assert lines[0] == ("I couldn't change Habit Tracker; it is unchanged: Claude did not return a complete app.",
+                        [CHANGE])
+    assert lines[-1] == ("I couldn't change Habit Tracker; it is unchanged: Claude is rate-limited right now. Try "
+                         "again in a minute.", [CHANGE])
+
+
+def test_the_pencil_steps_aside_for_an_apps_own_control_in_its_corner() -> None:
+    pytest.importorskip("playwright.async_api")
+    from playwright.async_api import async_playwright
+
+    from cc_buddy_bridge.apps_maker import BUDDY_JS
+
+    stub = "window.Telegram = { WebApp: { isVersionAtLeast: () => false } };"
+    body = """<header style="display:flex;padding:12px 16px 0"><h1 style="flex:1;margin:0">Budget</h1>
+      <button id="gear" aria-label="Settings" style="width:44px;height:44px" onclick="window.__gear=1">⚙</button></header>
+      <p>content</p>"""
+    page_html = f"<html><head><script>{stub}</script><script>{BUDDY_JS}</script></head><body style='margin:0'>{body}</body></html>"
+
+    async def go():
+        async with async_playwright() as p:
+            b = await p.chromium.launch()
+            page = await b.new_page(viewport={"width": 390, "height": 760}, has_touch=True)
+            await page.route("https://app.test/**", lambda r: r.fulfill(status=200, content_type="text/html",
+                                                                        body=page_html))
+            await page.goto("https://app.test/apps/budget/?t=abc")
+            await page.wait_for_timeout(100)
+            state = "() => getComputedStyle(document.querySelector('buddy-change')).visibility"
+            covered = await page.evaluate(state)
+            await page.touchscreen.tap(390 - 6 - 22, 6 + 22)          # where the pencil would be
+            gear = await page.evaluate("window.__gear === 1")
+            await page.evaluate("document.getElementById('gear').remove()")      # the view changes: the corner is free
+            await page.wait_for_timeout(100)
+            free = await page.evaluate(state)
+            await b.close()
+            return covered, gear, free, page.url
+
+    covered, gear, free, url = asyncio.run(go())
+    assert covered == "hidden" and gear is True and free == "visible" and url.endswith("/apps/budget/?t=abc")

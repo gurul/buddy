@@ -467,3 +467,13 @@ def test_a_control_under_buddys_change_pencil_is_a_finding_and_a_free_corner_is_
     assert len(corner) == 1 and '"Settings"' in corner[0] and "padding-right: 56px" in corner[0], r.issues
     assert not any("Change pencil" in i for i in run(CORNER_FREE).issues)            # the fix the finding asks for
     assert app_check.PENCIL == {"top": 6, "right": 6, "size": 44}
+
+
+def test_the_pencils_place_in_the_check_is_where_buddy_js_draws_it() -> None:
+    from cc_buddy_bridge import app_check
+    from cc_buddy_bridge.apps_maker import BUDDY_JS
+
+    p = app_check.PENCIL
+    assert f"width: {p['size']}px !important; height: {p['size']}px !important" in BUDDY_JS
+    assert f"top: calc({p['top']}px + var(--tg-safe-area-inset-top" in BUDDY_JS
+    assert f"right: calc({p['right']}px + var(--tg-safe-area-inset-right" in BUDDY_JS

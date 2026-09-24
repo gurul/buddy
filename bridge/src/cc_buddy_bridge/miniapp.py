@@ -29,6 +29,11 @@ apps"): the apps are the point.
 * **Apps can be changed, undone, renamed and deleted** from the home page's "…" sheet (owner: "allow apps to be
   deleted and mutated easily"). A delete moves the app to buddy's ``apps/.trash`` on the Mac, and Undo on the
   page (or restore_app in the chat) brings it back; nothing is erased.
+* **Each app has its own change chat** (owner, 2026-09-24: "a chat box for each app where you keep refining it
+  (make the buttons bigger, add categories)"): the home page at ``/?chat=<slug>`` shows what was asked of the
+  app and how each build went (``/api/apps/<slug>/history``, owner only), and takes the next change. Inside an
+  app, Telegram's Settings item and a small pencil lead there; the app only navigates, it never gets the power
+  to change apps or spend.
 
 Off unless ``CC_BUDDY_MINIAPP=1`` with the Telegram door configured and ``ANTHROPIC_API_KEY`` set.
 """
@@ -66,7 +71,8 @@ _WORST = {"in": 10.0, "out": 50.0, "cache_read": 1.0, "cache_write": 12.5, "cach
 INIT_DATA_MAX_AGE_SECS = 24 * 3600    # a Mini App left open all day still works; an old leaked string does not
 MAX_BODY_BYTES = 2_000_000
 APP_ROUTE_RE = re.compile(r"^/apps/([a-z0-9][a-z0-9-]{0,47})/(index\.html)?$")
-API_APP_RE = re.compile(r"^/api/apps/([a-z0-9][a-z0-9-]{0,47})/(load|save|report|delete|rename|revert|restore)$")
+API_APP_RE = re.compile(
+    r"^/api/apps/([a-z0-9][a-z0-9-]{0,47})/(load|save|report|delete|rename|revert|restore|history)$")
 APP_TOKEN_SECS = 24 * 3600            # an app left open all day still saves; as long as initData lives
 CLOSE_WAIT_SECS = 2.0                 # shutdown waits this long for open connections (a build's stream) to go
 SPEND_ALERTS_USD = (5.0, 20.0, 50.0, 100.0, 200.0, 500.0, 1000.0)
@@ -498,6 +504,9 @@ class MiniAppServer:
                                                     for a in self.store.list()],
                                            "building": self._building_now(user)})
             return
+        if api_app is not None and api_app.group(2) == "history":
+            await self._json(writer, *self._history(api_app.group(1), user))
+            return
         if api_app is not None:
             await self._json(writer, *self._app_action(api_app.group(1), api_app.group(2), body))
             return
@@ -530,6 +539,23 @@ class MiniAppServer:
             self._building.discard(user)
             self.builds.pop(user, None)
             self.changing.discard(slug)
+
+    def _history(self, slug: str, user: int) -> tuple[int, dict[str, Any]]:
+        """One app's change chat: the app (with a fresh Open address), what was asked of it and how each build
+        went (AppStore.thread: when, the request, version, the check's line, the journeys, what may still be
+        wrong, cost), and the change running on it now, if any (``stage`` and ``secs`` only for this owner's
+        own build from the page; a change from the chat door has neither)."""
+        assert self.store is not None
+        info = self.store.info(slug)
+        if info is None:
+            return 404, {"error": "There is no such app.", "gone": True}
+        try:
+            thread = self.store.thread(slug)
+        except KeyError:
+            return 404, {"error": "There is no such app.", "gone": True}
+        running = next((b for b in self._building_now(user) if b["app"] == slug), None)
+        return 200, {"app": {**info.as_dict(), "open": self.open_url(slug)}, "thread": thread,
+                     "building": running, **self.spend()}
 
     def _app_io(self, slug: str, action: str, body: dict[str, Any]) -> tuple[int, dict[str, Any]]:
         assert self.store is not None
@@ -643,16 +669,21 @@ class MiniAppServer:
             with contextlib.suppress(Exception):
                 await tick
         if made is not None and made.ok and made.app is not None:
+            from .apps_maker import owner_issues
+
             tested = made.check is not None and not made.check.skipped
             check = made.check.summary() if made.check is not None else "not tested"
             log.info("apps: %s phone check %s", made.app.slug, check)
             out: dict[str, Any] = {"done": True, "app": made.app.as_dict(), "url": self.open_url(made.app.slug),
                                    "check": check, "tested": tested, "rounds": made.rounds,
-                                   "problems": len(made.issues), "issues": made.issues[:2],
+                                   "problems": len(made.issues),
+                                   "issues": owner_issues(made.check, made.issues[:2]),
                                    "changed": bool(slug), "usd": round(made.usd, 4), **self.spend()}
         else:
-            out = {"error": f"I couldn't build it: {made.reason}." if made is not None else reason,
-                   "changed": bool(slug), **self.spend()}
+            out = {"error": f"I couldn't {'change' if slug else 'build'} it: {made.reason}." if made is not None
+                   else reason, "changed": bool(slug), **self.spend()}
+            if slug:
+                out["slug"] = slug                    # a change that failed still leads to its change chat
         if not gone:
             try:
                 writer.write(b"data: " + json.dumps(out).encode() + b"\n\n")
@@ -861,11 +892,16 @@ class MiniApp:
         sees the initData, which answers for the whole API."""
         return f"{self.url}/?open={slug}" if self.url else ""
 
-    async def _say(self, text: str, button: Optional[tuple[str, str]] = None) -> None:
+    def chat_url(self, slug: str) -> str:
+        """A Change button's address: the app's change chat on the home page ("" while the tunnel is down)."""
+        return f"{self.url}/?chat={slug}" if self.url else ""
+
+    async def _say(self, text: str, buttons: Optional[list[tuple[str, str]]] = None) -> None:
         for chat in sorted(self.cfg.owner_ids):           # a private chat's id is the owner's user id
             data: dict[str, Any] = {"chat_id": chat, "text": text}
-            if button is not None:
-                data["reply_markup"] = {"inline_keyboard": [[{"text": button[0], "web_app": {"url": button[1]}}]]}
+            if buttons:                                   # one per row, as telegram.send_web_apps lays them out
+                data["reply_markup"] = {"inline_keyboard": [[{"text": label, "web_app": {"url": url}}]
+                                                            for label, url in buttons]}
             await self.pins._ok("sendMessage", data)
 
     async def _build_result(self, user: int, out: dict[str, Any]) -> None:
@@ -877,10 +913,17 @@ class MiniApp:
             text = f"{app.get('icon') or ''} {title} is {'updated' if out.get('changed') else 'ready'}.".strip()
             if out.get("issues"):
                 text += f"\nIt may still have a problem: {str(out['issues'][0])[:240]}"
-            url = self.app_url(str(app.get("slug") or ""))
-            await self._say(text, (f"Open {title}", url) if url else None)
+            slug = str(app.get("slug") or "")
+            url = self.app_url(slug)
+            buttons = [(f"Open {title}", url)] if url else []
+            if url and out.get("changed"):
+                buttons.append(("Change", self.chat_url(slug)))       # back to its change chat, to keep refining
+            await self._say(text, buttons)
         else:
-            await self._say(str(out.get("error") or "The app build did not finish."))
+            slug = str(out.get("slug") or "")
+            chat = self.chat_url(slug) if slug and out.get("changed") and self.store is not None \
+                and self.store.info(slug) is not None else ""
+            await self._say(str(out.get("error") or "The app build did not finish."), [("Change", chat)] if chat else None)
 
     def _spend_note(self, mark: float, total: float) -> None:
         """Today's Claude spend passed ``mark``: a line in the chat. Tracking, not a limit (owner: "no claude

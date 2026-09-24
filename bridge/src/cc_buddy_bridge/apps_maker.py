@@ -42,7 +42,7 @@ from pathlib import Path
 from typing import Any, Awaitable, Callable, Mapping, Optional
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
-from . import app_check
+from . import app_check, jev_verify
 
 log = logging.getLogger(__name__)
 
@@ -53,6 +53,7 @@ MAKE_MAX_TOKENS = 96_000             # thinking counts toward it too; a whole ap
 SYSTEM_CACHE_TTL = "1h"              # the maker prompt outlives one build's rounds (see claude_generate)
 MAX_VERSIONS = 10
 MAX_REQUESTS = 30                    # the newest requests kept in meta.json
+MAX_BUILDS = 30                      # the newest build results kept in meta.json (the app's change chat)
 DATA_SAMPLE_CHARS = 6000             # how much of an app's saved data an edit prompt shows
 CHAT_PROGRESS_SECS = 20.0            # a chat build's progress lines, at most this often
 SLUG_RE = re.compile(r"[a-z0-9][a-z0-9-]{0,47}")
@@ -64,8 +65,19 @@ PINNED_LIB_RE = re.compile(r"/npm/(?:@[a-z0-9][\w.-]*/)?[a-z0-9][\w.-]*@\d+\.\d+
 _JSDELIVR_URL = re.compile(r"(?:https?:)?//cdn\.jsdelivr\.net(/[^\s\"'`)<>\\]*)?", re.I)
 _FILLER = frozenset({"the", "my", "a", "an", "app", "apps", "one", "this", "that"})
 TRASH = ".trash"
+UNDO_REQUEST = "(undo)"              # the request an undo leaves in meta.json
 _TRASHED_RE = re.compile(r"^([a-z0-9][a-z0-9-]{0,47})-(\d{8}-\d{6})(?:-\d+)?$")
 _DATA_V_RE = re.compile(rb'^\s*\{\s*"v"\s*:\s*(\d{1,9})\b')
+
+# The reference app's journeys, as the prompt shows them. tests/test_apps_maker.py parses them and walks them.
+SKELETON_JOURNEYS = """[
+  {"name": "Log two glasses", "steps": [{"do": "tap", "target": "Add a glass"}, {"do": "tap", "target": "Add a glass"}],
+   "expect": ["2 glasses", "6 glasses to go of 8"]},
+  {"name": "Lower the goal", "steps": [{"do": "type", "target": "Daily goal, in glasses", "value": "5"},
+   {"do": "tap", "target": "Add a glass"}], "expect": ["4 glasses to go of 5"]},
+  {"name": "See the week", "steps": [{"do": "tap", "target": "Add a glass"},
+   {"do": "tap", "target": "See the last 7 days ›"}], "expect": ["Last 7 days", "1 glass"]}
+]"""
 
 # ---- what Claude is told ----------------------------------------------------------------------------
 # One reference app, shown to Claude as a pattern. tests/test_apps_maker.py runs it through app_check, so the
@@ -228,9 +240,9 @@ log, a workout planner, a reading list, a countdown, a calculator for something 
 real native app on day one and still work, with every record the owner made, on day three hundred.
 
 <output>
-Answer with exactly one ```html fenced block holding one complete HTML document, and nothing after it. A sentence \
-before the block is fine; keep it short. Settle the data shape and the list of views first, briefly, then write \
-the file once.
+Answer with exactly one ```html fenced block holding one complete HTML document, then one ```journeys block (see \
+<journeys>), and nothing after them. A sentence before the blocks is fine; keep it short. Settle the data shape \
+and the list of views first, briefly, then write the file once.
 
 The document is one self-contained file: all CSS in <style>, all JavaScript in <script>, icons as emoji or inline \
 SVG. Its <head> has, in this order:
@@ -354,6 +366,9 @@ font-variant-numeric: tabular-nums on numbers that change.
 - Every top-level view starts with its screen title; tabs or a segmented control sit under it. The header is \
 one row: the title and at most two icon buttons. Secondary navigation (a month switcher) goes in a compact row \
 below, with arrows no taller than 36px inside their 44px tap area.
+- buddy draws a small Change pencil over the top-right corner of every view. Keep the top-right 56x56px of every \
+view, dialogs and sheets included, free of controls: the header gets padding-right: 56px, so its icon buttons sit \
+to the left of that corner.
 - Icon buttons in headers and toolbars are inline SVG drawn with currentColor in the link color. Emoji are for \
 content (the app icon, categories, list items), and each one pictures exactly the thing it labels.
 - Layout: 16px side gutters, 8/12/16/24px spacing, 12px corner radius. Content in cards or inset list sections \
@@ -413,12 +428,49 @@ navigator.wakeLock.request("screen") where it exists and take it again on visibi
 - One file that a person can read: clear names, short functions, the state shape described in one comment.
 </quality>
 
+<journeys>
+Passing the scripted test only proves the app does not break. The journeys prove it does what it is for. A \
+separate verifier model uses the app by them on the phone-sized screen, step by step, each journey from a fresh \
+app with no saved data, and then reads the screen for the text each journey expects. A journey that does not go \
+through comes back to you as a problem, like a crash does.
+
+After the html block, write one ```journeys block: a JSON list of 2 to 4 journeys covering the app's core \
+purpose, the thing it exists for first (add an expense and see who owes what), then another flow that matters \
+(edit or delete a record, the second view). Each journey is {"name": "<a few words>", "steps": [...], "expect": \
+[...]}, and each step is one of:
+- {"do": "tap", "target": "<label>"}: a button, tab, checkbox, list row or link.
+- {"do": "type", "target": "<label>", "value": "<text>"}: a text, number or date field.
+- {"do": "choose", "target": "<label>", "value": "<option's visible text>"}: a <select>, or a group of option \
+buttons under that label (radio buttons, chips, a segmented control, a dropdown the app draws itself).
+
+How to write them so the verifier can follow them (it is literal: it matches words, it does not infer):
+- "target" is the control's visible label exactly as the page shows it: a button's text or its aria-label, a \
+field's <label> or aria-label (never its placeholder), a select's label. Telegram's MainButton is tapped by the \
+text it shows, and its Back button by "Back".
+- Each control a journey names has a label of its own on the screen where it is used. A list that repeats a \
+button in every row gives each one an aria-label with the row's name (a delete button labelled "Delete Alex"), \
+and the journey uses that.
+- Start from the first screen with nothing saved: open a form (tap its Add button) before typing into it, and \
+fill every field the form needs. At most 10 steps each.
+- Every value a journey types and every expected text uses made-up example values: the realistic examples of \
+the placeholders, and names and amounts you invent. The verifier runs off the Mac, so journey text comes from \
+these examples and never from the saved data a change shows you.
+- "expect" holds 1 to 3 pieces of text that must be on screen after the last step, copied exactly as your code \
+renders them for these values: a computed total, a balance line, the new row's text. Choose text that appears \
+only if the feature worked, never text shown from the start. Each piece carries the result itself, the value the \
+journey entered or the number it changed (the new row's name, the category shown on the row, the new balance), \
+so it can only appear when the app kept what was entered. A toast or a confirmation line does not qualify: it \
+shows whether or not the value was kept. Only literal text: the verifier reads the screen's text, it does not \
+count items, compare numbers, read charts or work out dates.
+</journeys>
+
 <changes>
-When you are changing an existing app, you get its current file, a sample of the data it has saved, and what \
-the owner asked for before. Return the WHOLE updated file, every line, in one ```html block. Keep everything the \
-owner did not ask to change: features, look, title, icon. The owner's saved data must open in the new version \
-exactly as it is: if the data shape has to change, bump v and extend migrate() so the sample shown converts \
-cleanly, keeping every entry.
+When you are changing an existing app, you get its current file, its journeys, a sample of the data it has \
+saved, and what the owner asked for before. Return the WHOLE updated file, every line, in one ```html block, \
+then the whole ```journeys block, updated so it still walks the app as it now is and covers the change. Keep \
+everything the owner did not ask to change: features, look, title, icon. The owner's saved data must open in the \
+new version exactly as it is: if the data shape has to change, bump v and extend migrate() so the sample shown \
+converts cleanly, keeping every entry.
 </changes>
 
 <testing>
@@ -430,7 +482,7 @@ saved, in the light theme at 390px and 360px wide; that reopened screen, with th
 picture the owner gets. Uncaught errors, console errors, a page reload, requests to other addresses, sideways \
 scrolling, never saving, a save that only lands after closing, text or a selected tab that does not stand out \
 in the dark theme, tap targets under 32px, inputs under 16px and chart shapes stretched by CSS all come back to \
-you as problems to fix.
+you as problems to fix. Then the verifier walks your journeys (see <journeys>).
 </testing>
 
 <skeleton>
@@ -442,6 +494,12 @@ from, not a template: shape each app around its own purpose.
 
 ```html
 """ + SKELETON + """
+```
+
+Its journeys:
+
+```journeys
+""" + SKELETON_JOURNEYS + """
 ```
 </skeleton>"""
 
@@ -490,6 +548,41 @@ def owner_context(environ: Optional[Mapping[str, str]] = None, *, now: Optional[
 
 
 # ---- the store ------------------------------------------------------------------------------------
+
+def _cut(text: str, limit: int) -> str:
+    return text if len(text) <= limit else text[:limit - 1].rstrip() + "…"
+
+
+def owner_issues(report: Optional[app_check.CheckReport], issues: list[str], limit: int = 300) -> list[str]:
+    """``issues`` as the owner reads them (the change chat, the Telegram caption): a journey's problem is its
+    short line ("Couldn't tap "Add expense" in "Split a dinner"."), not the repair round's text with its control
+    list and screen dump; anything longer than ``limit`` ends in "…"."""
+    run = report.journeys if report is not None else None
+    plain = run.owner_lines() if run is not None else {}
+    return [_cut(plain.get(i, i), limit) for i in issues]
+
+
+def build_record(*, ok: bool, report: Optional[app_check.CheckReport], issues: list[str], usd: float,
+                 secs: float, rounds: int, reason: str = "") -> dict[str, Any]:
+    """How one build went, as meta.json keeps it for the app's change chat: whether it saved a page, the phone
+    check's line ("passed: 3 fields filled, 9 taps, 4 saves, journeys 3/3"), the journeys Jev walked, what may
+    still be wrong, and what it cost. The store adds when, the request and the version number."""
+    run = report.journeys if report is not None else None
+    return {"ok": ok, "check": report.summary() if report is not None else "not tested",
+            "tested": report is not None and not report.skipped,
+            "journeys": ({"passed": run.passed, "total": run.total, "not_run": run.not_run}
+                         | ({"ran": len(run.results)} if run.not_run and run.results else {})
+                         if run is not None and run.total else None),
+            "problems": len(issues), "issues": owner_issues(report, issues[:2]), "usd": round(usd, 4),
+            "secs": round(secs), "rounds": rounds, "reason": reason}
+
+
+_RESULT_KEYS = ("ok", "version", "check", "tested", "journeys", "problems", "issues", "usd", "secs", "rounds", "reason")
+
+
+def _result(build: dict[str, Any]) -> dict[str, Any]:
+    return {k: build.get(k) for k in _RESULT_KEYS}
+
 
 @dataclass
 class AppInfo:
@@ -624,7 +717,9 @@ def data_sample(value: Any, limit: int = DATA_SAMPLE_CHARS) -> str:
 
 
 class AppStore:
-    """The owner's apps on disk: ``<root>/<slug>/index.html``, ``meta.json``, ``data.json`` and ``versions/``.
+    """The owner's apps on disk: ``<root>/<slug>/index.html``, ``meta.json``, ``data.json``, ``journeys.json`` and
+    ``versions/``. A page's journeys (jev_verify.py) are versioned with it: ``versions/<n>.html`` keeps its
+    ``versions/<n>.journeys.json`` beside it, so an undo restores both. An app built before journeys has none.
 
     Every path is built from a slug that matches SLUG_RE in full and is not a symlink, so nothing a request or
     a URL carries can reach outside ``root``."""
@@ -717,6 +812,22 @@ class AppStore:
         except OSError:
             return None
 
+    def journeys(self, slug: str) -> Optional[list[jev_verify.Journey]]:
+        """The journeys of the app's current page, or None when it has none (an app built before them)."""
+        d = self._dir(slug)
+        try:
+            raw = json.loads((d / "journeys.json").read_text()) if d is not None else None
+        except (OSError, ValueError):
+            return None
+        if raw is None:
+            return None
+        found, _ = jev_verify.parse_journeys(raw)
+        return found or None
+
+    @staticmethod
+    def _journeys_of(version: Path) -> Path:
+        return version.with_name(f"{version.stem}.journeys.json")
+
     def requests(self, slug: str) -> list[dict[str, str]]:
         """What the owner asked of this app, oldest first."""
         d = self._dir(slug)
@@ -775,10 +886,14 @@ class AppStore:
             return full[0], []
         return None, full or [a for a in apps if words & cls._words(a.title + " " + a.slug)]
 
-    def save(self, html: str, request: str, slug: str = "") -> AppInfo:
-        """Keep ``html`` as the app ``slug`` (a new app when empty). The page it replaces becomes the newest
-        version (at most MAX_VERSIONS are kept); the title follows the page's <title> unless the owner renamed
-        the app."""
+    def save(self, html: str, request: str, slug: str = "",
+             journeys: Optional[list[jev_verify.Journey]] = None,
+             build: Optional[dict[str, Any]] = None) -> AppInfo:
+        """Keep ``html`` as the app ``slug`` (a new app when empty), with its ``journeys`` (None: this page has
+        none). The page it replaces becomes the newest version with its journeys (at most MAX_VERSIONS are
+        kept); the title follows the page's <title> unless the owner renamed the app. Each save is the app's
+        next version number (``meta["version"]``); ``build`` is how the build that made the page went
+        (``build_record``), kept with that number for the app's change chat (``thread``)."""
         now = _dt.datetime.now().isoformat(timespec="seconds")
         if not slug:
             base = slugify(title_of(html, fallback=request[:40] or "App"))
@@ -805,6 +920,8 @@ class AppStore:
             n = int(versions[-1].stem) + 1 if versions else 1
             kept = d / "versions" / f"{n}.html"
             live.replace(kept)
+            if (d / "journeys.json").is_file():
+                (d / "journeys.json").replace(self._journeys_of(kept))
             # which shape of data that page was written for: an undo to it can then warn (AppInfo.undo_warning)
             seen = meta.get("data_v") if isinstance(meta.get("data_v"), dict) else {}
             meta["data_v"] = {**seen, str(n): self._data_v(d)}
@@ -813,20 +930,88 @@ class AppStore:
         except BaseException:
             if kept is not None:
                 kept.replace(live)                         # the page that was there comes back
+                if self._journeys_of(kept).is_file():
+                    self._journeys_of(kept).replace(d / "journeys.json")
             tmp.unlink(missing_ok=True)
             raise
+        if journeys:
+            jtmp = d / "journeys.tmp"
+            jtmp.write_text(json.dumps(jev_verify.journeys_json(journeys), ensure_ascii=False, indent=1))
+            jtmp.replace(d / "journeys.json")
+        else:
+            (d / "journeys.json").unlink(missing_ok=True)
         for old in self._versions(d)[:-MAX_VERSIONS]:
             old.unlink()
+            self._journeys_of(old).unlink(missing_ok=True)
         if isinstance(meta.get("data_v"), dict):
             names = {p.stem for p in self._versions(d)}
             meta["data_v"] = {k: v for k, v in meta["data_v"].items() if k in names and isinstance(v, int)}
-        requests = list(meta.get("requests", [])) + [{"at": now, "text": request[:500]}]
-        meta.update({"created": meta.get("created", now), "updated": now, "requests": requests[-MAX_REQUESTS:]})
+        before = list(meta.get("requests", []))
+        # An app from before version numbers counts its earlier builds (every request but an undo) as versions.
+        version = (meta["version"] if isinstance(meta.get("version"), int)
+                   else sum(1 for r in before if isinstance(r, dict) and r.get("text") != UNDO_REQUEST)) + 1
+        n = self._next(meta)
+        requests = before + [{"at": now, "text": request[:500], "n": n}]
+        meta.update({"created": meta.get("created", now), "updated": now, "requests": requests[-MAX_REQUESTS:],
+                     "version": version})
+        if build is not None:
+            self._add_build(meta, {**build, "at": now, "request": request[:500], "version": version, "n": n})
         self._describe(meta, html, request)
         self._write_meta(d, meta)
         info = self.info(slug)
         assert info is not None
         return info
+
+    @staticmethod
+    def _next(meta: dict[str, Any]) -> int:
+        """The next number in the app's own order of events (``meta["seq"]``): two builds in the same second (a
+        change that failed at once, then its retry) still show in the order they happened."""
+        seq = meta.get("seq") if isinstance(meta.get("seq"), int) else 0
+        meta["seq"] = seq + 1
+        return seq + 1
+
+    @staticmethod
+    def _add_build(meta: dict[str, Any], record: dict[str, Any]) -> None:
+        builds = [b for b in meta.get("builds", []) if isinstance(b, dict)]
+        meta["builds"] = (builds + [record])[-MAX_BUILDS:]
+
+    def record_build(self, slug: str, request: str, build: dict[str, Any]) -> None:
+        """A build of an existing app that did not save a page (Claude failed, or nothing it wrote was usable):
+        kept for the app's change chat, so a change that cost money and did nothing still shows there. It is
+        not added to the requests, which tell the next build what the app was asked to do. KeyError when the
+        app is gone."""
+        d = self._app_dir(slug)
+        meta = self._meta(d)
+        self._add_build(meta, {**build, "at": _dt.datetime.now().isoformat(timespec="seconds"),
+                               "request": request[:500], "n": self._next(meta)})
+        self._write_meta(d, meta)
+
+    def thread(self, slug: str) -> list[dict[str, Any]]:
+        """The app's change chat, oldest first: every request (``kind`` "request", or "undo"), each with how its
+        build went (``result``: build_record's fields plus ``version``) when that was recorded, and the builds
+        that saved nothing. A request from before results were recorded has ``result`` None. KeyError when the
+        app is gone."""
+        meta = self._meta(self._app_dir(slug))
+        builds = [b for b in meta.get("builds", []) if isinstance(b, dict)]
+        order = lambda x: x.get("n") if isinstance(x.get("n"), int) else 0      # noqa: E731 — 0: from before "n"
+        # a saved build and its request carry the same number (AppStore.save writes both at once)
+        saved = {order(b): b for b in builds if b.get("ok") and order(b)}
+        items: list[tuple[tuple[str, int], dict[str, Any]]] = []
+        for r in meta.get("requests", []):
+            if not isinstance(r, dict):
+                continue
+            at, text = str(r.get("at", "")), str(r.get("text", ""))
+            b = saved.pop(order(r), None) if order(r) else None
+            items.append(((at, order(r)), {"at": at, "text": text,
+                                           "kind": "undo" if text == UNDO_REQUEST else "request",
+                                           "result": _result(b) if b is not None else None}))
+        for b in builds:
+            # a failed build, or a saved one whose request was trimmed off the (shorter-lived) request list
+            if not b.get("ok") or order(b) in saved:
+                at = str(b.get("at", ""))
+                items.append(((at, order(b)), {"at": at, "text": str(b.get("request", "")), "kind": "request",
+                                               "result": _result(b)}))
+        return [item for _, item in sorted(items, key=lambda x: x[0])]
 
     def _describe(self, meta: dict[str, Any], html: str, request: str = "") -> None:
         if not meta.get("renamed"):
@@ -855,6 +1040,10 @@ class AppStore:
         if not versions:
             raise KeyError(f"{slug} has no earlier version")
         versions[-1].replace(d / "index.html")
+        if self._journeys_of(versions[-1]).is_file():
+            self._journeys_of(versions[-1]).replace(d / "journeys.json")
+        else:
+            (d / "journeys.json").unlink(missing_ok=True)       # that page was built before journeys
         html = (d / "index.html").read_text()
         meta = self._meta(d)
         if isinstance(meta.get("data_v"), dict):
@@ -862,7 +1051,8 @@ class AppStore:
         meta["updated"] = _dt.datetime.now().isoformat(timespec="seconds")
         meta["icon"] = meta["description"] = ""
         self._describe(meta, html)
-        meta["requests"] = list(meta.get("requests", [])) + [{"at": meta["updated"], "text": "(undo)"}]
+        meta["requests"] = list(meta.get("requests", [])) + [{"at": meta["updated"], "text": UNDO_REQUEST,
+                                                               "n": self._next(meta)}]
         self._write_meta(d, meta)
         info = self.info(slug)
         assert info is not None
@@ -1008,7 +1198,7 @@ def build_prompt(request: str, context: str) -> str:
 
 
 def edit_prompt(app: AppInfo, html: str, data: Any, requests: list[dict[str, str]], change: str,
-                context: str) -> str:
+                context: str, journeys: Optional[list[jev_verify.Journey]] = None) -> str:
     asked = "\n".join(f"- {str(r.get('at', ''))[:16].replace('T', ' ')}: {r.get('text', '')}" for r in requests[-12:])
     saved = ("It has no saved data yet." if data is None else
              "Its saved data right now (what buddy.load() returns; long lists and strings shortened). The new "
@@ -1018,9 +1208,12 @@ def edit_prompt(app: AppInfo, html: str, data: Any, requests: list[dict[str, str
             f"You are changing the owner's existing app \"{app.title}\".\n\n"
             f"What the owner has asked of it so far, oldest first:\n{asked or '- (not recorded)'}\n\n{saved}\n\n"
             f"The current file:\n```html\n{html}\n```\n\n"
-            f"The change the owner wants now: {change.strip()}\n\n"
+            + (f"Its journeys now:\n```journeys\n{json.dumps(jev_verify.journeys_json(journeys), ensure_ascii=False)}"
+               "\n```\n\n" if journeys else "It has no journeys yet.\n\n")
+            + f"The change the owner wants now: {change.strip()}\n\n"
             "Return the whole updated file, every line, in one ```html block, keeping everything they did not "
-            "ask to change.")
+            "ask to change, then the whole ```journeys block for the app as it now is, with made-up example values "
+            "(the saved data above stays on the Mac).")
 
 
 def repair_prompt(issues: list[str], *, tested: bool = True, editable: bool = True) -> str:
@@ -1032,14 +1225,21 @@ def repair_prompt(issues: list[str], *, tested: bool = True, editable: bool = Tr
            if tested else "")
     if not editable:
         return (f"{how}These problems came up:\n{listed}\n\n"
-                "Fix the cause of each one and return the whole fixed file, every line, in one ```html block.")
+                "Fix the cause of each one and return the whole fixed file, every line, in one ```html block, then "
+                "its ```journeys block.")
     return (f"{how}These problems came up:\n{listed}\n\n"
             "Fix the cause of each one and keep everything that works. Answer with edits to the file you wrote "
             "last, one block per change, in this form:\n\n"
             f"{EDIT_START}\n(lines copied exactly from the file, enough of them to be found only once)\n"
             f"{EDIT_MID}\n(the lines that replace them)\n{EDIT_END}\n\n"
             "The blocks apply in order. If the fixes change most of the file, return the whole fixed file, "
-            "every line, in one ```html block instead.")
+            "every line, in one ```html block instead." + JOURNEY_REPAIR)
+
+
+# A journey problem is the app's until shown otherwise: the maker may correct a journey, never weaken one.
+JOURNEY_REPAIR = ("\n\nWhen a journey problem came from the journey itself (the app does the right thing and the journey "
+                  "names a control or a result in other words than the app shows), put the whole corrected ```journeys "
+                  "block after your fixes. Never change a journey to get around a problem in the app.")
 
 
 EDIT_START, EDIT_MID, EDIT_END = "<<<<<<< FIND", "=======", ">>>>>>> REPLACE"
@@ -1077,6 +1277,64 @@ def apply_edits(html: str, answer: str) -> tuple[Optional[str], str]:
     return out, ""
 
 
+_DATE_LIKE = re.compile(r"^\d{4}-\d{2}-\d{2}")
+
+
+def owner_values(data: Any, html: str) -> set[str]:
+    """The words in the owner's saved data that are theirs: every string and key with a letter, 3 characters or
+    more, that the app's own page does not hold (a default category the app ships is not the owner's). Dates are
+    left out: a journey that types today's date is not the owner's record."""
+    page = html.casefold()
+    out: set[str] = set()
+
+    def walk(v: Any, depth: int = 0) -> None:
+        if depth > 12 or len(out) > 2000:
+            return
+        if isinstance(v, dict):
+            for k, x in v.items():
+                walk(k, depth + 1)
+                walk(x, depth + 1)
+        elif isinstance(v, list):
+            for x in v:
+                walk(x, depth + 1)
+        elif isinstance(v, str):
+            t = " ".join(v.split())
+            if 3 <= len(t) <= 80 and re.search(r"[^\W\d_]", t) and not _DATE_LIKE.match(t) and t.casefold() not in page:
+                out.add(t)
+
+    walk(data)
+    return out
+
+
+def without_owner_data(journeys: list[jev_verify.Journey], data: Any, html: str,
+                       ) -> tuple[list[jev_verify.Journey], list[str]]:
+    """The journeys that carry none of the owner's saved data, and a problem for each that does. Jev runs off
+    the Mac (jev_verify: the step's words, the values typed and the expected text go to it), and an edit's
+    prompt shows Claude a sample of the saved data, which a journey can copy ("type Priya into Name")."""
+    mine = owner_values(data, html)
+    if not mine:
+        return journeys, []
+    keep, problems = [], []
+    for j in journeys:
+        text = " \n ".join([s.target for s in j.steps] + [s.value for s in j.steps] + list(j.expect))
+        if any(re.search(r"(?<!\w)" + re.escape(v) + r"(?!\w)", text, re.I) for v in mine):
+            problems.append(f'journey "{j.name}" uses the owner\'s saved data; the verifier runs off the Mac, so '
+                            "write it with made-up example values. It was not walked.")
+        else:
+            keep.append(j)
+    return keep, problems
+
+
+def stopped_reason(e: BaseException) -> str:
+    """Why a build stopped on an exception, as the change chat keeps it: the Claude API's own reason where
+    there is one (a refused key, a rate limit), else that it stopped."""
+    from .miniapp import _error_line
+
+    line = _error_line(e) if isinstance(e, Exception) else ""
+    return "the build stopped before it finished" if line in ("", "Something went wrong answering that.") \
+        else line.rstrip(".")
+
+
 class AppMaker:
     """Claude builds or changes one app: generate, check (in code, then in a headless phone), repair, keep the
     best version. Every dollar goes to ``spend``; there is no cap (owner: "no claude limit, just track spend")."""
@@ -1090,7 +1348,7 @@ class AppMaker:
         self._check, self.max_repairs = check, max(0, max_repairs)
 
     async def make(self, request: str, progress: Progress = _no_progress) -> Made:
-        return await self._run(build_prompt(request, self._context()), request, "", None, progress)
+        return await self._run(build_prompt(request, self._context()), request, "", None, progress, None)
 
     async def edit(self, name: str, change: str, progress: Progress = _no_progress) -> Made:
         # A slug is taken as it is (the Mini App and the chat door both pass one): the door locked that app,
@@ -1103,32 +1361,67 @@ class AppMaker:
             data = self.store.load_data(app.slug)
         except KeyError:
             data = None
-        prompt = edit_prompt(app, html, data, self.store.requests(app.slug), change, self._context())
-        return await self._run(prompt, change, app.slug, data, progress)
+        journeys = self.store.journeys(app.slug)
+        prompt = edit_prompt(app, html, data, self.store.requests(app.slug), change, self._context(), journeys)
+        t0 = time.perf_counter()
+        tally: dict[str, Any] = {"usd": 0.0, "rounds": 0}
+        try:
+            made = await self._run(prompt, change, app.slug, data, progress, journeys, tally)
+        except Exception as e:
+            # Claude could not be reached: the change chat still shows the request, why it did nothing, and what
+            # the rounds before the failure already cost
+            self._record_failed(app.slug, change, Made(False, reason=stopped_reason(e), usd=tally["usd"],
+                                                       secs=time.perf_counter() - t0, rounds=tally["rounds"]))
+            raise
+        if not made.ok:
+            self._record_failed(app.slug, change, made)
+        return made
 
-    async def _test(self, html: str, seed: Any) -> tuple[list[str], Optional[app_check.CheckReport]]:
+    def _record_failed(self, slug: str, change: str, made: Made) -> None:
+        try:
+            self.store.record_build(slug, change, build_record(
+                ok=False, report=made.check, issues=made.issues, usd=made.usd, secs=made.secs, rounds=made.rounds,
+                reason=made.reason))
+        except (KeyError, OSError) as e:                 # deleted meanwhile, or the disk: never fails the build
+            log.info("apps: the failed build of %s was not recorded (%s)", slug, type(e).__name__)
+
+    async def _test(self, html: str, seed: Any, journeys: Optional[list[jev_verify.Journey]] = None,
+                    ) -> tuple[list[str], Optional[app_check.CheckReport]]:
         issues = static_issues(html)
         if self._check is None:
             return issues, None
         try:
-            report = await self._check(html, seed=seed)
+            # journeys only when there are some: a check written before them takes (html, seed=) alone
+            report = await (self._check(html, seed=seed, journeys=journeys) if journeys else
+                            self._check(html, seed=seed))
         except Exception as e:  # noqa: BLE001 — a broken checker never fails a build
             log.warning("apps: the check failed to run (%s)", type(e).__name__)
             return issues, None
         return issues + [i for i in report.issues if i not in issues], report
 
-    async def _run(self, prompt: str, request: str, slug: str, seed: Any, progress: Progress) -> Made:
+    async def _run(self, prompt: str, request: str, slug: str, seed: Any, progress: Progress,
+                   journeys: Optional[list[jev_verify.Journey]], tally: Optional[dict[str, Any]] = None) -> Made:
+        """The build loop. ``journeys`` are the ones in hand (an edit's current ones, else None): an answer with a
+        usable ```journeys block replaces them, one without keeps them, and the version kept is saved with the
+        journeys it was checked with. A block that is empty or does not parse keeps them too, and stays a
+        problem until a usable one comes: otherwise it would switch the verifier off for the app. A repair
+        round's block never weakens the set: a journey it leaves out is still walked. On an edit (``seed``, the
+        saved data), a journey that carries the owner's data is never walked (without_owner_data).
+        ``tally`` gets the running cost and rounds, for a caller whose build raises part way."""
+        tally = tally if tally is not None else {}
         t0 = time.perf_counter()
         messages: list[dict[str, Any]] = [{"role": "user", "content": prompt}]
         usd = 0.0
-        # (untested, problems, -round, file, problems, report): a version the phone check really ran on beats
-        # one it could not (a checker that did not start), whatever their counts; fewer problems next; the later
-        # round on a tie.
-        best: Optional[tuple[bool, int, int, str, list[str], Optional[app_check.CheckReport]]] = None
+        # (untested, problems, -round, file, problems, report, journeys): a version the phone check really ran
+        # on beats one it could not (a checker that did not start), whatever their counts; fewer problems next;
+        # the later round on a tie.
+        best: Optional[tuple[bool, int, int, str, list[str], Optional[app_check.CheckReport],
+                             Optional[list[jev_verify.Journey]]]] = None
         why = "Claude did not return a complete app"
         issues: list[str] = []
         history: list[list[str]] = []
         last: Optional[str] = None          # the file Claude wrote last: what a repair's edits apply to
+        stuck: list[str] = []               # an unusable journeys block's problems, until a usable one comes
         for round_no in range(self.max_repairs + 1):
             if round_no:
                 n = len(issues)
@@ -1147,12 +1440,25 @@ class AppMaker:
             if gen.usage is not None:
                 self._spend(spent)
             usd += spent
+            tally["usd"] = usd
             if gen.stop_reason == "refusal":
                 why = "Claude declined to build that"
                 break
             html, bad_edit = apply_edits(last, gen.text) if last is not None else (None, "")
             if html is None and not bad_edit:
                 html = extract_html(gen.text)
+            found, journey_problems = jev_verify.extract_journeys(gen.text)
+            if found:
+                if round_no and journeys:
+                    names = {j.name for j in found}
+                    found = (found + [j for j in journeys if j.name not in names])[:jev_verify.MAX_JOURNEYS]
+                journeys, stuck = found, []
+            elif found is not None:
+                stuck = journey_problems        # the journeys in hand stay
+            elif stuck:
+                journey_problems = stuck
+            if html is None and not bad_edit and last is not None and found is not None:
+                html = last                     # a repair that corrected only the journeys
             if html is None:
                 cut = gen.stop_reason == "max_tokens"
                 why = "the app was too long to finish" if cut else "Claude did not return a complete app"
@@ -1163,15 +1469,23 @@ class AppMaker:
                 tested = False
             else:
                 last = html
+                if seed is not None and journeys:
+                    kept, leaked = without_owner_data(journeys, seed, html)
+                    journeys, journey_problems = kept or None, journey_problems + leaked
                 progress("testing", len(html))
-                issues, report = await self._test(html, seed)
+                issues, report = await self._test(html, seed, journeys)
+                if not journeys and not journey_problems:
+                    # not a problem to repair (a round costs more than it proves): the build is checked by the
+                    # script alone, as an app from before journeys is
+                    log.info("apps: round %d came with no journeys; only the scripted check runs", round_no)
+                issues = issues + [f"Journeys block: {p}" for p in journey_problems]
                 tested = report is not None and not report.skipped
                 untested = self._check is not None and not tested
                 if load_issues(html):
                     # never kept: a script from outside would run with the owner's data (load_issues)
                     why = "the app kept loading code from outside cdn.jsdelivr.net/npm at an exact version"
                 elif best is None or (untested, len(issues), -round_no) < best[:3]:
-                    best = (untested, len(issues), -round_no, html, issues, report)
+                    best = (untested, len(issues), -round_no, html, issues, report, journeys)
             history.append(list(issues))
             if html is not None and not issues:
                 break
@@ -1182,16 +1496,19 @@ class AppMaker:
                                     else gen.text},
                                    {"role": "user", "content": repair_prompt(issues, tested=tested,
                                                                              editable=last is not None)}]
+            tally["rounds"] = sum(1 for m in messages if m["role"] == "assistant")
         secs = time.perf_counter() - t0
         rounds = sum(1 for m in messages if m["role"] == "assistant")
         if best is None:
             return Made(False, reason=why, usd=usd, secs=secs, rounds=rounds, history=history)
-        _, _, _, html, left, report = best
+        _, _, _, html, left, report, kept_journeys = best
         if slug and self.store.info(slug) is None:
             return Made(False, reason="the app was deleted while it was being changed", usd=usd, secs=secs,
                         check=report, rounds=rounds, issues=left, history=history)
         progress("saving", len(html))
-        app = self.store.save(html, request, slug)
+        app = self.store.save(html, request, slug, journeys=kept_journeys,
+                              build=build_record(ok=True, report=report, issues=left, usd=usd, secs=secs,
+                                                 rounds=rounds))
         log.info("apps: %s %s in %.0f s, %d repair round(s), %d problem(s) left, $%.3f",
                  "edited" if slug else "made", app.slug, secs, rounds, len(left), usd)
         return Made(True, app=app, usd=usd, secs=secs, check=report, rounds=rounds, issues=left, history=history)
@@ -1273,6 +1590,69 @@ BUDDY_JS = """(() => {
     bb.onClick = (f) => { if (typeof f === "function" && !own.includes(f)) own.push(f); return bb; };
     bb.offClick = (f) => { const i = own.indexOf(f); if (i >= 0) own.splice(i, 1); return bb; };
   }
+  // The way to change this app: its chat on buddy's home page (/?chat=<slug>), where the owner's signed
+  // initData lives. The app only navigates there; it is never given the power to change apps or spend.
+  // Telegram's Settings item in the Mini App's "..." menu (7.0+) goes there, and so does a small pencil in the
+  // page's top right corner, beside the app's title, that scrolls away with the page (the maker is told to
+  // keep that corner free, and app_check reports a control under it). The pencil lives in a
+  // closed shadow root on <html>, with its host's position set inline and !important, so the app's own CSS
+  // (a "button { ... }" rule, a body that is re-rendered) cannot restyle or remove it by accident.
+  const toChat = () => { location.href = "/?chat=" + encodeURIComponent(slug); };
+  const sb = tg && tg.SettingsButton;
+  if (sb && tg.isVersionAtLeast && tg.isVersionAtLeast("7.0")) {
+    try { sb.onClick(toChat); sb.show(); } catch (e) {}
+  }
+  function pencil() {
+    if (!slug || document.querySelector("buddy-change")) return;
+    const host = document.createElement("buddy-change");
+    host.setAttribute("style", "all: initial !important; position: absolute !important; z-index: 2147483647 !important; "
+      + "display: block !important; width: 44px !important; height: 44px !important; "
+      + "top: calc(6px + var(--tg-safe-area-inset-top, 0px) + var(--tg-content-safe-area-inset-top, 0px)) !important; "
+      + "right: calc(6px + var(--tg-safe-area-inset-right, 0px) + var(--tg-content-safe-area-inset-right, 0px)) !important;");
+    const root = host.attachShadow({ mode: "closed" });
+    root.innerHTML = '<style>button { all: initial; box-sizing: border-box; width: 44px; height: 44px; display: grid; '
+      + 'place-items: center; cursor: pointer; border-radius: 22px; -webkit-tap-highlight-color: transparent; } '
+      + 'span { width: 32px; height: 32px; border-radius: 16px; display: grid; place-items: center; '
+      + 'font: 17px/1 -apple-system, system-ui, sans-serif; opacity: .8; '
+      + 'background: var(--tg-theme-secondary-bg-color, rgba(127, 127, 127, .16)); '
+      + 'color: var(--tg-theme-link-color, #2481cc); } '
+      + 'button:focus-visible span { outline: 2px solid var(--tg-theme-link-color, #2481cc); outline-offset: 2px; } '
+      + '</style><button type="button" aria-label="Change this app" title="Change this app">'
+      + '<span aria-hidden="true">\u270e</span></button>';
+    const btn = root.querySelector("button");
+    btn.addEventListener("click", toChat);
+    document.documentElement.appendChild(host);
+    // The corner belongs to the app first: while one of its own controls is under the pencil (a header's
+    // Settings button, a dialog's close), the pencil is hidden, so a tap there reaches the app. Checked again
+    // after every change to the page, a scroll or a resize, at most once a frame.
+    const TAP = "button,a[href],input,select,textarea,label,summary,[role=button],[role=tab],[role=link],"
+      + "[role=checkbox],[role=switch],[role=radio],[role=menuitem],[role=option],[onclick]";
+    let queued = false, hidden = false;
+    const under = () => {
+      const r = host.getBoundingClientRect();
+      if (r.bottom <= 0 || r.top >= innerHeight) return hidden;      // scrolled away: nothing to decide
+      const pts = [[r.left + r.width / 2, r.top + r.height / 2], [r.left + 8, r.top + 8], [r.right - 8, r.top + 8],
+        [r.left + 8, r.bottom - 8], [r.right - 8, r.bottom - 8]];
+      return pts.some(([x, y]) => {
+        const el = document.elementsFromPoint(x, y).find((e) => e !== host);
+        return !!(el && el !== document.documentElement && el !== document.body && el.closest(TAP));
+      });
+    };
+    const settle = () => {
+      queued = false;
+      const now = under();
+      if (now === hidden) return;
+      hidden = now;                    // the host and its button both: the button's "all: initial" is visible
+      [host, btn].forEach((e) => e.style.setProperty("visibility", now ? "hidden" : "visible", "important"));
+    };
+    const later = () => { if (!queued) { queued = true; requestAnimationFrame(settle); } };
+    new MutationObserver(later).observe(document.documentElement, { subtree: true, childList: true, attributes: true,
+      characterData: true });
+    addEventListener("scroll", later, { passive: true, capture: true });
+    addEventListener("resize", later);
+    settle();
+  }
+  if (document.readyState === "loading") document.addEventListener("DOMContentLoaded", pencil); else pencil();
 })();
 """
 
@@ -1359,11 +1739,13 @@ class ChatMaker:
 
     A build runs in the background like a Mac task: the tool returns at once, and when it is done the app's
     screenshot (from the check) goes to the chat with an Open button under it (an inline ``web_app`` button,
-    so it opens as a Mini App with the owner's signed initData). Undo, rename, delete and restore are instant;
+    so it opens as a Mini App with the owner's signed initData); a change also gets a Change button to the
+    app's change chat on the home page, to keep refining it. Undo, rename, delete and restore are instant;
     the first three act only on an app the owner named for sure (AppStore.resolve), never on a guess."""
 
     def __init__(self, app: Any, spawn: Callable[[Awaitable[Any], str], Any]) -> None:
-        self._app, self._spawn = app, spawn          # miniapp.MiniApp: .maker, .store, .app_url(slug), .url
+        # miniapp.MiniApp: .maker, .store, .app_url(slug), .chat_url(slug), .url
+        self._app, self._spawn = app, spawn
         self.building: set[str] = set()
 
     @property
@@ -1518,6 +1900,13 @@ class ChatMaker:
         failed = f"I couldn't change {info.title if info else target}; it is unchanged" if target \
             else "I couldn't build that app"
         progress = self._progress(chat_id, say)
+
+        async def fail(line: str) -> None:
+            # a change that failed leads to the app's change chat too: its thread shows the try, and it is where
+            # to ask again in other words
+            chat = self._app.chat_url(target) if target and self._app.store.info(target) is not None else ""
+            await (send(chat_id, line, [("Change", chat)]) if chat else say(chat_id, line))
+
         try:
             made = await (self._app.maker.edit(target, request, progress) if target
                           else self._app.maker.make(request, progress))
@@ -1525,12 +1914,12 @@ class ChatMaker:
             from .miniapp import _error_line
 
             log.warning("apps: building from the chat failed (%s)", type(e).__name__)
-            await say(chat_id, f"{failed}: {_error_line(e)}")
+            await fail(f"{failed}: {_error_line(e)}")
             return
         finally:
             self.building.discard(key)
         if not made.ok or made.app is None:
-            await say(chat_id, f"{failed}: {made.reason}.")
+            await fail(f"{failed}: {made.reason}.")
             return
         app = made.app
         url = self._app.app_url(app.slug)
@@ -1541,10 +1930,12 @@ class ChatMaker:
         if app.description:
             caption += f"\n{app.description}"
         if made.issues:
-            first = made.issues[0] if len(made.issues[0]) <= 240 else made.issues[0][:239] + "…"
+            first = owner_issues(made.check, made.issues[:1], 240)[0]
             caption += (f"\nIt may still have a problem: {first} "
                         + ('Say "undo" to go back.' if target else "Tell me what to fix."))
         buttons = [(f"Open {app.title}", url)]
+        if target and self._app.chat_url(app.slug):
+            buttons.append(("Change", self._app.chat_url(app.slug)))      # the app's change chat, to keep refining
         shot = made.check.screenshot if made.check is not None else None
         if shot and send_photo is not None:
             try:
