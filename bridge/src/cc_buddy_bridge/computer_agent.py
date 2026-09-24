@@ -89,6 +89,11 @@ RUN_PLAN_TIMEOUT_SECS = 45.0               # plan_executor.MAX_WALL_SECS (30) + 
 PLAN_EXEC_DEFAULT: bool = False
 DEFAULT_PLAN_EXEC_EFFORT = "low"           # the plan is short and typed; "high" is the recovery loop's
 MAX_PLAN_CONFIRMS = 3                      # human yes/no questions one plan may ask
+# The browser lane asks the planner again, with the new page's controls and what was already done, when a plan
+# stops at a checkpoint or a question's page did not hold the answer. Before this every such stop handed the
+# task off (tools/browser_model_eval.py, 2026-09-24: every model's tab/filter tasks ended at a checkpoint).
+# Two re-plans at most: three plan calls in all, never an open-ended loop.
+MAX_BROWSER_REPLANS = 2
 
 INSTRUCTIONS_TEMPLATE = """You are buddy, a small desk robot, operating the human's own Mac for them by voice request.
 
@@ -1185,12 +1190,17 @@ class ComputerAgent:
         ("", a [note] for the turn-by-turn loop) otherwise — that loop is the floor: a plan that cannot be
         made, parsed or finished costs one short call and then today's behaviour, from the screen as the
         executor left it. A consequential step asks the human directly (`_ask`), with no planner turn;
-        nothing in a plan can pre-approve one."""
+        nothing in a plan can pre-approve one.
+
+        In the browser (lane="browser") a checkpoint differs, measured on tools/browser_model_eval.py
+        (2026-09-24): it asks the planner again with the new page and the steps already done
+        (MAX_BROWSER_REPLANS)."""
         from . import plan_contract as pc
 
         t0 = self._clock()
+        browser = lane == "browser"
         outline = await self._interruptible(worker.outline())
-        named = "" if lane == "browser" else task_router.find_app_mention(goal, task_router.installed_apps())
+        named = "" if browser else task_router.find_app_mention(goal, task_router.installed_apps())
         if named and named.casefold() != str(outline.get("app") or "").casefold():
             # The request names an app that is not in front: the planner would plan blind (live, 2026-09-21: a
             # checkpoint instead of a click). Open it first, in the worker, and read ITS window.
@@ -1202,67 +1212,90 @@ class ComputerAgent:
                 raise
             except Exception as e:  # noqa: BLE001 — the plan's own open_app step is the fallback
                 log.info("agent: could not open %s before planning (%s)", named, type(e).__name__)
+        done: list[str] = []                        # every step applied, across plans, in order
         # In the browser a question is navigation plus a read of the page's text (browser_lane.page_text), not
         # "needs eyes": plan only the way to the page, then answer from what it says.
-        reads = lane == "browser" and (lane_router.is_question(goal) or bool(task_router.TELL_ME.search(goal)))
-        req = pc.plan_request(self.config.model, goal, app=str(outline.get("app") or ""),
-                              outline=[str(x) for x in outline.get("lines") or []],
-                              apps=[] if lane == "browser" else task_router.installed_apps(),
-                              effort=self.config.plan_exec_effort,
-                              timeout=self.config.api_timeout_secs, reads=reads)
-        try:
-            response = await self._interruptible(self._create(req, 0))
-            self._meter(response)
-            plan = pc.parse_plan(json.loads(classify_response(response).text), goal)
-        except (Cancelled, FailSafe):
-            raise
-        except Exception as e:  # noqa: BLE001 — no plan is "the planner does it turn by turn", never a failed task
-            self._log({"turn": 0, "plan": {"error": f"{type(e).__name__}: {e}"[:200],
-                                           "secs": round(self._clock() - t0, 2)}})
-            return "", ""
-        plan_dict = {**pc.plan_to_dict(plan), "app": str(outline.get("app") or "")}
-        self._log({"turn": 0, "plan": {**plan_dict, "secs": round(self._clock() - t0, 2),
-                                       "outline_lines": len(outline.get("lines") or [])}})
-        if plan.needs_eyes:
-            return "", ""
+        reads = browser and (lane_router.is_question(goal) or bool(task_router.TELL_ME.search(goal)))
         approved: dict[str, str] = {}
-        start, result = 0, {}
-        for _ in range(MAX_PLAN_CONFIRMS + 1):
-            result = await self._interruptible(worker.run_plan(plan_dict, goal, start=start, approved=approved))
-            self._log({"turn": 0, "ledger": result})
-            for entry in result.get("ledger") or []:
-                if entry.get("effect") != "refused":
-                    self._acted = True
-                    self._emit("progress", str(entry.get("step") or ""), 0)
-            if result.get("status") != "needs_human":
-                break
-            start = int(result.get("next_index") or 0)
-            what = str(result.get("confirm") or "this step")
-            if len(approved) >= MAX_PLAN_CONFIRMS:
-                break
-            question = f"Should I go ahead: {what}?"
-            self._emit("ask", question, 0)
-            said = await self._ask(question)
-            self._log({"turn": 0, "ask": question, "answer": said})
-            if not consent.approves(said):                  # fail-closed: "yeah no" is not a yes
-                return f"Okay, I stopped before that: {what}.", ""
-            approved[str(start)] = what
-        # The planner leaves final_say empty exactly when the answer must be read off the page (READ instructions);
-        # a plan with its own sentence ("Here is the top headline.") keeps it.
-        if reads and not plan.final_say and result.get("status") in ("complete", "checkpoint"):
-            said = await self._read_answer(goal, worker)
-            if said:
-                log.info("agent: plan and page read in %.2f s", self._clock() - t0)
-                return said, ""
-        if result.get("status") == "complete" and result.get("sentence"):
-            log.info("agent: plan ran in %.2f s with one planner call", self._clock() - t0)
-            return str(result["sentence"]), ""
-        done = [str(e.get("step")) for e in result.get("ledger") or [] if e.get("effect") != "refused"]
+        asked = 0
+        again = ""
+        result: dict[str, Any] = {}
+        for attempt in range(1 + (MAX_BROWSER_REPLANS if browser else 0)):
+            if attempt:
+                outline = await self._interruptible(worker.outline())
+            req = pc.plan_request(self.config.model, goal, app=str(outline.get("app") or ""),
+                                  outline=[str(x) for x in outline.get("lines") or []],
+                                  apps=[] if browser else task_router.installed_apps(),
+                                  effort=self.config.plan_exec_effort,
+                                  timeout=self.config.api_timeout_secs, reads=reads, browser=browser,
+                                  site=(urlsplit(str(outline.get("url") or "")).hostname or "") if browser else "",
+                                  done=done, again=again)
+            try:
+                response = await self._interruptible(self._create(req, 0))
+                self._meter(response)
+                plan = pc.parse_plan(json.loads(classify_response(response).text), goal)
+            except (Cancelled, FailSafe):
+                raise
+            except Exception as e:  # noqa: BLE001 — no plan is "the planner does it turn by turn", never a failed task
+                self._log({"turn": 0, "plan": {"error": f"{type(e).__name__}: {e}"[:200], "attempt": attempt,
+                                               "secs": round(self._clock() - t0, 2)}})
+                return "", self._handoff_note(done, again or "no plan")
+            plan_dict = {**pc.plan_to_dict(plan), "app": str(outline.get("app") or "")}
+            self._log({"turn": 0, "plan": {**plan_dict, "secs": round(self._clock() - t0, 2), "attempt": attempt,
+                                           "outline_lines": len(outline.get("lines") or [])}})
+            if plan.needs_eyes:
+                return "", self._handoff_note(done, again or "the planner needs to see the page")
+            approved = {}
+            start = 0
+            for _ in range(MAX_PLAN_CONFIRMS + 1):
+                result = await self._interruptible(worker.run_plan(plan_dict, goal, start=start, approved=approved))
+                self._log({"turn": 0, "ledger": result})
+                for entry in result.get("ledger") or []:
+                    if entry.get("effect") != "refused":
+                        self._acted = True
+                        done.append(str(entry.get("step") or ""))
+                        self._emit("progress", str(entry.get("step") or ""), 0)
+                if result.get("status") != "needs_human":
+                    break
+                start = int(result.get("next_index") or 0)
+                what = str(result.get("confirm") or "this step")
+                if asked >= MAX_PLAN_CONFIRMS:
+                    break
+                question = f"Should I go ahead: {what}?"
+                self._emit("ask", question, 0)
+                said = await self._ask(question)
+                asked += 1
+                self._log({"turn": 0, "ask": question, "answer": said})
+                if not consent.approves(said):                  # fail-closed: "yeah no" is not a yes
+                    return f"Okay, I stopped before that: {what}.", ""
+                approved[str(start)] = what
+            status = str(result.get("status") or "")
+            # The planner leaves final_say empty exactly when the answer must be read off the page (READ
+            # instructions); a plan with its own sentence ("Here is the top headline.") keeps it.
+            if reads and not plan.final_say and status in ("complete", "checkpoint"):
+                said = await self._read_answer(goal, worker)
+                if said:
+                    log.info("agent: plan and page read in %.2f s", self._clock() - t0)
+                    return said, ""
+            if status == "complete" and result.get("sentence"):
+                log.info("agent: plan ran in %.2f s with %d planner call%s", self._clock() - t0, attempt + 1,
+                         "" if attempt == 0 else "s")
+                return str(result["sentence"]), ""
+            if browser and status == "checkpoint":
+                again = "the plan stopped at a checkpoint to look at the new page"
+                continue
+            break
+        else:                                        # the re-plan budget ran out
+            return "", self._handoff_note(done, again)
+        return "", self._handoff_note(done, str(result.get("reason") or result.get("status") or ""))
+
+    @staticmethod
+    def _handoff_note(done: list[str], why: str) -> str:
+        """The [note] the turn-by-turn loop (or Codex) starts from, "" when nothing was applied at all."""
         if not done:
-            return "", ""
-        return "", ("\n\n[note] Before you started, a plan already did, in order: " + "; ".join(done)
-                    + f". It stopped there ({result.get('reason') or result.get('status')}). Start from the "
-                    "screenshot; do not repeat those steps.")
+            return ""
+        return ("\n\n[note] Before you started, a plan already did, in order: " + "; ".join(done)
+                + f". It stopped there ({why or 'unfinished'}). Start from the screenshot; do not repeat those steps.")
 
     async def _read_answer(self, goal: str, worker: Any) -> str:
         """Answer a question from the page the plan left on screen: its visible text, one short text-only call.

@@ -338,3 +338,15 @@ def test_a_cookie_notice_is_dismissed_before_a_click_and_is_in_the_ledger() -> N
     quiet = ConsentEffectors(said="")                       # nothing to dismiss: nothing in the ledger
     r = go(p, Senses([calendar(), calendar(True)], changed=[True]), quiet, decide="keyword")
     assert [e.step for e in r.ledger] == ["click week"]
+
+
+def test_a_closing_checkpoint_completes_only_where_the_caller_says_so() -> None:
+    p = plan({"kind": "click", "target": "week", "label_hint": "Week"}, {"kind": "checkpoint"})
+    r = go(p, Senses([calendar(), calendar(True)], changed=[True]), Effectors(), decide="keyword")
+    assert r.status == "checkpoint"                                  # the Mac lane: unchanged
+    r = go(p, Senses([calendar(), calendar(True)], changed=[True]), Effectors(), decide="keyword",
+           last_checkpoint_completes=True)
+    assert r.status == "complete" and r.sentence == "All set.", r.to_dict()
+    mid = plan({"kind": "checkpoint"}, {"kind": "click", "target": "week", "label_hint": "Week"})
+    r = go(mid, Senses([calendar()]), Effectors(), decide="keyword", last_checkpoint_completes=True)
+    assert r.status == "checkpoint" and r.next_index == 1            # one in the middle still stops
