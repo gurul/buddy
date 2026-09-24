@@ -5,10 +5,12 @@ from __future__ import annotations
 import asyncio
 import json
 import subprocess
+import threading
 import time
 import urllib.request
 from pathlib import Path
 from types import SimpleNamespace
+from typing import Any
 
 import pytest
 
@@ -206,20 +208,99 @@ def test_the_configured_default_applies_only_when_it_is_open() -> None:
 
 
 class _Ctx:
-    def __init__(self, body: str) -> None:
-        self.body = body
-        self.request = SimpleNamespace(get=lambda url, timeout=0: SimpleNamespace(text=lambda: self.body))
+    """A Chrome profile: its cookies for Google's account list, and (for the old request path) the request."""
+    def __init__(self, body: str, fetch: Any = None) -> None:
+        self.body, self.sid = body, f"sid-{id(self)}"
+        _BODIES[self.sid] = body
+        get = (lambda url, timeout=0: SimpleNamespace(text=lambda: fetch(url, f"SID={self.sid}", timeout))) if fetch \
+            else (lambda url, timeout=0: SimpleNamespace(text=lambda: self.body))
+        self.request = SimpleNamespace(get=get)
+
+    def cookies(self, urls: Any = None) -> list[dict[str, str]]:
+        return [{"name": "SID", "value": self.sid}]
+
+
+_BODIES: dict[str, str] = {}
+
+
+def _by_cookie(url: str, header: str, timeout: float) -> str:
+    return _BODIES[header.removeprefix("SID=")]
+
+
+def _attached(*contexts: Any, fetch: Any = _by_cookie) -> BrowserLane:
+    lane = BrowserLane(BrowserLaneConfig(enabled=True, attach=True))
+    lane._browser = SimpleNamespace(contexts=list(contexts))
+    lane._fetch_accounts = fetch
+    return lane
 
 
 def test_profiles_map_primary_accounts_to_contexts_and_a_missing_one_is_refused() -> None:
     work, personal = _Ctx(LIST_ACCOUNTS), _Ctx('[[["x",1,"G","owner@gmail.com"]]]')
-    lane = BrowserLane(BrowserLaneConfig(enabled=True, attach=True))
-    lane._browser = SimpleNamespace(contexts=[work, personal])
+    lane = _attached(work, personal)
     assert lane._profiles() == {"owner@work.example": work, "owner@gmail.com": personal}
     assert lane._pick_profile("owner@gmail.com") is personal
     assert lane._pick_profile("") is work
     with pytest.raises(AttachError, match="no open Chrome window for student@school.example"):
         lane._pick_profile("student@school.example")
+
+
+class _SlowGoogle:
+    """Google's account list answering in `secs`, counting how many requests are in flight at once."""
+    def __init__(self, secs: float, hang: tuple[str, ...] = ()) -> None:
+        self.secs, self.hang, self.calls, self.in_flight, self.most = secs, hang, 0, 0, 0
+        self.lock = threading.Lock()
+
+    def __call__(self, url: str, header: str, timeout: float) -> str:
+        with self.lock:
+            self.calls += 1
+            self.in_flight += 1
+            self.most = max(self.most, self.in_flight)
+        try:
+            body = _BODIES[header.removeprefix("SID=")]
+            time.sleep(5.0 if body in self.hang else self.secs)
+            return body
+        finally:
+            with self.lock:
+                self.in_flight -= 1
+
+
+def test_profile_lookups_run_at_once_and_are_cached_for_the_connection() -> None:
+    """Production, 2026-09-23/24: one Google request per profile, one after another, 8 s timeout each —
+    19 s before a task began. Every profile is now asked at once, and asked once per connection."""
+    google = _SlowGoogle(0.3)
+    a, b, c = (_Ctx(LIST_ACCOUNTS, google), _Ctx('[[["x",1,"G","owner@gmail.com"]]]', google),
+               _Ctx('[[["x",1,"G","student@school.example"]]]', google))
+    lane = _attached(a, b, c, fetch=google)
+    t0 = time.perf_counter()
+    found = lane._profiles()
+    secs = time.perf_counter() - t0
+    assert found == {"owner@work.example": a, "owner@gmail.com": b, "student@school.example": c}
+    assert google.most == 3, f"lookups were not concurrent (at most {google.most} in flight)"
+    assert secs < 0.6, f"three 0.3 s lookups took {secs:.2f} s: one after another"
+    assert lane._profiles() is found and google.calls == 3          # cached: no second round
+    lane._close()                                                     # a new connection asks again
+    lane._browser = SimpleNamespace(contexts=[a, b, c])
+    assert lane._profile_map is None
+
+
+def test_a_profile_that_does_not_answer_costs_only_the_lookup_budget(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(bl, "PROFILE_LOOKUP_BUDGET_SECS", 0.3)
+    silent = '[[["x",1,"G","slow@example.org"]]]'
+    google = _SlowGoogle(0.01, hang=(silent,))
+    work, slow = _Ctx(LIST_ACCOUNTS, google), _Ctx(silent, google)
+    lane = _attached(work, slow, fetch=google)
+    t0 = time.perf_counter()
+    assert lane._profiles() == {"owner@work.example": work}
+    assert time.perf_counter() - t0 < 1.0
+
+
+def test_with_one_chrome_profile_there_is_nothing_to_look_up() -> None:
+    google = _SlowGoogle(0.0)
+    only = _Ctx(LIST_ACCOUNTS, google)
+    lane = _attached(only, fetch=google)
+    lane._context = only
+    lane._ensure = lambda: SimpleNamespace(page=None)
+    assert lane._use_profile("check my work inbox") == "" and google.calls == 0
 
 
 def test_a_lost_tab_in_the_owners_chrome_is_replaced_by_a_new_one_never_theirs() -> None:

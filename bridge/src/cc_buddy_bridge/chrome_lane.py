@@ -11,7 +11,9 @@ connection, so one connection means one click per Chrome session, not one per ta
 2. Finished: that is the answer. Stopped by the owner's no: that is the answer.
 3. Part done: the rest goes to Codex with a note of what was already done, so nothing is repeated.
    Nothing done (no plan, the lane unreachable, the owner not clicking Allow): Codex takes the whole task,
-   exactly as before this module.
+   exactly as before this module. "Nothing done" has a clock: when no plan is executing and no step has been
+   reported NOTHING_DONE_BUDGET_SECS after the start, the lane is stopped and Codex takes the task then. A
+   plan that has started runs to its end.
 
 ``ChromeLaneAgent`` keeps the run/steer/cancel/status contract every door already uses, so it drops in behind
 app_reflex.ReflexFirstAgent as its second body (make_auto) with no change to the voice or Telegram doors.
@@ -28,6 +30,13 @@ from .agent_contract import AgentEvent
 
 log = logging.getLogger(__name__)
 
+# How long the lane may go with nothing done (no plan executing, no step reported) before Codex takes the task.
+# Production, 2026-09-23/24: once connected, the lane reached a plan's first step (or gave up) 4-6 s later; the
+# runs that did nothing still spent 11.3 s and 25.6 s before handing on (19 s of it one profile lookup, now
+# budgeted at 3 s), and one waited 36 s on Chrome's Allow until the owner pressed Stop. 15 s is about twice
+# the slowest healthy path; a plan that has started is never cut off.
+NOTHING_DONE_BUDGET_SECS = 15.0
+
 
 class ChromeLaneAgent:
     """Plan once in the owner's Chrome (``make_planner().run_in_browser``), Codex (``make_fallback``) for the rest."""
@@ -38,8 +47,11 @@ class ChromeLaneAgent:
                  make_fallback: Callable[[], Any], on_event: Callable[[AgentEvent], None],
                  ask_user: Callable[[str], Awaitable[str]],
                  prepare: Optional[Callable[[str], Awaitable[Any]]] = None,
-                 lane_screenshot: Optional[Callable[[], Awaitable[Optional[bytes]]]] = None) -> None:
+                 lane_screenshot: Optional[Callable[[], Awaitable[Optional[bytes]]]] = None,
+                 idle_budget_secs: Optional[float] = None) -> None:
         self._make_planner, self._make_fallback = make_planner, make_fallback
+        self._idle_budget = NOTHING_DONE_BUDGET_SECS if idle_budget_secs is None else idle_budget_secs
+        self._progressed = self._timed_out = False
         self._prepare = prepare                       # connect (the owner's Allow) and pick the Chrome profile
         self._lane_screenshot = lane_screenshot       # buddy's tab in the owner's Chrome, as JPEG bytes
         self.on_event, self.ask_user = on_event, ask_user
@@ -93,22 +105,26 @@ class ChromeLaneAgent:
         self.on_event(AgentEvent("started", goal))
         t0 = time.perf_counter()
         planner = self._current = self._make_planner(self._forward, self.ask_user)
+        self._progressed, self._timed_out = False, False
+        lane = getattr(planner, "browser", None)
+        plans_before = getattr(lane, "plans_started", 0)
+        attempt = asyncio.ensure_future(self._attempt(planner, goal))
         try:
-            if self._prepare is not None:
-                self._preparing = asyncio.ensure_future(self._prepare(goal))
-                try:
-                    await self._preparing             # raises when Chrome cannot be reached: Codex takes it
-                except asyncio.CancelledError:
-                    if self._cancel_reason is None:
-                        raise                         # the whole task was cancelled from outside: let it go
-                    self.final = "Stopped."
-                    self.on_event(AgentEvent("cancelled", self.final))
-                    return self.final
-            answer, note = await planner.run_in_browser(goal)
-        except Exception as e:  # noqa: BLE001 — the lane never costs the task: Codex takes it
-            log.warning("chrome-lane: the lane failed (%s: %s); Codex takes the task", type(e).__name__,
-                        str(e).splitlines()[0][:300] if str(e) else "")
-            answer, note = "", ""
+            await asyncio.wait({attempt}, timeout=self._idle_budget)
+            if not attempt.done() and not self._progressed and getattr(lane, "plans_started", 0) == plans_before:
+                # Nothing done yet (no plan executing, not a step reported): the lane is stuck connecting,
+                # waiting on Chrome's Allow, or planning slowly. Codex takes it now rather than later.
+                self._timed_out = True
+                log.info("chrome-lane: nothing done within %.0f s; Codex takes it", self._idle_budget)
+                if self._preparing is not None and not self._preparing.done():
+                    self._preparing.cancel()
+                planner.cancel(reason=f"no progress in {self._idle_budget:.0f} s")
+            answer, note = await attempt
+        except asyncio.CancelledError:
+            attempt.cancel()
+            raise
+        if self._timed_out:
+            answer, note = "", ""                         # "Stopped: no progress…" is ours, not the owner's answer
         if self._cancel_reason is not None:
             self.final = answer or "Stopped."
             self.on_event(AgentEvent("cancelled", self.final))
@@ -127,7 +143,31 @@ class ChromeLaneAgent:
         self.final = await self._current.run(goal + note)
         return self.final
 
+    async def _attempt(self, planner: Any, goal: str) -> tuple[str, str]:
+        """Connect, pick the profile, plan and execute: (answer, note), or ("", "") when the lane cannot."""
+        try:
+            if self._prepare is not None:
+                self._preparing = asyncio.ensure_future(self._prepare(goal))
+                try:
+                    await self._preparing             # raises when Chrome cannot be reached: Codex takes it
+                except asyncio.CancelledError:
+                    if self._timed_out:
+                        return "", ""                 # our own budget ran out while connecting: Codex takes it
+                    if self._cancel_reason is None:
+                        raise                         # the whole task was cancelled from outside: let it go
+                    return "Stopped.", ""
+            if self._timed_out:
+                return "", ""                         # the budget ran out as the connection came up
+            return await planner.run_in_browser(goal)
+        except asyncio.CancelledError:
+            raise
+        except Exception as e:  # noqa: BLE001 — the lane never costs the task: Codex takes it
+            log.warning("chrome-lane: the lane failed (%s: %s); Codex takes the task", type(e).__name__,
+                        str(e).splitlines()[0][:300] if str(e) else "")
+            return "", ""
+
     def _forward(self, ev: AgentEvent) -> None:
         # The planner's own started/final are this agent's to say; its progress and questions pass through.
         if ev.kind not in ("started", "final"):
+            self._progressed = True                   # a step done, or a question: the plan is under way
             self.on_event(ev)
