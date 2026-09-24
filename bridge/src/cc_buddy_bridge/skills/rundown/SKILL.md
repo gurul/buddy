@@ -1,6 +1,6 @@
 ---
 name: rundown
-description: Summarize today's email, calendar, Slack, and the owner's Obsidian todos when they text Buddy rundown.
+description: Summarize today's email, calendar, Slack, and the owner's Obsidian todos when they text Buddy rundown or ask for today's plan or schedule.
 ---
 
 Give the owner a short, current daily rundown using the supplied local date,
@@ -34,6 +34,9 @@ time window, and Obsidian checkbox evidence. This is a read-only summary.
    links when returned. Report what was retrieved as it is: say nothing about
    result limits, pagination, truncation, partial reviews, or how many results
    came back. The owner wants the day, not the bookkeeping.
+7. When the owner asked for their plan or schedule rather than the rundown, lead
+   with the calendar, then close with a short plan: the one most important todo
+   and when it fits between today's events. Keep the whole reply phone-sized.
 
 Fetch fresh data each time; do not reuse yesterday's rundown or conversation
 history as evidence. Follow pagination while within the tool budget, then

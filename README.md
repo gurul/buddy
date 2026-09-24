@@ -63,7 +63,8 @@ The [Telegram door](docs/stackchan/telegram.md) is **off by default**. With it o
 - **Chat, start or stop a Mac task,** answer the questions a task asks, and get a
   photo from the robot's camera or a screenshot.
 - **`rundown`** summarises today's email, calendar, Slack mentions/DMs and Obsidian
-  todos. It only reads.
+  todos. It only reads. "Plan my day", "what's my plan today", "what's on today"
+  and close variants get the same read, ending with a short plan.
 - **`new claude`** opens Warp on the Mac with Claude Code (personal) or era-code
   (work) in a folder you pick, with tap buttons. **`claude on`** relays a running
   session to the phone: it picks the only one, offers buttons when there are

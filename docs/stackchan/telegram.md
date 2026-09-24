@@ -48,8 +48,12 @@ What else the Bot API offers, and how buddy could use it: [telegram-bot-api.md](
 ## Rundown
 
 Text `rundown`, `/rundown`, or `buddy: rundown` for today's **email, calendar,
-Slack, and Obsidian todos**. This command addresses Buddy even while either relay
-is selected. It loads the packaged `skills/rundown/SKILL.md` each time and obtains
+Slack, and Obsidian todos**. Asking for today's plan is the same command: "plan my
+day", "what's my plan today" (or "plane"), "what's on today", "my schedule today",
+"what do I have today", "what does my day look like" and close variants, matched
+whole-text by `rundown.matches`; then the reply ends with a short plan around the
+day's events. "Plan a trip" and "today's news" stay ordinary turns. This command
+addresses Buddy even while either relay is selected. It loads the packaged `skills/rundown/SKILL.md` each time and obtains
 fresh app data through the existing Composio session. Email includes today's inbox
 and older unread items needing attention; Slack focuses on mentions, DMs, and
 recent requests. Calendar queries use local midnight through the next midnight.

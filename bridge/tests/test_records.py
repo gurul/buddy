@@ -361,7 +361,7 @@ def test_the_prompt_asks_for_corrections_and_the_journal() -> None:
     assert "dated correction" in records.RECONCILE_PROMPT or "correction and its date" in records.RECONCILE_PROMPT
     assert "fold every real fact about them" in records.RECONCILE_PROMPT
     assert set(records.RECONCILE_SCHEMA["properties"]["journal"]["required"]) == \
-        {"title", "happened", "learned", "open", "corrections"}
+        {"title", "happened", "learned", "open", "plans", "corrections"}
     assert "conversation" not in records.TYPES                    # what happened once belongs in the journal
 
 
@@ -561,3 +561,30 @@ def test_the_retired_machinery_is_gone() -> None:
     src = inspect.getsource(records)
     assert "chat_" "memory" not in src and "HIGHLIGHTS" not in src and ".reconciled" not in src
     assert "import asyncio" not in src
+
+
+# ---- event dates vs the transcript day ---------------------------------------------------------------
+
+def test_the_dream_is_told_each_line_carries_its_real_date_and_plans_keep_when_apart_from_said(tmp_path: Path) -> None:
+    """days/2026-09-23.md labelled a 2026-09-24 00:08 event with 2026-09-23: the body said "Everything said on
+    <day>" over lines with no date, and a transcript day runs 04:00 to 04:00. And a plan kept only when it was
+    said, not when it happens."""
+    cfg = cfg_at(tmp_path)
+    journal = {**result()["journal"],
+               "happened": ["2026-09-21 00:08 planned the trip by text"],
+               "plans": [{"what": "Dentist", "when": "2026-09-30 10:00", "said": "2026-09-21"},
+                         {"what": "Visit the ramen bar", "when": "", "said": "2026-09-20"}]}
+    client = FakeClient(result(journal=journal), {"records": [], "merged": []})
+    reconcile_day(cfg, client, DAY, "2026-09-20 23:59 texted Owner: dentist on the 30th at 10\n"
+                                     "2026-09-21 00:08 texted Owner: and the ramen bar some day")
+    body = client.bodies[0][1]
+    assert "04:00 on 2026-09-20 to 04:00 on 2026-09-21" in body
+    assert "real date" in body
+    schema = records.RECONCILE_SCHEMA["properties"]["journal"]
+    assert "plans" in schema["required"]
+    assert set(schema["properties"]["plans"]["items"]["required"]) == {"what", "when", "said"}
+    assert "when" in records.RECONCILE_PROMPT and "real date" in records.RECONCILE_PROMPT
+    page = (rdir(cfg) / "days" / f"{DAY}.md").read_text()
+    assert "- 2026-09-21 00:08 planned the trip by text" in page
+    assert "## Plans\n- Dentist (when 2026-09-30 10:00; said 2026-09-21)\n" \
+           "- Visit the ramen bar (when: no date yet; said 2026-09-20)" in page

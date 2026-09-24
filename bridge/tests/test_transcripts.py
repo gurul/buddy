@@ -377,7 +377,8 @@ def test_day_text_renders_the_whole_day_and_keeps_the_newest_over_budget(tmp_pat
     t.append("telegram", "t-1", "owner", "command", "claude on", now=at(21, 9, 2))
     t.append("telegram", "t-1", "buddy", "say", "done", now=at(21, 9, 3))
     assert t.day_text("2026-09-21").splitlines() == [
-        "09:00 spoken Owner: hello", "09:01 spoken buddy (web search): sunny", "09:03 texted buddy: done"]
+        "2026-09-21 09:00 spoken Owner: hello", "2026-09-21 09:01 spoken buddy (web search): sunny",
+        "2026-09-21 09:03 texted buddy: done"]
     for i in range(100):
         t.append("telegram", "t-1", "owner", "say", f"n{i:03d} " + "q" * 50, now=at(21, 10) + timedelta(minutes=i))
     text = t.day_text("2026-09-21", max_chars=1000)
@@ -385,6 +386,18 @@ def test_day_text_renders_the_whole_day_and_keeps_the_newest_over_budget(tmp_pat
     assert len(text) <= 1000 and "n099" in rows[-1]
     omitted = int(rows[0].strip("(").split()[0])
     assert rows[0] == f"({omitted} earlier lines omitted)" and omitted + len(rows) - 1 == 103
+
+
+def test_day_text_dates_each_line_with_its_own_calendar_date(tmp_path: Path) -> None:
+    """The dream's days/2026-09-23.md filed an event of 2026-09-24 00:08 under 2026-09-23: the transcript day
+    runs 04:00 to 04:00, and its lines carried only HH:MM under "Everything said on 2026-09-23". A line past
+    midnight stays in its transcript day, and says the date it was actually said."""
+    t, _ = store(tmp_path, now=at(22, 12))
+    t.append("telegram", "t-1", "owner", "say", "evening", now=at(21, 23, 50))
+    t.append("telegram", "t-1", "owner", "say", "past midnight", now=at(22, 0, 8))
+    assert t.day_of(at(22, 0, 8)) == "2026-09-21"
+    assert t.day_text("2026-09-21").splitlines() == [
+        "2026-09-21 23:50 texted Owner: evening", "2026-09-22 00:08 texted Owner: past midnight"]
 
 
 # ---- search ----------------------------------------------------------------------------------
