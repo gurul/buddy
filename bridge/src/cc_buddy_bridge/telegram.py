@@ -103,6 +103,7 @@ DEFAULT_STALE_SECS = 120.0          # a message older than this when it arrives 
 DEFAULT_ASK_TIMEOUT_SECS = 180.0    # a task's question waits this long (the voice waits 60: thumbs are slower)
 DEFAULT_IDLE_CLOSE_SECS = 600.0     # a chat this quiet is over: its RAM history is cleared, its transcript closed
 HISTORY_TURNS = 24                  # turns of the chat the model is shown
+HISTORY_HIDDEN_KINDS = ("relay", "command")   # transcript kinds kept out of the model's history (_note)
 CHANNEL = "telegram"                # this door's name in the transcript (transcripts.CHANNELS)
 TODAY_CHARS = 32000                 # today's transcript in the instructions (transcripts.TG_CHARS)
 THINK_CONTEXT_CHARS = 6000          # the owner's profile and today, for think_hard (think.CONTEXT_MAX_CHARS)
@@ -1375,7 +1376,9 @@ class TelegramInlet:
         self._relay_flush: Optional[asyncio.Task] = None
         self._last_ask_at = float("-inf")                  # a question or yes/no just went to the phone
         self._clock, self._wall, self._sleep = clock, wall, sleep
-        self.turns: list[tuple[str, str]] = []           # ("user" | "buddy", text): this chat, until it goes quiet
+        # ("user" | "buddy", text): what this chat said to buddy, until it goes quiet. Relay and command lines
+        # are never in it (_note): they are the transcript's only.
+        self.turns: list[tuple[str, str]] = []
         # Each turn's transcript kind, beside self.turns ("" for a line the transcript does not have): which
         # of the history's lines the today block must leave out (_shown).
         self._turn_kinds: list[str] = []
@@ -1876,8 +1879,10 @@ class TelegramInlet:
             if self._pending_answer_chat is not None and self._pending_answer_chat != inbound.chat_id:
                 self._spawn(self._say(inbound.chat_id, "A question is waiting in another owner chat."), "telegram-say")
                 return
+            # An Allow/Deny answer is said to Claude, not to buddy: a relay line, as the prompt it answers is.
+            kind = "relay" if self._pending_answer is self._permission_future else "say"
             self._pending_answer.set_result(self._strict_answer(inbound.text))
-            self._note("user", inbound.text)
+            self._note("user", inbound.text, kind)
             return
         if word == "/start":
             self._spawn(self._say(inbound.chat_id, HELLO_LINE), "telegram-say")
@@ -2058,7 +2063,7 @@ class TelegramInlet:
             # Exactly what a typed answer does (_handle): the waiting question gets these words. The prompt's
             # own code then edits the message to say what was decided.
             future.set_result(choice.value)
-            self._note("user", choice.value)
+            self._note("user", choice.value, "relay" if future is self._permission_future else "say")
             self._spawn(self._answer_tap(tap, choice.done or choice.label), "telegram-tap")
             return
         self._spawn(self._answer_tap(tap, ("Typed " + choice.value) if board.kind == TYPE else choice.label,
@@ -2823,8 +2828,19 @@ class TelegramInlet:
     # a restart, a crash or a failed model call no longer costs the words, and the voice sees this chat
     # live. The RAM history (self.turns) is only what the model is shown next; the transcript is the record.
     def _note(self, who: str, text: str, kind: str = "say", *, said: Optional[str] = None) -> None:
-        """One line of this chat: into the model's history, and into the transcript as `kind` (say, command,
-        relay, image). `said` is the transcript's words when they differ from the history's (an image turn)."""
+        """One line of this chat: into the transcript as `kind` (say, command, relay, image), and, for a line
+        said to buddy, into the model's history. `said` is the transcript's words when they differ from the
+        history's (an image turn).
+
+        Relay and command lines are the transcript's only (HISTORY_HIDDEN_KINDS). Live, 2026-09-24 08:44: the
+        history the brain was shown was eight lines the owner had typed to Claude Code and code words ("The
+        expense spllitter doesn't work", "Ultrathink", "Claude off"), with none of Claude's replies, and
+        think_hard built the owner's "plan" out of them. The today block leaves those kinds out as well, so
+        neither the history nor the prompt ever shows words that were not said to buddy."""
+        if kind in HISTORY_HIDDEN_KINDS:
+            self._record(who, kind, text if said is None else said)
+            self._last_turn_at = self._clock()
+            return
         self.turns.append((who, text))
         self._turn_kinds.append(kind if self._record(who, kind, text if said is None else said) else "")
         self._last_turn_at = self._clock()

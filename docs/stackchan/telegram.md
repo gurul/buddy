@@ -617,6 +617,14 @@ design is in [memory.md](memory.md); what matters for the chat:
   turn, up to 6,000 characters, with the stars the nightly dream has not absorbed
   yet on top) and today's lines on both channels (up to 32,000 characters, minus
   what this chat's history already shows). The opening brief rides in the turn note.
+- **The chat history holds only what was said to buddy.** Words you type to
+  Claude Code or Codex through the relay, your answers to Claude's permission
+  prompts, the prompts themselves, and code words (`claude off`, `stealth`,
+  `screenshot`, ...) go into the transcript as `relay` or `command` lines. They
+  never enter the history the text brain is shown, and the today block leaves
+  those kinds out too. Claude's replies never entered the history, so the brain
+  saw only one side of those exchanges. On 2026-09-24 it made a "plan" from eight
+  lines typed to Claude Code.
 - **Four memory tools:** `memory_search` (record lines, mem0 memories found by
   meaning, and the words said, each dated), `memory_read` (a record by id, or a day
   or a stretch of one), and the two-step forget, `forget_preview` then
