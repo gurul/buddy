@@ -222,3 +222,51 @@ def test_repeated_silence_arms_rts_pulse(fast_watchdog: None, monkeypatch: pytes
 
     assert len(opened) >= serial_transport.RX_TRIP_PULSE_COUNT + 1
     assert not bs._pulse_on_open  # armed then consumed, not left dangling
+
+
+# ---- port choice: the board, or nothing ------------------------------------------------------
+
+class _Port:
+    def __init__(self, device: str, vid: Any) -> None:
+        self.device, self.vid = device, vid
+
+
+def _ports(monkeypatch: pytest.MonkeyPatch, ports: list[_Port]) -> None:
+    from serial.tools import list_ports
+    monkeypatch.setattr(serial_transport.glob, "glob", lambda pattern: [p.device for p in ports])
+    monkeypatch.setattr(list_ports, "comports", lambda: ports)
+
+
+BOARD = _Port("/dev/cu.usbmodem101", 0x303A)
+CAMERA = _Port("/dev/cu.usbmodem1105", 0x3564)
+DOCK = _Port("/dev/cu.usbmodemSN1", 0x291A)
+
+
+def test_the_board_is_chosen_among_other_usb_devices(monkeypatch: pytest.MonkeyPatch) -> None:
+    _ports(monkeypatch, [CAMERA, BOARD, DOCK])
+    assert serial_transport._resolve_port("/dev/cu.usbmodem*") == BOARD.device
+
+
+def test_with_the_board_off_the_bus_a_camera_is_never_opened(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The robot power-cycling left a webcam and a dock matching the glob (2026-09-23); the daemon opened
+    the webcam. Every match has a vendor id and none is Espressif: wait for the board."""
+    _ports(monkeypatch, [CAMERA, DOCK])
+    assert serial_transport._resolve_port("/dev/cu.usbmodem*") is None
+    _ports(monkeypatch, [CAMERA])
+    assert serial_transport._resolve_port("/dev/cu.usbmodem*") is None
+
+
+def test_without_vendor_ids_the_glob_still_decides(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A board behind a hub or a USB-serial chip may report no vendor id: then the glob is all there is."""
+    _ports(monkeypatch, [_Port("/dev/cu.usbmodem9", None)])
+    assert serial_transport._resolve_port("/dev/cu.usbmodem*") == "/dev/cu.usbmodem9"
+
+
+def test_an_enumeration_error_falls_back_to_the_glob(monkeypatch: pytest.MonkeyPatch) -> None:
+    from serial.tools import list_ports
+    monkeypatch.setattr(serial_transport.glob, "glob", lambda pattern: [BOARD.device])
+
+    def boom() -> list[Any]:
+        raise OSError("IOKit")
+    monkeypatch.setattr(list_ports, "comports", boom)
+    assert serial_transport._resolve_port("/dev/cu.usbmodem*") == BOARD.device

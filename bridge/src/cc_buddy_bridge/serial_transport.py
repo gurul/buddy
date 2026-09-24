@@ -123,19 +123,23 @@ def _resolve_port(pattern: str) -> Optional[str]:
     hits = sorted(glob.glob(pattern))
     if not hits:
         return None
-    if len(hits) > 1:
-        try:
-            from serial.tools import list_ports
-            s3 = sorted(
-                p.device for p in list_ports.comports()
-                if p.device in hits and p.vid == _ESP32S3_VID
-            )
-        except Exception:  # noqa: BLE001
-            s3 = []
-        if s3:
+    try:
+        from serial.tools import list_ports
+        vids = {p.device: p.vid for p in list_ports.comports() if p.device in hits}
+    except Exception:  # noqa: BLE001 - IOKit can throw mid-enumeration; fall back to the glob alone
+        vids = {}
+    s3 = sorted(d for d, vid in vids.items() if vid == _ESP32S3_VID)
+    if s3:
+        if len(hits) > 1:
             log.warning("serial: %d nodes match %s — preferring ESP32-S3 %s",
                         len(hits), pattern, s3[0])
-            return s3[0]
+        return s3[0]
+    # Every match names a USB vendor and none is Espressif: the board is off the bus and what is left is
+    # a camera or a dock (2026-09-23: with the robot power-cycling, the daemon opened a webcam's node,
+    # wrote status polls into it and waited for acks). Wait for the board instead of guessing.
+    if hits and all(vids.get(d) is not None for d in hits):
+        return None
+    if len(hits) > 1:
         log.warning("serial: %d nodes match %s — picking %s",
                     len(hits), pattern, hits[0])
     return hits[0]
