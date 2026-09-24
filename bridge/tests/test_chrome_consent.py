@@ -6,7 +6,7 @@ import asyncio
 
 import pytest
 
-from cc_buddy_bridge.chrome_consent import QUESTION, ConsentBroker
+from cc_buddy_bridge.chrome_consent import PRESS_TRIES, QUESTION, ConsentBroker
 
 
 def rig(reply=None, *, showing_after: int = 0, never_shows: bool = False, no_telegram: bool = False,
@@ -17,7 +17,7 @@ def rig(reply=None, *, showing_after: int = 0, never_shows: bool = False, no_tel
 
     async def showing() -> bool:
         polls["n"] += 1
-        return not never_shows and polls["n"] > showing_after
+        return not never_shows and not pressed and polls["n"] > showing_after   # a press dismisses it
 
     async def pressing(label: str) -> bool:
         pressed.append(label)
@@ -32,7 +32,7 @@ def rig(reply=None, *, showing_after: int = 0, never_shows: bool = False, no_tel
         return reply
 
     broker = ConsentBroker(None if no_telegram else ask, showing=showing, pressing=pressing, appear_secs=0.05,
-                           ask_timeout_secs=0.05, poll_secs=0.01)
+                           ask_timeout_secs=0.05, poll_secs=0.01, settle_secs=0.001)
     return broker, pressed, asked
 
 
@@ -79,6 +79,8 @@ def _broker(showing_seq, reply="yes", press_ok=True, slow_reply=False):
     seq = list(showing_seq)
 
     async def showing() -> bool:
+        if pressed and press_ok:
+            return False                                   # a press that landed dismisses the dialog
         return seq.pop(0) if len(seq) > 1 else seq[0]
 
     async def pressing(label: str) -> bool:
@@ -94,7 +96,7 @@ def _broker(showing_seq, reply="yes", press_ok=True, slow_reply=False):
         told.append(text)
 
     b = ConsentBroker(ask, tell_owner=tell, showing=showing, pressing=pressing, appear_secs=1,
-                      ask_timeout_secs=2, poll_secs=0.01)
+                      ask_timeout_secs=2, poll_secs=0.01, settle_secs=0.001)
     return b, pressed, told
 
 
@@ -111,7 +113,33 @@ def test_a_press_that_fails_while_the_dialog_is_still_up_says_why() -> None:
 
     b, pressed, told = _broker([True], reply="yes", press_ok=False)
     assert asyncio.run(b.answer_own_connection()) == "press_failed"
-    assert pressed == ["Allow"] and told == [PRESS_FAILED_LINE]
+    assert pressed == ["Allow"] * PRESS_TRIES and told == [PRESS_FAILED_LINE]
+
+
+def test_a_press_chrome_ignored_is_repeated_until_the_dialog_is_gone() -> None:
+    """Measured 2026-09-24: AXPress in the dialog's first moments reports success and dismisses nothing. The
+    daemon logged auto_allowed while the dialog stayed up. Only a dialog that has gone counts as pressed."""
+    pressed: list[str] = []
+
+    async def showing() -> bool:
+        return len(pressed) < 2                             # the first press does nothing; the second lands
+
+    async def pressing(label: str) -> bool:
+        pressed.append(label)
+        return True                                         # Chrome says "done" both times
+
+    b = ConsentBroker(None, showing=showing, pressing=pressing, appear_secs=0.05, poll_secs=0.01,
+                      settle_secs=0.001, auto_allow=True)
+    assert asyncio.run(b.answer_own_connection()) == "auto_allowed" and pressed == ["Allow", "Allow"]
+
+    pressed.clear()
+
+    async def ask(q: str) -> str:
+        return "yes"
+
+    b = ConsentBroker(ask, showing=showing, pressing=pressing, appear_secs=0.05, ask_timeout_secs=1,
+                      poll_secs=0.01, settle_secs=0.001)
+    assert asyncio.run(b.answer_own_connection()) == "allowed" and pressed == ["Allow", "Allow"]
 
 
 def test_the_phone_wait_ends_before_the_connection_gives_up() -> None:
@@ -142,7 +170,7 @@ def test_the_standing_yes_presses_allow_without_asking() -> None:
     asked: list[str] = []
 
     async def showing() -> bool:
-        return True
+        return not pressed
 
     async def pressing(label: str) -> bool:
         pressed.append(label)
@@ -155,32 +183,39 @@ def test_the_standing_yes_presses_allow_without_asking() -> None:
     for ask_owner in (ask, None):                      # with or without Telegram
         pressed.clear()
         b = ConsentBroker(ask_owner, showing=showing, pressing=pressing, appear_secs=0.05, poll_secs=0.01,
-                          auto_allow=True)
+                          settle_secs=0.001, auto_allow=True)
         assert asyncio.run(b.answer_own_connection()) == "auto_allowed"
         assert pressed == ["Allow"] and asked == []
 
 
 def test_the_standing_yes_retries_a_lagging_button_and_never_presses_cancel() -> None:
     pressed: list[str] = []
+    landed = {"n": 0}
 
     async def showing() -> bool:
-        return True
+        return landed["n"] == 0
 
     async def pressing(label: str) -> bool:
         pressed.append(label)
-        return len(pressed) >= 3                        # the button appears on the third look
+        if len(pressed) >= 3:                           # the button appears on the third look
+            landed["n"] += 1
+        return len(pressed) >= 3
 
-    b = ConsentBroker(None, showing=showing, pressing=pressing, appear_secs=0.05, poll_secs=0.01, auto_allow=True)
+    b = ConsentBroker(None, showing=showing, pressing=pressing, appear_secs=0.05, poll_secs=0.01,
+                      settle_secs=0.001, auto_allow=True)
     assert asyncio.run(b.answer_own_connection()) == "auto_allowed" and pressed == ["Allow"] * 3
 
     pressed.clear()
+    landed["n"] = 0                                     # a fresh dialog
 
     async def never(label: str) -> bool:
         pressed.append(label)
         return False
 
-    b = ConsentBroker(None, showing=showing, pressing=never, appear_secs=0.05, poll_secs=0.01, auto_allow=True)
+    b = ConsentBroker(None, showing=showing, pressing=never, appear_secs=0.05, poll_secs=0.01,
+                      settle_secs=0.001, auto_allow=True)
     assert asyncio.run(b.answer_own_connection()) == "press_failed" and "Cancel" not in pressed
+    assert pressed == ["Allow"] * PRESS_TRIES
 
 
 def test_the_standing_yes_still_waits_for_chromes_own_dialog() -> None:
@@ -193,7 +228,8 @@ def test_the_standing_yes_still_waits_for_chromes_own_dialog() -> None:
         pressed.append(label)
         return True
 
-    b = ConsentBroker(None, showing=showing, pressing=pressing, appear_secs=0.05, poll_secs=0.01, auto_allow=True)
+    b = ConsentBroker(None, showing=showing, pressing=pressing, appear_secs=0.05, poll_secs=0.01,
+                      settle_secs=0.001, auto_allow=True)
     assert asyncio.run(b.answer_own_connection()) == "no_dialog" and pressed == []
 
 

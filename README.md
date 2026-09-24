@@ -116,11 +116,12 @@ think-out-loud mode, configuration and current limits.
 
 ### Experimental
 
-- **Live Laya expressions.** Local Laya can choose eleven temporary eye expressions,
-  including a wink, from conversation and diary text, even while speaking. The Mac
-  runs the model and the board renders the cues; Laya controls the eyes only. This
-  owner-enabled mode uses the original checkpoint, because the tuned head did worse
-  on fresh examples. See [controls, limits and device verification](docs/stackchan/laya-expressions/README.md)
+- **Live expressions.** buddy picks one of eleven temporary eye expressions,
+  including a wink, from conversation and diary text, even while speaking. Jev
+  (TypeSafe's typed-decision model, one `choice` per turn, ~200 ms) picks by default;
+  `CC_BUDDY_EXPRESSION_BACKEND=laya` keeps the original local Laya checkpoint, which
+  scored 15–20 points lower on the hand-written cases. The board renders the cues;
+  the picker controls the eyes only. See [controls, limits and measurements](docs/stackchan/laya-expressions/README.md)
   and the [expression-tuning study](docs/stackchan/laya-emotion/README.md).
 
 ## Get started

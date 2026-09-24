@@ -1,6 +1,23 @@
-# Live Laya expressions
+# Live expressions
 
-Laya controls **eyes only**. Buddy's original chirps, caption babble, sound settings, and phase sounds are preserved. The owner explicitly requested reverting the experimental Laya chirps after trying them.
+> **2026-09-24: Jev picks the eye by default.** The owner asked for Jev here too ("use jev for that too").
+> The worker below is unchanged; only the picker moved. `CC_BUDDY_EXPRESSION_BACKEND=jev` (default) asks
+> TypeSafe's Jev one `choice` over the same eleven labels, in its native shape, over the same speaker-labelled
+> context; `laya` keeps the local checkpoint described in the rest of this page. Measured with
+> `bridge/tools/jev_eyes_eval.py` on the 84 hand-written cases in `bridge/tests/fixtures/emotion` (both pickers
+> asked the eleven-label question, both folded onto the sets' six labels the same way; `jev-eyes-results.json`):
+>
+> | Picker | 48 scenario tests | 36 confirmation cases | Latency |
+> |---|---|---|---|
+> | **Jev** (`typesafe/jev-1.13` via OpenRouter) | **62.5%** acc, 0.583 macro-F1 | **72.2%** acc, 0.679 macro-F1 | 200 ms p50, 449 ms p95 |
+> | Untouched local Laya | 47.9% acc, 0.471 macro-F1 | 52.8% acc, 0.492 macro-F1 | 21 ms p50 |
+>
+> 14 of Jev's 32 misses are the sets' "startled" read as "surprised" — the fold has no startled eye. Cost:
+> $0.0018 for the 84 calls. Jev is a network call: the last turn or two of conversation leaves the Mac while
+> expressions are enabled (`expressions.json`). No Jev key, or no network: the worker reports the error in its
+> status and shows ordinary phase eyes; set `laya` to stay local.
+
+Laya (or Jev) controls **eyes only**. Buddy's original chirps, caption babble, sound settings, and phase sounds are preserved. The owner explicitly requested reverting the experimental Laya chirps after trying them.
 
 The model runs in the Mac bridge; the ESP32 renders its temporary expression overlay during speech and idle/explore. Spoken user turns, stable clauses in Buddy's streamed replies, and diary thoughts selected for the screen feed one dedicated worker. One pending event replaces older work; inference stays off the daemon event loop. Events are sent at most every 1.2 seconds, discarded after four seconds, and independently expired by the board.
 
