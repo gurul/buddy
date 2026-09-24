@@ -15,6 +15,11 @@ send-failure, stop) never close the fd — closing it under the reader's
 blocked read() raced (paired EBADF on every forced reconnect, and an
 fd-reuse hazard). They set a drop reason and cancel_read() instead; the
 reader notices, breaks, and closes in its finally.
+
+Nothing that can block runs on the event loop: reads, writes and the port
+enumeration (``_resolve_port``, whose ``list_ports.comports()`` takes 2-3 s
+while the board is off the bus) all run on worker threads, because the loop
+is shared with every other door (Telegram, the voice, the web page).
 """
 
 from __future__ import annotations
@@ -209,7 +214,9 @@ class BuddySerial:
         missing_since: Optional[float] = None
         next_missing_warn = 30.0
         while not self._stop.is_set():
-            port = _resolve_port(self.port_pattern)
+            # Off the loop: with the board off the bus, IOKit's enumeration (list_ports.comports) takes 2-3 s,
+            # and on the loop it froze every door, Telegram included (1,543+ stall reports, 2026-09-23/24).
+            port = await asyncio.to_thread(_resolve_port, self.port_pattern)
             if port is None:
                 # Device off the bus: say so, loudly then backing off. The
                 # 52-minute silent log hole of 2026-08-05 04:43 was this path
