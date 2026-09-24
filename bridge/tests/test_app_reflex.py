@@ -150,3 +150,43 @@ def test_agent_event_has_one_definition() -> None:
     from cc_buddy_bridge import agent_contract, computer_agent
 
     assert computer_agent.AgentEvent is agent_contract.AgentEvent
+
+
+# ---- a request that refers back to a link from an earlier message ----------------------------------------
+
+MAP = "https://maps.app.goo.gl/AbCdEf123"
+
+
+def test_open_it_after_a_shared_link_carries_the_link() -> None:
+    """Production, 2026-09-24: the owner shared a Google Maps link, then "Use Google search to open it up"; the
+    goal was the owner's words for that request only, so the link was not in it."""
+    recent = [f"here {MAP}", "Use Google search to open it up"]
+    goal = app_reflex.with_referenced_links("Use Google search to open it up", recent)
+    assert goal.startswith("Use Google search to open it up") and MAP in goal
+    from cc_buddy_bridge.browser_lane import is_web_goal
+    assert is_web_goal(goal)
+
+
+def test_the_newest_links_come_first_and_only_the_recent_messages_count() -> None:
+    old, mid, new = "https://example.org/old", "https://example.org/mid", "https://example.org/new."
+    recent = [old, "a", "b", mid, new]                     # `old` is five messages back: out of reach
+    goal = app_reflex.with_referenced_links("open that link", recent)
+    assert goal.index("example.org/new") < goal.index("example.org/mid") and old not in goal
+    assert "example.org/new." not in goal                   # trailing punctuation is not part of a link
+
+
+def test_a_goal_that_does_not_refer_back_or_has_its_own_link_is_unchanged() -> None:
+    recent = [f"here {MAP}"]
+    for goal in ("play some jazz on spotify", "open https://example.org/x", "what's the weather", ""):
+        assert app_reflex.with_referenced_links(goal, recent) == goal
+    assert app_reflex.with_referenced_links("open it", ["no links here"]) == "open it"
+
+
+def test_the_body_logs_the_goals_shape_never_its_words(caplog: Any) -> None:
+    import logging
+
+    agent, inner, _, _ = rig(enabled=False)
+    with caplog.at_level(logging.INFO, logger="cc_buddy_bridge.app_reflex"):
+        asyncio.run(agent.run(f"please open this secretive place {MAP}"))
+    line = next(r.getMessage() for r in caplog.records if "gets a goal of" in r.getMessage())
+    assert "6 words, 1 link(s) (maps.app.goo.gl)" in line and "secretive" not in line

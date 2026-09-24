@@ -48,8 +48,12 @@ What else the Bot API offers, and how buddy could use it: [telegram-bot-api.md](
 ## Rundown
 
 Text `rundown`, `/rundown`, or `buddy: rundown` for today's **email, calendar,
-Slack, and Obsidian todos**. This command addresses Buddy even while either relay
-is selected. It loads the packaged `skills/rundown/SKILL.md` each time and obtains
+Slack, and Obsidian todos**. Asking for today's plan is the same command: "plan my
+day", "what's my plan today" (or "plane"), "what's on today", "my schedule today",
+"what do I have today", "what does my day look like" and close variants, matched
+whole-text by `rundown.matches`; then the reply ends with a short plan around the
+day's events. "Plan a trip" and "today's news" stay ordinary turns. This command
+addresses Buddy even while either relay is selected. It loads the packaged `skills/rundown/SKILL.md` each time and obtains
 fresh app data through the existing Composio session. Email includes today's inbox
 and older unread items needing attention; Slack focuses on mentions, DMs, and
 recent requests. Calendar queries use local midnight through the next midnight.
@@ -138,9 +142,10 @@ token without an owner id is off. A door with no allowlist never opens.
 | `CC_BUDDY_TELEGRAM_ASK` | `0` | `1`: with the Claude relay on, every tool call is asked in the chat, not only the always-ask ones (never in bypass mode). |
 | `CC_BUDDY_TELEGRAM_DRAFTS` | `1` | `0`: while Claude works on a relayed line, show "typing…" instead of the "Thinking…" bubble. |
 | `CC_BUDDY_TELEGRAM_EFFORT` | `low` | Its reasoning effort (`low`, `medium`, `high`, `xhigh`, `max`). Hard questions go to `think_hard` instead. |
-| `CC_BUDDY_WEB_SEARCH` | `openai` | How every brain searches the web ([below](#web-search)): `openrouter-exa`, `openai` (the hosted tool), `off`. |
-| `CC_BUDDY_WEB_SEARCH_MODEL` | `openai/gpt-5.4-nano` | The OpenRouter model that carries the Exa results back (the cheapest with the web plugin, 2026-09-21). |
-| `CC_BUDDY_WEB_SEARCH_RESULTS` | `5` | Results per search, 1 to 10 (Exa's first price tier). |
+| `CC_BUDDY_WEB_SEARCH` | `openrouter-perplexity` with an OpenRouter key, else `openai` | How every brain searches the web ([below](#web-search)): `openrouter-perplexity`, `openrouter-exa`, `openai` (the hosted tool, on the OpenAI key), `off`. |
+| `CC_BUDDY_WEB_SEARCH_MODEL` | `google/gemini-3.1-flash-lite` | The OpenRouter model that writes the answer from the search results. An `openai/…` model is refused: OpenAI models run on the OpenAI key, not through OpenRouter. |
+| `CC_BUDDY_WEB_SEARCH_RESULTS` | `5` | Results per search, 1 to 10 (the engines' first price tier). |
+| `CC_BUDDY_WEB_SEARCH_MAX_USES` | `2` | Searches per question, 1 to 5. |
 | `CC_BUDDY_COMPOSIO` | `0` | `1`: the owner's apps through Composio ([below](#the-apps-composio)). Needs `COMPOSIO_API_KEY` in the env file. |
 | `CC_BUDDY_CODEX_BIN` | desktop app bundled Codex, then `codex` on PATH | Executable for computer-task delegation. Computer Use must be enabled in its installed plugins. |
 | `CC_BUDDY_COMPOSIO_POLICY` | `gmail=read,googlecalendar=write,googledrive=ask` | What a WRITING app call may do, per toolkit: `read` refuses it, `write` runs it, `ask` is your yes/no in the chat (the default for any toolkit not named). Reads always run. |
@@ -259,18 +264,72 @@ is always listed.
 `claude on <name>` picks a running session by folder name. If no running session
 matches, it starts that folder.
 
+## Choosing the text brain (measured)
+
+On 2026-09-24 an [Ori](https://openrouter.ai) eval compared six models as the
+Telegram text brain. It used 16 cases: 11 of the owner's real Telegram turns (a
+few lightly redacted) and 5 authored tool cases. Tools were mocked, tool
+choices were checked in code, and replies were judged by Claude Opus 5.5. The
+eval called the models through OpenRouter's Chat Completions API; production
+calls OpenAI models directly.
+
+Five short rules were added to the instructions from that eval: keep API keys
+out of the chat, route Mac requests to `start_task`, check the calendar or ask
+for an ambiguous "plan/plane today", give planning help a structure plus one
+question, and own a missed date and offer to save it. With those rules:
+
+| Model | Passed, before → after the rules | Cost for all 16 cases |
+|---|---:|---:|
+| `gpt-6-luna` (the default) | 11 → 14/16 | $0.0012 |
+| `gpt-6-sol` | 13 → 14/16 | $0.021 |
+| `gpt-6-astra` | 11 → 14/16 | $0.092 |
+| `google/gemini-3.7-flash` | 10 → 15/16 | $0.061 |
+| `z-ai/glm-5.3-flash` | 11 → 12/16 | $0.0056 |
+| `anthropic/claude-opus-4.7` | 12 → 13/16 | $0.730 |
+
+Luna stays the default: it matches astra with the rules at about 1/75th of the
+cost. No model passed all 16. Luna still misses offering to save a date it
+missed, and the sample is small, so rerun the eval before changing the model.
+
 ## Web search
 
-Voice, Telegram and `think_hard` use OpenAI's built-in `web_search` tool by
-default, including when an OpenRouter key is present. This restores the GPT
-search behavior from before commit `881fa36`, at the owner's request after
-Exa could not provide a live Seattle time reading.
+Voice, Telegram and `think_hard` search with **Perplexity through OpenRouter**
+whenever `OPENROUTER_API_KEY` is set (owner, 2026-09-24). On OpenRouter's search
+benchmarks Perplexity led BrowseComp, HLE and WideSearch on quality, value and
+speed with the model held fixed; on BrowseComp (2026-08-18) Claude Opus 5 scored
+89.0% with Perplexity against 82.2% with Exa. It costs $0.005 a search against
+Exa's $0.007.
 
-`CC_BUDDY_WEB_SEARCH=openai` explicitly selects hosted GPT search; `off`
-disables search. Exa remains an opt-in through `openrouter-exa`, which also
-requires `OPENROUTER_API_KEY`. Only that mode uses the search model/results
-settings above and returns a summarized answer through a function tool.
-Restart the daemon after changing the setting so new voice sessions pick it up.
+How one search works: the brain calls the `web_search` function tool, and
+buddy makes one OpenRouter chat call carrying the `openrouter:web_search`
+server tool on Perplexity, capped at 2 searches of 5 results. A cheap
+non-OpenAI model, `google/gemini-3.1-flash-lite`, writes a short answer with
+its sources. OpenAI models are never sent through OpenRouter.
+
+The answer step is also given the local date and time. Search engines are not
+a live clock: Exa could not say the time in Seattle (2026-09-21), and neither
+could Perplexity (2026-09-24). So a clock or "today" question is answered from
+buddy's clock instead of a page.
+
+Measured 2026-09-24 through buddy's own `websearch.search`:
+
+| Question | Time | Cost |
+|---|---:|---:|
+| "What time is it in Seattle right now?" (answered from the clock, correct) | 1.5 s | $0.0002 |
+| "What time is it in Tokyo?" (converted from the clock, correct) | 4.9 s | $0.0056 |
+| "Who won the most recent Formula 1 Grand Prix?" (correct, 5 sources) | 4.2 s | $0.0058 |
+
+`CC_BUDDY_WEB_SEARCH=openai` selects OpenAI's hosted search on the OpenAI key,
+which is also the default without an OpenRouter key. `openrouter-exa` keeps Exa
+on the same server tool, and `off` disables search. Restart the daemon after
+changing the setting so new voice sessions pick it up.
+
+The hosted search can leave empty citation links in a text reply, such as
+`([]())` (seen on 2026-09-24). Buddy takes empty markdown links out of the
+brain's text before the reply is kept or sent. A group of links with no labels
+is removed with its parentheses. A link with no label is removed. A label with
+no address stays as plain words. Real links, inline code and code blocks are
+not changed.
 
 ## The apps: Composio
 
@@ -382,6 +441,13 @@ Flip it to `ask` if two seconds a command is a price you will pay.
   the last step is never lost. If it will not take the reply link, the result
   comes without it. A restart closes an open progress message ("Stopped." for
   a task, "Closed." for a Codex turn) so no dead Stop button is left behind.
+- **A restart mid-answer is said, not swallowed.** If the daemon stops while a
+  text turn is still being answered (or is waiting for the one before it),
+  buddy replies to your message with "I restarted in the middle of answering
+  that. Please send it again." Telegram has already delivered that message and
+  will not send it again, so without this line the message would be lost with
+  no sign (2026-09-24). This is best effort. All of these lines together get at
+  most 2 seconds, so a slow Telegram never holds up the restart.
 - **The `/` menu.** At startup buddy sets its code words as bot commands in
   your own chat only (`setMyCommands`, scoped to your chat): `/claude_on`,
   `/claude_off`, `/new_claude`, `/codex`, `/rundown`, `/screenshot`,
@@ -590,6 +656,14 @@ design is in [memory.md](memory.md); what matters for the chat:
   turn, up to 6,000 characters, with the stars the nightly dream has not absorbed
   yet on top) and today's lines on both channels (up to 32,000 characters, minus
   what this chat's history already shows). The opening brief rides in the turn note.
+- **The chat history holds only what was said to buddy.** Words you type to
+  Claude Code or Codex through the relay, your answers to Claude's permission
+  prompts, the prompts themselves, and code words (`claude off`, `stealth`,
+  `screenshot`, ...) go into the transcript as `relay` or `command` lines. They
+  never enter the history the text brain is shown, and the today block leaves
+  those kinds out too. Claude's replies never entered the history, so the brain
+  saw only one side of those exchanges. On 2026-09-24 it made a "plan" from eight
+  lines typed to Claude Code.
 - **Four memory tools:** `memory_search` (record lines, mem0 memories found by
   meaning, and the words said, each dated), `memory_read` (a record by id, or a day
   or a stretch of one), and the two-step forget, `forget_preview` then

@@ -30,6 +30,7 @@ your phone ── Telegram ──▶ telegram.py text brain
                    08-journals/daily/2026-09-21.md  ◀── "journal: felt sharp this morning"
                               │ search_notes · read_note · edit_note · undo_note · list_inbox · list_todos · file_note
                               │ second_brain_workflow → one prompt → think_hard → your phone
+                              │   (daily-plan: the text brain reads your calendar and writes the plan itself)
 ```
 
 ## Where the vault is
@@ -128,11 +129,26 @@ Each is an SOP in `06-processes/<name>.md` plus a context pack in
 `06-processes/packs/<name>.pack`. `workflow_prompt` compiles them into one
 string: the SOP, today's date and the active project list, the selected files
 inside `<context>`, and whatever you supplied. It makes **no model call**; the
-text brain hands the prompt to `think_hard` and texts you the answer.
+text brain hands the prompt to `think_hard` and texts you the answer, except for
+the daily plan, below.
+
+**Today's plan is the rundown.** On Telegram, "plan my day", "what's my plan
+today" (typo "plane" included), "what's on today", "my schedule today", "what
+do I have today" and close variants take the rundown path
+(`rundown.matches`): one brain reads today's calendar and mail through your
+connected apps plus the vault's open checkboxes, and ends with a short plan
+around the day's events. It came from a real miss on 2026-09-24 08:44: "What is
+my plane today" went vault → `think_hard` (20.5 s, high effort), 39.2 s and
+three model calls in all, and came back "a suggested plan… with no calendar
+checked", because the `daily-plan` pack has no calendar and the second model
+had no tools to read one. Where `daily-plan` still runs (a phrasing the rundown
+does not catch), the tool result's `note` and a line added to the prompt tell
+the text brain to read today's calendar and write the plan itself in the same
+turn; it never goes to `think_hard`. The other three workflows still do.
 
 | Say | Workflow | Reads | Gives back |
 |---|---|---|---|
-| "plan my day" | `daily-plan` | vision, todos, the last three journal days, five most recently touched project notes | the one most important thing, up to three more, time blocks, one line of notice |
+| "plan my day" | `daily-plan` (on Telegram: the rundown) | vision, todos, the last three journal days, five most recently touched project notes, plus today's calendar read by the text brain | the one most important thing, up to three more, time blocks around the day's events, one line of notice |
 | "weekly review" | `weekly-review` | todos (ticked ones included), vision, eight journal days, projects, recent events | wins, misses, learnings, next week's P0/P1, stale projects |
 | "triage my inbox" | `triage-inbox` | every inbox note, the project and area names | JSON decisions: where each note goes, todos to add, questions. `apply_triage` carries them out; never deletes |
 | "distill this" + a pasted transcript | `distill-chat` | the transcript, the project and area names | title, gist, decisions, action items, insights, open questions, where it belongs |

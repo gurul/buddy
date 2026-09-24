@@ -16,8 +16,29 @@ TASK_DATE = re.compile(r'(?:📅|⏳|🛫|\b(?:due|scheduled|start)::?)\s*(\d{4}
 READ_META_TOOLS = frozenset({'COMPOSIO_SEARCH_TOOLS', 'COMPOSIO_GET_TOOL_SCHEMAS'})
 
 
+# Asking for today's plan is asking for the rundown: the calendar is most of a day's plan. "What is my
+# plane today" (2026-09-24 08:44) missed the word "rundown", took the vault-only plan and a 20 s second
+# model, and came back with no calendar. Whole-text matches only, each anchored on today or "my day":
+# "plan a trip", "today's news" and "what's on netflix today" stay ordinary turns.
+_WHAT_IS = r"(?:what(?:'s| is|s)|whats)"
+_PLAN = r"(?:plan|plane|plans|schedule|agenda|calendar)"
+_DAILY = re.compile(r"(?:(?:hey|hi|ok|okay|so)\s+)?(?:buddy[,:]?\s+)?(?:" + "|".join((
+    r"/?rundown",
+    _WHAT_IS + r" (?:my|the) " + _PLAN + r"(?: like)? (?:for |on )?(?:today|the day)",
+    _WHAT_IS + r" today(?:'s|s)? " + _PLAN,
+    r"(?:my |the )?today(?:'s|s)? " + _PLAN,
+    r"(?:my |the )?" + _PLAN + r" (?:for )?today",
+    r"(?:(?:please|can you|could you|help me) )?plan (?:out )?(?:my day|the day|today)(?: today)?(?: please)?",
+    _WHAT_IS + r" on (?:for |my calendar |my schedule |my agenda )?today",
+    r"what (?:do|have) i (?:got |have )?(?:on |going on |planned |to do )?(?:for )?today",
+    _WHAT_IS + r" my day (?:look )?like(?: today)?",
+    r"(?:what does|how does) (?:my day|today) look(?: like)?(?: today)?",
+)) + r")")
+
+
 def matches(text: str) -> bool:
-    return text.strip().lower().rstrip('.!') in ('rundown', '/rundown', 'buddy: rundown')
+    said = re.sub(r"\s+", " ", text.replace("\u2019", "'").strip().lower()).rstrip(".!? ")
+    return _DAILY.fullmatch(said) is not None
 
 
 def allows(name: str, args: dict[str, Any]) -> bool:

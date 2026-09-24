@@ -78,7 +78,7 @@ def test_configured_defaults_to_the_voice_backend_model_at_high_effort() -> None
     cfg = configured({}, backend_model="gpt-6-astra")
     assert cfg == ThinkConfig(enabled=True, model="gpt-6-astra", effort="high", timeout_secs=90.0,
                               search=websearch.SearchConfig(engine="openai"))
-    assert configured({"OPENROUTER_API_KEY": "r"}, backend_model="m").search.engine == "openai"
+    assert configured({"OPENROUTER_API_KEY": "r"}, backend_model="m").search.engine == "openrouter-perplexity"
     cfg = configured({"CC_BUDDY_THINK_MODEL": "gpt-5.5", "CC_BUDDY_THINK_EFFORT": "xhigh",
                       "CC_BUDDY_THINK_TIMEOUT_SECS": "120"}, backend_model="gpt-6-astra")
     assert (cfg.model, cfg.effort, cfg.timeout_secs) == ("gpt-5.5", "xhigh", 120.0)

@@ -636,10 +636,18 @@ What the owner asked you to remember is in their words, each with its date. Thos
 facts you have: fold every real fact about them into the records and the profile, and keep it there. A line
 that is not a fact about them — a stray question, a half sentence the microphone caught — you leave out.
 
-The journal: a title of a few words for the day; what happened (one line per conversation or event, with
-its time); what you learned about the owner; what is still open (a question left unanswered, a promise
-buddy made, a plan with no date yet); and the corrections. Short lines. An empty list when there is
-nothing."""
+Dates: every transcript line starts with the real date and time it was said. A transcript day runs from
+04:00 to 04:00, so its last lines can carry the next calendar date; they belong in this journal, under
+their own date. Date a fact by the date of the line that said it, and read "tomorrow", "Friday" or "tonight"
+from that line's date too.
+
+The journal: a title of a few words for the day; what happened (one line per conversation or event,
+starting with the real date and time as the transcript gives it, YYYY-MM-DD HH:MM); what you learned about
+the owner; what is still open (a question left unanswered, a promise buddy made); the plans; and the
+corrections. A plan is anything the owner means to do or attend (an appointment, a trip, a deadline, a
+project milestone): what it is, when it happens (YYYY-MM-DD, with HH:MM when given; empty when the day gave
+no date), and the date it was said. The day it happens and the day it was said are different dates; keep
+both. Short lines. An empty list when there is nothing."""
 
 CONSOLIDATE_PROMPT = """You are buddy, a small desk robot, tidying the records of what you know about your owner.
 You are shown every record and the profile page. Return only what should change:
@@ -659,6 +667,11 @@ _RECORD = {"type": "object", "additionalProperties": False,
            "required": ["id", "type", "aliases", "facts"],
            "properties": {"id": {"type": "string"}, "type": {"type": "string", "enum": list(TYPES)},
                           "aliases": _LIST, "facts": _LIST}}
+_PLANS = {"type": "array", "items": {
+    "type": "object", "additionalProperties": False, "required": ["what", "when", "said"],
+    "properties": {"what": {"type": "string"},
+                   "when": {"type": "string", "description": "when it happens: YYYY-MM-DD [HH:MM], or empty"},
+                   "said": {"type": "string", "description": "the date of the line that said it: YYYY-MM-DD"}}}}
 RECONCILE_SCHEMA = {
     "type": "object", "additionalProperties": False,
     "required": ["records", "forget", "profile", "journal"],
@@ -670,9 +683,9 @@ RECONCILE_SCHEMA = {
                     "required": ["life_context", "acting", "talking"],
                     "properties": {"life_context": _LIST, "acting": _LIST, "talking": _LIST}},
         "journal": {"type": "object", "additionalProperties": False,
-                    "required": ["title", "happened", "learned", "open", "corrections"],
+                    "required": ["title", "happened", "learned", "open", "plans", "corrections"],
                     "properties": {"title": {"type": "string"}, "happened": _LIST, "learned": _LIST,
-                                   "open": _LIST, "corrections": _LIST}},
+                                   "open": _LIST, "plans": _PLANS, "corrections": _LIST}},
     },
 }
 CONSOLIDATE_SCHEMA = {
@@ -730,10 +743,26 @@ def render_journal(journal: dict[str, Any], day: str) -> str:
     title = " ".join(str(journal.get("title") or "").split()) or day
     parts = [f"---\nday: {day}\ntitle: {title}\n---", f"# {title}"]
     for heading, key in (("What happened", "happened"), ("What buddy learned", "learned"),
-                         ("Still open", "open"), ("Corrections", "corrections")):
-        rows = items(key)
+                         ("Still open", "open"), ("Plans", "plans"), ("Corrections", "corrections")):
+        rows = _plan_rows(journal.get(key)) if key == "plans" else items(key)
         parts.append(f"## {heading}\n" + ("\n".join(f"- {r}" for r in rows) if rows else "- (nothing)"))
     return "\n\n".join(parts) + "\n"
+
+
+def _plan_rows(plans: Any) -> list[str]:
+    """One line per plan: when it happens apart from when it was said, e.g. "Dentist (when 2026-09-30 10:00;
+    said 2026-09-23)". Malformed entries are skipped."""
+    def flat(value: Any) -> str:
+        return " ".join(str(value or "").split())
+
+    rows = []
+    for plan in plans if isinstance(plans, list) else []:
+        if not isinstance(plan, dict) or not flat(plan.get("what")):
+            continue
+        when, said = flat(plan.get("when")), flat(plan.get("said"))
+        rows.append(f"{flat(plan.get('what'))} (when{' ' + when if when else ': no date yet'}"
+                    + (f"; said {said})" if said else ")"))
+    return rows
 
 
 def _record_from(raw: Any, day: str) -> Optional[Record]:
@@ -822,7 +851,10 @@ def reconcile_day(cfg: RecallConfig, client: Any, day: str, day_text: str) -> Op
     if star_rows:
         body += "\n\n## What the owner said to remember for good\n\n" + \
                 "\n".join(_star_line(t, d) for t, d in star_rows)
-    body += f"\n\n## Everything said on {day}\n\n{day_text}"
+    after = (datetime.strptime(day, "%Y-%m-%d") + timedelta(days=1)).strftime("%Y-%m-%d")
+    body += (f"\n\n## Everything said in the transcript day {day}\n\nIt runs from {DAY_START_HOUR:02d}:00 on {day} "
+             f"to {DAY_START_HOUR:02d}:00 on {after}. Each line starts with the real date and time it was said."
+             f"\n\n{day_text}")
     result = _call(client, "reconcile", body)
     if result is None:
         return None

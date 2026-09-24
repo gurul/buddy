@@ -31,8 +31,10 @@ from __future__ import annotations
 import asyncio
 import logging
 import os
+import re
 import time
 from typing import Any, Awaitable, Callable, Iterable, Optional
+from urllib.parse import urlsplit
 
 from . import task_router
 from .agent_contract import AgentEvent
@@ -44,6 +46,60 @@ def reflexes_on(environ: Any = None) -> bool:
     env = os.environ if environ is None else environ
     raw = str(env.get("CC_BUDDY_REFLEXES", "")).strip().lower()
     return task_router.REFLEX_DEFAULT if not raw else raw not in ("0", "false", "no", "off")
+
+
+# A task's goal is the owner's words for THIS request ("Use Google search to open it up"), written by the door's
+# model; a link the owner sent in an earlier message is not in it (production, 2026-09-24: a Google Maps link,
+# then "open it up", and the Chrome lane got the words without the link). When the goal refers back and carries
+# no link of its own, the links from the owner's recent messages go with it (``with_referenced_links``).
+LINK = re.compile(r"https?://[^\s<>\"'`]+", re.I)
+REFERS_BACK = re.compile(
+    r"\b(that|this|the|same)\s+(link|url|page|site|website|place|address|location|map|pin|article|video|listing|post)\b"
+    r"|\b(open|visit|load|show|check|search|look up|go to|read|click|pull up|bring up|navigate to)\s+"
+    r"(it|that|this|them|those|these)\b", re.I)
+RECENT_OWNER_MESSAGES = 4       # how far back a "that link" may reach
+MAX_REFERENCED_LINKS = 3
+
+
+def links_in(text: str) -> list[str]:
+    """The http(s) links in a text, in order, without trailing punctuation, deduplicated."""
+    out: list[str] = []
+    for m in LINK.findall(text or ""):
+        url = m.rstrip(".,;:!?)]}")
+        if url not in out:
+            out.append(url)
+    return out
+
+
+def refers_back(goal: str) -> bool:
+    return bool(REFERS_BACK.search(goal or ""))
+
+
+def with_referenced_links(goal: str, recent_owner_texts: Iterable[str]) -> str:
+    """``goal`` plus the links from the owner's recent messages (oldest to newest; the last
+    RECENT_OWNER_MESSAGES are read, newest link first) when the goal refers back to something ("open it",
+    "that link") and has no link of its own. Otherwise ``goal`` unchanged."""
+    if not goal or links_in(goal) or not refers_back(goal):
+        return goal
+    found: list[str] = []
+    for text in reversed(list(recent_owner_texts)[-RECENT_OWNER_MESSAGES:]):
+        for url in links_in(text):
+            if url not in found:
+                found.append(url)
+    if not found:
+        return goal
+    found = found[:MAX_REFERENCED_LINKS]
+    return (goal + "\n\n[note] The owner's recent messages included "
+            + ("this link" if len(found) == 1 else "these links, newest first") + ", which the request refers to: "
+            + " ".join(found))
+
+
+def goal_shape(goal: str) -> str:
+    """What a goal looks like, for the log, without the owner's words: its length, its links' hosts, whether
+    it refers back to something."""
+    hosts = [urlsplit(u).hostname or "?" for u in links_in(goal)]
+    return (f"{len((goal or '').split())} words, {len(hosts)} link(s)" + (f" ({', '.join(hosts)})" if hosts else "")
+            + (", refers back" if refers_back(goal) else ""))
 
 
 QUIT_ALL_KEEP = frozenset({"finder", "warp", "stable", "terminal", "iterm2", "iterm", "ghostty", "cmux", "claude",
@@ -268,6 +324,8 @@ class ReflexFirstAgent:
             self._on_event(AgentEvent("cancelled", "Stopped."))
             return "Stopped."
         self._inner = await self._choose_body(goal)
+        # The goal's shape, never its words: enough to tell later whether a link reached the body.
+        log.info("app-reflex: %s gets a goal of %s", self.provider, goal_shape(goal))
         try:
             return await self._inner.run(goal)
         finally:

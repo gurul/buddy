@@ -248,3 +248,89 @@ def test_the_telegram_screenshot_prefers_the_browser_and_falls_back_to_the_deskt
     assert sent[-1] == ("JPEGBYTES", "Your Chrome: buddy's tab")
     asyncio.run(inlet._send_screen(1, "the screen", agent=Nothing()))
     assert sent[-1] == ("DESKTOPXX", "the screen")                    # no browser picture: the desktop, as before
+
+
+# ---- the "nothing done yet" budget ----------------------------------------------------------------------
+
+class _Lane:
+    plans_started = 0
+
+
+class StuckPlanner:
+    """A planner that never gets a plan going (a slow plan call, a lane that hangs) until it is cancelled."""
+    def __init__(self, on_event: Any) -> None:
+        self.on_event, self.running, self.browser, self.cancelled = on_event, False, _Lane(), ""
+        self._stop = asyncio.Event()
+
+    async def run_in_browser(self, goal: str) -> tuple[str, str]:
+        await self._stop.wait()
+        return f"Stopped: {self.cancelled}.", ""
+
+    def cancel(self, reason: str = "") -> None:
+        self.cancelled = reason
+        self._stop.set()
+
+
+class WorkingPlanner(StuckPlanner):
+    """A plan starts executing at once and takes longer than the budget to finish."""
+    async def run_in_browser(self, goal: str) -> tuple[str, str]:
+        await asyncio.sleep(0.02)
+        self.browser.plans_started += 1               # browser_lane.BrowserLane.run_plan: a plan is executing
+        await asyncio.sleep(0.4)
+        return "You have 3 unread emails.", ""
+
+
+def budget_rig(planner_cls: Any, budget: float = 0.1):
+    made: dict[str, Any] = {}
+
+    def make_planner(on_event, ask_user):
+        made["planner"] = planner_cls(on_event)
+        return made["planner"]
+
+    def make_fallback():
+        made["codex"] = Codex()
+        return made["codex"]
+
+    async def ask(q: str) -> str:
+        return "yes"
+
+    agent = ChromeLaneAgent(make_planner, make_fallback, lambda ev: None, ask, idle_budget_secs=budget)
+    return agent, made
+
+
+def _timed(agent: ChromeLaneAgent, goal: str) -> tuple[str, float]:
+    import time as _time
+
+    async def go() -> tuple[str, float]:
+        t = _time.perf_counter()
+        said = await agent.run(goal)
+        return said, _time.perf_counter() - t
+    return asyncio.run(go())
+
+
+def test_a_lane_with_nothing_done_hands_codex_the_task_within_the_budget() -> None:
+    """Production, 2026-09-23/24: runs that did nothing still spent 11.3 s and 25.6 s before Codex started."""
+    agent, made = budget_rig(StuckPlanner)
+    said, secs = _timed(agent, "open that map link")
+    assert said == "codex finished it" and made["codex"].goals == ["open that map link"]
+    assert secs < 1.0 and made["planner"].cancelled.startswith("no progress")
+    assert agent.handed_on
+
+
+def test_waiting_on_chromes_allow_past_the_budget_hands_codex_the_task() -> None:
+    """Production, 2026-09-23: the lane waited 36 s on Chrome's Allow until the owner pressed Stop."""
+    agent, made = budget_rig(StuckPlanner)
+
+    async def never_allowed(goal: str) -> None:
+        await asyncio.sleep(30)
+
+    agent._prepare = never_allowed
+    said, secs = _timed(agent, "check my gmail")
+    assert said == "codex finished it" and made["codex"].goals == ["check my gmail"] and secs < 1.0
+
+
+def test_a_plan_under_way_is_never_cut_off_by_the_budget() -> None:
+    agent, made = budget_rig(WorkingPlanner)
+    said, secs = _timed(agent, "how many unread emails do I have")
+    assert said == "You have 3 unread emails." and "codex" not in made
+    assert made["planner"].cancelled == "" and secs >= 0.4

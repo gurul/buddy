@@ -275,7 +275,7 @@ def test_session_config_shape() -> None:
     assert all(t["type"] == "function" for t in off["delegation"]["responses"]["tools"])
 
 
-def test_session_config_offers_web_search_through_exa_or_the_hosted_tool() -> None:
+def test_session_config_offers_web_search_through_openrouter_or_the_hosted_tool() -> None:
     from cc_buddy_bridge import websearch
 
     exa = session_config(VoiceConfig(output="audio", search=websearch.SearchConfig(engine="openrouter-exa")))
@@ -283,8 +283,8 @@ def test_session_config_offers_web_search_through_exa_or_the_hosted_tool() -> No
     assert tools[-1] == websearch.WEB_SEARCH_TOOL and tools[-1]["name"] == "web_search"     # Exa via OpenRouter
     hosted = session_config(VoiceConfig(output="audio", search=websearch.SearchConfig(engine="openai")))
     assert hosted["delegation"]["responses"]["tools"][-1] == {"type": "web_search"}
-    assert configured({"OPENROUTER_API_KEY": "r"}).search.engine == "openai"
-    assert configured({}).search.engine == "openai"
+    assert configured({"OPENROUTER_API_KEY": "r"}).search.engine == "openrouter-perplexity"   # Perplexity by default
+    assert configured({}).search.engine == "openai"                                           # no key: hosted
 
 
 # ---- the conversation ------------------------------------------------------------------------

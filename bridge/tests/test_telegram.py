@@ -852,7 +852,7 @@ def test_a_plain_screenshot_request_is_answered_by_code_even_mid_task(tmp_path: 
 
     run_rig(rig, during)
     assert len(rig.create.requests) == 1                                  # zero model calls for the two screens
-    assert ("user", "screenshot") in rig.closed[0]
+    assert ("user", "screenshot") not in rig.closed[0]                   # a code word: the transcript's only
     for asks in ("send me a screenshot", "what's on the screen?", "Show me your screen please"):
         assert telegram.SCREEN_NOW.match(asks), asks
     for goes_to_the_model in ("screenshot the headline on google news", "show me the top headline", "open mail"):
@@ -1232,6 +1232,7 @@ def test_a_permission_prompt_is_answered_from_the_phone_and_silence_defers() -> 
         assert await ask == "allow"
         assert await inlet.decide_permission("Bash", "sleep 1") is None                # silence: defer
         assert rig.create.requests == []                               # yes/no never became a chat turn
+        assert inlet.turns == []                    # the prompt and its answers were Claude's: never the history
         # the shipped default: the phone never asks (owner, 2026-09-21); CC_BUDDY_TELEGRAM_ASK=1 turns it on
         quiet = Rig(FakeApi(), FakeCreate())
         quiet.inlet.claude = True
@@ -4243,17 +4244,21 @@ def test_two_codex_folders_with_one_name_get_buttons_that_can_be_told_apart() ->
     asyncio.run(go())
 
 
-def test_a_tapped_question_option_is_kept_in_the_chats_record() -> None:
+def test_a_tapped_question_option_is_kept_in_the_chats_record(tmp_path: Path) -> None:
+    memory = FakeMemory(tmp_path)
+
     async def go() -> None:
         api, typed = FakeApi(), []
-        rig = relay_rig(api, typed)
+        rig = relay_rig(api, typed, memory=memory)
         rig.inlet.relay_tool_call("AskUserQuestion", "Which one? (1. era-maker / 2. buddy)")
         await jobs(rig)
         await tap(rig, api.key("2. buddy")[1], api.keyboards[-1][0])
-        assert typed == ["2"] and rig.inlet.turns[-1] == ("user", "2. buddy")
+        # the record is the transcript; a relay line never enters the text brain's history
+        assert typed == ["2"] and ("user", "2. buddy") not in rig.inlet.turns
         await rig.inlet._shutdown()
 
     asyncio.run(go())
+    assert ("owner", "relay", "2. buddy") in _rows(memory)
 
 
 # ---- G12: memory — every word to the transcript, today in the prompt, one set of memory tools ------------
@@ -4380,7 +4385,7 @@ def test_code_words_are_commands_and_codex_traffic_is_relay_outside_the_history(
     run_rig(rig)
     assert _rows(memory) == [("owner", "command", "claude off"), ("owner", "command", "stealth"),
                              ("owner", "relay", "codex: fix the tests")]
-    assert rig.closed == [[("user", "claude off"), ("user", "stealth")]]  # Codex never reaches the history
+    assert rig.closed == []                               # neither code words nor Codex reach the history
 
 
 def test_an_image_turn_is_an_image_line_with_its_caption(tmp_path: Path) -> None:
@@ -4458,7 +4463,7 @@ def test_a_voice_line_said_between_two_texts_is_in_the_second_turns_today_block(
 def test_no_line_of_the_history_is_repeated_in_the_today_block_and_none_is_lost(tmp_path: Path,
                                                                                  commands: int) -> None:
     """The today block leaves out exactly the lines the history shows: the history's say lines plus the
-    owner's new message. A code word in the history is not a say line, so it does not count. A fixed
+    owner's new message. A code word is in neither (the transcript's only), so it does not count. A fixed
     exclude_tail=HISTORY_TURNS fails both cases: with no command it repeats one line, with two it loses one."""
     memory = FakeMemory(tmp_path)
     earlier = memory.transcripts.new_conv("telegram")
@@ -4483,7 +4488,7 @@ def test_no_line_of_the_history_is_repeated_in_the_today_block_and_none_is_lost(
         shown = sum(1 for h in history if h == text) + sum(1 for row in block.split("\n") if row.endswith(": " + text))
         assert shown == 1, (text, shown)                  # every say line exactly once: history or block
     assert "an earlier chat today" in block and "Owner: text 0" in block    # the positive controls
-    assert "text 0" not in history and ("stealth" in history) == bool(commands)   # text 0 fell out of it
+    assert "text 0" not in history and "stealth" not in history     # text 0 fell out; code words never enter
 
 
 def test_the_memory_tools_are_offered_whenever_memory_is_lent_even_with_no_profile(tmp_path: Path) -> None:
@@ -4626,3 +4631,128 @@ def test_the_app_tools_get_the_picture_sender_as_well_as_the_button_sender() -> 
     (name, args, chat_id, send, send_photo), = maker.calls
     assert (name, chat_id) == ("make_app", OWNER)
     assert send == rig.api.send_web_apps and send_photo == rig.api.send_photo_web_apps
+
+
+def test_the_eval_rules_stay_in_the_text_brain_instructions() -> None:
+    # From the 2026-09-24 Ori eval: they took gpt-6-luna from 11/16 to 14/16 and closed its API-key safety miss.
+    text = " ".join(telegram.INSTRUCTIONS.split())
+    for rule in ("Keep API keys out of this chat", "through start_task with the owner's words",
+                 "check the calendar or ask whether the owner means a flight", "ask one useful next question",
+                 "own the miss plainly and offer to remember the date"):
+        assert rule in text, rule
+
+
+def test_relay_lines_and_code_words_never_reach_the_text_brains_history(tmp_path: Path) -> None:
+    # Live, 2026-09-24 08:44: the brain's history was eight lines the owner had typed to Claude Code ("The
+    # expense spllitter doesn't work", "Ultrathink", "Claude off"...), and think_hard built "the plan" from
+    # them. Relay and command lines are the transcript's only; a genuine owner/buddy exchange stays.
+    memory, typed = FakeMemory(tmp_path), []
+    rig = relay_rig(FakeApi(), typed, memory=memory)
+    rig.create.responses = [say("Pasta tonight."), say("Here is what I know.")]
+
+    async def go() -> None:
+        await rig.inlet._turn(_in("what's for dinner?", 1))
+        rig.inlet.claude = True
+        await dispatch(rig, "The expense spllitter doesn't work", message_id=2)
+        await dispatch(rig, "claude: Ultrathink", message_id=3)
+        await dispatch(rig, "claude off", message_id=4)
+        await dispatch(rig, "stealth", message_id=5)
+        await rig.inlet._turn(_in("so what's the plan?", 6))
+        await rig.inlet._shutdown()
+
+    asyncio.run(go())
+    assert typed == ["The expense spllitter doesn't work", "Ultrathink"]
+    last = rig.create.requests[-1]
+    shown = [(i["role"], i["content"][0]["text"]) for i in last["input"] if i.get("role") != "developer"]
+    assert shown == [("user", "what's for dinner?"), ("assistant", "Pasta tonight."), ("user", "so what's the plan?")]
+    everything = json.dumps(last)
+    for leaked in ("spllitter", "Ultrathink", "claude off", "stealth"):
+        assert leaked not in everything, leaked
+    # the transcript is still the whole record, each line under its kind
+    assert [(who, kind, text) for who, kind, text in _rows(memory) if kind in ("relay", "command")] == [
+        ("owner", "relay", "The expense spllitter doesn't work"), ("owner", "relay", "claude: Ultrathink"),
+        ("owner", "command", "claude off"), ("owner", "command", "stealth")]
+
+
+def test_a_text_turn_cut_off_by_a_restart_is_answered_with_one_line() -> None:
+    # Live, 2026-09-24 08:47:54: the owner's text got "typing…", the daemon restarted at 08:48:00, and no reply
+    # ever came. The update was already acknowledged, so Telegram will not send it again: buddy must say so.
+    never = asyncio.Event()
+
+    async def hangs() -> dict[str, Any]:
+        await never.wait()
+        return say("too late")
+
+    api = FakeApi([update("what should I cook tonight?", update_id=7)])
+    rig = Rig(api, FakeCreate(hangs))
+    run_rig(rig)                                          # the loop is cancelled mid-turn: the daemon stops
+    assert api.replies == [(telegram.TURN_RESTART_LINE, 7)] and api.sent == [(OWNER, telegram.TURN_RESTART_LINE)]
+    # the control: a turn that finished before the restart gets its answer and nothing else
+    api = FakeApi([update("hi", update_id=8)])
+    rig = Rig(api, FakeCreate(say("Hello!")))
+    run_rig(rig)
+    assert api.sent == [(OWNER, "Hello!")] and api.replies == []
+
+
+def test_the_restart_line_never_holds_up_the_shutdown() -> None:
+    never = asyncio.Event()
+
+    async def hangs() -> dict[str, Any]:
+        await never.wait()
+        return say("too late")
+
+    class Stuck(FakeApi):
+        async def send_message(self, *a: Any, **kw: Any) -> None:
+            await never.wait()                            # Telegram does not answer
+
+    api = Stuck([update("hello?", update_id=9)])
+    rig = Rig(api, FakeCreate(hangs))
+    waited: list[float] = []
+    real_wait_for = asyncio.wait_for
+
+    async def timed(aw: Any, timeout: Optional[float]) -> Any:
+        waited.append(timeout or 0.0)
+        return await real_wait_for(aw, 0.01)              # the test does not sit out the real budget
+
+    async def go() -> None:
+        loop_task = asyncio.ensure_future(rig.inlet.run())
+        await settle()
+        with pytest.MonkeyPatch.context() as mp:
+            mp.setattr(telegram.asyncio, "wait_for", timed)
+            loop_task.cancel()
+            await asyncio.gather(loop_task, return_exceptions=True)
+
+    asyncio.run(go())
+    assert waited and max(waited) <= telegram.TURN_RESTART_SECS <= 2.0
+
+
+def test_empty_citation_links_never_reach_the_phone() -> None:
+    # Live, 2026-09-24 23:35:17: a reply carried "([]())", an empty markdown link left by the hosted web
+    # search's citations. It is taken out before the reply is kept or sent; real links and code are not.
+    reply = ("Ramen Taro opens at 11 ([]()). The menu is online ([Taro](https://example.com/menu)) "
+             "and so is a map []() [here]().\nIn code, `x = f([]())` stays.")
+    api = FakeApi([update("when does the ramen place open?")])
+    rig = Rig(api, FakeCreate(say(reply)))
+    run_rig(rig)
+    sent = api.sent[0][1]
+    assert sent == ("Ramen Taro opens at 11. The menu is online ([Taro](https://example.com/menu)) "
+                    "and so is a map here.\nIn code, `x = f([]())` stays.")
+    assert rig.closed == [[("user", "when does the ramen place open?"), ("buddy", sent)]]
+    for text, clean in (("Done ([](https://a.example), []()).", "Done."), ("[]()", ""), ("plain", "plain")):
+        assert telegram.strip_empty_links(text) == clean, text
+
+
+def test_open_it_after_a_shared_link_carries_the_link_into_the_task() -> None:
+    # 2026-09-23 23:35: "Use Google search to open it up" came right after the owner shared a Maps link; the model
+    # wrote only the second message's words as the goal. The link from the owner's earlier message now rides along.
+    rig = Rig(FakeApi([update("Use Google search to open it up")]),
+              FakeCreate(call("start_task", {"goal": "Use Google search to open it up"})))
+    rig.inlet.turns = [("user", "What do u think of this https://maps.app.goo.gl/EXAMPLE"), ("buddy", "Nice route.")]
+    rig.inlet._turn_kinds = ["say", "say"]
+
+    async def during() -> None:
+        assert "https://maps.app.goo.gl/EXAMPLE" in rig.agents[0].goal
+        assert rig.agents[0].goal.startswith("Use Google search to open it up")
+        rig.agents[0].release.set()
+
+    run_rig(rig, during)
