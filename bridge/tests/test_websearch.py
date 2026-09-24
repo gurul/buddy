@@ -1,4 +1,5 @@
-"""websearch.py: one OpenRouter call with the web plugin on Exa, read back as an answer and sources."""
+"""websearch.py: one OpenRouter call with the web search server tool (Perplexity by default), read back as an answer
+and sources."""
 
 from __future__ import annotations
 
@@ -40,30 +41,48 @@ PAYLOAD = {
 }
 
 
-def test_configured_uses_hosted_search_unless_exa_is_explicit() -> None:
-    for env in ({}, {"OPENROUTER_API_KEY": "r"},
-                {"OPENROUTER_API_KEY": "r", "CC_BUDDY_WEB_SEARCH": "bing"}):
-        cfg = ws.configured(env)
-        assert cfg.engine == "openai"
-        assert ws.tools_for(cfg) == [{"type": "web_search"}]
-    cfg = ws.configured({"OPENROUTER_API_KEY": "r", "CC_BUDDY_WEB_SEARCH": "openrouter-exa"})
-    assert cfg == ws.SearchConfig(engine="openrouter-exa", model="openai/gpt-5.4-nano", max_results=5)
+def test_configured_uses_perplexity_with_an_openrouter_key_and_hosted_search_without() -> None:
+    cfg = ws.configured({"OPENROUTER_API_KEY": "r"})
+    assert cfg == ws.SearchConfig(engine="openrouter-perplexity", model="google/gemini-3.1-flash-lite",
+                                  max_results=5, max_uses=2)
     assert ws.tools_for(cfg) == [ws.WEB_SEARCH_TOOL]
+    for env in ({}, {"CC_BUDDY_WEB_SEARCH": "openrouter-perplexity"}, {"CC_BUDDY_WEB_SEARCH": "openrouter-exa"},
+                {"OPENROUTER_API_KEY": "r", "CC_BUDDY_WEB_SEARCH": "openai"}):
+        cfg = ws.configured(env)
+        assert cfg.engine == "openai" and ws.tools_for(cfg) == [{"type": "web_search"}]
+    assert ws.configured({"OPENROUTER_API_KEY": "r", "CC_BUDDY_WEB_SEARCH": "bing"}).engine == "openrouter-perplexity"
+    assert ws.configured({"OPENROUTER_API_KEY": "r", "CC_BUDDY_WEB_SEARCH": "openrouter-exa"}).engine == "openrouter-exa"
+    assert ws.SearchConfig().engine == "openai"                  # a bare config never needs an OpenRouter key
     assert ws.WEB_SEARCH_TOOL["strict"] is True
     assert ws.WEB_SEARCH_TOOL["parameters"]["additionalProperties"] is False
     assert ws.tools_for(ws.configured({"CC_BUDDY_WEB_SEARCH": "off", "OPENROUTER_API_KEY": "r"})) == []
-    assert ws.configured({"CC_BUDDY_WEB_SEARCH": "openrouter-exa"}).engine == "openai"
-    tuned = ws.configured({"OPENROUTER_API_KEY": "r", "CC_BUDDY_WEB_SEARCH": "openrouter-exa",
-                           "CC_BUDDY_WEB_SEARCH_MODEL": "openai/gpt-5.6-luna", "CC_BUDDY_WEB_SEARCH_RESULTS": "40"})
-    assert tuned.model == "openai/gpt-5.6-luna" and tuned.max_results == 10
+    tuned = ws.configured({"OPENROUTER_API_KEY": "r", "CC_BUDDY_WEB_SEARCH_MODEL": "z-ai/glm-5.3-flash",
+                           "CC_BUDDY_WEB_SEARCH_RESULTS": "40", "CC_BUDDY_WEB_SEARCH_MAX_USES": "9"})
+    assert (tuned.model, tuned.max_results, tuned.max_uses) == ("z-ai/glm-5.3-flash", 10, 5)
 
 
-def test_the_request_is_one_chat_call_with_the_web_plugin_on_exa() -> None:
-    body = ws.request(ws.SearchConfig(max_results=3), "  who won\n the game ")
-    assert body["model"] == "openai/gpt-5.4-nano"
-    assert body["plugins"] == [{"id": "web", "engine": "exa", "max_results": 3}]
+def test_an_openai_answer_model_is_never_sent_through_openrouter() -> None:
+    # owner, 2026-09-24: OpenAI models run on the OpenAI key directly, not through OpenRouter
+    cfg = ws.configured({"OPENROUTER_API_KEY": "r", "CC_BUDDY_WEB_SEARCH_MODEL": "openai/gpt-6-luna"})
+    assert cfg.model == ws.DEFAULT_MODEL and not cfg.model.startswith("openai/")
+
+
+def test_the_request_is_one_chat_call_with_the_search_server_tool_and_the_clock() -> None:
+    from datetime import datetime, timezone
+
+    now = datetime(2026, 9, 24, 18, 36, tzinfo=timezone.utc)
+    body = ws.request(ws.SearchConfig(engine="openrouter-perplexity", max_results=3, max_uses=2), "  who won\n the game ",
+                      environ={"CC_BUDDY_TIMEZONE": "America/Los_Angeles"}, now=now)
+    assert body["model"] == "google/gemini-3.1-flash-lite" and "plugins" not in body
+    assert body["tools"] == [{"type": "openrouter:web_search",
+                              "parameters": {"engine": "perplexity", "max_results": 3, "max_uses": 2}}]
     assert body["messages"][-1] == {"role": "user", "content": "who won the game"}
-    assert body["messages"][0]["role"] == "system" and body["max_tokens"] == 400
+    system = body["messages"][0]["content"]
+    assert body["messages"][0]["role"] == "system" and body["max_tokens"] == 400 and body["usage"] == {"include": True}
+    # the answer step reads the local clock, converted to the owner's zone: pages are not a live clock
+    assert "Thursday 2026-09-24 11:36" in system and "America/Los_Angeles" in system
+    exa = ws.request(ws.SearchConfig(engine="openrouter-exa"), "x", now=now)
+    assert exa["tools"][0]["parameters"]["engine"] == "exa"
 
 
 def test_parse_reads_the_answer_and_the_citations_once_each() -> None:
@@ -89,9 +108,16 @@ def test_search_posts_once_and_never_raises() -> None:
         assert req.get_header("Authorization") == "Bearer r"
         return Reply(PAYLOAD)
 
-    out = ws.search("who won", ws.SearchConfig(), key="r", opener=opener, clock=iter([0.0, 0.42]).__next__)
-    assert out["ok"] and out["ms"] == 420 and out["cost_usd"] == 0.007 and len(out["sources"]) == 2
-    assert seen[0][0] == ws.URL and seen[0][1]["plugins"][0]["engine"] == "exa" and seen[0][2] == 20.0
+    cfg = ws.SearchConfig(engine="openrouter-perplexity")
+    out = ws.search("who won", cfg, key="r", opener=opener, clock=iter([0.0, 0.42]).__next__)
+    # no usage.cost in the reply: the engine's list price per search
+    assert out["ok"] and out["ms"] == 420 and out["cost_usd"] == 0.005 and len(out["sources"]) == 2
+    assert seen[0][0] == ws.URL and seen[0][1]["tools"][0]["parameters"]["engine"] == "perplexity" and seen[0][2] == 20.0
+
+    def priced(req, timeout):
+        return Reply({**PAYLOAD, "usage": {**PAYLOAD["usage"], "cost": 0.0056}})
+
+    assert ws.search("who won", cfg, key="r", opener=priced)["cost_usd"] == 0.0056        # OpenRouter's own figure
     # failures are one reason each
     assert ws.search("x", key="") == {"ok": False, "reason": "web search is not set up on this computer (no OpenRouter key)"}
     assert ws.search("   ", key="r") == {"ok": False, "reason": "empty query"}
