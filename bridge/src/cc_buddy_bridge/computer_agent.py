@@ -1196,8 +1196,10 @@ class ComputerAgent:
 
         In the browser (lane="browser") three things differ, all measured on tools/browser_model_eval.py
         (2026-09-24): a blank page with a URL in the request opens that URL before planning, so the planner
-        sees the site instead of declining an empty outline; a checkpoint asks the planner again with the new page and the steps already done
-        (MAX_BROWSER_REPLANS)."""
+        sees the site instead of declining an empty outline; a checkpoint, or a question whose page did not
+        hold the answer, asks the planner again with the new page and the steps already done
+        (MAX_BROWSER_REPLANS); and a question is answered only from the page's text, never with the
+        executor's "Done: open url …" sentence."""
         from . import plan_contract as pc
 
         t0 = self._clock()
@@ -1275,13 +1277,19 @@ class ComputerAgent:
                     return f"Okay, I stopped before that: {what}.", ""
                 approved[str(start)] = what
             status = str(result.get("status") or "")
+            ran_all = int(result.get("next_index") or 0) >= len(plan.steps)
             # The planner leaves final_say empty exactly when the answer must be read off the page (READ
-            # instructions); a plan with its own sentence ("Here is the top headline.") keeps it.
-            if reads and not plan.final_say and status in ("complete", "checkpoint"):
-                said = await self._read_answer(goal, worker)
-                if said:
-                    log.info("agent: plan and page read in %.2f s", self._clock() - t0)
-                    return said, ""
+            # instructions); a plan with its own sentence ("Here is the top headline.") keeps it. A plan whose
+            # every step ran is read even when its own `success` guess was not on the page: the read decides.
+            if reads and not plan.final_say:
+                if status in ("complete", "checkpoint") or (status == "partial" and ran_all):
+                    said = await self._read_answer(goal, worker)
+                    if said:
+                        log.info("agent: plan and page read in %.2f s", self._clock() - t0)
+                        return said, ""
+                    again = "the page now open did not show the answer"
+                    continue
+                break                                # a question is never answered with "Done: open url …"
             if status == "complete" and result.get("sentence"):
                 log.info("agent: plan ran in %.2f s with %d planner call%s", self._clock() - t0, attempt + 1,
                          "" if attempt == 0 else "s")

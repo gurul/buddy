@@ -235,10 +235,20 @@ def test_a_sign_in_redirect_is_said_plainly_with_no_model_call(tmp_path: Path) -
     assert answer == "You're not signed in to github.com in Chrome, so I couldn't check." and client.calls == 1
 
 
-def test_not_found_on_the_page_hands_the_task_on(tmp_path: Path) -> None:
-    a, lane, client = _reading(tmp_path, answer_text=pc.READ_NOT_FOUND)
+def test_not_found_on_the_page_asks_again_then_hands_the_task_on(tmp_path: Path) -> None:
+    from test_computer_agent import _message, _response
+
+    declined = {"needs_eyes": True, "why": "no page shows it", "steps": [], "final_say": "", "success": None}
+    client = FakeClient([_plan_response(READ_PLAN), _response("r1", _message(pc.READ_NOT_FOUND)),
+                         _plan_response(declined)])
+    lane = ReadingLane([READ_DONE], page={"title": "Inbox", "url": "https://mail.google.com/mail/u/0/#inbox",
+                                          "text": "Inbox Primary Social"})
+    a, _ = _agent(client, PlanWorker([]), tmp_path, config=_cfg(tmp_path), browser=lane)
     answer, note = asyncio.run(a.run_in_browser("how many unread emails are in my gmail inbox?"))
-    assert answer == "" and "open url https://mail.google.com" in note and client.calls == 2
+    assert answer == "" and "open url https://mail.google.com" in note and client.calls == 3
+    again = client.requests[2]["input"][0]["content"][0]["text"]
+    assert "Already done, in order (do not repeat): open url https://mail.google.com" in again
+    assert "did not show the answer" in again
 
 
 # ---- what tools/browser_model_eval.py found, 2026-09-24 -----------------------------------------------------
@@ -333,6 +343,42 @@ def test_a_blank_tab_with_no_url_is_planned_as_it_is(tmp_path: Path) -> None:
     asyncio.run(a.run_in_browser("open google news"))
     shown = client.requests[0]["input"][0]["content"][0]["text"]
     assert lane.opened == [] and "Site open: none (a blank page)" in shown and "none readable" in shown
+
+
+HOME_DONE = {"status": "complete", "next_index": 1, "reason": "", "confirm": "", "sentence": "Done: open url https://help.example.test.",
+             "ledger": [{"index": 1, "step": "open url https://help.example.test", "effect": "confirmed"}]}
+
+
+def test_a_question_is_never_answered_with_the_navigation_step(tmp_path: Path) -> None:
+    # gpt-6-astra, help_read_after_nav: the page read found nothing and buddy said "Done: open url …" as the answer.
+    from test_computer_agent import _message, _response
+
+    home = {"needs_eyes": False, "why": "", "final_say": "", "success": None,
+            "steps": [_step("open_url", "https://help.example.test")]}
+    client = FakeClient([_plan_response(home), _response("r1", _message(pc.READ_NOT_FOUND))])
+    lane = PageLane([HOME_DONE], [["link: Shipping"]], page={"title": "Help", "url": "https://help.example.test/",
+                                                           "text": "Help Center Returns Shipping"})
+    a, _ = _agent(client, PlanWorker([]), tmp_path, config=_cfg(tmp_path), browser=lane)
+    answer, note = asyncio.run(a.run_in_browser("how many business days does standard shipping take on help.example.test?"))
+    assert "Done" not in answer and answer == "" and "open url https://help.example.test" in note
+
+
+def test_a_question_whose_plan_ran_is_read_even_when_its_own_success_guess_missed(tmp_path: Path) -> None:
+    # gpt-6-luna, help_read_after_nav: every step ran, but its `success` wording was not on the page, and the lane
+    # handed off without reading the page that held the answer.
+    from test_computer_agent import _message, _response
+
+    missed = {"status": "partial", "next_index": 1, "reason": 'the plan ran but "standard shipping business days" is not on screen',
+              "confirm": "", "sentence": "",
+              "ledger": [{"index": 1, "step": "open url https://help.example.test/shipping", "effect": "confirmed"}]}
+    ship = {"needs_eyes": False, "why": "", "final_say": "", "success": {"kind": "text_visible", "value": "standard shipping business days"},
+            "steps": [_step("open_url", "https://help.example.test/shipping")]}
+    client = FakeClient([_plan_response(ship), _response("r1", _message("Standard shipping takes 5 to 7 business days."))])
+    lane = PageLane([missed], [["link: Home"]], page={"title": "Shipping", "url": "https://help.example.test/shipping",
+                                                     "text": "Standard shipping takes 5 to 7 business days."})
+    a, _ = _agent(client, PlanWorker([]), tmp_path, config=_cfg(tmp_path), browser=lane)
+    answer, _ = asyncio.run(a.run_in_browser("how many business days does standard shipping take on help.example.test?"))
+    assert answer == "Standard shipping takes 5 to 7 business days." and lane.reads == 1
 
 
 def test_the_browser_wording_never_sends_a_blank_page_to_needs_eyes() -> None:
