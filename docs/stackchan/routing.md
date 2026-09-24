@@ -462,7 +462,9 @@ goals a better body. Playwright drives **buddy's own Chromium** (a persistent
 profile at `~/.config/cc-buddy-bridge/browser`, headed so you and the phone's
 screenshot see it, signed in once by you), and the page supplies the
 candidates: every visible control with its role, accessible name, state and
-box, from one JavaScript evaluate. A click lands on the element, not on a
+box, from one JavaScript evaluate. Controls above or below the viewport are
+collected too, after the on-screen ones, and are scrolled into view before a
+click or a type. A click lands on the element, not on a
 point. "Did it work" is a DOM question: the URL, the title, the text now on
 the page, what is typed in a field.
 
@@ -472,7 +474,12 @@ Nothing about the brain changes. The page is presented as the same
 answer, the sensitive-label table, "only the human approves" — runs unchanged
 on top of it. The lane implements the nine-method senses/effectors contract
 (`snapshot`, `text_visible`, `focused`, `frontmost_pid`, `screen_changed`,
-`click_candidate`, `focus_and_type`, `press`, `settle`) and nothing else. It
+`click_candidate`, `focus_and_type`, `press`, `settle`), plus `approve` (the
+label the human's yes covers for the current click, set by the executor) and
+`clear_consent`: before a click or a type, a cookie or consent notice is
+dismissed with a button that refuses or closes. A button the sensitive table
+knows ("Accept", "Agree", "OK") is never pressed there, so a notice that only
+offers to agree stays up and the step stops at `dialog_open`. It
 never attaches to your Chrome: that needs a debugging port, a consent prompt
 per session, and your live cookies under the daemon.
 
@@ -485,7 +492,7 @@ goal ── is_web_goal? (a URL, a site, "the browser", or the router's search) 
                                                                                  ▼
                                              run_plan: per step the page's candidates → gate + Jev → Playwright → expect
                                                                                  │
-                                                        complete → one sentence · partial/failed → the screenshot planner
+                     complete → one sentence · checkpoint → re-plan on the new page (≤ 2) · partial → the screenshot planner
 ```
 
 A web search ("search the web for ramen near me") is one navigation with zero
@@ -528,18 +535,56 @@ behind the lane:
 | gpt-6-luna | 16/36 (44%) | 6.4 s | $0.0002 | 20 |
 | z-ai/glm-5.3-flash | 9/36 (25%) | 15.0 s | $0.0001 | 26 (does not hold the plan schema) |
 
-The differences among astra, sol, luna and gemini-flash are within noise. A
-cheaper planner holds astra's success rate: luna costs about 75x less and sol
-about 4.5x less. The default is unchanged until the owner decides.
-`CC_BUDDY_AGENT_MODEL` is the knob, and it moves the Mac planner too. The
-bigger lesson: six of the nine local tasks fail for every model, and the
-causes are in the lane, not the planner:
+The differences among astra, sol, luna and gemini-flash are within noise. The
+bigger lesson was that six of the nine local tasks failed for every model, and
+the causes were in the lane, not the planner:
 
-- the typed-field picker returns `ambiguous_field` on a form with several
+- the typed-field picker returned `ambiguous_field` on a form with several
   fields;
-- a `checkpoint` after an in-page tab hands off;
-- an open cookie dialog refuses every click;
-- controls below the fold are never collected.
+- a `checkpoint` after an in-page tab handed off;
+- an open cookie dialog refused every click;
+- controls below the fold were never collected;
+- from a blank tab, astra and luna declined an empty outline, and the others
+  opened the site and then checkpointed;
+- when the page read found nothing, astra's answer was the executor's
+  "Done: open url …".
+
+**After the lane fixes (2026-09-24, branch `fix/browser-lane-bugs`)**, the same
+twelve tasks, 3 runs each:
+
+| model | before | after | avg time before → after | planner cost per task | planner calls per task | handoffs after |
+|---|---|---|---|---|---|---|
+| gpt-6-astra (default) | 16/36 (44%) | 36/36 (100%) | 7.2 s → 7.8 s | $0.0152 → $0.0171 | 1.42 → 1.42 | 6 |
+| gpt-6-luna | 16/36 (44%) | 36/36 (100%) | 6.4 s → 6.9 s | $0.0002 → $0.0002 | 1.36 → 1.53 | 7 |
+
+Every finished answer was correct (astra 30/30, luna 29/29). Every submit, save
+and add-to-cart still stopped for the human's yes. What changed, one commit
+each:
+
+- a form's field is the one the step names (or the plan just clicked), with
+  Jev's agreement, and a field named exactly is no longer traded for a
+  withheld look-alike ("Your message" versus "Send message");
+- controls below the fold are collected and scrolled to;
+- a cookie notice is refused (never accepted) before a click;
+- a checkpoint asks the planner again with the new page's controls and the
+  steps already done, at most twice (`MAX_BROWSER_REPLANS`), and the browser
+  lane has its own planning wording (`PLAN_INSTRUCTIONS_BROWSER`): plan past a
+  tab the request names, open the site on a blank page, `needs_eyes` only when
+  no web page could do it;
+- a blank tab opens the URL in the request before planning;
+- a question is answered from the page text or handed off, never with a
+  navigation step, and a re-plan may say nothing is left;
+- the human's yes reaches the page's own sensitive-label gate, for that click
+  only (the page used to refuse an approved "Send message");
+- Return in a search form waits for the results page.
+
+The remaining handoffs are all `search_then_link` and `cookie_banner` (plus one
+contact form): the work was done, but the plan's own `expect` named text that
+the fixture page does not show (its article title is generic), so the executor
+stopped, as it should, rather than claim the step. Real pages usually carry the
+name. With the lane fixed, luna matches astra at about 1/88 of the planner
+cost. The default is unchanged until the owner decides; `CC_BUDDY_AGENT_MODEL`
+is the knob, and it moves the Mac planner too.
 
 Run it:
 `python tools/browser_model_eval.py run --models gpt-6-luna --repeats 3 --out-dir DIR`,
