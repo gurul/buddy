@@ -47,6 +47,7 @@ import asyncio
 import json
 import logging
 import os
+import re
 import sys
 import time
 from dataclasses import dataclass, field
@@ -94,6 +95,7 @@ MAX_PLAN_CONFIRMS = 3                      # human yes/no questions one plan may
 # task off (tools/browser_model_eval.py, 2026-09-24: every model's tab/filter tasks ended at a checkpoint).
 # Two re-plans at most: three plan calls in all, never an open-ended loop.
 MAX_BROWSER_REPLANS = 2
+GOAL_URL = re.compile(r"https?://[^\s<>\"'),;]+", re.I)
 
 INSTRUCTIONS_TEMPLATE = """You are buddy, a small desk robot, operating the human's own Mac for them by voice request.
 
@@ -1192,8 +1194,9 @@ class ComputerAgent:
         executor left it. A consequential step asks the human directly (`_ask`), with no planner turn;
         nothing in a plan can pre-approve one.
 
-        In the browser (lane="browser") a checkpoint differs, measured on tools/browser_model_eval.py
-        (2026-09-24): it asks the planner again with the new page and the steps already done
+        In the browser (lane="browser") three things differ, all measured on tools/browser_model_eval.py
+        (2026-09-24): a blank page with a URL in the request opens that URL before planning, so the planner
+        sees the site instead of declining an empty outline; a checkpoint asks the planner again with the new page and the steps already done
         (MAX_BROWSER_REPLANS)."""
         from . import plan_contract as pc
 
@@ -1213,6 +1216,8 @@ class ComputerAgent:
             except Exception as e:  # noqa: BLE001 — the plan's own open_app step is the fallback
                 log.info("agent: could not open %s before planning (%s)", named, type(e).__name__)
         done: list[str] = []                        # every step applied, across plans, in order
+        if browser and not outline.get("lines"):
+            outline = await self._open_named_page(goal, worker, outline, done)
         # In the browser a question is navigation plus a read of the page's text (browser_lane.page_text), not
         # "needs eyes": plan only the way to the page, then answer from what it says.
         reads = browser and (lane_router.is_question(goal) or bool(task_router.TELL_ME.search(goal)))
@@ -1288,6 +1293,29 @@ class ComputerAgent:
         else:                                        # the re-plan budget ran out
             return "", self._handoff_note(done, again)
         return "", self._handoff_note(done, str(result.get("reason") or result.get("status") or ""))
+
+    async def _open_named_page(self, goal: str, worker: Any, outline: dict[str, Any], done: list[str]) -> dict[str, Any]:
+        """A blank page and a URL in the request: open it, then plan against the site. Measured on
+        tools/browser_model_eval.py (2026-09-24, search_then_link and help_read_after_nav from a blank tab):
+        with "none readable" as the outline gpt-6-astra and gpt-6-luna declined as needs_eyes, and the others
+        opened the site and stopped at a checkpoint to look. Anything else keeps the blank outline."""
+        m = GOAL_URL.search(goal)
+        if not m:
+            return outline
+        url = m.group(0).rstrip(".!?:")
+        try:
+            said = await self._interruptible(worker.open_url(url))
+            again = await self._interruptible(worker.outline())
+        except (Cancelled, FailSafe):
+            raise
+        except Exception as e:  # noqa: BLE001 — the plan's own open_url step is the fallback
+            log.info("agent: could not open %s before planning (%s)", url, type(e).__name__)
+            return outline
+        self._acted = True
+        done.append(f"open url {url}")
+        self._emit("progress", str(said), 0)
+        self._log({"turn": 0, "browser": {"opened_before_planning": url}})
+        return again
 
     @staticmethod
     def _handoff_note(done: list[str], why: str) -> str:

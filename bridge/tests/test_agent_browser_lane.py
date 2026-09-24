@@ -312,6 +312,29 @@ def test_the_mac_lane_still_hands_a_checkpoint_to_the_loop(tmp_path: Path) -> No
     assert len(worker.runs) == 1                                               # one plan, then the loop
 
 
+def test_a_blank_tab_opens_the_url_in_the_request_before_planning(tmp_path: Path) -> None:
+    plan = {"needs_eyes": False, "why": "", "final_say": "Opened.", "success": None,
+            "steps": [_step("click", "Getting started link", hint="Getting started")]}
+    done = {"status": "complete", "next_index": 1, "reason": "", "confirm": "", "sentence": "Opened.",
+            "ledger": [{"index": 1, "step": "click Getting started link", "effect": "confirmed"}]}
+    client = FakeClient([_plan_response(plan)])
+    lane = PageLane([done], [["search field: Search docs", "link: Getting started"]], blank=True)
+    a, _ = _agent(client, PlanWorker([]), tmp_path, config=_cfg(tmp_path), browser=lane)
+    answer, _ = asyncio.run(a.run_in_browser("Go to https://docs.example.test, and open Getting started."))
+    assert answer == "Opened." and lane.opened == ["https://docs.example.test"]
+    shown = client.requests[0]["input"][0]["content"][0]["text"]
+    assert "link: Getting started" in shown and "none readable" not in shown and "Site open: settings.example.test" in shown
+
+
+def test_a_blank_tab_with_no_url_is_planned_as_it_is(tmp_path: Path) -> None:
+    client = FakeClient([_plan_response(WEB_PLAN)])
+    lane = PageLane([WEB_DONE], [["link: Top stories"]], blank=True)
+    a, _ = _agent(client, PlanWorker([]), tmp_path, config=_cfg(tmp_path), browser=lane)
+    asyncio.run(a.run_in_browser("open google news"))
+    shown = client.requests[0]["input"][0]["content"][0]["text"]
+    assert lane.opened == [] and "Site open: none (a blank page)" in shown and "none readable" in shown
+
+
 def test_the_browser_wording_never_sends_a_blank_page_to_needs_eyes() -> None:
     assert "blank page" in pc.PLAN_INSTRUCTIONS_BROWSER and "only when no web page could do the request" in pc.PLAN_INSTRUCTIONS_BROWSER
     assert "asked again with the new page's controls" in pc.PLAN_INSTRUCTIONS_BROWSER
