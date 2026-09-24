@@ -120,7 +120,40 @@ def test_the_daemon_lends_the_live_list_to_the_inlet(monkeypatch: Any) -> None:
     inlet = Daemon._make_telegram(daemon)
     try:
         assert inlet is not None
-        assert inlet._claude_sessions() == ["/Users/g/repo"]
+        assert asyncio.run(inlet._claude_sessions()) == ["/Users/g/repo"]
         assert set(state.sessions) == {"live"}
     finally:
         asyncio.run(inlet.api.close())
+
+
+def test_a_session_run_through_the_npm_bin_shim_is_a_claude_process() -> None:
+    """Review finding: ps shows an npm install started by its shebang shim as ``node …/bin/claude``; it was
+    not recognised, so a live session was judged dead and dropped from the picker."""
+    assert claude_live._is_claude("node /opt/homebrew/bin/claude --resume")
+    assert claude_live._is_claude("/usr/local/bin/bun /Users/g/.bun/bin/claude")
+    assert not claude_live._is_claude("node /opt/homebrew/bin/claude-mem worker")       # the control
+    assert not claude_live._is_claude("node server.js claude")
+
+
+def test_the_probe_runs_off_the_event_loop_and_the_pruning_on_it() -> None:
+    """Review finding: "claude on" ran ps and lsof synchronously on the daemon's event loop (up to 3 s)."""
+    import asyncio
+    import threading
+
+    state = State()
+    state.session_start("dead", cwd="/Users/g/old")
+    state.session_start("live", cwd="/Users/g/repo")
+    state.sessions["dead"].started_at -= 3600
+    state.sessions["live"].started_at -= 600
+    threads: list[str] = []
+
+    def probe() -> set[str]:
+        threads.append(threading.current_thread().name)
+        return {"/Users/g/repo"}
+
+    async def go() -> list[str]:
+        return await claude_live.picker_sessions_off_loop(state, probe)
+
+    assert asyncio.run(go()) == ["/Users/g/repo"]
+    assert threads and threads[0] != threading.main_thread().name
+    assert set(state.sessions) == {"live"}

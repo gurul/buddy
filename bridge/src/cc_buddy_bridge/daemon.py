@@ -1077,7 +1077,8 @@ class Daemon:
             on_sound=self._set_sound, on_star=self._star_by_voice, on_caption=self._on_caption,
             notes=lambda: self._room_notes_taker(), terminal=Daemon._type_into_terminal,
             # Live sessions only: one whose terminal died without a SessionEnd is dropped (claude_live).
-            claude_sessions=lambda: claude_live.picker_sessions(self.state),
+            # Awaited by the inlet: the ps/lsof probe runs on a worker thread, never on this loop.
+            claude_sessions=lambda: claude_live.picker_sessions_off_loop(self.state),
             records=records_mod.RecordsReader(self._recall_cfg) if records_mod.configured().enabled else None)
 
     def _make_agent(self, on_event: Any, ask_user: Any) -> Any:

@@ -18,6 +18,7 @@ worse than showing a dead one: the first loses the owner's way in, the second co
 
 from __future__ import annotations
 
+import asyncio
 import logging
 import os
 import subprocess
@@ -35,13 +36,19 @@ GRACE_SECS = 30.0                 # a session this new is kept whatever the prob
 Run = Callable[..., Any]
 
 
+RUNTIMES = ("node", "bun", "deno")    # what an npm install's ``claude`` shim runs under
+
+
 def _is_claude(args: str) -> bool:
-    """A Claude Code process: the native binary (``claude``, or its full path) or the npm install's
-    ``node …/claude-code/cli.js``."""
+    """A Claude Code process: the native binary (``claude``, or its full path), the npm install's
+    ``node …/claude-code/cli.js``, or that install launched through its bin shim, which ps shows as
+    ``node /opt/homebrew/bin/claude`` (review, 2026-09-23: such a session was judged dead and dropped)."""
     words = args.split()
     if not words:
         return False
     if os.path.basename(words[0]) == "claude":
+        return True
+    if os.path.basename(words[0]) in RUNTIMES and len(words) > 1 and os.path.basename(words[1]) == "claude":
         return True
     return any("claude-code/cli" in w for w in words[1:3])
 
@@ -89,6 +96,13 @@ def alive(cwd: str, live: set[str]) -> bool:
         if here == there or there in here.parents:
             return True
     return False
+
+
+async def picker_sessions_off_loop(state: Any, probe: Optional[Callable[[], Optional[set[str]]]] = None) -> list[str]:
+    """``picker_sessions`` for code on the event loop: the probe (two subprocesses, up to 1.5 s each) runs on
+    a worker thread, and only the pruning of ``state``, which the loop owns, runs on the loop."""
+    live = await asyncio.to_thread(probe or live_cwds)
+    return picker_sessions(state, probe=lambda: live)
 
 
 def picker_sessions(state: Any, live: Optional[set[str]] = None, *,

@@ -238,7 +238,10 @@ opens, `claude on` connects the chat to it as usual.
 each one from its hooks). A session whose terminal was closed or crashed never
 says goodbye, so before it lists them buddy checks the Mac: it looks for a
 running `claude` process in each session's folder (`ps` and `lsof`, about
-30 ms). A session with no process there is left out and forgotten. If that
+30 ms, run off the daemon's event loop; a message you send while it runs
+waits and is routed right after). An npm install started through its `claude`
+shim (`node …/bin/claude`) counts as a `claude` process too. A session with
+no process there is left out and forgotten. If that
 check fails or finds no `claude` at all, every session is listed, as before.
 A session that started in the last 30 s, or one with a question still waiting,
 is always listed.

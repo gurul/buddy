@@ -44,6 +44,7 @@ from __future__ import annotations
 
 import asyncio
 import dataclasses
+import inspect
 import json
 import logging
 import math
@@ -1151,9 +1152,9 @@ class TelegramInlet:
     * ``notes``         — () -> RoomNotes: the room note-taker (daemon._room_notes_taker), for take_notes
     * ``terminal``      — (cwd, text) -> str: type a line into the Claude Code terminal for that session;
                           "" when it went in (the owner's message gets a reaction), else the line to say
-    * ``claude_sessions`` — () -> [cwd]: the running Claude Code sessions' folders, newest first, for the
-                          "claude on" picker (the daemon's leaves out sessions whose process is gone:
-                          claude_live.picker_sessions)
+    * ``claude_sessions`` — () -> [cwd], or an awaitable of it: the running Claude Code sessions' folders,
+                          newest first, for the "claude on" picker (the daemon's leaves out sessions whose
+                          process is gone, probing ps and lsof on a worker thread: claude_live.picker_sessions_off_loop)
     * ``launcher``      — (folder, harness) -> str: open a new coding session on the Mac
                           (claude_launch.open_session). "new claude" (code word) and the start_coding_session
                           tool walk claude_launch's tree: personal or work, then general or which folder;
@@ -1199,7 +1200,7 @@ class TelegramInlet:
                  launcher: Callable[[Path, str], Awaitable[str]] = claude_launch.open_session,
                  launch_root: Optional[Path] = None,
                  launch_recent: Callable[[], list[claude_launch.Recent]] = claude_launch.load_recent,
-                 claude_sessions: Callable[[], list[str]] = lambda: [],
+                 claude_sessions: Callable[[], Any] = lambda: [],
                  codex: Optional[codex_chat.CodexChat] = None,
                  codex_folders: Callable[[], list[Path]] = codex_chat.accessible_folders,
                  permission_timeout_secs: float = DEFAULT_PERMISSION_TIMEOUT_SECS,
@@ -1240,6 +1241,10 @@ class TelegramInlet:
         self._launch: Optional[claude_launch.LaunchFlow] = None   # a new session's tree, being walked
         self._claude_sessions = claude_sessions
         self._join_after_launch = False                   # "claude on" with nothing running: join what opens
+        # "claude on" whose session list is still being read (off the loop): the owner's messages that arrive
+        # meanwhile wait here and are handled, in order, once the relay has joined or asked which session.
+        self._claude_on_job: Optional[asyncio.Task] = None
+        self._held: list[Inbound] = []
         self._permission_timeout = permission_timeout_secs
         self.stealth = False
         self.claude = False                               # the terminal relay
@@ -1368,16 +1373,20 @@ class TelegramInlet:
     async def _set_commands(self) -> None:
         """buddy's code words in the / menu of each owner's private chat (a private chat's id is its user's
         id). Once per start, and fail-soft: a menu Telegram refuses leaves every word working when typed."""
+        done = 0
         for owner in sorted(self.config.owner_ids):
             try:
                 await self.api.set_commands(BOT_COMMANDS, owner)
             except asyncio.CancelledError:
                 raise
             except Exception as e:  # noqa: BLE001 — a missing menu is cosmetic
-                log.warning("telegram: could not set the / menu (%s); the code words still work typed",
-                            e if isinstance(e, BotApiError) else type(e).__name__)
-                return
-        log.info("telegram: / menu set for %d owner chat(s)", len(self.config.owner_ids))
+                # One owner's refusal (a chat that never opened the bot: "chat not found") must not cost the
+                # owners after it their menu (review, 2026-09-23): log it and go on.
+                log.warning("telegram: could not set the / menu for one owner chat (%s); the code words still "
+                            "work typed", e if isinstance(e, BotApiError) else type(e).__name__)
+                continue
+            done += 1
+        log.info("telegram: / menu set for %d of %d owner chat(s)", done, len(self.config.owner_ids))
 
     # -- "typing…" while work goes on --
     def _keep_typing(self, chat_id: Optional[int], reason: str, secs: float) -> None:
@@ -1581,6 +1590,9 @@ class TelegramInlet:
     def _handle(self, inbound: Inbound) -> None:
         """One accepted message from the owner, routed. A picker's tap comes here too, with the button's
         words as its text (``_on_tap``), so a tap and a typed reply do exactly the same thing."""
+        if self._claude_on_job is not None and not self._claude_on_job.done():
+            self._held.append(inbound)                    # routed once "claude on" has decided: never ahead of it
+            return
         if inbound.image is not None:
             if self._image_waits():
                 self._spawn(self._say(inbound.chat_id, "Please answer the pending question in a separate text, then resend the image."), "telegram-say")
@@ -2291,13 +2303,41 @@ class TelegramInlet:
     def _claude_on(self, inbound: Inbound, target: str) -> None:
         """"claude on" joins a running session: the only one straight away, a picker when there are several
         (each a button), the new-session tree when there are none, then joins what it opens. "claude on
-        <name>" picks by folder name, and a name no session has starts that folder instead."""
+        <name>" picks by folder name, and a name no session has starts that folder instead.
+
+        The daemon's list probes the Mac (ps, then lsof: tens of milliseconds, up to 3 s at the timeouts), so it
+        is awaited as a job, never run on the event loop that serves the hooks, BLE and this poll (review,
+        2026-09-23). Messages arriving meanwhile are held and routed after, in order."""
         self._join_after_launch = False
         try:
-            cwds = list(dict.fromkeys(c for c in self._claude_sessions() if c))
+            listed = self._claude_sessions()
         except Exception as e:  # noqa: BLE001 — no list is only a shorter menu
             log.warning("telegram: could not list Claude sessions (%s)", type(e).__name__)
-            cwds = []
+            listed = []
+        if inspect.isawaitable(listed):
+            self._claude_on_job = self._spawn(self._claude_on_listed(inbound, target, listed), "telegram-claude-on")
+            return
+        self._claude_on_pick(inbound, target, listed)
+
+    async def _claude_on_listed(self, inbound: Inbound, target: str, listed: Awaitable[Any]) -> None:
+        try:
+            try:
+                sessions = await listed
+            except asyncio.CancelledError:
+                raise
+            except Exception as e:  # noqa: BLE001 — no list is only a shorter menu
+                log.warning("telegram: could not list Claude sessions (%s)", type(e).__name__)
+                sessions = []
+            self._claude_on_pick(inbound, target, sessions)
+        finally:
+            if self._claude_on_job is asyncio.current_task():
+                self._claude_on_job = None
+        held, self._held = self._held, []
+        for message in held:
+            self._handle(message)
+
+    def _claude_on_pick(self, inbound: Inbound, target: str, sessions: Any) -> None:
+        cwds = list(dict.fromkeys(c for c in (sessions or []) if c))
         names = [Path(c).name for c in cwds]
         if target:
             hits = claude_launch.match(target, names)

@@ -3691,3 +3691,46 @@ def test_claude_off_during_a_codex_chat_leaves_its_steps_and_result_flowing() ->
         await rig.inlet._shutdown()
 
     asyncio.run(go())
+
+
+def test_claude_on_awaits_a_session_list_off_the_loop_and_holds_messages_until_it_decides() -> None:
+    """Review finding: the daemon's session list (ps and lsof) ran inside _dispatch, blocking the event
+    loop. It is awaited as a job now; a message that arrives meanwhile is routed after "claude on" has
+    joined, so it still reaches the terminal."""
+    async def go() -> None:
+        api, typed, gate = FakeApi(), [], asyncio.Event()
+
+        async def sessions() -> list[str]:
+            await gate.wait()
+            return ["/Users/g/repo"]
+
+        async def terminal(cwd: str, text: str) -> str:
+            typed.append(text)
+            return ""
+
+        rig = Rig(api, FakeCreate(), terminal=terminal, claude_sessions=sessions)
+        rig.inlet._dispatch(update("claude on", update_id=1))            # returns at once: the list is a job
+        rig.inlet._dispatch(update("run the tests", update_id=2))
+        await settle()
+        assert rig.inlet.claude is False and typed == []
+        gate.set()
+        await jobs(rig)
+        assert rig.inlet.claude is True and typed == ["run the tests"] and not rig.create.requests
+        await rig.inlet._shutdown()
+
+    asyncio.run(go())
+
+
+def test_one_owner_whose_menu_is_refused_does_not_cost_the_others_theirs() -> None:
+    """Review finding: the first refusal (an owner who never opened the bot) ended the loop."""
+    class OneRefused(FakeApi):
+        async def set_commands(self, commands: Any, chat_id: int) -> None:
+            if chat_id == 7:
+                raise BotApiError(400, "Bad Request: chat not found")
+            await super().set_commands(commands, chat_id)
+
+    api = OneRefused()
+    config = TelegramConfig(enabled=True, token=TOKEN, owner_ids=frozenset({7, OWNER}))
+    rig = Rig(api, FakeCreate(), config=config)
+    asyncio.run(rig.inlet._set_commands())
+    assert [chat for _, chat in api.commands] == [OWNER]
