@@ -4,7 +4,7 @@
     python3 tools/fetch_telegram_docs.py            # writes docs/reference/telegram/*.md
 
 Standard library only. Each page's main content (``#dev_page_content``) becomes Markdown: headings,
-paragraphs, lists, tables as pipe rows, code as fences, links kept absolute. Rerun it to refresh;
+paragraphs, lists, tables as pipe rows, code as fences, links kept absolute, sample bot tokens redacted. Rerun it to refresh;
 every file starts with its source URL and the date it was fetched.
 """
 
@@ -32,6 +32,10 @@ PAGES = {
     "tutorial": "/bots/tutorial",
 }
 OUT = Path(__file__).resolve().parent.parent / "docs" / "reference" / "telegram"
+# Telegram's pages print sample bot tokens ("123456789:AA…"). They are fake, but secret scanners cannot
+# tell, so every token-shaped string is replaced before a page is saved.
+BOT_TOKEN = re.compile(r"(?<!\d)\d{6,12}:[A-Za-z0-9_-]{30,}")      # also inside a URL: /bot123456:…
+REDACTED = "<bot-token>"
 
 
 class ToMarkdown(HTMLParser):
@@ -164,7 +168,7 @@ def main() -> int:
         try:
             parser = ToMarkdown()
             parser.feed(fetch(path))
-            body = parser.markdown()
+            body = BOT_TOKEN.sub(REDACTED, parser.markdown())
         except Exception as e:  # noqa: BLE001 — one page failing leaves the others
             failed.append(f"{name}: {type(e).__name__}: {e}")
             continue

@@ -263,9 +263,9 @@ own profile.
 - **Which profile.** buddy identifies each open Chrome profile by its
   signed-in Google account. It asks Google's account list with that
   profile's cookies (`context.request`), so no tab opens. A task that names
-  an account works in that profile: "my era inbox" goes to owner@work.example,
-  "canvas on my uw account" to student@school.example, "gmail" to
-  owner@gmail.com. `CC_BUDDY_CHROME_PROFILE` sets the default. A
+  an account works in that profile, by the address, its name before the @, or
+  its domain word: "my work inbox" goes to owner@work.example, "canvas on my
+  school account" to student@school.example, "gmail" to owner@gmail.com. `CC_BUDDY_CHROME_PROFILE` sets the default. A
   profile needs an open Chrome window to be reachable, and naming one without
   a window gets a plain "open a window in that profile".
 - **Which tasks.** A web goal (`browser_lane.is_web_goal`: a URL, a site

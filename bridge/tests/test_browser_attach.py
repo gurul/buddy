@@ -189,8 +189,8 @@ def test_accounts_are_read_primary_first_and_deduplicated() -> None:
 
 
 @pytest.mark.parametrize("request_text,expected", [
-    ("check my era inbox", "owner@work.example"),
-    ("open canvas on my uw account", "student@school.example"),
+    ("check my work inbox", "owner@work.example"),
+    ("open canvas on my school account", "student@school.example"),
     ("how many unread in gmail", "owner@gmail.com"),
     ("use student@school.example and open canvas", "student@school.example"),
     ("what's the weather", ""),                                  # nothing named, no default: the first profile
