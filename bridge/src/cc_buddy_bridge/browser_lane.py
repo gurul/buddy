@@ -738,7 +738,7 @@ class BrowserLane:
         p = self._ensure()
         plan = pc.parse_plan(plan_dict, goal, source=str(plan_dict.get("source") or "astra"))
         ok = {int(k): v for k, v in (approved or {}).items()}
-        p.approve = next(iter(ok.values()), None)
+        p.approve = None                          # the executor grants each approved click its label (_grant)
 
         def open_app(name: str) -> str:
             if name.casefold() in ("browser", "chrome", "chromium", "google chrome", "safari"):

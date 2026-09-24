@@ -220,6 +220,7 @@ def run_plan(plan: Plan, *, senses: Any, effectors: Any, asker: Optional[Callabl
             entry.effect = "confirmed" if str(said).startswith("opened ") and " but " not in str(said) else "unverifiable"
 
         elif step.kind == "click":
+            _grant(effectors, ok.get(i, ""))
             objectives = list(dict.fromkeys(o for o in (step.label_hint, step.target) if o))
             result = None
             for objective in objectives:
@@ -236,7 +237,8 @@ def run_plan(plan: Plan, *, senses: Any, effectors: Any, asker: Optional[Callabl
             entry.how = last.via if last is not None else "code"
             if result.status == "confirm" and i in ok and ok[i] != _confirm_label(result.line, ""):
                 # The human already said yes to THIS step (the plan had flagged it); the lane now names the
-                # control. Their yes covers it: one question a step, not two.
+                # control. Their yes covers it: one question a step, not two — at the effector's own gate too.
+                _grant(effectors, _confirm_label(result.line, ""))
                 result = run_delegate(objective, senses=senses, effectors=effectors, decider=None, decide=decide,
                                       asker=asker, max_steps=1, skip_if_selected=True, dry_run=dry_run,
                                       approve=_confirm_label(result.line, "") or None, step_gates=step_gates,
@@ -245,6 +247,7 @@ def run_plan(plan: Plan, *, senses: Any, effectors: Any, asker: Optional[Callabl
                 entry.note = result.line
                 last = result.steps[-1] if result.steps else None
                 entry.how = last.via if last is not None else "code"
+            _grant(effectors, "")                            # a yes covers one step, never the next
             if result.status == "confirm":
                 out.ledger.append(entry)
                 return stop("needs_human", i, "a consequential control", _confirm_label(result.line, step.target))
@@ -324,6 +327,16 @@ def run_plan(plan: Plan, *, senses: Any, effectors: Any, asker: Optional[Callabl
             e.effect = "confirmed"
     out.sentence = _say(plan, out.ledger)
     return stop("complete", len(plan.steps))
+
+
+def _grant(effectors: Any, approved: str) -> None:
+    """Tell an effector with its own sensitive-label gate (browser_lane's page, desktop_helpers' adapter: an
+    `approve` attribute) which label the human's yes covers for THIS click, normalised as they compare it;
+    "" for none. Before this the page kept the first approval of a run as given — the step's description
+    ("click button labelled Send message"), never a label — so an approved sensitive click was refused at the
+    page and read as hit_test_failed (browser_model_eval smoke run, contact_form, 2026-09-24)."""
+    if hasattr(effectors, "approve"):
+        effectors.approve = " ".join(str(approved or "").split()).casefold()
 
 
 def _clear_consent(effectors: Any, i: int, out: PlanResult) -> None:

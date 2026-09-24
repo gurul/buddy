@@ -350,3 +350,31 @@ def test_a_closing_checkpoint_completes_only_where_the_caller_says_so() -> None:
     mid = plan({"kind": "checkpoint"}, {"kind": "click", "target": "week", "label_hint": "Week"})
     r = go(mid, Senses([calendar()]), Effectors(), decide="keyword", last_checkpoint_completes=True)
     assert r.status == "checkpoint" and r.next_index == 1            # one in the middle still stops
+
+
+class GatedEffectors(Effectors):
+    """Effectors with their own sensitive-label gate, as browser_lane's page and desktop_helpers' adapter have."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.approve = ""
+
+    def click_candidate(self, c) -> str:
+        from cc_buddy_bridge.ax_candidates import is_sensitive
+
+        if is_sensitive(c.label) and self.approve != " ".join(c.label.split()).casefold():
+            return f"refused: {c.label!r} is a sensitive control without approval"
+        return super().click_candidate(c)
+
+
+def test_the_humans_yes_to_a_flagged_step_reaches_the_effectors_own_gate_for_that_step_only() -> None:
+    form = _contact_form()
+    p = plan({"kind": "click", "target": "button labelled Send message", "label_hint": "Send message", "consequential": True},
+             request="send the contact form")
+    eff = GatedEffectors()
+    first = go(p, Senses([form]), eff, Desk(front="browser"), asker=asker_saying("Send message"))
+    assert first.status == "needs_human" and eff.clicks == []
+    r = go(p, Senses([form, form, form, form]), eff, Desk(front="browser"), asker=asker_saying("Send message"),
+           approved={0: first.confirm})
+    assert eff.clicks == ["Send message"] and r.status != "partial", r.to_dict()
+    assert eff.approve == ""                                   # nothing carries over to a later step
