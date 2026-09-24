@@ -3734,3 +3734,108 @@ def test_one_owner_whose_menu_is_refused_does_not_cost_the_others_theirs() -> No
     rig = Rig(api, FakeCreate(), config=config)
     asyncio.run(rig.inlet._set_commands())
     assert [chat for _, chat in api.commands] == [OWNER]
+
+
+# ---- review fixes: no stale "typing…" or "Thinking…" (2026-09-23) --------------------------------------
+
+def _typing_relay_rig(api: FakeApi, typed: list[str], **kw: Any) -> Rig:
+    """The relay joined with drafts off, so a relayed line shows "typing…"; the 4 s tick wait is held open,
+    so the reasons stay in view while the test looks at them."""
+    async def terminal(cwd: str, text: str) -> str:
+        typed.append(text)
+        return ""
+
+    async def sleep(secs: float) -> None:
+        if secs == telegram.TYPING_EVERY_SECS:
+            await asyncio.Event().wait()
+        await asyncio.sleep(0)
+
+    kw.setdefault("claude_sessions", lambda: ["/Users/g/repo"])
+    rig = Rig(api, FakeCreate(), NO_DRAFTS, terminal=terminal, sleep=sleep, **kw)
+    rig.inlet._relay_to("/Users/g/repo")
+    rig.inlet._chat_id = OWNER
+    return rig
+
+
+def test_a_relay_typing_that_ended_while_a_question_waited_does_not_come_back_after_the_answer() -> None:
+    """Review finding: _ask_user paused every reason and put them all back, so the relay's "typing…" came
+    back after the answer although Claude's turn had ended meanwhile."""
+    async def go() -> None:
+        api, typed = FakeApi(), []
+        rig = _typing_relay_rig(api, typed)
+        await dispatch(rig, "run the tests", update_id=3)
+        assert "relay" in rig.inlet._typing[OWNER]
+        rig.inlet._keep_typing(OWNER, "turn", 60)
+        question = asyncio.ensure_future(rig.inlet._ask_user("Which account?", OWNER))
+        await jobs(rig)
+        assert OWNER not in rig.inlet._typing                         # nothing under the question
+        rig.inlet.relay_turn_ended("/Users/g/repo")                   # Claude finished while it waited
+        await dispatch(rig, "work", update_id=4)
+        assert await question == "work"
+        assert set(rig.inlet._typing.get(OWNER, {})) == {"turn"}      # buddy's own turn resumes; the relay's does not
+        await rig.inlet._shutdown()
+
+    asyncio.run(go())
+
+
+def test_a_stop_from_a_session_buddy_does_not_know_leaves_the_joined_sessions_bubble() -> None:
+    """Review finding: the daemon passes no folder for a Stop hook whose session is not in its state, and
+    that ended the picked session's "Thinking…" early."""
+    async def go() -> None:
+        api = FakeApi()
+        rig = _relay_rig(api)
+        rig.inlet._relay_to("/Users/g/repo")
+        rig.inlet._chat_id = OWNER
+        await dispatch(rig, "run the tests", update_id=3)
+        assert rig.inlet._thinking
+        rig.inlet.relay_turn_ended("")
+        assert rig.inlet._thinking
+        rig.inlet.relay_turn_ended("/Users/g/repo")                   # the control: its own Stop ends it
+        assert not rig.inlet._thinking
+        await rig.inlet._shutdown()
+
+    asyncio.run(go())
+
+
+def test_claude_on_opening_the_picker_ends_the_last_sessions_typing() -> None:
+    """Review finding: the picker turned the relay off, after which nothing ever ended its "typing…"."""
+    async def go() -> None:
+        api, typed = FakeApi(), []
+        rig = _typing_relay_rig(api, typed, claude_sessions=lambda: ["/Users/g/repo", "/Users/g/other"])
+        await dispatch(rig, "run the tests", update_id=3)
+        assert "relay" in rig.inlet._typing[OWNER]
+        await dispatch(rig, "claude on", update_id=4)
+        assert rig.inlet.claude is False and api.sent[-1][1] == telegram.CLAUDE_PICK_LINE
+        assert "relay" not in rig.inlet._typing.get(OWNER, {})
+        await rig.inlet._shutdown()
+
+    asyncio.run(go())
+
+
+def test_a_quick_turn_that_ends_while_the_receipt_is_on_its_way_leaves_no_bubble() -> None:
+    """Review finding: "Thinking…" started only after the 👍 was awaited, so a Stop hook landing during that
+    await found nothing to end, and the bubble then ran to its five-minute cap."""
+    class SlowReact(FakeApi):
+        def __init__(self) -> None:
+            super().__init__()
+            self.gate, self.reacting = asyncio.Event(), asyncio.Event()
+
+        async def react(self, chat_id: int, message_id: int, emoji: str) -> None:
+            self.reacting.set()
+            await self.gate.wait()
+            await super().react(chat_id, message_id, emoji)
+
+    async def go() -> None:
+        api = SlowReact()
+        rig = _relay_rig(api)
+        rig.inlet._relay_to("/Users/g/repo")
+        rig.inlet._chat_id = OWNER
+        rig.inlet._dispatch(update("what is 2+2", update_id=3))
+        await api.reacting.wait()
+        rig.inlet.relay_turn_ended("/Users/g/repo")                   # the answer came before the 👍 landed
+        api.gate.set()
+        await jobs(rig)
+        assert api.reactions[-1][2] == telegram.TYPED_REACTION and not rig.inlet._thinking
+        await rig.inlet._shutdown()
+
+    asyncio.run(go())

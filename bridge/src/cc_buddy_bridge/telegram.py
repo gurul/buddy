@@ -1295,6 +1295,9 @@ class TelegramInlet:
         # ticks each reason is worth. One loop per chat sends it while any reason is left (_typing_loop).
         self._typing: dict[int, dict[str, int]] = {}
         self._typing_tasks: dict[int, asyncio.Task] = {}
+        # The reasons a question to the owner paused (_ask_user), per chat, until it is answered. A reason that
+        # ends meanwhile (Claude answered, its turn ended) is dropped here too, so it does not come back.
+        self._paused_typing: dict[int, dict[str, int]] = {}
         # "Thinking…" while a relayed Claude turn works (_start_thinking): one draft loop at most, how many more
         # refreshes it is worth, and its draft id (a new one per turn, so a turn's bubble never animates from the
         # last one's). ``_drafts_ok`` goes False for good at the first refusal; the relay then uses "typing…".
@@ -1403,7 +1406,12 @@ class TelegramInlet:
             self._typing_tasks[chat_id] = asyncio.ensure_future(self._typing_loop(chat_id))
 
     def _stop_typing(self, chat_id: Optional[int], reason: str) -> None:
-        """Drop one reason; with none left, the loop ends now, so no "typing…" follows the reply."""
+        """Drop one reason; with none left, the loop ends now, so no "typing…" follows the reply. A reason
+        paused under a question to the owner is dropped as well: it is over, and must not resume after the
+        answer (review, 2026-09-23: the relay's "typing…" came back for minutes after Claude had finished)."""
+        paused = self._paused_typing.get(chat_id) if chat_id is not None else None
+        if paused is not None:
+            paused.pop(reason, None)
         reasons = self._typing.get(chat_id) if chat_id is not None else None
         if reasons is None:
             return
@@ -2350,6 +2358,9 @@ class TelegramInlet:
             return self._start_then_join(inbound.chat_id, "", CLAUDE_NONE_LINE)
         self._defer_permission()
         self.claude = False
+        # The relay is off while the owner picks: nothing ends the last session's "Thinking…" now (its text
+        # and Stop hook are no longer relayed), so it ends here (review, 2026-09-23).
+        self._stop_thinking(inbound.chat_id)
         self._join_after_launch = True                   # the picker's "new claude" joins what it opens
         log.info("telegram: claude relay asks which of %d sessions", len(cwds))
         words = [f"claude on {n}" for n in names] + [NEW_CLAUDE_BUTTON]
@@ -2372,6 +2383,7 @@ class TelegramInlet:
     def _start_then_join(self, chat_id: int, argument: str, intro: str = "") -> None:
         self._defer_permission()
         self.claude = False
+        self._stop_thinking(chat_id)                       # as for the picker: no relay left to end it
         self._launch = self._new_launch()
         step = self._launch.start(argument)
         if step.done:
@@ -2401,15 +2413,15 @@ class TelegramInlet:
         if said:
             await self._say(chat_id, said)
             return False
+        # Claude is on it: "Thinking…" until it asks, waits on the owner or ends its turn (relay_tool_call,
+        # relay_notification, decide_permission, relay_turn_ended), or the cap; with drafts off, "typing…" until
+        # it also says something (relay_text). Started before the receipt is awaited: a quick turn's answer or
+        # Stop hook landing during that await must find it on and end it, not precede it (review, 2026-09-23).
+        self._start_thinking(chat_id)
         if tapped:
-            self._start_thinking(chat_id)
             return True
         # It went in: a reaction on the owner's own message says so (owner, 2026-09-23), not a line.
         await self._receipt(chat_id, message_id, TYPED_REACTION, "Typed.")
-        # Claude is on it: "Thinking…" until it asks, waits on the owner or ends its turn (relay_tool_call,
-        # relay_notification, decide_permission, relay_turn_ended), or the cap; with drafts off, "typing…" until
-        # it also says something (relay_text).
-        self._start_thinking(chat_id)
         return True
 
     async def _receipt(self, chat_id: int, message_id: int, emoji: str, fallback: str = "") -> bool:
@@ -2516,8 +2528,10 @@ class TelegramInlet:
 
     def relay_turn_ended(self, cwd: str = "") -> None:
         """Claude Code's Stop hook: a turn ended. For the joined session, "Thinking…" (or "typing…") stops
-        now, even when the turn ended without a word for the phone. Another session's end changes nothing."""
-        if cwd and self._relay_pin and not _same_folder(cwd, self._relay_pin):
+        now, even when the turn ended without a word for the phone. Another session's end changes nothing, and
+        neither does the end of a session buddy does not know (the daemon passes no folder): with a session
+        picked, a Stop from anywhere else used to end its "Thinking…" early (review, 2026-09-23)."""
+        if self._relay_pin and (not cwd or not _same_folder(cwd, self._relay_pin)):
             return
         self._stop_thinking(self._chat_id)
         self._retire_options()                             # the turn is over: its question was answered
@@ -2915,8 +2929,10 @@ class TelegramInlet:
         self._pending_words = frozenset(c.value for c in choices)
         self._note("buddy", question)
         board = _Keyboard(chat_id, ANSWER, list(choices), future=future) if choices else None
-        # Waiting on the owner is not working: no "typing…" under the question. It comes back with the answer.
-        paused = self._end_typing(chat_id)
+        # Waiting on the owner is not working: no "typing…" under the question. It comes back with the answer,
+        # except a reason that ended while the question waited (_stop_typing drops it from the paused set).
+        paused = self._paused_typing.setdefault(chat_id, {})
+        paused.update(self._end_typing(chat_id))
         line = UNANSWERED_LINE
         try:
             if board is not None:
@@ -2948,6 +2964,8 @@ class TelegramInlet:
             if board is not None:
                 self._retire(board)
                 self._spawn(self._settle_prompt(board, question + "\n\n" + line, title, None), "telegram-edit")
+            if self._paused_typing.get(chat_id) is paused:
+                del self._paused_typing[chat_id]
             for reason, ticks in paused.items():
                 self._keep_typing(chat_id, reason, ticks * TYPING_EVERY_SECS)
 
