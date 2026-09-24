@@ -93,6 +93,10 @@ fast = ["laya-mlx>=0.1.0,<0.2; sys_platform == 'darwin' and platform_machine == 
 # use it); composio-openai 0.22.0 shapes the tools for the Responses API. Imported lazily; the daemon runs
 # without it and with CC_BUDDY_COMPOSIO off. Install with `pip install -e ".[composio]"`.
 composio = ["composio>=0.22,<0.23", "composio-openai>=0.22,<0.23"]
+# The "Ask Claude" Telegram Mini App (miniapp.py): the Anthropic SDK streams claude-opus-5-5 with the owner's
+# ANTHROPIC_API_KEY. 1.8.0 current per PyPI, 2026-09-24, Python >=3.10. Imported lazily; the daemon runs without it
+# and with CC_BUDDY_MINIAPP off. Install with `pip install -e ".[miniapp]"` plus `brew install cloudflared`.
+miniapp = ["anthropic>=1.8,<2"]
 
 [project.scripts]
 cc-buddy-bridge = "cc_buddy_bridge.cli:main"
@@ -123,4 +127,5 @@ ignore = [
 
 [tool.setuptools.package-data]
 cc_buddy_bridge = ["learning/web/*.html", "learning/web/*.css", "learning/web/*.js", "learning/web/fonts/*.woff2", "learning/web/fonts/OFL.txt",
-                   "learning/web/canvas/*", "learning/web/canvas/assets/**/*", "skills/*/SKILL.md"]
+                   "learning/web/canvas/*", "learning/web/canvas/assets/**/*", "skills/*/SKILL.md",
+                   "miniapp_page.html"]

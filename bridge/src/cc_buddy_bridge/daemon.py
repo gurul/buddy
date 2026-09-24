@@ -387,6 +387,9 @@ class Daemon:
         if self._telegram is not None:
             tasks.append(asyncio.create_task(self._telegram.run(), name="telegram"))
             self._command_risk()                     # one log line at start: the Auto Mode gate's mode
+        # The "Ask Claude" Mini App (miniapp.py): the owner's menu button opens a Claude chat inside Telegram,
+        # served here through a Cloudflare quick tunnel. Off unless CC_BUDDY_MINIAPP=1.
+        Daemon._start_miniapp(self, tasks)
         # The nightly dream (dream.py): the one automatic writer of the records and the mem0 index. It
         # watches the shutdown event itself and is drained, not cancelled, at the end: a night half written
         # is worse than a restart a few seconds late.
@@ -1195,6 +1198,21 @@ class Daemon:
                                             **Daemon._chrome_body(self, make_inner, on_event, ask_user))
         self._active_agent = agent
         return agent
+
+    def _start_miniapp(self, tasks: list) -> None:
+        from . import miniapp
+
+        cfg = miniapp.configured()
+        if not cfg.enabled:
+            return
+        try:
+            import anthropic  # noqa: F401 — the import is the check
+        except ImportError:
+            log.warning("miniapp: CC_BUDDY_MINIAPP is on but the anthropic SDK is not installed "
+                        "(pip install -e \".[miniapp]\"); off")
+            return
+        self._miniapp = miniapp.MiniApp(cfg)
+        tasks.append(asyncio.create_task(self._miniapp.run(), name="miniapp"))
 
     def _make_chrome_lane(self) -> Any:
         """CC_BUDDY_BROWSER_ATTACH=1: the browser lane attached to the owner's own Chrome, kept for the daemon's
