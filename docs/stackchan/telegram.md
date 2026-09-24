@@ -375,7 +375,8 @@ Flip it to `ask` if two seconds a command is a price you will pay.
   instead. When the task ends, the message says "Finished" or "Stopped" and
   the button goes. The result comes as a new message, so your phone notifies,
   and it is a reply to the message that asked for the task. If Telegram will
-  not edit the message, each step comes as its own message, as before. Steps
+  not edit the message, each step comes as its own message, as Codex steps did
+  before (steps from other providers reach the chat only since 2026-09-23). Steps
   still waiting when the work ends come as one message before the result, so
   the last step is never lost. If it will not take the reply link, the result
   comes without it. A restart closes an open progress message ("Stopped." for

@@ -673,3 +673,34 @@ problem, not a Telegram one, but it is the most serious weakness in the relay.
   business connection.
 - An **edit window** for the bot's own messages. The 48-hour rule is stated
   only for business messages not sent by the bot, and for `deleteMessage`.
+
+## Known limits
+
+Found by the review of the Telegram batches on 2026-09-23 and left as they
+are for now: each is cosmetic, bounded, or needs a larger change than a fix.
+
+- **"Thinking…" can outlive the turn by up to 30 s.** A draft already on its
+  way (a refresh, or the re-show after a relayed message) can land after the
+  turn's last message, and nothing can take a draft back. A turn stopped with
+  Esc at the Mac sends no Stop hook, so its bubble is refreshed until the
+  5-minute cap. With two owner chats, the bubble follows the chat that
+  started it. With drafts refused, "typing…" after the re-show can run to its
+  cap instead of stopping at Claude's first words.
+- **"stop" during a relayed Claude turn** answers "Nothing is running." and the
+  bubble comes back: the relay cannot stop Claude from the chat.
+- **A relayed slash command that starts no turn** (`/clear`) leaves
+  "Thinking…" up to its cap, since no Stop hook follows.
+- **Option buttons after a question answered at the Mac** stay live until you
+  type, the turn ends or the relay moves; a late tap types its number into
+  Claude's prompt.
+- **A buttons send that fails partway** (a timeout after Telegram delivered
+  it, or a later piece refused) is resent plain, so it can arrive twice. The
+  fallback keeps the question from being lost.
+- **A task's "Should I go ahead…?" is strict while a relay is on.** A
+  qualified reply ("yes, but the cheaper one") goes to the relay, and the
+  question waits until its timeout; nothing tells you it is still open.
+- **The 👀 is set before an image's download starts**, which adds one
+  reaction round-trip to every relayed image.
+- **Session liveness is read by folder.** A live `claude` in a folder, or in
+  one above it, keeps every session under it in the picker; the hooks carry
+  no process id to tell sessions apart.
