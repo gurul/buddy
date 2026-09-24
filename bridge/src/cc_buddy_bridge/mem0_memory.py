@@ -5,7 +5,8 @@ asked in other words than the record used ("where does my sister live" against "
 This is the layer that catches it: mem0's open-source library (mem0ai, Apache-2.0), run on this
 computer, with its vector store (Qdrant, on disk) and its history database both under
 ``<memory>/mem0``. Only the two model calls leave the machine: fact extraction and embeddings, both
-OpenAI (owner, 2026-09-23: "it can go to openai").
+OpenAI (owner, 2026-09-23: "it can go to openai"), and the extraction call asks OpenAI not to keep it
+(``store=False``).
 
 It is an INDEX, not a source (owner, 2026-09-23: three stores — transcripts, records, mem0). The nightly
 dream feeds it each finished conversation of the day, natively: what the owner said goes in as the user's
@@ -103,7 +104,10 @@ def available() -> bool:
 def mem0_config(cfg: Mem0Config) -> dict[str, Any]:
     """The Memory.from_config dict: OpenAI for the two model calls, everything stored under ``cfg.home``."""
     return {
-        "llm": {"provider": "openai", "config": {"model": cfg.model}},
+        # store=False: mem0's extraction call is a Chat Completions call, and its text is not to be kept on
+        # OpenAI's side (owner, 2026-09-23: "nothing should leak out ever"). mem0ai 2.2.0 sends it only when
+        # set. The embeddings call has no such flag.
+        "llm": {"provider": "openai", "config": {"model": cfg.model, "store": False}},
         "embedder": {"provider": "openai", "config": {"model": cfg.embed_model}},
         "vector_store": {"provider": "qdrant", "config": {
             "collection_name": "buddy", "path": str(cfg.home / "qdrant"), "on_disk": True,
