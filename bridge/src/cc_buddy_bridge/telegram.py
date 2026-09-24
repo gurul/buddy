@@ -1061,6 +1061,7 @@ class _Progress:
     lock: asyncio.Lock = field(default_factory=asyncio.Lock)      # the first send, edits and the close, in order
     flush: Optional[asyncio.Task] = None
     pushing: bool = False                                         # the flush holds steps it took: never cancel it
+    taking: int = 0                                               # the first unsent steps a send or edit in flight shows
 
     def text(self) -> str:
         return "\n\n".join([self.head] + (["\n".join("- " + s for s in self.steps)] if self.steps else []))
@@ -1774,11 +1775,14 @@ class TelegramInlet:
             if progress.closed:
                 return
             text = progress.text()
-            taken = len(progress.unsent)                   # the steps this send shows; later ones stay unsent
-            sent = await self._send_choices(progress.chat_id, text, progress.board, title=progress.title,
-                                            subtitle=progress.subtitle)
-            progress.shown, progress.edited_at = text, self._clock()
-            del progress.unsent[:taken]
+            progress.taking = len(progress.unsent)         # the steps this send shows; later ones stay unsent
+            try:
+                sent = await self._send_choices(progress.chat_id, text, progress.board, title=progress.title,
+                                                subtitle=progress.subtitle)
+                progress.shown, progress.edited_at = text, self._clock()
+                del progress.unsent[:progress.taking]
+            finally:
+                progress.taking = 0
             if sent and progress.board is not None and progress.board.message_id:
                 progress.message_id = progress.board.message_id
             else:
@@ -1808,6 +1812,7 @@ class TelegramInlet:
         while len(progress.steps) > 1 and not self._progress_fits(progress):
             if len(progress.unsent) >= len(progress.steps):      # never shown: it goes on its own, not lost
                 gone = progress.unsent.pop(0)
+                progress.taking = max(0, progress.taking - 1)    # it left the in-flight share too
                 if gone != PROGRESS_LONG_STEP_LINE:
                     self._spawn(self._say(progress.chat_id, gone, title=progress.title, subtitle=progress.subtitle),
                                 "telegram-progress")
@@ -1846,12 +1851,16 @@ class TelegramInlet:
                 if text == progress.shown and not progress.unsent:
                     return
                 progress.pushing = True                    # from here the steps are ours: the close waits
+                progress.taking = len(progress.unsent)     # the steps this edit shows; later ones stay unsent
                 try:
                     await self._push_progress(progress, text)
                 finally:
-                    progress.pushing = False
+                    progress.pushing, progress.taking = False, 0
 
     async def _push_progress(self, progress: _Progress, text: str) -> None:
+        """Edit ``text`` into the progress message. On success only the steps taken with ``text`` count as
+        shown: a step that arrives while the edit is in flight stays unsent, so a later failed edit or a
+        failed close still sends it as a plain message rather than losing it (owner, 2026-09-23)."""
         progress.edited_at = self._clock()
         if not progress.broken and progress.message_id:
             try:
@@ -1862,13 +1871,15 @@ class TelegramInlet:
                 else:
                     await self.api.edit_message(progress.chat_id, progress.message_id, text, title=progress.title,
                                                 subtitle=progress.subtitle)
-                progress.shown, progress.unsent = text, []
+                progress.shown = text
+                del progress.unsent[:progress.taking]
                 return
             except asyncio.CancelledError:
                 raise
             except Exception as e:  # noqa: BLE001 — a failed edit is today's behaviour: one message per step
                 if isinstance(e, BotApiError) and "not modified" in e.description.lower():
-                    progress.shown, progress.unsent = text, []
+                    progress.shown = text
+                    del progress.unsent[:progress.taking]
                     return
                 log.warning("telegram: could not edit a progress message (%s); steps go as new messages",
                             e if isinstance(e, BotApiError) else type(e).__name__)

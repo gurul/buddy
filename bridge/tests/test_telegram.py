@@ -3186,3 +3186,108 @@ def test_the_bot_api_sends_reply_links_reply_boxes_and_keeps_buttons_on_an_edit(
     assert seen[2][0] == "editMessageText" and seen[2][1]["reply_markup"] == {
         "inline_keyboard": [[{"text": "Stop", "callback_data": "k.1", "style": "danger"}]]}
     assert seen[3][1]["reply_markup"] == {"inline_keyboard": []}
+
+
+# Review of the progress batch, second pass (owner, 2026-09-23): a step that arrives while an edit is in
+# flight is not in that edit's text, so a successful edit must not count it as shown. Only the steps the
+# edit took leave ``unsent``; the late step goes out by the next edit or, when editing fails, as a message.
+
+def edit_then_step(api: FakeApi, rig: Rig, step: str, *, then_fail: bool = True, then_hold: bool = False) -> None:
+    """The first edit lets ``step`` arrive while it is in flight, then succeeds; later edits fail. With
+    ``then_hold`` the next paced edit waits out a second that never ends, so the close comes first."""
+    real = api.edit_message
+    calls = {"n": 0}
+
+    async def edit(*a: Any, **kw: Any) -> None:
+        calls["n"] += 1
+        if calls["n"] == 1:
+            rig.inlet._progress_step(rig.inlet._task_progress, step)
+            await asyncio.sleep(0)
+            await real(*a, **kw)
+            if then_fail:
+                api.fail_edits = BotApiError(400, "Bad Request: message can't be edited")
+            if then_hold:
+                rig.inlet._sleep = held_second
+            return
+        await real(*a, **kw)
+
+    api.edit_message = edit  # type: ignore[method-assign]
+
+
+def test_a_step_during_an_in_flight_edit_is_sent_when_the_next_edit_fails() -> None:
+    api = FakeApi([update("open the calculator")])
+    rig = task_rig(api)
+    edit_then_step(api, rig, "B CLICKED PAY")
+
+    async def during() -> None:
+        rig.agents[0].on_event(AgentEvent("progress", "A"))
+        await settle()
+        assert api.edits[0][1] == ON_IT_LINE + "\n\n- A"                   # the edit in flight showed only A
+        assert (OWNER, "B CLICKED PAY") in api.sent                        # the next edit failed: B went plain
+        rig.agents[0].release.set()
+
+    run_rig(rig, during)
+    assert api.sent == [(OWNER, ON_IT_LINE), (OWNER, "B CLICKED PAY"), (OWNER, "Calculator is open.")]
+
+
+def test_a_step_during_an_in_flight_edit_is_sent_when_the_closing_edit_fails() -> None:
+    api = FakeApi([update("open the calculator")])
+    rig = task_rig(api)
+    edit_then_step(api, rig, "B CLICKED PAY", then_hold=True)
+
+    async def during() -> None:
+        rig.agents[0].on_event(AgentEvent("progress", "A"))
+        await settle()
+        assert api.sent == [(OWNER, ON_IT_LINE)]                           # B waits for the paced edit
+        rig.agents[0].release.set()                                        # the close comes first, and fails
+
+    run_rig(rig, during)
+    assert api.sent == [(OWNER, ON_IT_LINE), (OWNER, "B CLICKED PAY"), (OWNER, "Calculator is open.")]
+
+
+def test_a_step_during_an_in_flight_edit_is_shown_by_the_next_edit_when_edits_work() -> None:
+    api = FakeApi([update("open the calculator")])
+    rig = task_rig(api)
+    edit_then_step(api, rig, "B CLICKED PAY", then_fail=False)
+
+    async def during() -> None:
+        rig.agents[0].on_event(AgentEvent("progress", "A"))
+        await settle()
+        assert api.edits[-1][1] == ON_IT_LINE + "\n\n- A\n- B CLICKED PAY"
+        rig.agents[0].release.set()
+
+    run_rig(rig, during)
+    assert api.sent == [(OWNER, ON_IT_LINE), (OWNER, "Calculator is open.")]   # nothing extra: B was shown
+
+
+def test_a_step_scrolled_off_during_an_in_flight_edit_does_not_lose_a_later_one() -> None:
+    """Long steps arriving while the edit of A is in flight scroll A off (sent on its own). The edit's
+    share of ``unsent`` shrinks with it, so its success does not wipe the long step that took A's place."""
+    api = FakeApi([update("open the calculator")])
+    rig = task_rig(api)
+    long1, long2 = "one " + "x" * 2000, "two " + "y" * 2000
+    real = api.edit_message
+    calls = {"n": 0}
+
+    async def edit(*a: Any, **kw: Any) -> None:
+        calls["n"] += 1
+        if calls["n"] == 1:
+            rig.inlet._progress_step(rig.inlet._task_progress, long1)
+            rig.inlet._progress_step(rig.inlet._task_progress, long2)
+            await asyncio.sleep(0)
+            await real(*a, **kw)
+            api.fail_edits = BotApiError(400, "Bad Request: message can't be edited")
+            return
+        await real(*a, **kw)
+
+    api.edit_message = edit  # type: ignore[method-assign]
+
+    async def during() -> None:
+        rig.agents[0].on_event(AgentEvent("progress", "A"))
+        await settle()
+        rig.agents[0].release.set()
+
+    run_rig(rig, during)
+    said = "\n".join(t for _, t in api.sent)
+    assert long1 in said and long2 in said                                 # both long steps reached the phone
+    assert api.sent[-1] == (OWNER, "Calculator is open.")
