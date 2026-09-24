@@ -260,6 +260,14 @@ own profile.
   - The daemon keeps **one** connection for its whole life, so the text
     comes once per Chrome session. If Chrome restarts, the next web task
     reconnects and asks again.
+- **Or never asked** (`CC_BUDDY_CHROME_ACCESS=allow`, default `ask`). This is
+  your standing yes: buddy presses **Allow** on its own the moment the
+  dialog shows, with no text. It still acts only on the dialog raised by its
+  own connection, and only on Chrome's own "Allow remote debugging?". If the
+  button can't be pressed, it never presses Cancel; Chrome's own 2-minute
+  wait runs out and Codex takes the task. The daemon logs every outcome as
+  `chrome-consent: <outcome>` (for example `auto_allowed` or `no_dialog`), and
+  logs the mode at startup on the `chrome lane: on` line.
 - **Which profile.** buddy identifies each open Chrome profile by its
   signed-in Google account. It asks Google's account list with that
   profile's cookies (`context.request`), so no tab opens. A task that names

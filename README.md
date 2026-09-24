@@ -316,7 +316,8 @@ permission choices.
 
 - **Your own Chrome first (opt-in):** with `CC_BUDDY_BROWSER_ATTACH=1`, web goals try
   your logged-in Chrome first. Chrome's “Allow remote debugging?” prompt is answered
-  from your phone (a no or silence cancels), buddy works in its own tab, and anything
+  from your phone (a no or silence cancels), or pressed by buddy with no question when
+  `CC_BUDDY_CHROME_ACCESS=allow`. buddy works in its own tab, and anything
   unfinished goes to Codex. See [attach mode](docs/stackchan/routing.md#controlling-your-logged-in-chrome-attach-mode).
 - **Stopping:** `stop_task` interrupts Codex, even while a permission is pending.
 - **Permissions:** app prompts offer `yes`, `allow for task` and `always allow` when

@@ -1212,8 +1212,12 @@ class Daemon:
         # Jev grounds each click unless the owner turned it off (CC_BUDDY_JEV_STEP=0).
         env = {**os.environ, "CC_BUDDY_JEV_STEP": os.environ.get("CC_BUDDY_JEV_STEP", "1")}
         lane = browser_lane.BrowserLane(cfg, step_asker=browser_lane.make_step_asker(env))
+        from . import chrome_consent
+
         log.info("chrome lane: on — web tasks try the owner's logged-in Chrome first (profile: %s); Codex is the "
-                 "floor", cfg.chrome_profile or "the first open")
+                 "floor; Chrome's Allow: %s", cfg.chrome_profile or "the first open",
+                 "pressed by buddy (CC_BUDDY_CHROME_ACCESS=allow)" if chrome_consent.access_preference() == "allow"
+                 else "asked on the phone")
         return lane
 
     async def _ask_owner_on_phone(self, question: str) -> str:
@@ -1245,7 +1249,8 @@ class Daemon:
         telegram_on = getattr(self, "_telegram", None) is not None
         broker = chrome_consent.ConsentBroker(
             (lambda q: Daemon._ask_owner_on_phone(self, q)) if telegram_on else None,
-            tell_owner=(lambda text: Daemon._tell_owner_on_phone(self, text)) if telegram_on else None)
+            tell_owner=(lambda text: Daemon._tell_owner_on_phone(self, text)) if telegram_on else None,
+            auto_allow=chrome_consent.access_preference() == "allow")   # CC_BUDDY_CHROME_ACCESS=allow
         if getattr(self, "_planner_create", None) is None:
             self._planner_create = make_response_creator()
         create, cfg = self._planner_create, self._agent_cfg

@@ -135,3 +135,72 @@ def test_a_waiting_question_is_never_overwritten_by_the_chrome_question() -> Non
     with pytest.raises(RuntimeError, match="already waiting"):
         asyncio.run(Daemon._ask_owner_on_phone(busy, "Allow?"))
     assert asked == []
+
+
+def test_the_standing_yes_presses_allow_without_asking() -> None:
+    pressed: list[str] = []
+    asked: list[str] = []
+
+    async def showing() -> bool:
+        return True
+
+    async def pressing(label: str) -> bool:
+        pressed.append(label)
+        return True
+
+    async def ask(q: str) -> str:
+        asked.append(q)
+        return "no"
+
+    for ask_owner in (ask, None):                      # with or without Telegram
+        pressed.clear()
+        b = ConsentBroker(ask_owner, showing=showing, pressing=pressing, appear_secs=0.05, poll_secs=0.01,
+                          auto_allow=True)
+        assert asyncio.run(b.answer_own_connection()) == "auto_allowed"
+        assert pressed == ["Allow"] and asked == []
+
+
+def test_the_standing_yes_retries_a_lagging_button_and_never_presses_cancel() -> None:
+    pressed: list[str] = []
+
+    async def showing() -> bool:
+        return True
+
+    async def pressing(label: str) -> bool:
+        pressed.append(label)
+        return len(pressed) >= 3                        # the button appears on the third look
+
+    b = ConsentBroker(None, showing=showing, pressing=pressing, appear_secs=0.05, poll_secs=0.01, auto_allow=True)
+    assert asyncio.run(b.answer_own_connection()) == "auto_allowed" and pressed == ["Allow"] * 3
+
+    pressed.clear()
+
+    async def never(label: str) -> bool:
+        pressed.append(label)
+        return False
+
+    b = ConsentBroker(None, showing=showing, pressing=never, appear_secs=0.05, poll_secs=0.01, auto_allow=True)
+    assert asyncio.run(b.answer_own_connection()) == "press_failed" and "Cancel" not in pressed
+
+
+def test_the_standing_yes_still_waits_for_chromes_own_dialog() -> None:
+    pressed: list[str] = []
+
+    async def showing() -> bool:
+        return False
+
+    async def pressing(label: str) -> bool:
+        pressed.append(label)
+        return True
+
+    b = ConsentBroker(None, showing=showing, pressing=pressing, appear_secs=0.05, poll_secs=0.01, auto_allow=True)
+    assert asyncio.run(b.answer_own_connection()) == "no_dialog" and pressed == []
+
+
+@pytest.mark.parametrize("value,expect", [("allow", "allow"), (" Allow ", "allow"), ("ask", "ask"), ("", "ask"),
+                                          ("yes", "ask"), (None, "ask")])
+def test_the_access_preference_is_allow_only_when_spelled_allow(value, expect) -> None:
+    from cc_buddy_bridge.chrome_consent import access_preference
+
+    env = {} if value is None else {"CC_BUDDY_CHROME_ACCESS": value}
+    assert access_preference(env) == expect

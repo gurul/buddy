@@ -11,6 +11,9 @@ ok"), so the dialog's answer comes from them over Telegram and buddy presses the
 * Allow is pressed only on the owner's clear yes (consent.approves: fail-closed). No, anything unclear, no
   answer in time, or no way to ask (Telegram off): Cancel is pressed — never a dialog left hanging — and the
   task goes to Codex, which already drives the owner's Chrome without this prompt.
+* ``CC_BUDDY_CHROME_ACCESS=allow`` is the owner's standing yes (owner, 2026-09-24: "Allow remote debugging
+  should be allowed automatically don't ask me"): Allow is pressed at once, with no question. The two rules
+  above still hold — only buddy's own connection, only Chrome's own dialog. The default is ``ask``.
 
 The buttons are Chrome web-UI controls: macOS Accessibility's AXPress presses them (a synthetic click does
 not), through the AX API directly (pyobjc), with the daemon's own Accessibility permission.
@@ -30,6 +33,7 @@ log = logging.getLogger(__name__)
 DIALOG_TEXT = "Allow remote debugging?"
 APPEAR_SECS = 10.0            # how long after buddy starts connecting the dialog may take to show
 POLL_SECS = 0.3
+AUTO_PRESS_TRIES = 5          # on the standing yes: tries at pressing Allow, POLL_SECS apart
 ASK_TIMEOUT_SECS = 100.0      # the owner's time to answer: inside browser_lane.CONSENT_TIMEOUT_MS (120 s), so a
                               # late yes never lands after the connection has given up
 GONE_LINE = "Chrome's question was answered at the Mac, so you don't need to reply."
@@ -122,32 +126,57 @@ async def press(label: str) -> bool:
         return False
 
 
+def access_preference(environ: Any = None) -> str:
+    """``allow`` (the owner's standing yes) or ``ask`` (the default). Anything else is ``ask``."""
+    import os
+
+    env = os.environ if environ is None else environ
+    return "allow" if (env.get("CC_BUDDY_CHROME_ACCESS") or "").strip().lower() == "allow" else "ask"
+
+
 class ConsentBroker:
     """Answers the Chrome dialog raised by buddy's own connection with the owner's Telegram yes or no.
 
     ``ask_owner(question) -> reply`` (Telegram), or None when there is no way to ask: then the dialog is
-    cancelled. ``showing``/``pressing`` are the Accessibility seams (tests fake them)."""
+    cancelled — unless ``auto_allow`` (the owner's standing yes), which presses Allow without asking.
+    ``showing``/``pressing`` are the Accessibility seams (tests fake them)."""
 
     def __init__(self, ask_owner: Optional[Callable[[str], Awaitable[str]]], *,
                  tell_owner: Optional[Callable[[str], Awaitable[None]]] = None,
                  showing: Callable[[], Awaitable[bool]] = dialog_showing,
                  pressing: Callable[[str], Awaitable[bool]] = press,
                  appear_secs: float = APPEAR_SECS, ask_timeout_secs: float = ASK_TIMEOUT_SECS,
-                 poll_secs: float = POLL_SECS) -> None:
+                 poll_secs: float = POLL_SECS, auto_allow: bool = False) -> None:
         self._ask, self._showing, self._pressing = ask_owner, showing, pressing
+        self._auto_allow = auto_allow
         self._tell = tell_owner
         self._appear, self._ask_timeout, self._poll = appear_secs, ask_timeout_secs, poll_secs
         self.last: str = ""                      # what happened last: allowed | declined | no_dialog | …
 
     async def answer_own_connection(self) -> str:
-        """Called while buddy's own connect is in flight. Waits for Chrome's dialog, asks the owner, presses
-        the button. Returns allowed | declined | unanswered | no_dialog | no_way_to_ask."""
+        """Called while buddy's own connect is in flight. Waits for Chrome's dialog, asks the owner (or not, on
+        the standing yes), presses the button. Returns allowed | auto_allowed | declined | unanswered |
+        no_dialog | no_way_to_ask | answered_at_mac | press_failed | dialog_gone. Every outcome is logged: a
+        silent early return once hid why the owner had to click at the Mac (2026-09-24)."""
+        self.last = await self._answer()
+        log.info("chrome-consent: %s", self.last)
+        return self.last
+
+    async def _answer(self) -> str:
         deadline = time.monotonic() + self._appear
         while not await self._showing():
             if time.monotonic() >= deadline:
                 self.last = "no_dialog"          # already allowed on this connection, or Chrome did not ask
                 return self.last
             await asyncio.sleep(self._poll)
+        if self._auto_allow:
+            for _ in range(AUTO_PRESS_TRIES):            # the button can lag the heading by a frame
+                if await self._pressing("Allow"):
+                    return "auto_allowed"
+                if not await self._showing():
+                    return "dialog_gone"
+                await asyncio.sleep(self._poll)
+            return "press_failed"
         if self._ask is None:
             await self._pressing("Cancel")
             self.last = "no_way_to_ask"
@@ -188,7 +217,6 @@ class ConsentBroker:
         else:
             await self._pressing("Cancel")
             self.last = "declined"
-        log.info("chrome-consent: %s", self.last)
         return self.last
 
     async def _say(self, text: str) -> None:
