@@ -61,6 +61,17 @@ Eyes, head and standing orders (owner requests 2026-09-10):
   the conversation once buddy's goodbye has been said (a running task keeps
   going with the mic off, and its result is said first). "Mute"/"unmute"
   switch sound off/on; the head and the lights keep moving.
+
+Memory (owner, 2026-09-23: "voice can't look anything up"; every word is kept on
+this Mac). When the daemon lends a `memory.Memory`, every closed turn of both
+sides is written to the per-day transcript the moment it closes, as are the
+results buddy answered from (a search, a look, think_hard, a memory lookup, a
+finished task), and the conversation gets a close marker on every exit path. The
+Live front gets the short voice profile and a voice-worded block of what was
+said earlier today; the backend, which composes the answers, gets the full
+profile, a longer today block and the memory tools. Think out loud gets none of
+it: a learner's words are never kept. With no memory lent, both prompts are
+byte-identical to a memory-less session and nothing is written.
 """
 
 from __future__ import annotations
@@ -74,7 +85,8 @@ import re
 import threading
 import time
 from dataclasses import dataclass, field
-from typing import Any, Awaitable, Callable, Optional
+from datetime import datetime
+from typing import TYPE_CHECKING, Any, Awaitable, Callable, Optional
 
 from . import head as head_mod
 from . import system_context, websearch
@@ -84,6 +96,9 @@ from .computer_agent import ComputerAgent
 from .intent import LEAVE, LESSON, LOOK, MUTE, REMEMBER, UNMUTE, fast_intent, normalize
 from .learning import LESSON_ACTIONS, run_lesson
 from .learning import think_aloud as think_aloud_mod
+
+if TYPE_CHECKING:
+    from .memory import Memory
 
 log = logging.getLogger(__name__)
 
@@ -114,6 +129,19 @@ UNMUTED_NOTE = "[sound] Your sound is back on."
 SAMPLE_RATE = 24000
 # While a learner thinks out loud, only these standing orders act; every other phrase is about the problem.
 LISTENING_INTENTS = (LEAVE, MUTE, UNMUTE)
+# Memory lookups (memory.py) run in a worker thread with this wait: past it the backend is told so and the
+# conversation goes on. A spoken answer that waits longer than this is worse than "I don't know".
+MEMORY_TIMEOUT_SECS = 2.5
+MEMORY_TIMEOUT_LINE = "Memory lookup took too long."
+MEMORY_RESULT_CHARS = 1500     # a memory tool's output to the backend is clipped to this
+TOOL_LINE_CHARS = 1500         # a tool result kept in the transcript is clipped to this
+THINK_TODAY_CHARS = 6000       # today's talk handed to think_hard with the profile
+# The results buddy answers from. Their text is kept as a "tool" line, so "what did the search say" and
+# "the second one" still resolve later. Head moves, sound, lessons and forget are actions, not answers;
+# recent_conversation returns lines the transcript already holds.
+ANSWER_TOOLS = frozenset({websearch.TOOL_NAME, "think_hard", "look", "look_around", "find", "take_photo",
+                          "memory_search", "memory_read"})
+TRANSCRIPT_WHO = {"user": "owner", "assistant": "buddy"}
 
 # The Live model owns voice, timing and interruptions. Tool workflow lives in
 # the backend prompt, per OpenAI's Live delegation guidance.
@@ -268,10 +296,50 @@ taste, how they like to be talked to — without reciting it. Asked what you kno
 a sentence or two:"""
 
 
+# What was said earlier today, by voice and by text (transcripts.py), for the Live front. Background, like
+# the profile: it lets "the one I texted you" resolve, and it must never be read back.
+VOICE_TODAY_HEADER = """
+
+Earlier today you and your owner said this, by voice and by text. It is background only: never recite it,
+and never announce that you remember it:"""
+
+# The backend is the half that answers questions, so its memory is worded as facts to answer from, not as
+# manners (ask each model natively: owner, 2026-09-21).
+BACKEND_PROFILE_HEADER = """
+
+What buddy knows about its owner, from earlier conversations. Answer questions about them from it, and use
+it to understand what they mean:"""
+
+BACKEND_TODAY_HEADER = """
+
+Everything buddy and its owner said earlier today, by voice and by text, oldest first. Use it to understand
+what the owner refers to. Older days are not here: memory_search finds them:"""
+
+# Offered only with the memory tools: a rule about tools the backend does not have would be noise.
+BACKEND_MEMORY_RULES = """
+
+- A question about the owner, or about what was said before (earlier today, another day, by text) → the
+  memory tools first, before the web or think_hard: memory_search, then memory_read for more of a hit.
+  recent_conversation has what the owner texted since this conversation began. Answer from what they
+  return, in one short line, with when it was said if that matters. If they find nothing, say so."""
+
+
 def profile_block(profile: str) -> str:
     """The profile paragraph for the session prompt, or "" when there is none."""
     text = (profile or "").strip()
     return PROFILE_HEADER + "\n" + text if text else ""
+
+
+def backend_profile_block(profile: str) -> str:
+    """The profile for the backend's instructions, or "" when there is none."""
+    text = (profile or "").strip()
+    return BACKEND_PROFILE_HEADER + "\n" + text if text else ""
+
+
+def today_block(today: str, header: str = VOICE_TODAY_HEADER) -> str:
+    """Today's talk under `header`, or "" when nothing was said today."""
+    text = (today or "").strip()
+    return header + "\n" + text if text else ""
 
 
 def memory_block(memory: str) -> str:
@@ -418,8 +486,10 @@ def configured(environ: Any = None) -> VoiceConfig:
                        search=websearch.configured(env))
 
 
-def session_config(config: VoiceConfig, memory: str = "",
-                   think_aloud: Optional[dict[str, Any]] = None, profile: str = "") -> dict[str, Any]:
+def session_config(config: VoiceConfig, brief: str = "",
+                   think_aloud: Optional[dict[str, Any]] = None, profile: str = "", *,
+                   backend_profile: str = "", today: str = "", backend_today: str = "",
+                   memory_tools: Optional[list[dict[str, Any]]] = None) -> dict[str, Any]:
     """The `session.start` payload (Live API, openai 3.13).
 
     There is no `output_modalities` and no turn-detection block: gpt-live-1 is
@@ -429,13 +499,23 @@ def session_config(config: VoiceConfig, memory: str = "",
     `think_aloud` is the open lesson when the session is opened for think out loud:
     its listening rules and the lesson go into both instructions, because the
     voice's instructions cannot change after session.start.
+
+    Memory (owner, 2026-09-23): `brief` is the one-clause opening brief, `profile` the short voice profile
+    and `today` today's talk, for the Live front; `backend_profile`, `backend_today` and `memory_tools` are
+    the backend's. The profile and today go before the clock, the brief after it. Every block is "" when
+    empty, so with no memory both instructions are byte-identical to a memory-less session. Think out loud
+    gets none of it and no memory tools: a learner's lesson is not a conversation to remember.
     """
     captions = config.output == "captions"
     listening = think_aloud is not None
     context = system_context.context()
+    if listening:
+        brief = profile = backend_profile = today = backend_today = ""
+        memory_tools = None
+    extra = list(memory_tools or [])
     return {
         "model": config.model,
-        "instructions": INSTRUCTIONS + context + memory_block(memory) + profile_block(profile)
+        "instructions": INSTRUCTIONS + profile_block(profile) + today_block(today) + context + memory_block(brief)
                         + (caption_instructions(PagerConfig(read_cps=config.caption_cps))
                            if captions else "")
                         + (think_aloud_mod.voice_instructions(think_aloud) if listening else ""),
@@ -447,9 +527,11 @@ def session_config(config: VoiceConfig, memory: str = "",
             "type": "responses",
             "responses": {
                 "model": config.backend_model,
-                "instructions": BACKEND_INSTRUCTIONS + context
+                "instructions": BACKEND_INSTRUCTIONS + (BACKEND_MEMORY_RULES if extra else "")
+                                + backend_profile_block(backend_profile)
+                                + today_block(backend_today, BACKEND_TODAY_HEADER) + context
                                 + (think_aloud_mod.backend_instructions(think_aloud) if listening else ""),
-                "tools": TOOLS + (websearch.tools_for(config.search) if config.web_search else []),
+                "tools": TOOLS + (websearch.tools_for(config.search) if config.web_search else []) + extra,
                 "tool_choice": "auto",
                 "reasoning": {"effort": config.backend_effort},
                 "parallel_tool_calls": False,
@@ -589,6 +671,14 @@ class _Turns:
 class VoiceSession:
     """One conversation. See the module docstring."""
 
+    # Memory seams, with class defaults so a partial double that skips __init__ still dispatches tools.
+    memory: Optional["Memory"] = None
+    conv = ""
+    _memory_tool_names: frozenset[str] = frozenset()
+    _opened_wall: Optional[datetime] = None
+    _captured = 0
+    _close_written = False
+
     def __init__(
         self,
         connection: Any,                                   # Live connection (async ctx manager already entered)
@@ -609,11 +699,13 @@ class VoiceSession:
         intent: Optional[Callable[[str], Awaitable[Optional[str]]]] = None,   # intent.make_classifier(...)
         on_sound: Optional[Callable[[bool], None]] = None,  # the owner muted (False) / unmuted (True)
         muted: Callable[[], bool] = lambda: False,
-        thinker: Optional[Callable[[str], Awaitable[dict[str, Any]]]] = None,   # think.make_thinker(...)
+        thinker: Optional[Callable[..., Awaitable[dict[str, Any]]]] = None,   # think.make_thinker(...)
         on_photo: Optional[Callable[[str], Awaitable[dict[str, Any]]]] = None,   # Daemon._photo_for_owner
-        memory: str = "",                                   # recall.opening_brief(...)
-        profile: str = "",                                  # records.profile(...), "" when records are off
-        on_star: Optional[Callable[[str], Optional[str]]] = None,   # chat_memory.star(...)
+        brief: str = "",                                    # the opening brief, "" when memory is off
+        memory: Optional["Memory"] = None,                  # memory.Memory, None when memory is off
+        conv: str = "",                                     # this conversation's transcript id ("" mints one)
+        today: str = "",                                    # today's talk for the Live front (voice budget)
+        backend_today: str = "",                            # today's talk for the backend (backend budget)
         learning: Optional[Callable[..., dict[str, Any]]] = None,
         think_aloud: Optional[dict[str, Any]] = None,       # the lesson, when opened for think out loud
         on_spoken_idea: Optional[Callable[[str, str], Any]] = None,   # LearningApp.append_spoken (blocking)
@@ -675,16 +767,24 @@ class VoiceSession:
         self.agent_factory = agent_factory
         self.on_state = on_state
         self.config = config or VoiceConfig()
+        self.brief = brief
+        # Memory (owner, 2026-09-23): every word is kept on this Mac. Each closed turn goes to the day's
+        # transcript through memory.transcripts the moment it closes, so a crash or a restart loses nothing
+        # (the 2026-09-11 RAM-only choice is reversed). "Remember that" stars through memory.star: in the
+        # owner's memory system only a human may star, and out loud is how the owner does it.
         self.memory = memory
-        self.profile = profile
-        # Both sides of the conversation, in order, held in RAM only. chat_memory.py
-        # distils this into a few lines when the session closes; the words
-        # themselves are never written to disk (owner choice, 2026-09-11).
+        if memory is not None and not conv:
+            conv = memory.transcripts.new_conv("voice")
+        self.conv = conv
+        self.today = today
+        self.backend_today = backend_today
+        self._memory_tool_names = frozenset()
+        self._opened_wall = None
+        self._captured = 0                  # transcript lines this conversation wrote
+        self._close_written = False
+        # Both sides of the conversation, in order, as (who, text): the on_closed hand-off and "remember
+        # that" read it. Think out loud keeps nothing here.
         self.turns: list[tuple[str, str]] = []
-        # Promoting something to the permanent layer, by voice. In the owner's
-        # memory system only a human may star, and out loud is how the owner does
-        # it — nothing about this goes through a terminal.
-        self.on_star = on_star
         self._clock = clock
         # Captions: the pager decides which page is up and for how long; the
         # board only draws. Polled after every text event and by _pager_loop.
@@ -735,7 +835,19 @@ class VoiceSession:
         listening = self._think_aloud is not None
         self._set("listening" if listening else "wake")
         self._started_at = self._last_activity = self._clock()
-        await self.conn.session.start(session=session_config(self.config, self.memory, self._think_aloud, self.profile))
+        profile = backend_profile = ""
+        memory_tools: list[dict[str, Any]] = []
+        if self.memory is not None:
+            self._opened_wall = self._wall_now()
+            if not listening:
+                profile, backend_profile = await asyncio.to_thread(self._profiles)
+                memory_tools = self._memory_tools()
+        cfg = session_config(self.config, self.brief, self._think_aloud, profile,
+                             backend_profile=backend_profile, today=self.today, backend_today=self.backend_today,
+                             memory_tools=memory_tools)
+        log.info("voice: prompt front %d chars, backend %d chars",
+                 len(cfg["instructions"]), len(cfg["delegation"]["responses"]["instructions"]))
+        await self.conn.session.start(session=cfg)
         await self._await_started()
         self._started.set()
         # A fixed greeting needs no backend round-trip: commentary is context the
@@ -767,41 +879,156 @@ class VoiceSession:
             cancelled = True                        # hush (a touch on the robot): clear the board at once
             raise
         finally:
-            self._ended.set()                       # every exit path: nothing may speak into a closing session
-            pump.cancel()
-            watchdog.cancel()
-            for t in self._slow_tasks:
-                t.cancel()
-            await asyncio.gather(pump, watchdog, *self._slow_tasks, return_exceptions=True)
-            await self._stop_scene()                # the camera stops being looked at the moment we close
-            if self.task_running and self.agent is not None:
-                self.agent.cancel(reason="the conversation closed")
-            if self._agent_task is not None:
-                await asyncio.gather(self._agent_task, return_exceptions=True)
-            ticker.cancel()                     # one poller at a time: the loop stops before the drain
-            await asyncio.gather(ticker, return_exceptions=True)
-            closing = self._turns.flush()       # the last turn never went quiet; close it now
-            if closing is not None and not cancelled:
-                self._close_turn(*closing)
-            if self._captions:
-                if cancelled:
-                    self._emit_events(self._pager.reset(self._clock()))
-                else:
-                    try:
-                        await self._drain_captions()
-                    except asyncio.CancelledError:
+            try:
+                self._ended.set()                       # every exit path: nothing may speak into a closing session
+                pump.cancel()
+                watchdog.cancel()
+                for t in self._slow_tasks:
+                    t.cancel()
+                await asyncio.gather(pump, watchdog, *self._slow_tasks, return_exceptions=True)
+                await self._stop_scene()                # the camera stops being looked at the moment we close
+                if self.task_running and self.agent is not None:
+                    self.agent.cancel(reason="the conversation closed")
+                if self._agent_task is not None:
+                    await asyncio.gather(self._agent_task, return_exceptions=True)
+                ticker.cancel()                     # one poller at a time: the loop stops before the drain
+                await asyncio.gather(ticker, return_exceptions=True)
+                closing = self._turns.flush()       # the last turn never went quiet; close it now
+                if closing is not None and not cancelled:
+                    self._close_turn(*closing)
+                elif closing is not None and closing[0] in TRANSCRIPT_WHO and self._think_aloud is None:
+                    # A hush cut it off: nothing is shown or acted on, but what was said is still kept.
+                    self.turns.append(closing)
+                    self._capture(TRANSCRIPT_WHO[closing[0]], "say", closing[1])
+                self._write_close()                 # nothing more is said: mark it before the caption drain
+                if self._captions:
+                    if cancelled:
                         self._emit_events(self._pager.reset(self._clock()))
-                        raise
+                    else:
+                        try:
+                            await self._drain_captions()
+                        except asyncio.CancelledError:
+                            self._emit_events(self._pager.reset(self._clock()))
+                            raise
 
-            await self._drain_speaker()
-            self.speaker.stop()
-            if self._idea_saves:
-                # A line the learner said just before the close is still being written to the lesson.
-                await asyncio.gather(*self._idea_saves, return_exceptions=True)
-            if self._think_aloud is not None:
-                self._think_aloud = None
-                self._notify_think_aloud(False)
-            self._set("idle")
+                await self._drain_speaker()
+                self.speaker.stop()
+                if self._idea_saves:
+                    # A line the learner said just before the close is still being written to the lesson.
+                    await asyncio.gather(*self._idea_saves, return_exceptions=True)
+                if self._think_aloud is not None:
+                    self._think_aloud = None
+                    self._notify_think_aloud(False)
+                self._set("idle")
+            finally:
+                self._write_close()     # every exit path, a second hush in the drain too
+
+    # -- memory --
+    def _wall_now(self) -> Optional[datetime]:
+        """When this conversation opened, for recent_conversation. Floored to the second: transcript lines
+        carry whole seconds, so a text sent in the opening second is still newer than this."""
+        try:
+            return self.memory.transcripts.now().replace(microsecond=0) if self.memory is not None else None
+        except Exception:  # noqa: BLE001 — memory never fails a conversation
+            return None
+
+    def _profiles(self) -> tuple[str, str]:
+        """(voice profile, full profile), off the loop: a few file reads."""
+        memory = self.memory
+        if memory is None:
+            return "", ""
+        try:
+            return memory.profile_for_voice(), memory.profile()
+        except Exception as e:  # noqa: BLE001
+            log.warning("voice: no profile this conversation (%s)", type(e).__name__)
+            return "", ""
+
+    def _memory_tools(self) -> list[dict[str, Any]]:
+        """The backend's memory tools, in memory.py's stable order. Their names route in _tool."""
+        memory = self.memory
+        if memory is None:
+            return []
+        try:
+            tools = [t for t in memory.tools(voice=True) if isinstance(t, dict) and t.get("name")]
+        except Exception as e:  # noqa: BLE001
+            log.warning("voice: no memory tools this conversation (%s)", type(e).__name__)
+            return []
+        taken = {t["name"] for t in TOOLS} | {websearch.TOOL_NAME}
+        tools = [t for t in tools if t["name"] not in taken]
+        self._memory_tool_names = frozenset(str(t["name"]) for t in tools)
+        return tools
+
+    def _capture(self, who: str, kind: str, text: str, tool: str = "") -> None:
+        """One transcript line for this conversation. Never while a learner thinks out loud; never raises."""
+        memory = self.memory
+        if memory is None or self._think_aloud is not None or not self.conv or not (text or "").strip():
+            return
+        try:
+            if memory.transcripts.append("voice", self.conv, who, kind, text, tool=tool):
+                self._captured += 1
+        except Exception as e:  # noqa: BLE001
+            log.warning("voice: transcript line not written (%s)", type(e).__name__)
+
+    def _write_close(self) -> None:
+        """The close marker, once, when this conversation wrote anything."""
+        memory = self.memory
+        if memory is None or self._close_written or not self._captured:
+            return
+        self._close_written = True
+        try:
+            memory.transcripts.close("voice", self.conv)
+        except Exception as e:  # noqa: BLE001
+            log.warning("voice: close marker not written (%s)", type(e).__name__)
+
+    def _capture_result(self, name: str, result: Any) -> None:
+        """Keep what an answer-bearing tool returned, as one tool line of at most TOOL_LINE_CHARS."""
+        if name not in ANSWER_TOOLS or not isinstance(result, dict) or result.get("ok") is False:
+            return
+        text = ""
+        for key in ("answer", "caption", "view", "text", "summary"):
+            value = result.get(key)
+            if isinstance(value, str) and value.strip():
+                text = value.strip()
+                break
+        if not text:
+            rest = {k: v for k, v in result.items() if k != "ok"}
+            text = json.dumps(rest, ensure_ascii=False, default=str) if rest else ""
+        self._capture("buddy", "tool", text[:TOOL_LINE_CHARS], tool=name)
+
+    async def _memory_tool(self, name: str, args: dict[str, Any]) -> dict[str, Any]:
+        """A memory lookup in a worker thread, waited on for MEMORY_TIMEOUT_SECS at most.
+
+        On a timeout the thread finishes on its own; the backend hears MEMORY_TIMEOUT_LINE and the
+        conversation goes on. The log carries the tool, the hit count and the milliseconds, never the query."""
+        memory = self.memory
+        if memory is None:
+            return {"ok": False, "reason": "memory is off on this computer"}
+        t0 = time.monotonic()
+        try:
+            result = await asyncio.wait_for(
+                asyncio.to_thread(memory.handle_tool, name, args, since=self._opened_wall, channel="voice"),
+                timeout=MEMORY_TIMEOUT_SECS)
+        except asyncio.TimeoutError:
+            log.warning("voice: %s → timed out after %.1f s", name, MEMORY_TIMEOUT_SECS)
+            return {"ok": False, "reason": MEMORY_TIMEOUT_LINE}
+        if not isinstance(result, dict):
+            result = {"ok": False, "reason": f"{name} failed"}
+        hits = sum(len(v) for v in result.values() if isinstance(v, list))
+        log.info("voice: %s → ok=%s hits=%d in %d ms", name, result.get("ok"), hits,
+                 int((time.monotonic() - t0) * 1000))
+        return result
+
+    def _think_context(self) -> str:
+        """The owner's profile and today's talk, for think_hard (think.py bounds it). Off the loop."""
+        memory = self.memory
+        if memory is None:
+            return ""
+        try:
+            parts = [memory.profile().strip(), memory.today(THINK_TODAY_CHARS).strip()]
+        except Exception as e:  # noqa: BLE001
+            log.warning("voice: no context for think_hard (%s)", type(e).__name__)
+            return ""
+        return "\n\n".join(p for p in parts if p)
 
     async def _await_started(self, timeout: float = 15.0) -> None:
         """Audio sent before `session.started` is discarded, so wait for it."""
@@ -1153,6 +1380,7 @@ class VoiceSession:
         # While listening, neither side is kept for chat memory: the learner's words go to their lesson only.
         if who in ("user", "assistant") and not listening:
             self.turns.append((who, text))
+            self._capture(TRANSCRIPT_WHO[who], "say", text)      # only here: think out loud never reaches it
         if who == "user":
             if listening:
                 self._save_spoken_idea(text)
@@ -1197,7 +1425,8 @@ class VoiceSession:
         if name in ("move_head", "look_around", "find", "look"):
             self._last_head_tool_at = self._clock()
         result: dict[str, Any]
-        if self._think_aloud is not None and name in ("start_task", "go_explore", "think_hard"):
+        if self._think_aloud is not None and (name in ("start_task", "go_explore", "think_hard")
+                                              or name in self._memory_tool_names):
             # A learner is working a problem: buddy does not take over the Mac, wander off, or solve it elsewhere.
             result = {"ok": False, "reason": "not while the learner is thinking out loud; listen and give a hint"}
         elif name == "start_task":
@@ -1252,8 +1481,9 @@ class VoiceSession:
                 result = {"ok": True, "sound": "on" if on else "off"}
             else:
                 result = {"ok": False, "reason": "on must be true or false"}
-        elif name in ("look", "look_around", "find", "think_hard", "lesson", "take_photo", websearch.TOOL_NAME):
-            # Seconds (or a minute, for think_hard) of camera, head or model work:
+        elif (name in ("look", "look_around", "find", "think_hard", "lesson", "take_photo", websearch.TOOL_NAME)
+              or name in self._memory_tool_names):
+            # Seconds (or a minute, for think_hard) of camera, head, model or disk work:
             # answered from a background task, so Live events (the owner talking,
             # captions) keep flowing meanwhile.
             self._slow_tool(name, call_id, args)
@@ -1330,6 +1560,8 @@ class VoiceSession:
                     result = await asyncio.to_thread(websearch.search, str(args.get("query", "")), self.config.search)
                 elif name == "take_photo":
                     result = await self._take_photo(str(args.get("note", "")))
+                elif name in self._memory_tool_names:
+                    result = await self._memory_tool(name, args)
                 else:
                     result = await self._find(str(args.get("target", "")))
             except asyncio.CancelledError:
@@ -1340,11 +1572,16 @@ class VoiceSession:
             if self._ended.is_set():
                 return
             self._last_activity = self._clock()
-            # What the camera saw, or what was asked, is never logged: only whether the call worked.
-            log.info("voice: %s → ok=%s%s", name, result.get("ok"),
-                     f" found={result['found']}" if "found" in result else "")
+            if name in self._memory_tool_names:
+                output = _clip_output(result, MEMORY_RESULT_CHARS)     # _memory_tool logged it
+            else:
+                # What the camera saw, or what was asked, is never logged: only whether the call worked.
+                log.info("voice: %s → ok=%s%s", name, result.get("ok"),
+                         f" found={result['found']}" if "found" in result else "")
+                output = json.dumps(result)
+            self._capture_result(name, result)
             await self.conn.response.item.create(item={"type": "function_call_output", "call_id": call_id,
-                                                       "output": json.dumps(result)})
+                                                       "output": output})
             if not self._ended.is_set():
                 await self._request_response()
 
@@ -1390,7 +1627,11 @@ class VoiceSession:
         await self._quiet("A hard question is being worked on in the background. Say a few words that "
                           "you are on it if you have not already; do not guess the answer.")
         try:
-            return await self.thinker(question)
+            if self.memory is None:
+                return await self.thinker(question)
+            # The slow brain answers "what should I get my sister" better knowing who the owner is and what
+            # was said today (think.py bounds the context).
+            return await self.thinker(question, context=await asyncio.to_thread(self._think_context))
         except Exception as e:  # noqa: BLE001
             log.warning("voice: think_hard failed: %s: %s", type(e).__name__, e)
             return {"ok": False, "reason": "the slow brain did not answer in time; answer as best you can"}
@@ -1471,40 +1712,46 @@ class VoiceSession:
         """What "remember that" points at.
 
         It is anaphoric: the claim is in the previous turn, not in the words
-        "remember that". The owner's own last turn is preferred — it is their
-        claim about themselves — and buddy's last line is the fallback, for
-        "that's interesting, remember that".
+        "remember that". Only the owner's own last substantive turn counts — it
+        is their claim about themselves. buddy's own words are never starred
+        (owner, 2026-09-23: the old fallback to buddy's last line laundered its
+        replies into the permanent layer); with no owner turn, nothing is.
         """
         phrase = " ".join(said.lower().split())
-        for who in ("user", "assistant"):
-            for turn_who, text in reversed(self.turns):
-                body = " ".join(str(text).split())
-                if turn_who != who or not body:
-                    continue
-                if body.lower() == phrase or len(body) < 8:
-                    continue
-                return body
+        for turn_who, text in reversed(self.turns):
+            body = " ".join(str(text).split())
+            if turn_who != "user" or not body:
+                continue
+            if body.lower() == phrase or len(body) < 8:
+                continue
+            return body
         return ""
 
     def _remember(self, claim: str) -> None:
-        """Star it, and say so in one clause. Silence would look like it failed."""
-        if self.on_star is None:
+        """Star it through memory.star, and say so in one clause. Silence would look like it failed."""
+        if self.memory is None:
             return
         if not claim:
-            self._bg(self._quiet("[memory] They asked you to remember something, but nothing was said before "
-                                 "it that you could keep. Ask what you should remember, in one short line."))
+            self._bg(self._quiet("[memory] They asked you to remember something, but they said nothing before "
+                                 "it that you could keep. Say so in one short line."))
+            return
+        self._bg(self._star(claim))
+
+    async def _star(self, claim: str) -> None:
+        memory = self.memory
+        if memory is None:
             return
         try:
-            kept = self.on_star(claim)
-        except Exception:  # noqa: BLE001
-            log.exception("voice: could not star it")
+            kept = await asyncio.to_thread(memory.star, claim)
+        except Exception as e:  # noqa: BLE001
+            log.warning("voice: could not star it (%s)", type(e).__name__)
             kept = None
         if kept:
-            log.info("voice: starred %r", kept[:80])
-            self._bg(self._quiet("[memory] You have written that down for good. Tell them you will remember "
-                                 "it, in three or four words. Do not repeat it back to them."))
+            log.info("voice: starred one line (%d chars)", len(kept))     # never the words
+            await self._quiet("[memory] You have written that down for good. Tell them you will remember "
+                              "it, in three or four words. Do not repeat it back to them.")
         else:
-            self._bg(self._quiet("[memory] You could not write it down. Say so in one short line, plainly."))
+            await self._quiet("[memory] You could not write it down. Say so in one short line, plainly.")
 
     async def _fast_head_move(self, text: str, turn_started_at: float) -> None:
         """Ask the typed model for a pose and, when it is sure, turn the head now. Any failure, an abstention or
@@ -1607,6 +1854,7 @@ class VoiceSession:
         assert self.agent is not None
         final = await self.agent.run(goal)
         self._last_activity = self._task_done_at = self._clock()
+        self._capture("buddy", "tool", str(final or "")[:TOOL_LINE_CHARS], tool="start_task")
         if not self._ended.is_set():
             # The conversation stays open after the result: the owner ends it with a
             # goodbye, or the idle timeout does (owner request 2026-09-10, reversing
@@ -1690,6 +1938,22 @@ class VoiceSession:
             await self.conn.response.create()
 
 
+def _clip_output(result: dict[str, Any], cap: int) -> str:
+    """A tool result as JSON of at most `cap` chars, still valid JSON when clipped."""
+    text = json.dumps(result, ensure_ascii=False, default=str)
+    if len(text) <= cap:
+        return text
+    head = {"ok": result.get("ok"), "clipped": True, "text": ""}
+    room = cap - len(json.dumps(head))
+    while room > 0:
+        head["text"] = text[:room]
+        out = json.dumps(head, ensure_ascii=False)
+        if len(out) <= cap:
+            return out
+        room -= len(out) - cap
+    return json.dumps({"ok": result.get("ok"), "clipped": True})
+
+
 def _attr(event: Any, name: str) -> Any:
     if isinstance(event, dict):
         return event.get(name)
@@ -1718,12 +1982,14 @@ async def open_session(
     intent: Optional[Callable[[str], Awaitable[Optional[str]]]] = None,
     on_sound: Optional[Callable[[bool], None]] = None,
     muted: Callable[[], bool] = lambda: False,
-    thinker: Optional[Callable[[str], Awaitable[dict[str, Any]]]] = None,
+    thinker: Optional[Callable[..., Awaitable[dict[str, Any]]]] = None,
     on_photo: Optional[Callable[[str], Awaitable[dict[str, Any]]]] = None,
-    memory: str = "",
-    profile: str = "",
+    brief: str = "",
+    memory: Optional["Memory"] = None,
+    conv: str = "",
+    today: str = "",
+    backend_today: str = "",
     on_closed: Optional[Callable[[list[tuple[str, str]]], None]] = None,
-    on_star: Optional[Callable[[str], Optional[str]]] = None,
     learning: Optional[Callable[..., dict[str, Any]]] = None,
     think_aloud: Optional[dict[str, Any]] = None,
     on_spoken_idea: Optional[Callable[[str, str], Any]] = None,
@@ -1739,7 +2005,9 @@ async def open_session(
     or the real speaker in audio mode.
 
     `think_aloud` opens it for think out loud on that lesson. `on_open` hands the
-    session to the daemon, so a toggle can switch or stop it while it runs."""
+    session to the daemon, so a toggle can switch or stop it while it runs.
+    `memory` (with `conv`, `today`, `backend_today` from the daemon) is lent when
+    memory is on; the session writes its own transcript lines and close marker."""
     from openai import AsyncOpenAI
 
     cfg = config or configured()
@@ -1757,7 +2025,8 @@ async def open_session(
                                    agent_enabled=agent_enabled, on_caption=on_caption,
                                    on_explore=on_explore, scene=scene, head=head, intent=intent,
                                    on_sound=on_sound, muted=muted, thinker=thinker, on_photo=on_photo,
-                                   memory=memory, profile=profile, on_star=on_star, learning=learning,
+                                   brief=brief, memory=memory, conv=conv, today=today,
+                                   backend_today=backend_today, learning=learning,
                                    think_aloud=think_aloud, lesson_wake=lesson_wake, on_spoken_idea=on_spoken_idea,
                                    on_think_aloud=on_think_aloud, head_pose=head_pose, gate=gate,
                                    on_expression=on_expression, mac_busy=mac_busy)
@@ -1766,8 +2035,8 @@ async def open_session(
             try:
                 await session.run()
             finally:
-                # Hand the conversation to whoever wants to remember it, on every
-                # exit path including a hush and an exception.
+                # Hand the turns on, on every exit path including a hush and an
+                # exception. The transcript lines and the close marker are already written.
                 if on_closed is not None:
                     try:
                         on_closed(list(session.turns))
