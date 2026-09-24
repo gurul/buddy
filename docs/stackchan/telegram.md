@@ -259,6 +259,33 @@ is always listed.
 `claude on <name>` picks a running session by folder name. If no running session
 matches, it starts that folder.
 
+## Choosing the text brain (measured)
+
+On 2026-09-24 an [Ori](https://openrouter.ai) eval compared six models as the
+Telegram text brain. It used 16 cases: 11 of the owner's real Telegram turns (a
+few lightly redacted) and 5 authored tool cases. Tools were mocked, tool
+choices were checked in code, and replies were judged by Claude Opus 5.5. The
+eval called the models through OpenRouter's Chat Completions API; production
+calls OpenAI models directly.
+
+Five short rules were added to the instructions from that eval: keep API keys
+out of the chat, route Mac requests to `start_task`, check the calendar or ask
+for an ambiguous "plan/plane today", give planning help a structure plus one
+question, and own a missed date and offer to save it. With those rules:
+
+| Model | Passed, before → after the rules | Cost for all 16 cases |
+|---|---:|---:|
+| `gpt-6-luna` (the default) | 11 → 14/16 | $0.0012 |
+| `gpt-6-sol` | 13 → 14/16 | $0.021 |
+| `gpt-6-astra` | 11 → 14/16 | $0.092 |
+| `google/gemini-3.7-flash` | 10 → 15/16 | $0.061 |
+| `z-ai/glm-5.3-flash` | 11 → 12/16 | $0.0056 |
+| `anthropic/claude-opus-4.7` | 12 → 13/16 | $0.730 |
+
+Luna stays the default: it matches astra with the rules at about 1/75th of the
+cost. No model passed all 16. Luna still misses offering to save a date it
+missed, and the sample is small, so rerun the eval before changing the model.
+
 ## Web search
 
 Voice, Telegram and `think_hard` use OpenAI's built-in `web_search` tool by

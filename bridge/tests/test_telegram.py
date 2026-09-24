@@ -4565,3 +4565,12 @@ def test_think_hard_is_told_the_profile_and_today(tmp_path: Path) -> None:
               thinker=old_thinker)
     asyncio.run(rig.inlet._turn(_in("Should I run tomorrow?")))
     assert asked == ["run tomorrow?"]
+
+
+def test_the_eval_rules_stay_in_the_text_brain_instructions() -> None:
+    # From the 2026-09-24 Ori eval: they took gpt-6-luna from 11/16 to 14/16 and closed its API-key safety miss.
+    text = " ".join(telegram.INSTRUCTIONS.split())
+    for rule in ("Keep API keys out of this chat", "through start_task with the owner's words",
+                 "check the calendar or ask whether the owner means a flight", "ask one useful next question",
+                 "own the miss plainly and offer to remember the date"):
+        assert rule in text, rule
