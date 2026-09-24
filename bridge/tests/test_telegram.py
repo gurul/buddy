@@ -4611,3 +4611,55 @@ def test_relay_lines_and_code_words_never_reach_the_text_brains_history(tmp_path
     assert [(who, kind, text) for who, kind, text in _rows(memory) if kind in ("relay", "command")] == [
         ("owner", "relay", "The expense spllitter doesn't work"), ("owner", "relay", "claude: Ultrathink"),
         ("owner", "command", "claude off"), ("owner", "command", "stealth")]
+
+
+def test_a_text_turn_cut_off_by_a_restart_is_answered_with_one_line() -> None:
+    # Live, 2026-09-24 08:47:54: the owner's text got "typing…", the daemon restarted at 08:48:00, and no reply
+    # ever came. The update was already acknowledged, so Telegram will not send it again: buddy must say so.
+    never = asyncio.Event()
+
+    async def hangs() -> dict[str, Any]:
+        await never.wait()
+        return say("too late")
+
+    api = FakeApi([update("what should I cook tonight?", update_id=7)])
+    rig = Rig(api, FakeCreate(hangs))
+    run_rig(rig)                                          # the loop is cancelled mid-turn: the daemon stops
+    assert api.replies == [(telegram.TURN_RESTART_LINE, 7)] and api.sent == [(OWNER, telegram.TURN_RESTART_LINE)]
+    # the control: a turn that finished before the restart gets its answer and nothing else
+    api = FakeApi([update("hi", update_id=8)])
+    rig = Rig(api, FakeCreate(say("Hello!")))
+    run_rig(rig)
+    assert api.sent == [(OWNER, "Hello!")] and api.replies == []
+
+
+def test_the_restart_line_never_holds_up_the_shutdown() -> None:
+    never = asyncio.Event()
+
+    async def hangs() -> dict[str, Any]:
+        await never.wait()
+        return say("too late")
+
+    class Stuck(FakeApi):
+        async def send_message(self, *a: Any, **kw: Any) -> None:
+            await never.wait()                            # Telegram does not answer
+
+    api = Stuck([update("hello?", update_id=9)])
+    rig = Rig(api, FakeCreate(hangs))
+    waited: list[float] = []
+    real_wait_for = asyncio.wait_for
+
+    async def timed(aw: Any, timeout: Optional[float]) -> Any:
+        waited.append(timeout or 0.0)
+        return await real_wait_for(aw, 0.01)              # the test does not sit out the real budget
+
+    async def go() -> None:
+        loop_task = asyncio.ensure_future(rig.inlet.run())
+        await settle()
+        with pytest.MonkeyPatch.context() as mp:
+            mp.setattr(telegram.asyncio, "wait_for", timed)
+            loop_task.cancel()
+            await asyncio.gather(loop_task, return_exceptions=True)
+
+    asyncio.run(go())
+    assert waited and max(waited) <= telegram.TURN_RESTART_SECS <= 2.0

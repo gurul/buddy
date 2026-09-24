@@ -409,6 +409,13 @@ Flip it to `ask` if two seconds a command is a price you will pay.
   the last step is never lost. If it will not take the reply link, the result
   comes without it. A restart closes an open progress message ("Stopped." for
   a task, "Closed." for a Codex turn) so no dead Stop button is left behind.
+- **A restart mid-answer is said, not swallowed.** If the daemon stops while a
+  text turn is still being answered (or is waiting for the one before it),
+  buddy replies to your message with "I restarted in the middle of answering
+  that. Please send it again." Telegram has already delivered that message and
+  will not send it again, so without this line the message would be lost with
+  no sign (2026-09-24). This is best effort. All of these lines together get at
+  most 2 seconds, so a slow Telegram never holds up the restart.
 - **The `/` menu.** At startup buddy sets its code words as bot commands in
   your own chat only (`setMyCommands`, scoped to your chat): `/claude_on`,
   `/claude_off`, `/new_claude`, `/codex`, `/rundown`, `/screenshot`,

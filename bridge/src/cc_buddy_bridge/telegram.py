@@ -257,6 +257,10 @@ FORWARDED_LINE = "I don't act on forwarded messages. Type it to me in your own w
 HELLO_LINE = "Hi! It's buddy. Text me like you'd talk to me at the desk."
 STOPPED_LINE = "Stopped."
 RESTART_LINE = "buddy restarted, so your task ({goal}) was stopped before it finished. Send it again."
+# A text turn a restart cut off, as a reply to the owner's message: the update was already acknowledged, so
+# Telegram never sends it again (live, 2026-09-24 08:47:54: "typing…", a restart at 08:48:00, then silence).
+TURN_RESTART_LINE = "I restarted in the middle of answering that. Please send it again."
+TURN_RESTART_SECS = 2.0              # all of those lines together: a restart is never held up longer
 NOTHING_TO_STOP_LINE = "Nothing is running."
 ON_IT_LINE = "On it. I'll text you the result."
 FAILED_LINE = "Something went wrong on my side. Try me again in a moment."
@@ -1385,6 +1389,9 @@ class TelegramInlet:
         self._conv: Optional[str] = None                  # this chat's transcript conversation, while it is open
         self._last_turn_at: Optional[float] = None
         self._turn_lock = asyncio.Lock()
+        # Text turns not yet answered, waiting for the lock or running: (chat id, message id) per turn. A turn
+        # still here when the daemon stops is told so (_shutdown), never dropped in silence.
+        self._open_turns: dict[int, tuple[int, int]] = {}
         self._agent: Any = None
         self._agent_task: Optional[asyncio.Task] = None
         self._task_chat: Optional[int] = None             # the running task's chat and words, for a restart notice
@@ -1501,8 +1508,20 @@ class TelegramInlet:
                     await asyncio.wait_for(self._say(chat, RESTART_LINE.format(goal=goal[:120])), timeout=3)
                 except Exception:  # noqa: BLE001 — shutting down: best effort only
                     pass
+        # Taken as the jobs are cancelled: every turn still open now is one whose answer will never come.
+        cut_off = list(self._open_turns.values())
         for job in list(self._jobs):
             job.cancel()
+        if cut_off:
+            # Best effort, and briefly: one line per cut-off turn, as a reply to the owner's message, all within
+            # TURN_RESTART_SECS so a slow Telegram never holds up the restart.
+            try:
+                await asyncio.wait_for(asyncio.gather(*(self._say(chat, TURN_RESTART_LINE, reply_to=message_id)
+                                                        for chat, message_id in cut_off), return_exceptions=True),
+                                       timeout=TURN_RESTART_SECS)
+            except Exception:  # noqa: BLE001 — shutting down: best effort only
+                pass
+            log.info("telegram: %d chat turn(s) cut off by the restart; the owner was told, best effort", len(cut_off))
         self._stop_thinking(None)
         typing = list(self._typing_tasks.values())
         self._typing.clear()
@@ -2943,6 +2962,14 @@ class TelegramInlet:
 
     # -- one turn --
     async def _turn(self, inbound: Inbound, *, image: Optional[telegram_images.ReceivedImage] = None) -> None:
+        key = id(inbound)
+        self._open_turns[key] = (inbound.chat_id, inbound.message_id)
+        try:
+            await self._answer_turn(inbound, image=image)
+        finally:
+            self._open_turns.pop(key, None)
+
+    async def _answer_turn(self, inbound: Inbound, *, image: Optional[telegram_images.ReceivedImage] = None) -> None:
         async with self._turn_lock:
             chat_id = inbound.chat_id
             self._turn_request = inbound.message_id          # a task this turn starts replies to it
