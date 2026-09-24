@@ -30,17 +30,32 @@ class Agent:
         self.calls.append(("cancel", reason))
 
 
+class FakeMemory:
+    """memory.Memory's tool half: the four tool names the text brain is offered, and a recorder for handle_tool."""
+
+    NAMES = ("memory_search", "memory_read", "forget_preview", "forget_apply")
+
+    def __init__(self, hits: list[Any]) -> None:
+        self.hits = hits
+
+    def tools(self, *, voice: bool = False) -> list[dict[str, Any]]:
+        return [{"type": "function", "name": n, "parameters": {}} for n in self.NAMES]
+
+    def handle_tool(self, name: str, args: dict[str, Any], *, since: Any = None, channel: str = "") -> dict[str, Any]:
+        self.hits.append(("memory.handle_tool", name, dict(args), channel))
+        return {"ok": True}
+
+
 def _rig(monkeypatch: pytest.MonkeyPatch, *, agent: bool) -> tuple[TelegramInlet, list[Any]]:
     hits: list[Any] = []
 
     async def no_model(request: dict[str, Any]) -> dict[str, Any]:
         raise AssertionError("no model call in a routing test")
 
-    records = type("R", (), {"search": lambda self, q: hits.append(("records.search", q)) or {"ok": True},
-                             "get": lambda self, i: hits.append(("records.get", i)) or {"ok": True}})()
+    memory = FakeMemory(hits)
     apps = type("A", (), {"names": frozenset({"GMAIL_FETCH_EMAILS"})})()
     vault = type("V", (), {"root": "/vault"})()
-    inlet = TelegramInlet(CFG, object(), no_model, records=records, apps=apps, vault=vault)
+    inlet = TelegramInlet(CFG, object(), no_model, memory=memory, apps=apps, vault=vault)
 
     def rec(label: str) -> Any:
         async def handler(*a: Any, **kw: Any) -> dict[str, Any]:
@@ -79,8 +94,10 @@ ROUTES = [
     ("set_sound", {"on": False}, [("_robot_tool", "set_sound", {"on": False})]),
     ("remember", {"claim": "x"}, [("_robot_tool", "remember", {"claim": "x"})]),
     ("take_notes", {"action": "start"}, [("_robot_tool", "take_notes", {"action": "start"})]),
-    ("memory_search", {"query": "q"}, [("records.search", "q")]),
-    ("memory_get", {"id": "7"}, [("records.get", "7")]),
+    ("memory_search", {"query": "q"}, [("memory.handle_tool", "memory_search", {"query": "q"}, "telegram")]),
+    ("memory_read", {"ref": "7"}, [("memory.handle_tool", "memory_read", {"ref": "7"}, "telegram")]),
+    ("forget_preview", {"query": "q"}, [("memory.handle_tool", "forget_preview", {"query": "q"}, "telegram")]),
+    ("forget_apply", {"token": "t"}, [("memory.handle_tool", "forget_apply", {"token": "t"}, "telegram")]),
     (websearch.TOOL_NAME, {"query": "ramen"}, [("websearch.search", "ramen")]),
     ("GMAIL_FETCH_EMAILS", {"q": 1}, [("_app_tool", "GMAIL_FETCH_EMAILS", {"q": 1})]),
     ("think_hard", {"question": "why"}, [("_think_hard", "why")]),
@@ -137,7 +154,9 @@ def test_a_failing_handler_is_reported_not_raised(monkeypatch: pytest.MonkeyPatc
     assert asyncio.run(inlet._tool("take_photo", {"note": "n"}, OWNER)) == {"ok": False, "reason": "take_photo failed"}
 
 
-def test_memory_tools_without_records_say_so(monkeypatch: pytest.MonkeyPatch) -> None:
-    inlet, _ = _rig(monkeypatch, agent=False)
-    inlet._records = None
-    assert asyncio.run(inlet._tool("memory_search", {"query": "q"}, OWNER))["ok"] is False
+def test_memory_tools_without_memory_never_reach_a_memory(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Memory off: the memory tools are not offered, and a stray call is the catch-all's, never a store's."""
+    inlet, hits = _rig(monkeypatch, agent=False)
+    inlet._memory, inlet._memory_tools_cache = None, None
+    asyncio.run(inlet._tool("memory_search", {"query": "q"}, OWNER))
+    assert hits == [("_think_hard", "")]

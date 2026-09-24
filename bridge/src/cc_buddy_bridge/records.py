@@ -91,28 +91,6 @@ _STAR_LINE = re.compile(r"^\s*[-*]\s+(?:★\s*)?(.+?)\s*$")
 _STAR_DATE = re.compile(r"^(.*?)\s*\((\d{4}-\d{2}-\d{2})\)$")
 _UPDATED = re.compile(r"^updated:\s*(\d{4}-\d{2}-\d{2})\s*$", re.M)
 
-# Kept only while telegram.py still imports it: memory.Memory.tools() is the tool set both brains get now.
-MEMORY_TOOLS: list[dict[str, Any]] = [
-    {
-        "type": "function", "name": "memory_search", "strict": True,
-        "description": "Search what you know about your owner: a keyword search over your memory records "
-                       "(preferences, people, projects, places), and, where it is on, a search by meaning "
-                       "over everything said in past conversations. Returns matching record lines with their "
-                       "id and date, and recalled memories. Use it before answering anything about their "
-                       "life, taste or plans, and before saying you do not know.",
-        "parameters": {"type": "object", "additionalProperties": False, "required": ["query"],
-                       "properties": {"query": {"type": "string",
-                                                "description": "A few keywords, the way the owner would say it."}}},
-    },
-    {
-        "type": "function", "name": "memory_get", "strict": True,
-        "description": "Read one whole memory record by id (ids are listed in your profile and in search results).",
-        "parameters": {"type": "object", "additionalProperties": False, "required": ["id"],
-                       "properties": {"id": {"type": "string"}}},
-    },
-]
-
-
 # ---- records on disk --------------------------------------------------------------------------
 
 @dataclass

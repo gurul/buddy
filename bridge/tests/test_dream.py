@@ -402,3 +402,38 @@ def test_the_loop_survives_a_dream_that_raises(tmp_path: Path, monkeypatch: pyte
     monkeypatch.setattr(d, "_night", broken)
     report = asyncio.run(d.dream("2026-09-22"))
     assert report.failed == ["dream"] and not report.dreamt
+
+
+# ---- the night ends committed (L6) -------------------------------------------------------------
+
+def test_the_night_ends_with_the_report_committed(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """The counts are appended after reconcile's and consolidate's commits; one more commit puts the whole
+    journal in history. A night with no journal commits nothing more."""
+    d, t, _, _ = setup(tmp_path, monkeypatch)
+    commits: list[tuple[Path, str]] = []
+    monkeypatch.setattr(records, "commit", lambda repo, message: commits.append((Path(repo), message)) or "abc1234")
+    say(t, at(22, 21))
+    report = asyncio.run(d.dream("2026-09-22"))
+    assert report.dreamt and report.journal is not None
+    assert "## Dream" in report.journal.read_text(encoding="utf-8")
+    assert commits == [(Path(d.cfg.records_dir), "dream: 2026-09-22 report")]
+
+    empty = asyncio.run(d.dream("2026-09-20"))           # nothing said: no call, no journal, no commit
+    assert empty.empty and len(commits) == 1
+
+
+def test_the_report_commit_is_real_history(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    import shutil
+    import subprocess
+    if shutil.which("git") is None:
+        pytest.skip("git is not installed")
+    d, t, _, _ = setup(tmp_path, monkeypatch)
+    assert records.ensure_repo(Path(d.cfg.records_dir))
+    say(t, at(22, 21))
+    asyncio.run(d.dream("2026-09-22"))
+    status = subprocess.run(["git", "status", "--porcelain"], cwd=d.cfg.records_dir, capture_output=True,
+                            text=True, check=True).stdout
+    assert status == ""                                   # nothing of the night is left uncommitted
+    log_out = subprocess.run(["git", "log", "--format=%s"], cwd=d.cfg.records_dir, capture_output=True,
+                             text=True, check=True).stdout
+    assert "dream: 2026-09-22 report" in log_out

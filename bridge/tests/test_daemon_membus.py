@@ -1,23 +1,20 @@
-"""The daemon on its memory bus: what it publishes (state, lesson, conversation, diary), what it
-never publishes (the learner's words), the opt-in sinks, the recall service and the remember draft."""
+"""The daemon on its memory bus: what it publishes (state, lesson, diary), what it never publishes (the
+learner's words, anything said in a conversation), the opt-in sinks, the recall service and the remember line."""
 
 from __future__ import annotations
 
 import asyncio
 import logging
-from datetime import datetime
 from pathlib import Path
 from types import MethodType, SimpleNamespace
 
 import pytest
 
-from cc_buddy_bridge import chat_memory as chat_memory_mod
 from cc_buddy_bridge.caption_pager import CaptionPager
 from cc_buddy_bridge.daemon import Daemon
 from cc_buddy_bridge.diary import DiaryTaker, Record
 from cc_buddy_bridge.explore import ExploreConfig, Explorer
 from cc_buddy_bridge.memory_bus import BusConfig, MemoryBus, configured
-from cc_buddy_bridge.recall import RecallConfig
 from cc_buddy_bridge.thought_screen import ThoughtScreen
 
 
@@ -55,7 +52,7 @@ def _daemon(learning=None, bus_cfg: BusConfig | None = None) -> SimpleNamespace:
     for name in ("_handle_ipc", "_handle_lesson", "_learning_notice", "_learning_idle", "_on_agent_state",
                  "_on_caption", "_note_activity", "_dismiss_explore", "_clear_thought", "_run_explore_action",
                  "_request_explore", "_start_memory_sinks", "_stop_memory_sinks", "_publish_observation",
-                 "_publish_conversation", "_publish_lesson", "_on_remember", "_recall_service"):
+                 "_publish_lesson", "_on_remember", "_recall_service"):
         setattr(d, name, MethodType(getattr(Daemon, name), d))
     return d
 
@@ -217,32 +214,13 @@ def test_the_diary_only_calls_on_written_for_records_it_wrote(tmp_path, monkeypa
     asyncio.run(go())
 
 
-def test_a_distilled_conversation_note_publishes_without_the_transcript(tmp_path) -> None:
-    async def go():
-        d = _daemon()
-        cfg = RecallConfig(store=tmp_path, notes=tmp_path / "notes")
-        published: list[dict] = []
-        d.bus.subscribe("/buddy/memory/conversation", lambda t, m: published.append(m))
+def test_nothing_said_in_a_conversation_is_published() -> None:
+    """The conversation topic is gone (owner, 2026-09-23): what was said stays in the memory folder."""
+    from cc_buddy_bridge.memory_bus import TOPICS
 
-        class _Client:
-            def distil(self, body: str) -> str:
-                assert "green mug" in body
-                return ('{"title":"The mug","said":["The owner found the green mug."],'
-                        '"open":["they will wash it"],"owes":["a reminder tomorrow"],"nothing":false}')
-        cm = chat_memory_mod.ChatMemory(cfg, _Client(), wall=lambda: datetime(2026, 9, 15, 12, 0),
-                                        on_note=lambda note: Daemon._publish_conversation(d, note))
-        turns = [("user", "have you seen my green mug anywhere in this room today"),
-                 ("assistant", "On the left shelf.")]
-        path = await cm.remember(turns, "s1")
-        assert path is not None
-        await asyncio.sleep(0)
-        assert len(published) == 1
-        e = published[0]
-        assert e["title"] == "The mug" and e["note"] == ["The owner found the green mug."]
-        assert e["open"] == ["they will wash it"] and e["owes"] == ["buddy owes a reminder tomorrow"]
-        assert e["session_id"] == "s1" and e["ended"] == "2026-09-15 12:00"
-        assert "green mug anywhere" not in repr(e) and "left shelf" not in repr(e)
-    asyncio.run(go())
+    assert "/buddy/memory/conversation" not in TOPICS
+    assert not hasattr(Daemon, "_publish_conversation")
+    assert "/buddy/memory/observation" in TOPICS            # the control: the diary topic is still there
 
 
 # ---- sinks -------------------------------------------------------------------------------------
@@ -392,23 +370,18 @@ def test_recall_searches_claude_mem_when_it_is_on(monkeypatch) -> None:
     asyncio.run(go())
 
 
-def test_a_remember_on_the_bus_writes_a_candidate_draft_and_never_a_star(monkeypatch, tmp_path) -> None:
+def test_a_remember_on_the_bus_is_dropped_while_memory_is_off(monkeypatch, tmp_path, caplog) -> None:
     _install_fakes(monkeypatch)
 
     async def go():
         d = _daemon()
-        d._recall_cfg = RecallConfig(store=tmp_path, notes=tmp_path / "notes")
+        d._memory = None
         await d._start_memory_sinks()
-        d.bus.publish("/buddy/memory/remember", {"text": "The green mug lives on the left shelf.", "title": "Mug"})
-        await asyncio.sleep(0)
-        drafts = list((tmp_path / "sessions").rglob("*.md"))
-        assert len(drafts) == 1
-        body = drafts[0].read_text(encoding="utf-8")
-        assert chat_memory_mod.CANDIDATE_MARK in body and "left shelf" in body and "# Mug" in body
-        assert not (tmp_path / "HIGHLIGHTS.md").exists()           # never starred
-        d.bus.publish("/buddy/memory/remember", {"text": "   "})    # nothing to keep
-        await asyncio.sleep(0)
-        assert len(list((tmp_path / "sessions").rglob("*.md"))) == 1
+        with caplog.at_level(logging.INFO, logger="cc_buddy_bridge.daemon"):
+            d.bus.publish("/buddy/memory/remember", {"text": "The green mug lives on the left shelf."})
+            await asyncio.sleep(0)
+        assert "remember dropped" in caplog.text and "left shelf" not in caplog.text
+        assert list(tmp_path.rglob("*")) == []
     asyncio.run(go())
 
 

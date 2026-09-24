@@ -139,9 +139,9 @@ def test_to_memory_shapes_each_topic() -> None:
     assert obs["metadata"]["importance"] == 7 and obs["metadata"]["time"] == 1.5
     assert "thought" not in obs["metadata"] and "observations" not in obs["metadata"]
 
-    conv = to_memory("/buddy/memory/conversation",
-                     {"title": "Coffee plans", "note": "Guru wants coffee at four.", "open": ["book the table"]})
-    assert conv["title"] == "Coffee plans" and conv["text"] == "Guru wants coffee at four.\n\nStill open: book the table"
+    # What was said is not on the bus any more (owner, 2026-09-23): a conversation topic is dropped.
+    assert to_memory("/buddy/memory/conversation",
+                     {"title": "Coffee plans", "note": "The owner wants coffee at four."}) is None
 
     lesson = to_memory("/buddy/memory/lesson",
                        {"action": "step", "stage": "working", "topic": "Fractions", "level": "Grade 4",

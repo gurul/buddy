@@ -382,8 +382,8 @@ def test_no_owner_id_means_no_inlet() -> None:
 def _bare_daemon() -> SimpleNamespace:
     return SimpleNamespace(_make_agent=lambda *a: None, _agent_cfg=SimpleNamespace(enabled=True),
                            _recall_cfg=None, _photo_for_owner=None, _thinker=None, _scene=None, _head=None,
-                           _on_agent_state=lambda s: None, _remember_conversation=lambda t: None,
-                           _request_explore=None, _set_sound=lambda on: None, _star_by_voice=lambda c: None,
+                           _on_agent_state=lambda s: None,
+                           _request_explore=None, _set_sound=lambda on: None,
                            _on_caption=lambda m: None, _room_notes_taker=lambda: None)
 
 

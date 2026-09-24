@@ -22,7 +22,8 @@ For one transcript day, in a worker thread, never on the event loop:
 3. ``index.ingest_day`` + ``index.tidy`` — the day's conversations go into mem0,
    and exact duplicates and ★ candidates come out.
 4. The day goes into ``records/.dreamt`` (one day per line) and a ``## Dream``
-   section with the counts is appended to the journal.
+   section with the counts is appended to the journal, then committed, so every
+   night ends with its whole journal in the records' history.
 
 ### Why the dream is the only automatic writer of records
 
@@ -208,6 +209,10 @@ class Dreamer:
             report.secs = round(time.monotonic() - started, 1)
             if report.dreamt and not report.empty:
                 self._append_report(day, report)
+                if report.journal is not None:
+                    # The counts land after reconcile's and consolidate's commits: one more, so the night
+                    # ends with its whole journal in the records' history, never as an uncommitted edit.
+                    records.commit(Path(self.cfg.records_dir), f"dream: {day} report")
             if report.dreamt:
                 log.info("dream: %s — %s", day, "nothing said, no call" if report.empty else self._summary(report))
             return report

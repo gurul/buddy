@@ -14,15 +14,16 @@ if TYPE_CHECKING:
     from .key_tap import KeyTapper
 
 from . import claude_live, mem0_memory, photos, voice_agent
+from . import dream as dream_mod
 from . import follow as follow_mod
+from . import memory as memory_mod
 from . import recall as recall_mod
 from . import records as records_mod
 from . import telegram as telegram_mod
+from . import transcripts as transcripts_mod
 from .audit import AuditLog
 from .ble import BuddyBLE
 from .caption_pager import CaptionPager, PagerConfig
-from .chat_memory import ChatMemory, make_chat_client
-from .chat_memory import star as star_memory
 from .codex_computer import CodexComputerAgent
 from .computer_agent import configured as agent_configured
 from .diary import DiaryTaker, Emote, Thought, build_emote_cmd, make_diary_client
@@ -95,6 +96,11 @@ log = logging.getLogger(__name__)
 # and the name of a conversation task opened for listening (so a stop can cancel one still connecting).
 THINK_ALOUD_CALL_SECS = 12.0
 THINK_ALOUD_TASK = "think-aloud-conversation"
+# Memory (owner, 2026-09-23). A voice conversation opens with today's lines only when they are built this fast;
+# shutdown gives the close markers and then the background work (the dream) this long.
+TODAY_BUILD_SECS = 0.05
+CLOSE_MARKERS_SECS = 3.0
+DRAIN_SECS = 12.0
 
 class Daemon:
     def __init__(
@@ -213,19 +219,23 @@ class Daemon:
         self._think_aloud_state = "off"
         self._think_aloud_lesson_id: Optional[str] = None
         self._recall_cfg = recall_mod.configured()
-        # buddy's memory as it forms (memory_bus.py): every kept diary thought, distilled
-        # conversation note, lesson event and state change is published the moment it
-        # happens. Sinks (a rosbridge WebSocket server, the owner's claude-mem) attach in
-        # run() behind env flags, all off by default. Bound to the loop in run().
+        # buddy's memory as it forms (memory_bus.py): every kept diary thought, lesson event
+        # and state change is published the moment it happens. What was SAID never goes on
+        # the bus: it stays in the memory folder (owner, 2026-09-23). Sinks (a rosbridge
+        # WebSocket server, the owner's claude-mem) attach in run() behind env flags, all off
+        # by default. Bound to the loop in run().
         self.bus = MemoryBus()
         self._bus_cfg = bus_configured()
         self._rosbridge: Optional[Any] = None
         self._claude_mem_sink: Optional[Any] = None
         self._claude_mem_mirror: Optional[Any] = None
-        # buddy's memory of what was SAID: one note per conversation, and its own
-        # day pass. Separate from the diary, which remembers what it SAW.
-        self._chat_memory = ChatMemory(self._recall_cfg, make_chat_client(),
-                                       on_note=lambda note: Daemon._publish_conversation(self, note))
+        # buddy's memory of what was SAID (memory.py): one facade over the transcripts, the records and
+        # the mem0 index, opened at the top of run() once the one-time move to the memory folder is done.
+        # None while memory is off (CC_BUDDY_MEMORY): then nothing is written and every prompt is as before.
+        # Separate from the diary, which remembers what it SAW.
+        self._memory: Optional[memory_mod.Memory] = None
+        # The newest voice conversation's transcript id ("" when none): shutdown closes it if its session did not.
+        self._voice_conv = ""
         # Fire-and-forget work that must outlive the call that started it, held so
         # it is not garbage-collected mid-flight.
         self._background: set[asyncio.Task[Any]] = set()
@@ -307,6 +317,9 @@ class Daemon:
 
     async def run(self) -> None:
         _log_permission_config_summary(self.matchers)
+        # Memory first: the one-time move into the memory folder must run before anything opens a store,
+        # and the IPC server below can already write meeting notes into it.
+        await Daemon._open_memory(self)
         # The voice SDK's resources package imports in 12–20 s inside this process
         # (GIL contention with vision and the keyword spotter). Pay it now, off the
         # loop, so the first "hey buddy" does not (voice_agent.warm_live_import).
@@ -361,10 +374,6 @@ class Daemon:
                                      on_written=lambda rec: Daemon._publish_observation(self, rec))
         tasks.append(asyncio.create_task(self._explore_loop(), name="explore"))
         tasks.append(asyncio.create_task(self._thought_caption_loop(), name="thought-captions"))
-        # buddy's own day pass: aggregate yesterday's conversations into a day
-        # record without waiting for a human to run anything.
-        tasks.append(asyncio.create_task(self._chat_memory.curate_loop(self._shutdown),
-                                         name="chat-memory-curate"))
         # codex_warm.py: one Codex agent started ahead of time, so a hard task's handoff is the turn only.
         from . import codex_warm
         warm_on, warm_age = codex_warm.configured()
@@ -378,16 +387,10 @@ class Daemon:
         if self._telegram is not None:
             tasks.append(asyncio.create_task(self._telegram.run(), name="telegram"))
             self._command_risk()                     # one log line at start: the Auto Mode gate's mode
-        # The records layer (records.py): CC_BUDDY_RECORDS=1 reconciles each curated day into typed,
-        # git-tracked records and the profile the text brain reads. The agent never writes them.
-        self._reconciler = records_mod.make_reconciler(records_mod.configured(), self._recall_cfg)
-        if self._reconciler is not None:
-            tasks.append(asyncio.create_task(self._reconciler.loop(self._shutdown), name="records-reconcile"))
-        # mem0 (mem0_memory.py), CC_BUDDY_MEM0=1: reads each session note into a local meaning search that
-        # memory_search consults beside the records. Only with records on: it is reached through them.
-        owner_memory = mem0_memory.shared(self._recall_cfg) if records_mod.configured().enabled else None
-        if owner_memory is not None:
-            tasks.append(asyncio.create_task(owner_memory.loop(self._shutdown), name="mem0-ingest"))
+        # The nightly dream (dream.py): the one automatic writer of the records and the mem0 index. It
+        # watches the shutdown event itself and is drained, not cancelled, at the end: a night half written
+        # is worse than a restart a few seconds late.
+        Daemon._start_dream(self)
         if not self._explore_cfg.enabled:
             log.info("explore: buddy explores only when asked (`cc-buddy-bridge explore`, \"go explore\", a text); "
                      "CC_BUDDY_EXPLORE=1 turns the idle start on")
@@ -420,6 +423,8 @@ class Daemon:
                 self._ears.stop()
             if self._listen_stop is not None:
                 self._listen_stop()
+            await Daemon._close_open_conversations(self)
+            await Daemon._drain_background(self)
             await self.ble.stop()
             await self.ipc.stop()
             await self._stop_memory_sinks()
@@ -430,6 +435,121 @@ class Daemon:
 
     async def shutdown(self) -> None:
         self._shutdown.set()
+
+    # ---- memory: the one facade, the dream, and closing up ----
+
+    def _build_memory(self) -> Optional["memory_mod.Memory"]:
+        """The memory stack, or None while memory is off. Synchronous (renames and a few git calls): run()
+        calls it on a worker thread.
+
+        The move comes first and only with memory on (owner, 2026-09-23): with memory off nothing under
+        ~/.config/cc-buddy-bridge is touched. After the move the records folder is a repository of its own
+        again (the old one went to the archive), sealed so it can never be pushed."""
+        if not memory_mod.enabled():
+            log.info("memory: off (CC_BUDDY_MEMORY) — nothing said is kept, and prompts carry no memory")
+            return None
+        cfg = self._recall_cfg
+        try:
+            memory_mod.migrate(cfg, recall_mod.legacy_store(), recall_mod.legacy_mem0())
+        except Exception as e:  # noqa: BLE001 - a failed move leaves the old store where it was
+            log.warning("memory: the move to the memory folder failed (%s) — the old store is untouched",
+                        type(e).__name__)
+        records_mod.ensure_repo(cfg.records_dir)
+        transcripts = transcripts_mod.Transcripts(transcripts_mod.configured(), archive=cfg.archive_dir)
+        index = mem0_memory.shared(cfg)
+        log.info("memory: on — transcripts, records%s", ", mem0 index" if index is not None else " (no mem0 index)")
+        return memory_mod.Memory(cfg, transcripts, index)
+
+    async def _open_memory(self) -> None:
+        try:
+            self._memory = await asyncio.to_thread(Daemon._build_memory, self)
+        except Exception as e:  # noqa: BLE001 - memory is a nicety: the daemon runs without it
+            log.warning("memory: could not open (%s) — running without memory", type(e).__name__)
+            self._memory = None
+
+    def _start_dream(self) -> Optional[asyncio.Task[Any]]:
+        """The nightly dream, held in `_background` so shutdown drains it instead of cancelling it.
+        No memory or no model client (records.make_client logs why): no dream."""
+        memory = getattr(self, "_memory", None)
+        if memory is None:
+            return None
+        client = records_mod.make_client()
+        if client is None:
+            return None
+        dreamer = dream_mod.Dreamer(self._recall_cfg, memory.transcripts, client, memory.index)
+        task = asyncio.create_task(dreamer.loop(self._shutdown), name="memory-dream")
+        self._background.add(task)
+        task.add_done_callback(self._background.discard)
+        return task
+
+    async def _close_open_conversations(self) -> None:
+        """A restart must not leave a conversation open in the transcripts: the voice session and the text
+        inlet write their own close markers on the way out, and this is the backstop for any that did not
+        (a task cancelled before it ran). A conversation that wrote nothing gets nothing."""
+        memory = getattr(self, "_memory", None)
+        if memory is None:
+            return
+        inlet = getattr(self, "_telegram", None)
+        open_convs = [("voice", getattr(self, "_voice_conv", "")),
+                      ("telegram", str(getattr(inlet, "_conv", None) or "") if inlet is not None else "")]
+        store = memory.transcripts
+
+        def close_all() -> int:
+            closed = 0
+            for ch, conv in open_convs:
+                if not conv:
+                    continue
+                lines = store.conv_lines(conv)
+                if lines and not any(ln.get("kind") == "close" for ln in lines):
+                    closed += bool(store.close(ch, conv))
+            return closed
+
+        try:
+            closed = await asyncio.wait_for(asyncio.to_thread(close_all), timeout=CLOSE_MARKERS_SECS)
+        except Exception as e:  # noqa: BLE001 - shutting down: best effort
+            log.warning("memory: close markers not written at shutdown (%s)", type(e).__name__)
+            return
+        if inlet is not None and getattr(inlet, "_conv", None) is not None:
+            inlet._conv = None                   # closed above: a late _close_chat must not close it twice
+        self._voice_conv = ""
+        if closed:
+            log.info("memory: %d open conversation(s) closed at shutdown", closed)
+
+    async def _drain_background(self) -> None:
+        """Wait up to DRAIN_SECS for background work (the nightly dream) to finish, then cancel
+        whatever is left."""
+        pending = [t for t in list(getattr(self, "_background", ()) or ()) if not t.done()]
+        if not pending:
+            return
+        done, still = await asyncio.wait(pending, timeout=DRAIN_SECS)
+        for t in still:
+            t.cancel()
+        if still:
+            await asyncio.gather(*still, return_exceptions=True)
+            log.warning("shutdown: %d background task(s) cut off after %.0f s", len(still), DRAIN_SECS)
+
+    async def _voice_memory(self, memory: Optional["memory_mod.Memory"]) -> tuple[str, str, str]:
+        """(conv, today, backend_today) for a new voice conversation. The two today blocks are built on
+        a worker thread within TODAY_BUILD_SECS: a slow disk opens the conversation without them rather
+        than holding the owner's first word."""
+        if memory is None:
+            return "", "", ""
+        conv = memory.transcripts.new_conv("voice")
+
+        def build() -> tuple[str, str]:
+            return (memory.today(transcripts_mod.VOICE_CHARS, style="voice"),
+                    memory.today(transcripts_mod.BACKEND_CHARS))
+
+        try:
+            today, backend_today = await asyncio.wait_for(asyncio.to_thread(build), timeout=TODAY_BUILD_SECS)
+        except asyncio.TimeoutError:
+            log.info("memory: today's lines took over %.0f ms — this conversation opens without them",
+                     TODAY_BUILD_SECS * 1000)
+            today = backend_today = ""
+        except Exception as e:  # noqa: BLE001
+            log.warning("memory: today's lines unavailable (%s)", type(e).__name__)
+            today = backend_today = ""
+        return conv, today, backend_today
 
     # ---- the memory bus and its sinks ----
 
@@ -488,18 +608,6 @@ class Daemon:
             "time": float(getattr(rec, "ts", 0.0) or time.time()),
         })
 
-    def _publish_conversation(self, note: dict[str, Any]) -> None:
-        """The distilled note after a conversation closed. The transcript never gets here."""
-        self.bus.publish("/buddy/memory/conversation", {
-            "title": str(note.get("title") or ""),
-            "note": list(note.get("note") or []),
-            "open": list(note.get("open") or []),
-            "owes": list(note.get("owes") or []),
-            "session_id": str(note.get("session_id") or ""),
-            "ended": str(note.get("ended") or ""),
-            "time": time.time(),
-        })
-
     def _publish_lesson(self, action: str, stage: str, feedback: str) -> None:
         """A lesson moved on. Only the action, the stage, the lesson's topic and level, and buddy's OWN
         feedback: the learner's ideas, strokes, images and spoken words never leave the lesson store."""
@@ -523,22 +631,28 @@ class Daemon:
         })
 
     def _on_remember(self, msg: dict[str, Any]) -> None:
-        """Someone on the bus asked buddy to keep a line. buddy never stars for itself: the line is
-        written as a ★ (candidate) draft in its chat-memory store, for the owner to promote."""
+        """Someone on the bus asked buddy to keep a line. buddy never stars for itself, and a bus line is not
+        something the owner said: it becomes one transcript line (channel "bus", a tool line) for the nightly
+        dream to judge, beside everything else that day. With memory off it is dropped."""
         text = " ".join(str(msg.get("text") or "").split())[:500]
         if not text:
             return
-        title = " ".join(str(msg.get("title") or "Asked to remember").split())[:80]
-        from .chat_memory import CANDIDATE_MARK, write_note
-        when = datetime.now()
-        body = "\n".join([
-            "---", "status: draft", "source: memory-bus", f"session_id: bus-{when:%H%M%S}",
-            f"ended: {when:%Y-%m-%d %H:%M}", "---", "",
-            "> **Unverified.** A line sent to buddy over its memory bus, not something it heard.", "",
-            f"# {title}", "", "## Proposed for the permanent layer", "", f"- {CANDIDATE_MARK} {text}", "",
-        ])
-        path = write_note(self._recall_cfg, body, when, f"bus-{when:%H%M%S}")
-        log.info("memory bus: remember -> %s", path.name if path else "not written")
+        memory = getattr(self, "_memory", None)
+        if memory is None:
+            log.info("memory bus: remember dropped — memory is off")
+            return
+        title = " ".join(str(msg.get("title") or "").split())[:80]
+        line = f"{title}: {text}" if title else text
+        store = memory.transcripts
+        try:
+            conv = store.new_conv(transcripts_mod.BUS)
+            kept = store.append(transcripts_mod.BUS, conv, "system", "tool", line, tool="remember")
+            if kept:
+                store.close(transcripts_mod.BUS, conv)
+        except Exception as e:  # noqa: BLE001 - a bus line never costs the daemon
+            log.warning("memory bus: remember not kept (%s)", type(e).__name__)
+            return
+        log.info("memory bus: remember -> %s", "a transcript line" if kept else "not written")
 
     async def _recall_service(self, args: dict[str, Any]) -> dict[str, Any]:
         """/buddy/memory/recall: search the owner's claude-mem for buddy's memories."""
@@ -915,17 +1029,19 @@ class Daemon:
                 await asyncio.to_thread(server.app.voice, action="open")
             except Exception as e:  # noqa: BLE001
                 log.warning("lesson word: could not open the lesson window: %s: %s", type(e).__name__, e)
+        # What buddy remembers of talking with the owner (memory.py, recall.py), when memory is on: the
+        # opening brief (one clause), this conversation's transcript id, and today's lines for the voice and
+        # its backend. Read here because the prompt is built once, at session.start, before the owner has
+        # finished their first sentence, and before the microphone is taken, so a hush during the read
+        # leaves nothing to undo. The session reads the profile itself. Memory off: all empty.
+        memory = getattr(self, "_memory", None)
+        brief = recall_mod.opening_brief(self._recall_cfg, memory.transcripts if memory is not None else None)
+        if brief:
+            log.info("recall: an opening brief of %d chars", len(brief))
+        conv, today, backend_today = await Daemon._voice_memory(self, memory)
+        self._voice_conv = conv
         mic = self._ears.subscribe()
         keepalive = asyncio.create_task(self._agent_keepalive(), name="agent-keepalive")
-        # What buddy remembers of talking with the owner (recall.py). Read here
-        # rather than inside the session because it is a few file reads —
-        # measured at well under a millisecond — and the prompt is built once, at
-        # session.start, before the owner has finished their first sentence.
-        memory = recall_mod.opening_brief(self._recall_cfg)
-        if memory:
-            log.info("recall: %s", memory)
-        # The records profile, the same page a text turn reads, when CC_BUDDY_RECORDS is on.
-        profile = records_mod.profile(self._recall_cfg) if records_mod.configured().enabled else ""
         gate = await Daemon._voice_gate_for(self, think_aloud)
         try:
             await voice_agent.open_session(mic, self._on_agent_state, self._make_agent,
@@ -935,9 +1051,8 @@ class Daemon:
                                            scene=self._scene, head=self._head, intent=self._intent,
                                            on_sound=self._set_sound, muted=lambda: self._sound.muted,
                                            thinker=self._thinker, on_photo=self._photo_for_owner,
-                                           memory=memory, profile=profile,
-                                           on_closed=self._remember_conversation,
-                                           on_star=self._star_by_voice,
+                                           brief=brief, memory=memory, conv=conv, today=today,
+                                           backend_today=backend_today,
                                            learning=server.app.voice if server is not None else None,
                                            think_aloud=think_aloud, lesson_wake=lesson_wake,
                                            head_pose=Daemon._head_pose_asker(self), gate=gate,
@@ -969,9 +1084,6 @@ class Daemon:
                 # Listening was asked for while this conversation was closing: open it now.
                 self._think_aloud_wish = None
                 self._start_think_aloud_conversation(wish)
-            # Last, and on every exit path including a hush: the conversation
-            # happened, so the next one can say how long ago it was.
-            recall_mod.note_conversation_time(self._recall_cfg)
             reason, self._explore_after_conversation = self._explore_after_conversation, None
             if reason is not None:
                 await self._request_explore(reason)
@@ -981,28 +1093,6 @@ class Daemon:
             self._room_notes = RoomNotes(self._recall_cfg, notes_configured(), make_notes_client(),
                                          self._ears, on_state=self._on_agent_state)
         return self._room_notes
-
-    def _star_by_voice(self, claim: str) -> Optional[str]:
-        """The owner said "remember that" out loud. That is a human promoting.
-
-        Synchronous because it is one small append and buddy has to say whether it
-        worked in the same breath.
-        """
-        return star_memory(self._recall_cfg, claim)
-
-    def _remember_conversation(self, turns: list[tuple[str, str]]) -> None:
-        """The conversation is over: write down what was said, in the background.
-
-        Fire and forget on purpose. Distilling costs one model call, and nothing
-        about the next wake word, the board, or the idle explorer may wait on it.
-        """
-        if not turns:
-            return
-        session_id = f"{time.time():.0f}"
-        task = asyncio.create_task(self._chat_memory.remember(turns, session_id),
-                                   name="chat-memory-remember")
-        self._background.add(task)
-        task.add_done_callback(self._background.discard)
 
     def _on_voice_explore(self) -> None:
         """The voice tool go_explore: remember the wish; it is granted in
@@ -1061,9 +1151,11 @@ class Daemon:
 
     def _make_telegram(self) -> Optional["telegram_mod.TelegramInlet"]:
         """CC_BUDDY_TELEGRAM=1 with a token and an owner id: the inlet, lent the same agent factory, camera,
-        slow brain and conversation memory the voice session gets, the owner's apps (Composio) and their
-        second brain (the vault). None — today's behaviour — otherwise."""
+        slow brain and memory (the same Memory, None while memory is off) the voice session gets, the owner's
+        apps (Composio) and their second brain (the vault). None — today's behaviour — otherwise."""
         from . import second_brain
+
+        memory = getattr(self, "_memory", None)
 
         tg = telegram_mod.configured()
         if tg.enabled:
@@ -1077,17 +1169,16 @@ class Daemon:
             vault=vault if tg.enabled and vault.enabled else None,
             agent_factory=self._make_agent, agent_enabled=self._agent_cfg.enabled,
             busy=lambda: Daemon._desk_has_the_mac(self),
-            memory=lambda: recall_mod.opening_brief(self._recall_cfg),
+            brief=lambda: recall_mod.opening_brief(self._recall_cfg, memory.transcripts if memory is not None else None),
+            memory=memory,
             on_photo=self._photo_for_owner, thinker=self._thinker,
-            on_state=self._on_agent_state, on_closed=self._remember_conversation,
+            on_state=self._on_agent_state,
             scene=self._scene, head=self._head, on_explore=lambda: self._request_explore("requested from Telegram"),
-            on_sound=self._set_sound, on_star=self._star_by_voice, on_caption=self._on_caption,
+            on_sound=self._set_sound, on_caption=self._on_caption,
             notes=lambda: self._room_notes_taker(), terminal=Daemon._type_into_terminal,
             # Live sessions only: one whose terminal died without a SessionEnd is dropped (claude_live).
             # Awaited by the inlet: the ps/lsof probe runs on a worker thread, never on this loop.
-            claude_sessions=lambda: claude_live.picker_sessions_off_loop(self.state),
-            records=records_mod.RecordsReader(self._recall_cfg, mem0_memory.shared(self._recall_cfg))
-            if records_mod.configured().enabled else None)
+            claude_sessions=lambda: claude_live.picker_sessions_off_loop(self.state))
 
     def _make_agent(self, on_event: Any, ask_user: Any) -> Any:
         """Codex computer use, behind the launch reflex (app_reflex.py): "open Spotify" is `open -a`,

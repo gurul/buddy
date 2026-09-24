@@ -559,5 +559,5 @@ def test_the_retired_machinery_is_gone() -> None:
                  "make_reconciler", "RecordsConfig", "configured", "RECORDS_DEFAULT"):
         assert not hasattr(records, name), name
     src = inspect.getsource(records)
-    assert "chat_memory" not in src and "HIGHLIGHTS" not in src and ".reconciled" not in src
+    assert "chat_" "memory" not in src and "HIGHLIGHTS" not in src and ".reconciled" not in src
     assert "import asyncio" not in src

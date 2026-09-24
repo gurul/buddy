@@ -128,18 +128,19 @@ def test_starred_claims_are_pinned_above_the_days():
     assert "guitar behind the desk" in text
 
 
-def test_a_conversation_note_shows_its_title_and_what_buddy_owes(tmp_path):
+def test_a_day_journal_shows_its_title_and_what_buddy_owes(tmp_path):
     note = """---
-source: buddy-voice
+day: 2026-09-05
+title: The right servo and the flash script
 ---
 
 # The right servo and the flash script
 
-## What was said
+## What happened
 
 - the owner thinks the right servo sticks
 
-## Open threads
+## Still open
 
 - buddy owes an answer about why the right servo sticks
 - the owner wants to try a different horn
@@ -149,26 +150,43 @@ source: buddy-voice
         "buddy owes an answer about why the right servo sticks",
     ], "the title and buddy's own debt; the owner's threads are not the widget's job"
 
-    day = TODAY.isoformat()
-    d = tmp_path / "sessions" / day
+    d = tmp_path / "records" / "days"
     d.mkdir(parents=True)
-    (d / "2214-abc.md").write_text(note, encoding="utf-8")
+    (d / f"{TODAY.isoformat()}.md").write_text(note, encoding="utf-8")
+    (d / "2026-01-01.md").write_text("# An old day\n", encoding="utf-8")     # outside the two days: not shown
     got = nw.collect_conversations(tmp_path, TODAY)
-    assert [n.time for n in got] == ["22:14", "22:14"]
+    assert [n.text for n in got] == ["The right servo and the flash script",
+                                     "buddy owes an answer about why the right servo sticks"]
+    assert [n.time for n in got] == [nw.NO_TIME, nw.NO_TIME]
     assert all(n.kind == nw.SAID for n in got)
+
+
+def test_a_forgotten_journal_line_is_never_shown():
+    assert nw.parse_conversation("# (forgotten)\n\n- buddy owes (forgotten)\n- buddy owes a photo\n") == [
+        "buddy owes a photo"]
+
+
+def test_the_stars_come_from_the_records_starred_page(tmp_path):
+    from cc_buddy_bridge import records
+    from cc_buddy_bridge.recall import RecallConfig
+
+    assert nw.stars(tmp_path) == []
+    cfg = RecallConfig(store=tmp_path, notes=tmp_path / "notes")
+    assert records.star(cfg, "the spare key is under the blue pot")
+    assert nw.stars(tmp_path) == ["The spare key is under the blue pot"]
 
 
 def test_everything_is_gathered_newest_first_and_absence_is_normal(tmp_path):
     notes_dir = tmp_path / "notes"
-    store = tmp_path / "debrief"
+    store = tmp_path / "memory"
     notes_dir.mkdir()
     (notes_dir / f"{TODAY.isoformat()}.md").write_text("- 21:03 the chair is pushed in\n", encoding="utf-8")
-    d = store / "sessions" / TODAY.isoformat()
+    d = store / "records" / "days"
     d.mkdir(parents=True)
-    (d / "2214-abc.md").write_text("---\nsource: buddy-voice\n---\n# A chat\n", encoding="utf-8")
+    (d / f"{YESTERDAY.isoformat()}.md").write_text("---\ntitle: A chat\n---\n# A chat\n", encoding="utf-8")
 
     notes, starred = nw.collect_everything(notes_dir, store, TODAY)
-    assert [n.text for n in notes] == ["A chat", "the chair is pushed in"]
+    assert [n.text for n in notes] == ["the chair is pushed in", "A chat"]
     assert starred == []
 
     # either half missing is a normal state, not an error

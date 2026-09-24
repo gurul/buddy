@@ -8,7 +8,7 @@ import logging
 import os
 import signal
 import sys
-from typing import Any, Optional
+from typing import Any, Callable, Optional
 
 from . import __version__
 from .daemon import Daemon
@@ -302,9 +302,12 @@ def main(argv: list[str] | None = None) -> int:
 
     p_memory = sub.add_parser(
         "memory",
-        help="Watch buddy's memory as it forms, over the daemon's rosbridge (CC_BUDDY_ROSBRIDGE=1)",
-        description="tail: print every event on the memory bus. recall: search the owner's claude-mem "
-                    "for buddy's memories (CC_BUDDY_CLAUDE_MEM=1).")
+        help="buddy's memory: forget, dream, reindex; or watch the memory bus (CC_BUDDY_ROSBRIDGE=1)",
+        description="forget: remove words from every memory store, after a preview and a yes. dream: run the "
+                    "nightly dream now. reindex: rebuild the mem0 index from the transcripts. tail: print every "
+                    "event on the memory bus. recall: search the owner's claude-mem for buddy's memories "
+                    "(CC_BUDDY_CLAUDE_MEM=1). forget, dream and reindex need CC_BUDDY_MEMORY=1; run dream and "
+                    "reindex with the daemon stopped (the mem0 index takes one opener at a time).")
     memory_sub = p_memory.add_subparsers(dest="memory_cmd")
     p_tail = memory_sub.add_parser("tail", help="Print one line per event until Ctrl-C")
     p_tail.add_argument("--url", default="ws://127.0.0.1:9090", help="rosbridge WebSocket URL")
@@ -313,6 +316,11 @@ def main(argv: list[str] | None = None) -> int:
     p_recall.add_argument("query")
     p_recall.add_argument("--limit", type=int, default=5)
     p_recall.add_argument("--url", default="ws://127.0.0.1:9090", help="rosbridge WebSocket URL")
+    p_forget = memory_sub.add_parser("forget", help="Count what matches in every store, then forget it on a yes")
+    p_forget.add_argument("query", help="The words to forget; a phrase in double quotes matches as written")
+    p_dream = memory_sub.add_parser("dream", help="Dream the due nights now, or one day with --day")
+    p_dream.add_argument("--day", default=None, help="A transcript day, YYYY-MM-DD, dreamt again even if done")
+    memory_sub.add_parser("reindex", help="Rebuild the mem0 index from every transcript day")
 
     sub.add_parser(
         "telegram-check",
@@ -343,6 +351,8 @@ def main(argv: list[str] | None = None) -> int:
         if args.memory_cmd is None:
             p_memory.print_help()
             return 1
+        if args.memory_cmd in ("forget", "dream", "reindex"):
+            return _run_memory_store(args)
         return _run_memory(args)
     if args.cmd == "daemon":
         return _run_daemon(args)
@@ -870,6 +880,114 @@ def _run_memory(args: Any) -> int:
         return asyncio.run(tail() if args.memory_cmd == "tail" else recall())
     except KeyboardInterrupt:
         return 0
+
+
+def _open_memory_store() -> Optional[tuple[Any, Any]]:
+    """(RecallConfig, Memory) over the memory folder, for the offline memory commands. None (with a line on
+    stderr) while memory is off or before the daemon has made the folder: the one-time move is the daemon's."""
+    from . import mem0_memory, recall, transcripts
+    from . import memory as memory_mod
+
+    if not memory_mod.enabled():
+        print("memory: off — set CC_BUDDY_MEMORY=1 (as the daemon has it) to use this", file=sys.stderr)
+        return None
+    cfg = recall.configured()
+    if not (cfg.store / memory_mod.MIGRATED_FILE).exists():
+        print(f"memory: {cfg.store} is not set up yet — start the daemon once with CC_BUDDY_MEMORY=1",
+              file=sys.stderr)
+        return None
+    store = transcripts.Transcripts(transcripts.configured(), archive=cfg.archive_dir)
+    return cfg, memory_mod.Memory(cfg, store, mem0_memory.shared(cfg))
+
+
+def _run_memory_store(args: Any, ask: Optional[Callable[[str], str]] = None) -> int:
+    """``cc-buddy-bridge memory forget|dream|reindex``: the memory folder itself, no daemon needed.
+    Prints counts, never the matched words."""
+    import re
+    from datetime import datetime
+
+    opened = _open_memory_store()
+    if opened is None:
+        return 1
+    cfg, memory = opened
+
+    if args.memory_cmd == "forget":
+        preview = memory.forget_preview(args.query)
+        if not preview.get("ok"):
+            print(f"forget: {preview.get('reason') or 'refused'}", file=sys.stderr)
+            return 1
+        total = int(preview.get("total") or 0)
+        if not total:
+            print("forget: nothing in memory matches")
+            return 0
+        layers = ", ".join(f"{k} {v}" for k, v in (preview.get("layers") or {}).items())
+        print(f"forget: {total} matching lines ({layers})")
+        print(f"        not covered: {', '.join(preview.get('not_covered') or [])}")
+        try:
+            answer = (ask or input)("Forget them everywhere, for good? [y/N] ")
+        except EOFError:
+            answer = ""
+        if answer.strip().lower() not in ("y", "yes"):
+            print("forget: nothing changed")
+            return 0
+        done = memory.forget_apply(str(preview.get("token") or ""))
+        if not done.get("ok"):
+            print(f"forget: {done.get('reason') or 'failed'}", file=sys.stderr)
+            return 1
+        layers = ", ".join(f"{k} {v}" for k, v in (done.get("layers") or {}).items())
+        squashed = ", ".join(done.get("history_squashed") or []) or "none"
+        print(f"forget: {done.get('total', 0)} lines forgotten ({layers}); history squashed: {squashed}")
+        return 0
+
+    if args.memory_cmd == "dream":
+        from . import dream, records
+
+        if args.day is not None and not re.fullmatch(r"\d{4}-\d{2}-\d{2}", args.day):
+            print("dream: --day takes YYYY-MM-DD", file=sys.stderr)
+            return 2
+        client = records.make_client()
+        if client is None:
+            print("dream: no model client (OPENAI_API_KEY and the openai SDK are needed)", file=sys.stderr)
+            return 1
+        dreamer = dream.Dreamer(cfg, memory.transcripts, client, memory.index)
+        days = [args.day] if args.day else dreamer.due_nights(datetime.now())
+        if not days:
+            print("dream: no night is due")
+            return 0
+        failed = 0
+        for day in days:
+            report = asyncio.run(dreamer.dream(day))
+            if report.empty:
+                print(f"dream: {day} — nothing said")
+            elif report.dreamt:
+                print(f"dream: {day} — {dreamer._summary(report)}")
+            else:
+                failed += 1
+                print(f"dream: {day} — not dreamt (failed: {', '.join(report.failed)})", file=sys.stderr)
+        return 1 if failed else 0
+
+    # reindex
+    from .mem0_memory import INGESTED_CONVS
+
+    index = memory.index
+    if index is None:
+        print("reindex: the mem0 index is off (CC_BUDDY_MEM0=0, or mem0ai is not installed)", file=sys.stderr)
+        return 1
+    try:
+        (cfg.mem0_dir / INGESTED_CONVS).unlink()
+    except FileNotFoundError:
+        pass
+    except OSError as e:
+        print(f"reindex: could not reset the index ledger ({type(e).__name__})", file=sys.stderr)
+        return 1
+    days = memory.transcripts.days()
+    added = sum(int(index.ingest_day(memory.transcripts, day) or 0) for day in days)
+    tidied = int(index.tidy() or 0)
+    if getattr(index, "_mem", None) is None:
+        print("reindex: the index did not open — stop the daemon first (one opener at a time)", file=sys.stderr)
+        return 1
+    print(f"reindex: {len(days)} days read, {added} memories added, {tidied} duplicates removed")
+    return 0
 
 
 def _run_lesson(args: Any) -> int:

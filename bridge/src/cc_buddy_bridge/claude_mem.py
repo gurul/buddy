@@ -9,7 +9,8 @@ Three pieces, all off the daemon's loop and none able to raise into it:
 
 * ``ClaudeMemSink`` subscribes to ``/buddy/memory/*`` on the MemoryBus and POSTs each event to
   ``/api/memory/save`` from one worker thread through a bounded queue. Project "buddy", so a Claude
-  Code session searching claude-mem sees what buddy saw, said and taught.
+  Code session searching claude-mem sees what buddy saw and taught. What was SAID is not on the bus
+  (owner, 2026-09-23): it stays in buddy's own memory folder and never reaches claude-mem.
 * ``recall(query)`` asks ``GET /api/search`` and returns a short list, newest first, empty on any error.
 * ``ClaudeMemMirror`` reads the worker's ``GET /stream`` (server-sent events) and republishes every
   ``new_observation`` from the owner's other projects on ``/claude/observation``, so a rosbridge client
@@ -90,7 +91,6 @@ def _title(prefix: str, text: str) -> str:
 _META_FIELDS = frozenset({
     "id", "lesson_id", "action", "stage", "mode", "topic", "level",        # lessons
     "importance", "novelty", "written", "tags", "changed",                 # diary
-    "started", "ended", "owes", "open",                                    # conversations
     "state", "source",
 })
 
@@ -123,13 +123,6 @@ def to_memory(topic: str, msg: dict[str, Any], project: str = "buddy") -> Option
             return None
         text = _clip(thought) + ("\n\nSeen: " + "; ".join(_clip(s) for s in seen) if seen else "")
         title = _title("buddy saw: ", thought or seen[0])
-    elif topic == "/buddy/memory/conversation":
-        note = str(msg.get("note") or msg.get("text") or "").strip()
-        if not note:
-            return None
-        open_items = [str(o) for o in (msg.get("open") or []) if str(o).strip()][:_MAX_LIST]
-        text = note + ("\n\nStill open: " + "; ".join(open_items) if open_items else "")
-        title = str(msg.get("title") or "").strip() or _title("buddy talked: ", note)
     elif topic == "/buddy/memory/lesson":
         action = str(msg.get("action") or "").strip().lower()
         if action not in LESSON_ACTIONS_KEPT:

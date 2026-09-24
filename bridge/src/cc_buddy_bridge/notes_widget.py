@@ -41,10 +41,10 @@ from typing import Optional, Sequence
 log = logging.getLogger(__name__)
 
 NOTES_DIR_ENV = "CC_BUDDY_NOTES_DIR"
-DEBRIEF_DIR_ENV = "CC_BUDDY_DEBRIEF_DIR"
+MEMORY_DIR_ENV = "CC_BUDDY_MEMORY_DIR"
 CONFIG_DIR = Path.home() / ".config" / "cc-buddy-bridge"
 DEFAULT_NOTES_DIR = CONFIG_DIR / "notes"
-DEFAULT_DEBRIEF_DIR = CONFIG_DIR / "debrief"
+DEFAULT_MEMORY_DIR = CONFIG_DIR / "memory"
 POSITION_PATH = CONFIG_DIR / "widget.json"
 
 TITLE = "buddy"
@@ -58,6 +58,8 @@ SEEN = "seen"
 KIND_LABELS = {SAID: "Talking", SEEN: "Looking"}
 STARS_LABEL = "Remembered for good"
 MAX_STARS = 8
+NO_TIME = "--:--"                 # a journal line: the day's page, not a moment
+FORGOTTEN = "(forgotten)"         # what forget leaves in a journal: never shown
 MAX_NOTES = 40
 WIDGET_SIZE = (360.0, 420.0)
 SCREEN_MARGIN = 24.0
@@ -89,28 +91,30 @@ def notes_dir() -> Path:
     return Path(raw).expanduser() if raw else DEFAULT_NOTES_DIR
 
 
-def debrief_dir() -> Path:
-    """Where buddy keeps what was said. ``CC_BUDDY_DEBRIEF_DIR`` overrides."""
-    raw = os.environ.get(DEBRIEF_DIR_ENV)
-    return Path(raw).expanduser() if raw else DEFAULT_DEBRIEF_DIR
+def memory_dir() -> Path:
+    """buddy's memory folder (recall.py). ``CC_BUDDY_MEMORY_DIR`` overrides."""
+    raw = os.environ.get(MEMORY_DIR_ENV)
+    return Path(raw).expanduser() if raw else DEFAULT_MEMORY_DIR
+
+
+def _recall_cfg(store: Path):
+    from .recall import RecallConfig
+
+    return RecallConfig(store=store, notes=notes_dir())
 
 
 def stars(store: Path, limit: int = MAX_STARS) -> list[str]:
-    """The claims the owner promoted by saying "remember that". Newest last.
-
-    Read only from buddy's own section of the file. chat_memory._stars_from says
-    why scanning the whole file put a stranger's outage on this widget.
-    """
+    """The claims the owner promoted by saying "remember that" (records/starred.md). Newest last."""
     try:
-        from .chat_memory import _stars_from
+        from . import records
 
-        return _stars_from((store / "HIGHLIGHTS.md").read_text(encoding="utf-8", errors="replace"), limit)
-    except (OSError, ImportError):
+        return records.stars(_recall_cfg(store), limit)
+    except Exception:  # noqa: BLE001 - a widget shows less, it never breaks
         return []
 
 
 def parse_conversation(text: str) -> list[str]:
-    """A conversation note as the one or two lines worth showing.
+    """A dream journal (records/days/<day>.md) as the one or two lines worth showing.
 
     The title says what it was about; a debt of buddy's own is the line the owner
     most wants to see, because it is the thing buddy has not done yet.
@@ -123,44 +127,32 @@ def parse_conversation(text: str) -> list[str]:
             title = stripped[2:].strip()
         elif stripped.startswith("- ") and stripped[2:].lower().startswith("buddy owes"):
             owes.append(stripped[2:].strip())
-    out = [title] if title else []
-    out.extend(owes[:2])
+    out = [title] if title and FORGOTTEN not in title else []
+    out.extend(o for o in owes[:2] if FORGOTTEN not in o)
     return out
+
+
+def journal_dir(store: Path) -> Path:
+    """The dream journal: one file per day buddy talked, written the night after (dream.py)."""
+    return store / "records" / "days"
 
 
 def collect_conversations(store: Path, today: Optional[date] = None,
                           limit: int = MAX_NOTES) -> list[Note]:
-    """What was said, newest first, from today and yesterday."""
+    """What was said, from the dream journals of today and yesterday, newest day first. A journal has no
+    clock time: it is one page for the whole day, written the night after."""
     today = today or date.today()
-    wanted = {today.isoformat(), (today - timedelta(days=1)).isoformat()}
-    sessions = store / "sessions"
-    if not sessions.is_dir():
-        return []
     out: list[Note] = []
-    try:
-        days = sorted((d for d in sessions.iterdir() if d.is_dir() and d.name in wanted), reverse=True)
-    except OSError:
-        return []
-    for day_dir in days:
+    for day in (today, today - timedelta(days=1)):
+        path = journal_dir(store) / f"{day.isoformat()}.md"
         try:
-            day = date.fromisoformat(day_dir.name)
-        except ValueError:
-            continue
-        try:
-            files = sorted((f for f in day_dir.iterdir() if f.suffix == ".md"), reverse=True)
+            text = path.read_text(encoding="utf-8", errors="replace")
         except OSError:
             continue
-        for path in files:
-            try:
-                text = path.read_text(encoding="utf-8", errors="replace")
-            except OSError:
-                continue
-            stem = path.stem.split("-")[0]
-            hhmm = f"{stem[:2]}:{stem[2:4]}" if len(stem) >= 4 and stem[:4].isdigit() else "--:--"
-            for line in parse_conversation(text):
-                out.append(Note(day=day, time=hhmm, text=line, kind=SAID))
-                if len(out) >= limit:
-                    return out
+        for line in parse_conversation(text):
+            out.append(Note(day=day, time=NO_TIME, text=line, kind=SAID))
+            if len(out) >= limit:
+                return out
     return out
 
 
@@ -342,7 +334,7 @@ def run(once: bool = False, directory: Optional[Path] = None,
         return 2
 
     directory = directory or notes_dir()
-    store = store or debrief_dir()
+    store = store or memory_dir()
     directory.mkdir(parents=True, exist_ok=True)
 
     level = Quartz.kCGDesktopIconWindowLevel + 1
@@ -463,18 +455,21 @@ def run(once: bool = False, directory: Optional[Path] = None,
             AppKit.NSWorkspace.sharedWorkspace().openURL_(
                 Foundation.NSURL.fileURLWithPath_(str(directory)))
 
+        # Never create anything under the memory folder from here: the daemon's one-time move skips a
+        # target that already exists, so a folder made by the widget would strand the owner's records.
+        @objc.python_method
+        def _open_first(self, *paths):
+            for path in paths:
+                if path.exists():
+                    AppKit.NSWorkspace.sharedWorkspace().openURL_(
+                        Foundation.NSURL.fileURLWithPath_(str(path)))
+                    return
+
         def openSaid_(self, sender):  # noqa: N802 — ObjC selector
-            (store / "sessions").mkdir(parents=True, exist_ok=True)
-            AppKit.NSWorkspace.sharedWorkspace().openURL_(
-                Foundation.NSURL.fileURLWithPath_(str(store)))
+            self._open_first(journal_dir(store), store)
 
         def openStars_(self, sender):  # noqa: N802 — ObjC selector
-            path = store / "HIGHLIGHTS.md"
-            if not path.exists():
-                store.mkdir(parents=True, exist_ok=True)
-                path.write_text("# HIGHLIGHTS\n\n## From talking\n\n", encoding="utf-8")
-            AppKit.NSWorkspace.sharedWorkspace().openURL_(
-                Foundation.NSURL.fileURLWithPath_(str(path)))
+            self._open_first(store / "records" / "starred.md", store / "records", store)
 
         def quit_(self, sender):  # noqa: N802 — ObjC selector
             AppKit.NSApp.terminate_(None)
@@ -541,7 +536,8 @@ def run(once: bool = False, directory: Optional[Path] = None,
     def watch() -> None:
         try:
             from watchfiles import watch as wf_watch
-            watched = [str(directory)] + ([str(store)] if store.exists() else [])
+            records_dir = store / "records"
+            watched = [str(directory)] + ([str(records_dir)] if records_dir.exists() else [])
             for _changes in wf_watch(*watched, stop_event=stop, debounce=300):
                 controller.performSelectorOnMainThread_withObject_waitUntilDone_(
                     "refresh:", None, False)

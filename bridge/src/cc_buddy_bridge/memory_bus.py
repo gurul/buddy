@@ -1,8 +1,7 @@
 """MemoryBus: buddy's memory, as it forms, on an in-process pub/sub bus.
 
-buddy keeps three memories and none of them is live: the diary (what it sees) is a JSONL
-stream, the debrief store (what was said) is written after a conversation closes, and a
-lesson is a SQLite row. This bus is the one place those become events the moment they
+buddy keeps two memories that go on this bus: the diary (what it sees) is a JSONL stream,
+and a lesson is a SQLite row. This bus is the one place those become events the moment they
 happen, so that anything else can watch: the rosbridge server (rosbridge.py) fans them out
 to WebSocket clients as ROS-style topics, and the claude-mem client (claude_mem.py) stores
 them in the owner's claude-mem so a Claude Code session can search buddy's day.
@@ -12,8 +11,11 @@ is safe from any thread: once the bus is bound, subscribers run on the loop thre
 that, they run inline. A subscriber that raises is logged and kept.
 
 Topics carry a ROS-style type name so a rosbridge client can `subscribe` with `type`.
-What is NOT on the bus, by design: the learner's own words in a lesson (spoken ideas and
-typed ideas stay in the lesson store, docs/learning.md § Privacy) and raw audio or frames.
+What is NOT on the bus, by design: anything said in a conversation (owner, 2026-09-23: the
+transcripts and records stay in the memory folder, memory.py), the learner's own words in a
+lesson (spoken ideas and typed ideas stay in the lesson store, docs/learning.md § Privacy), and
+raw audio or frames. An inbound ``/buddy/memory/remember`` line becomes one transcript line
+(channel "bus") for the nightly dream to judge — never a star.
 """
 
 from __future__ import annotations
@@ -75,7 +77,6 @@ def configured(environ: Any = None) -> BusConfig:
 # topic -> type. The msg shapes are documented in docs/memory-bus.md.
 TOPICS: dict[str, str] = {
     "/buddy/memory/observation": "buddy_msgs/Observation",      # diary: a written thought about the room
-    "/buddy/memory/conversation": "buddy_msgs/ConversationNote",  # the distilled note after a conversation
     "/buddy/memory/lesson": "buddy_msgs/LessonEvent",           # a lesson action and buddy's feedback
     "/buddy/memory/remember": "buddy_msgs/Remember",            # inbound: someone asks buddy to keep a line
     "/buddy/state": "buddy_msgs/AgentState",                    # idle / wake / listening / thinking / speaking

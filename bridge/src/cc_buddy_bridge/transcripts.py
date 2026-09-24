@@ -12,6 +12,12 @@ Memory is now three stores (owner, 2026-09-23): these transcripts, the records
 and mem0. The transcripts are the source; the nightly dream reads a whole day
 from here (``day_text``) and the other two are rebuilt from what it finds.
 
+Two channels are the owner talking (``TALK``: voice and telegram). A third,
+``bus``, holds a line some other program sent over the memory bus asking buddy
+to keep it: it is in the day the dream reads and in search, labelled "sent",
+but never in a prompt's today block, never in recent_conversation, and never
+the "last talked" time — it is not the owner speaking.
+
 ### Where the words live, and why there
 
 ``~/.config/cc-buddy-bridge/memory/transcripts/<YYYY-MM-DD>.jsonl``, one JSON
@@ -77,7 +83,9 @@ VOICE_CHARS = 4000                             # today, in the Live voice prompt
 BACKEND_CHARS = 16000                          # today, in the voice backend's prompt
 DAY_TEXT_CHARS = 100_000                       # one whole day, for the nightly dream
 
-CHANNELS = ("voice", "telegram")
+TALK = ("voice", "telegram")                   # where the owner talks: the only channels a prompt block shows
+BUS = "bus"                                    # a line sent over the memory bus: kept for the dream, never talk
+CHANNELS = TALK + (BUS,)
 WHO = ("owner", "buddy", "claude", "system")
 KINDS = ("say", "tool", "command", "relay", "image", "close")
 RENDER_KINDS = ("say", "tool", "image")        # what a prompt block shows by default
@@ -279,11 +287,16 @@ def speaker(line: dict[str, Any]) -> str:
     return base
 
 
+def _mode(ch: Any) -> str:
+    """How a line reached buddy: spoken (voice), texted (Telegram) or sent (the memory bus, not the owner)."""
+    return {"voice": "spoken", BUS: "sent"}.get(ch, "texted")
+
+
 def render_line(line: dict[str, Any], style: str = "text") -> str:
-    """One transcript line as a prompt line: 'HH:MM (spoken|texted) Owner: …'. Style 'voice' clips shorter."""
+    """One transcript line as a prompt line: 'HH:MM (spoken|texted|sent) Owner: …'. Style 'voice' clips shorter."""
     ts = _parse_ts(line.get("ts", ""))
     clock = f"{ts:%H:%M} " if ts else ""
-    mode = "spoken" if line.get("ch") == "voice" else "texted"
+    mode = _mode(line.get("ch"))
     tool = line.get("kind") == "tool"
     if style == "voice":
         cap = VOICE_TOOL_LINE_CHARS if tool else VOICE_LINE_CHARS
@@ -440,7 +453,7 @@ class Transcripts:
             finally:
                 self._flock(fcntl.LOCK_UN)
             self.stats.appended += 1
-            if kind != "close" and (self._last is None or at > self._last):
+            if kind != "close" and ch in TALK and (self._last is None or at > self._last):
                 self._last = at
         return True
 
@@ -519,14 +532,14 @@ class Transcripts:
         return out
 
     def last_turn_at(self) -> Optional[datetime]:
-        """When anything was last said or done on either channel (close markers do not count)."""
+        """When anything was last said or done on either channel (close markers and bus lines do not count)."""
         with self._lock:
             if self._last_scanned:
                 return self._last
         newest: Optional[datetime] = None
         for day in reversed(self.days()[-2:]):
             for ln in self.lines(day):
-                if ln["kind"] == "close":
+                if ln["kind"] == "close" or ln["ch"] not in TALK:
                     continue
                 ts = _parse_ts(ln["ts"])
                 if ts is not None and (newest is None or ts > newest):
@@ -541,7 +554,7 @@ class Transcripts:
 
     def lines_since(self, ts: Stamp, exclude_ch: str = "",
                     kinds: Sequence[str] = RENDER_KINDS) -> list[dict[str, Any]]:
-        """Lines strictly newer than `ts`, from channels other than `exclude_ch`, oldest first."""
+        """Lines strictly newer than `ts`, from the talk channels other than `exclude_ch`, oldest first."""
         since = _parse_ts(ts)
         if since is None:
             return []
@@ -551,14 +564,15 @@ class Transcripts:
             if first <= day <= last:
                 for ln in self.lines(day):
                     at = _parse_ts(ln["ts"])
-                    if at is not None and at > since and ln["ch"] != exclude_ch and ln["kind"] in kinds:
+                    if (at is not None and at > since and ln["ch"] != exclude_ch and ln["ch"] in TALK
+                            and ln["kind"] in kinds):
                         out.append(ln)
         return out
 
     def today_block(self, max_chars: int, exclude_conv: Optional[str] = None, exclude_tail: int = 0,
                     kinds: Sequence[str] = RENDER_KINDS, style: str = "text",
                     now: Optional[datetime] = None) -> str:
-        """Today, both channels, oldest first, within `max_chars`. '' for an empty day.
+        """Today, both talk channels (never a bus line), oldest first, within `max_chars`. '' for an empty day.
 
         `exclude_conv` drops a conversation the caller already shows: all of it when `exclude_tail` is 0,
         or only its newest `exclude_tail` say/image lines (the turns a chat history keeps).
@@ -568,7 +582,7 @@ class Transcripts:
         stays a stable prefix across many appends: prompt caching keeps working."""
         if not self.enabled or max_chars <= 0:
             return ""
-        rows = [ln for ln in self.lines(self.day_of(now or self.now())) if ln["kind"] in kinds]
+        rows = [ln for ln in self.lines(self.day_of(now or self.now())) if ln["kind"] in kinds and ln["ch"] in TALK]
         if exclude_conv:
             if exclude_tail <= 0:
                 rows = [ln for ln in rows if ln["conv"] != exclude_conv]
@@ -609,7 +623,7 @@ class Transcripts:
         return f"(about {bucket} earlier lines today: memory_search finds them)"
 
     def day_text(self, day: str, max_chars: int = DAY_TEXT_CHARS) -> str:
-        """One whole day for the nightly dream: 'HH:MM spoken|texted Owner/buddy[ (tool)]: text', say, tool and
+        """One whole day for the nightly dream: 'HH:MM spoken|texted|sent Owner/buddy[ (tool)]: text', say, tool and
         image lines, oldest first, each whole. Over budget, the NEWEST lines are kept under a
         '(N earlier lines omitted)' header. '' for a day with nothing said."""
         rows = []
@@ -617,7 +631,7 @@ class Transcripts:
             if ln["kind"] not in RENDER_KINDS or not ln["text"]:
                 continue
             at = _parse_ts(ln["ts"])
-            mode = "spoken" if ln["ch"] == "voice" else "texted"
+            mode = _mode(ln["ch"])
             rows.append(f"{at:%H:%M} {mode} {speaker(ln)}: {_flat(ln['text'])}")
         if not rows or max_chars <= 0:
             return ""
@@ -724,7 +738,7 @@ class Transcripts:
                channel: str = "") -> dict[str, Any]:
         """Dated hits, newest day first: {"ok", "hits": [{day, time, ch, who, text, before, after}],
         "truncated"}. Every term must match; a quoted phrase matches as written. Three sources: the
-        transcripts (ch voice|telegram), meeting notes (ch 'meeting') and the archive's notes (ch 'note').
+        transcripts (ch voice|telegram|bus), meeting notes (ch 'meeting') and the archive's notes (ch 'note').
         The JSON result stays within 3000 chars and the search within 1.5 s; either cut sets truncated."""
         pred = match(query)
         if pred is None:

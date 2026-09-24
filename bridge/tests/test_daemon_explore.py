@@ -13,7 +13,6 @@ from types import MethodType, SimpleNamespace
 
 from cc_buddy_bridge import daemon as daemon_mod
 from cc_buddy_bridge.caption_pager import CaptionPager
-from cc_buddy_bridge.chat_memory import ChatMemory
 from cc_buddy_bridge.daemon import Daemon
 from cc_buddy_bridge.daemon import Daemon as _Daemon
 from cc_buddy_bridge.diary import Thought
@@ -76,12 +75,11 @@ def _daemon(connected: bool = True, pending: int = 0, listen_sent=None, enabled:
         _explore_after_conversation=None,
         _voice=SimpleNamespace(start=lambda: None, stop=lambda: None, tap=lambda name: None),
         _voice_cfg=None,
-        # recall.py: buddy's memory of talking with the owner. A temp store keeps
-        # these tests off the real one, and an absent store means an empty brief.
-        _recall_cfg=RecallConfig(store=Path("/nonexistent/debrief"), notes=Path("/nonexistent/notes")),
-        # chat_memory with no client remembers nothing, which is what these tests want
-        _chat_memory=ChatMemory(RecallConfig(store=Path("/nonexistent/debrief"),
-                                            notes=Path("/nonexistent/notes")), None),
+        # recall.py / memory.py: buddy's memory of talking with the owner. Memory off (None) here: an
+        # empty brief and nothing written, which is what these tests want.
+        _recall_cfg=RecallConfig(store=Path("/nonexistent/memory"), notes=Path("/nonexistent/notes")),
+        _memory=None,
+        _voice_conv="",
         _background=set(),
         _agent_cfg=SimpleNamespace(enabled=False),
         _last_diag=None,
@@ -100,8 +98,7 @@ def _daemon(connected: bool = True, pending: int = 0, listen_sent=None, enabled:
                  "_request_explore", "_dismiss_explore", "_clear_thought", "_flush_thought_pager",
                  "_show_thought", "_handle_ipc", "_handle_ble", "_on_wake",
                  "_converse", "_on_voice_explore", "_on_agent_state", "_resync_agent", "_agent_keepalive",
-                 "_cancel_active_task", "_make_agent", "_wake_suppressed", "_on_caption",
-                 "_remember_conversation", "_star_by_voice"):
+                 "_cancel_active_task", "_make_agent", "_wake_suppressed", "_on_caption"):
         setattr(d, name, MethodType(getattr(Daemon, name), d))
     return d
 

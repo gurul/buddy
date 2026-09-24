@@ -330,13 +330,21 @@ def test_telegram_tool_path_asks_then_the_reply_answers(root: Path) -> None:
 def test_every_offered_tool_is_accepted_when_the_model_calls_it() -> None:
     """TOOL_NAMES is what parse_response accepts; a tool offered but not accepted fails the turn (the
     start_coding_session bug of 2026-09-23: it was offered, then refused as 'unexpected')."""
-    from cc_buddy_bridge import telegram
-    from cc_buddy_bridge.records import MEMORY_TOOLS
+    from cc_buddy_bridge.memory import TOOLS as MEMORY_TOOLS
 
-    for tool in (*telegram.TOOLS, *MEMORY_TOOLS):
-        response = {"output": [{"type": "function_call", "name": tool["name"], "call_id": "c1", "arguments": "{}"}]}
-        calls, _, _ = telegram.parse_response(response)
+    def call(name: str) -> dict:
+        return {"output": [{"type": "function_call", "name": name, "call_id": "c1", "arguments": "{}"}]}
+
+    for tool in telegram.TOOLS:
+        calls, _, _ = telegram.parse_response(call(tool["name"]))
         assert [c["name"] for c in calls] == [tool["name"]]
+    # The memory tools are offered per turn (only with memory on), so they are accepted as that turn's lent tools.
+    offered = {tool["name"] for tool in MEMORY_TOOLS}
+    for name in offered:
+        calls, _, _ = telegram.parse_response(call(name), offered)
+        assert [c["name"] for c in calls] == [name]
+        with pytest.raises(RuntimeError):
+            telegram.parse_response(call(name))          # not offered this turn: refused
 
 
 # ---- tap buttons and "claude on" -----------------------------------------------------------------

@@ -32,9 +32,10 @@ notes stop`, and a tap on the robot.
 The owner chose transcript **and** notes (2026-09-11). So the file holds the
 distilled notes — decisions, actions, questions left open — and the full
 transcript underneath, because the whole point of notes on a meeting is being
-able to go back to what was actually said. This is the opposite of the rule for
-conversations, where only the distillation is kept, and it is deliberate: a
-conversation is remembered, a meeting is recorded, and the owner asked for each.
+able to go back to what was actually said. The file lives in the memory folder,
+under ``transcripts/meetings/<date>/`` beside the conversations' transcripts
+(owner, 2026-09-23), so ``memory_search`` finds it and forget reaches it. Two
+meetings that start in the same minute get two files, never one over the other.
 
 ### What it costs to be wrong
 
@@ -60,6 +61,7 @@ from pathlib import Path
 from typing import Any, Callable, Optional, Protocol
 
 from .recall import RecallConfig
+from .transcripts import MEETINGS_SUBDIR
 
 log = logging.getLogger(__name__)
 
@@ -74,6 +76,8 @@ TRANSCRIBE_TIMEOUT_SECS = 60.0
 SUMMARY_TIMEOUT_SECS = 120.0
 # Below this the segment is silence and is not worth an upload.
 SILENCE_RMS = 120.0
+# Meetings that start in the same minute under the same title get -2, -3, … up to this many files.
+MAX_SAME_NAME = 50
 
 # "stop taking notes", "that's enough notes", "stop the notes", "okay stop
 # recording". Deliberately narrow and anchored on the tail of what was just said,
@@ -525,7 +529,9 @@ def _slug(text: str) -> str:
 
 
 def notes_dir(cfg: RecallConfig) -> Path:
-    return cfg.store / "notes"
+    """Meeting notes live beside the transcripts (owner, 2026-09-23: one memory folder), where
+    ``memory_search`` finds them and forget reaches them."""
+    return cfg.transcripts_dir / MEETINGS_SUBDIR
 
 
 def render(summary: dict[str, Any], transcript: str, state: NotesState,
@@ -572,20 +578,32 @@ def render(summary: dict[str, Any], transcript: str, state: NotesState,
 
 def write_notes(cfg: RecallConfig, summary: dict[str, Any], transcript: str, state: NotesState,
                 keep_transcript: bool = True) -> Optional[Path]:
+    """One new file per meeting, 0600 in 0700 folders. Two meetings that start in the same minute with the
+    same title get two files: the second is never written over the first."""
     started = state.started_wall or datetime.now()
     try:
         d = notes_dir(cfg) / f"{started:%Y-%m-%d}"
         d.mkdir(parents=True, exist_ok=True)
-        for parent in (cfg.store, notes_dir(cfg), d):
+        for parent in (cfg.store, cfg.transcripts_dir, notes_dir(cfg), d):
             try:
                 os.chmod(parent, 0o700)
             except OSError:
                 pass
-        path = d / f"{started:%H%M}-{_slug(summary.get('title') or 'notes')}.md"
-        path.write_text(render(summary, transcript, state, keep_transcript), encoding="utf-8")
-        return path
+        stem = f"{started:%H%M}-{_slug(summary.get('title') or 'notes')}"
+        data = render(summary, transcript, state, keep_transcript).encode("utf-8")
+        for n in range(1, MAX_SAME_NAME + 1):
+            path = d / (f"{stem}.md" if n == 1 else f"{stem}-{n}.md")
+            try:
+                fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW | os.O_CLOEXEC, 0o600)
+            except FileExistsError:
+                continue
+            with os.fdopen(fd, "wb") as f:
+                f.write(data)
+            return path
+        log.warning("notes: %d notes already share this minute and title — not written", MAX_SAME_NAME)
+        return None
     except OSError as e:
-        log.warning("notes: could not write the file: %s", e)
+        log.warning("notes: could not write the file (%s)", type(e).__name__)
         return None
 
 

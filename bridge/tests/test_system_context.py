@@ -23,12 +23,21 @@ def test_missing_location_and_invalid_timezone_use_local_clock():
     assert "Local clock when this context was generated:" in result
 
 
+def _telegram_context(body: dict) -> str:
+    """The text of the developer item a Telegram request ends its input with (telegram.with_turn_context)."""
+    last = body["input"][-1]
+    assert last["type"] == "message" and last["role"] == "developer"
+    return "".join(part["text"] for part in last["content"])
+
+
 def test_context_reaches_each_brain_and_refreshes_for_new_requests(monkeypatch):
     monkeypatch.setenv("CC_BUDDY_LOCATION", "Example Building, Portland, Oregon")
     monkeypatch.setenv("CC_BUDDY_TIMEZONE", "America/Los_Angeles")
     session = voice_agent.session_config(voice_agent.configured())
+    # Telegram keeps the clock out of its cached instructions (owner, 2026-09-23): it is the trailing developer
+    # item of the turn's input, rebuilt every turn.
     prompts = [session["instructions"], session["delegation"]["responses"]["instructions"],
-               telegram.request(telegram.configured(), [])["instructions"],
+               _telegram_context(telegram.request(telegram.configured(), [])),
                think.request(think.configured(), [])["instructions"]]
     for prompt in prompts:
         assert "Example Building, Portland, Oregon" in prompt
@@ -36,5 +45,5 @@ def test_context_reaches_each_brain_and_refreshes_for_new_requests(monkeypatch):
         assert "Local clock when this context was generated:" in prompt
     monkeypatch.setattr(system_context, "context", lambda: "FRESH_CONTEXT")
     assert "FRESH_CONTEXT" in think.request(think.configured(), [])["instructions"]
-    assert "FRESH_CONTEXT" in telegram.request(telegram.configured(), [])["instructions"]
+    assert "FRESH_CONTEXT" in _telegram_context(telegram.request(telegram.configured(), []))
     assert "FRESH_CONTEXT" in voice_agent.session_config(voice_agent.configured())["instructions"]

@@ -388,3 +388,24 @@ def test_a_segment_that_only_continues_is_left_alone() -> None:
     assert stitch("something", "") == ""
     # a word repeated inside a line is not a seam, so nothing is dropped
     assert stitch("the board", "the docs are written") == "the docs are written"
+
+
+# ---- where the file goes (L6: one memory folder) -------------------------------------------
+
+def test_meeting_notes_live_beside_the_transcripts_and_never_overwrite(tmp_path: Path) -> None:
+    """Meeting notes are under transcripts/meetings/<date>/ so memory_search finds them; two meetings that
+    start in the same minute under the same title are two files (they used to be one, the second winning)."""
+    from cc_buddy_bridge.notes import notes_dir, write_notes
+
+    cfg = _cfg(tmp_path)
+    assert notes_dir(cfg) == cfg.transcripts_dir / "meetings"
+    state = NotesState()
+    state.started_wall = WHEN
+    first = write_notes(cfg, SUMMARY, "first meeting words", state)
+    second = write_notes(cfg, SUMMARY, "second meeting words", state)
+    assert first is not None and second is not None and first != second
+    assert first.parent == cfg.transcripts_dir / "meetings" / "2026-09-11"
+    assert "first meeting words" in first.read_text() and "second meeting words" in second.read_text()
+    assert second.name == first.stem + "-2.md"
+    assert (first.stat().st_mode & 0o777) == 0o600
+    assert recent(cfg)[:2] == sorted([first, second], reverse=True)
