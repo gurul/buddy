@@ -377,7 +377,8 @@ Flip it to `ask` if two seconds a command is a price you will pay.
   not edit the message, each step comes as its own message, as before. Steps
   still waiting when the work ends come as one message before the result, so
   the last step is never lost. If it will not take the reply link, the result
-  comes without it.
+  comes without it. A restart closes an open progress message ("Stopped." for
+  a task, "Closed." for a Codex turn) so no dead Stop button is left behind.
 - **The `/` menu.** At startup buddy sets its code words as bot commands in
   your own chat only (`setMyCommands`, scoped to your chat): `/claude_on`,
   `/claude_off`, `/new_claude`, `/codex`, `/rundown`, `/screenshot`,
@@ -449,7 +450,11 @@ Flip it to `ask` if two seconds a command is a price you will pay.
   progress message under **Codex** ("Sent to Codex.", then Codex's public steps,
   edited in place, whole, with the same scroll-off rule as a task) with a
   **Stop** button that interrupts that turn, like `stop`. When the turn ends,
-  the progress message says "Finished", or "Stopped" if you stopped it. The final
+  the progress message says "Finished", or "Stopped" if you stopped it. If Codex
+  refuses the stop (its turn is still starting), the Stop button comes back. If
+  the message never reaches Codex, or the chat disconnects, the progress
+  message says so ("Codex did not take it.", "Closed.") and loses its button.
+  A step Codex writes just before the turn ends arrives before the answer. The final
   answer is a new message replying to yours. Reasoning and tool output stay out
   of Telegram. Browser tasks
   send the captured image from their own tab using the same validation as Buddy's
@@ -540,7 +545,11 @@ Flip it to `ask` if two seconds a command is a price you will pay.
   and Codex's app-access choices (**Allow once**, **Allow for this task**,
   **Always allow**, **Deny**). A tap is the same answer as typing it. While the
   Claude or Codex relay is on, a question with buttons takes only a tap, a
-  plain yes or no, or a button's words typed ("allow for task"). Other text
+  plain yes or no, or a button's words typed ("allow for task"). A question
+  whose asker goes away first (a stopped task, a Chrome dialog answered at the
+  Mac) ends saying "Closed without an answer here.", never that silence was a
+  no. A question longer than one Telegram message loses its buttons when
+  answered and the outcome comes as a short message below it. Other text
   goes to Claude or Codex, and the question keeps waiting. With no relay on,
   your next message is still the answer, and an image is refused until you
   answer. A typed yes or no in any wording ("ok", "nope") is handed on as the
@@ -639,7 +648,7 @@ instruction; each is a branch in `telegram.accept` or the inlet, with a test.
 | A forwarded message never reaches a model (you get one fixed line back). | It is the easiest way to put someone else's instructions in front of an agent that can click. |
 | A message older than two minutes when it arrives is dropped. | Telegram holds undelivered messages for a day. A task texted while the daemon was down must not run when it comes back. |
 | Only your next message can answer a task's question. | "Only the human approves" ([routing](routing.md)) has to hold over chat too. |
-| A button tap acts only when it is from an owner id, in that owner's private chat, on a button this run of the daemon made and still needs. Every tap is answered; a stranger's tap is not. | A button's data is only a short key, and what it means stays on the Mac. A button from before a restart, or one already used, says "This button has expired." and does nothing. |
+| A button tap acts only when it is from an owner id, in that owner's private chat, on a button this run of the daemon made and still needs. Every tap is answered; a stranger's tap is not. The owner's own tap outside their private chat is answered empty and does nothing. | A button's data is only a short key, and what it means stays on the Mac. A button from before a restart, or one already used, says "This button has expired." and does nothing. |
 | Edited messages, channel posts, other bots, stickers and voice notes reach no model. | Only new text from the owner is a request. |
 | A file leaves only from your home folder, never from a hidden path, symlinks followed first. | A chat that can reach a Mac must never be a way to read its secrets. |
 | What you wrote is never logged; neither is the token. | The log gets counts, seconds and numeric ids. The token is part of every Bot API URL, so HTTP errors are rewritten before they are raised (`BotApiError` never carries a URL) and every log record in the process is checked for the token as it is made (`hide_token`) — httpx logs each request line at INFO. |

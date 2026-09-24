@@ -145,6 +145,7 @@ TAP_ANSWERED_LINE = "Already answered."
 PERMISSION_DEFERRED_LINE = "No answer here, so the dialog on the Mac decides."
 ANSWERED_LINE = "Answered."
 UNANSWERED_LINE = "No answer, so I took that as a no."
+ASK_CLOSED_LINE = "Closed without an answer here."   # the asker went away first: a stopped task, a Mac-side answer
 # The titles: a message that is not buddy's own voice says whose it is, or what it is, in bold on its
 # first line (telegram_format.compose). Buddy's own replies and one-liners carry none.
 TASK_DONE_TITLE = "Task result"
@@ -224,6 +225,7 @@ PROGRESS_DONE_LINE = "Finished. The result is below."
 PROGRESS_STOPPED_LINE = "Stopped."
 PROGRESS_CLOSED_LINE = "Closed."
 CODEX_SENT_LINE = "Sent to Codex."
+CODEX_NOT_SENT_LINE = "Codex did not take it."   # a progress message opened for a send that then failed
 CODEX_TITLE = "Codex"
 # A task's free question opens the reply box on itself (ForceReply), so the owner's next message is visibly
 # the answer. The placeholder is 1-64 characters (ForceReply.input_field_placeholder).
@@ -1288,6 +1290,7 @@ class TelegramInlet:
         self._options_board: Optional[_Keyboard] = None       # the relayed question's option buttons
         self._picker_board: Optional[_Keyboard] = None        # the latest picker (claude on, new claude, codex)
         self._stopped_from_chat = False
+        self._stopping = False                            # _shutdown has begun: no new edit jobs are started
         self._jobs: set[asyncio.Task] = set()
         self._dropped_ids: set[int] = set()
         self.stopped_reason: Optional[str] = None
@@ -1351,6 +1354,15 @@ class TelegramInlet:
             await self._shutdown()
 
     async def _shutdown(self) -> None:
+        self._stopping = True
+        # An open progress message would keep saying "On it" with a live-looking Stop button that, after the
+        # restart, only answers "expired" (review, 2026-09-23). Closed first, best effort, briefly.
+        for progress, line in ((self._task_progress, PROGRESS_STOPPED_LINE), (self._codex_progress, PROGRESS_CLOSED_LINE)):
+            if progress is not None and not progress.closed:
+                try:
+                    await asyncio.wait_for(self._close_progress(progress, line), timeout=3)
+                except Exception:  # noqa: BLE001 — shutting down: best effort only
+                    pass
         if self._agent is not None and self.task_running:
             self._agent.cancel(reason="the daemon is stopping")
             # A restart used to end a texted task in silence (live, 2026-09-23: a Chrome task died with two
@@ -1524,6 +1536,13 @@ class TelegramInlet:
             verdict, tap = accept_tap(update, self.config)
             if tap is None:
                 uid = sender_id(update)
+                query = update.get("callback_query")
+                if (uid in self.config.owner_ids and isinstance(query, dict)
+                        and isinstance(query.get("id"), str)):
+                    # The owner's own tap outside their private chat: nothing acts on it, but it is answered,
+                    # empty, so their button does not spin until Telegram gives up (review, 2026-09-23). A
+                    # stranger's tap stays unanswered: the sender learns nothing.
+                    self._spawn(self._answer_tap(Tap(query["id"], 0, uid, ""), ""), "telegram-tap")
                 if uid is not None and uid not in self._dropped_ids and len(self._dropped_ids) < 256:
                     self._dropped_ids.add(uid)
                     log.info("telegram: dropped a tap (%s) from user id %d", verdict, uid)
@@ -1935,11 +1954,19 @@ class TelegramInlet:
         except Exception as e:  # noqa: BLE001 — buttons left on a message only answer "expired"
             log.debug("telegram: could not take buttons off a message (%s)", type(e).__name__)
 
-    async def _settle_prompt(self, board: _Keyboard, text: str, title: Optional[str],
+    async def _settle_prompt(self, board: _Keyboard, body: str, line: str, title: Optional[str],
                              subtitle: Optional[str]) -> None:
-        """A decided prompt, rewritten to say what was decided, its buttons gone (fail-soft: the decision
-        stands whether or not the message changes)."""
+        """A decided prompt, rewritten to say what was decided (``body`` then ``line``), its buttons gone
+        (fail-soft: the decision stands whether or not the message changes). An edit holds one piece, on the
+        message the buttons sit on, which is the last piece of a long prompt: rewriting it with the prompt's
+        start would duplicate that and cut the outcome (review, 2026-09-23). A prompt longer than one piece
+        loses its buttons instead, and the outcome goes as a short message of its own."""
         if not board.message_id or board.chat_id is None:
+            return
+        text = body + "\n\n" + line
+        if len(fmt.split(fmt.compose(text, title, subtitle))) > 1:
+            await self._drop_buttons(board.chat_id, board.message_id)
+            await self._say(board.chat_id, line)
             return
         try:
             await self.api.edit_message(board.chat_id, board.message_id, text, title=title, subtitle=subtitle)
@@ -2030,6 +2057,18 @@ class TelegramInlet:
         closing = max((PROGRESS_DONE_LINE, PROGRESS_STOPPED_LINE, PROGRESS_CLOSED_LINE), key=len)
         return len(fmt.compose(text + "\n\n" + closing, progress.title, progress.subtitle)) <= MAX_PROGRESS_CHARS
 
+    def _restore_stop(self, progress: Optional[_Progress]) -> None:
+        """A Stop tap retires its key before the stop runs. When the stop then fails (Codex: "still starting",
+        "nothing is running" before the turn has an id) the work goes on, so the button comes back under a
+        fresh key and the next edit shows it; without this nothing on the message could stop it any more
+        (review, 2026-09-23)."""
+        if progress is None or progress.closed or progress.board is None:
+            return
+        self._register(progress.board)
+        progress.shown = ""                                # the same text, but its button changed: edit it
+        if progress.flush is None or progress.flush.done():
+            progress.flush = self._spawn(self._flush_progress(progress), "telegram-progress")
+
     def _stop_rows(self, progress: _Progress) -> Optional[list[list[tuple[str, str, str]]]]:
         """The Stop button's row while its key is live, else None (a tapped or retired button stays gone)."""
         board = progress.board
@@ -2041,12 +2080,17 @@ class TelegramInlet:
         """Put the latest steps on the phone, no sooner than PROGRESS_EDIT_SECS after the last change, and
         again while steps keep coming. An edit that would change nothing is skipped."""
         while not progress.closed:
-            wait = progress.edited_at + PROGRESS_EDIT_SECS - self._clock()
+            seen = progress.edited_at
+            wait = seen + PROGRESS_EDIT_SECS - self._clock()
             if wait > 0:
                 await self._sleep(wait)
             async with progress.lock:
                 if progress.closed:
                     return
+                if progress.edited_at != seen:
+                    # The first send (or another edit) landed while this waited for the lock: its second is
+                    # waited out again, not skipped (review, 2026-09-23: an edit followed the send at once).
+                    continue
                 text = progress.text()
                 if text == progress.shown and not progress.unsent:
                     return
@@ -2213,9 +2257,11 @@ class TelegramInlet:
             if self._codex_chat != chat_id or not self._codex.connected:
                 if self._codex_chat == chat_id:
                     self._codex_chat = None
+                    await self._end_codex_progress(PROGRESS_CLOSED_LINE)   # its Stop has nothing left to stop
                 await self._say(chat_id, "Send codex <folder>, for example codex buddy, to start a new chat. "
                                 "Buddy is still available.")
                 return False
+            opened: Optional[_Progress] = None
             try:
                 if interrupt:
                     await self._codex.interrupt()
@@ -2225,9 +2271,18 @@ class TelegramInlet:
                         self._codex_progress.stopped = True
                     await self._say(chat_id, "Stop requested in Codex.")
                     return False
-                steering = bool(getattr(self._codex, "running", False))
+                steering = bool(getattr(self._codex, "running", False)) and self._codex_progress is not None
+                if not steering:
+                    await self._end_codex_progress(PROGRESS_CLOSED_LINE)
+                    # Opened before the send, not after: commentary Codex emits while turn/start is awaited, and
+                    # a turn that ends inside that await, find this turn's progress message (review, 2026-09-23).
+                    # Its Stop interrupts this Codex chat, under this epoch: a later chat is never reached.
+                    opened = self._codex_progress = self._open_progress(
+                        chat_id, CODEX_SENT_LINE,
+                        lambda cid: self._spawn(self._codex_send(cid, "", epoch, interrupt=True), "telegram-codex"),
+                        title=CODEX_TITLE, subtitle=self._codex_title, request_id=message_id)
                 await self._codex.send(text)
-                if steering and self._codex_progress is not None:
+                if steering:
                     # A steer is confirmed by a 👍 on the owner's message (owner, 2026-09-23), not a line.
                     await self._receipt(chat_id, message_id, DELIVERED_REACTION, CODEX_SENT_LINE)
                     return True
@@ -2235,17 +2290,17 @@ class TelegramInlet:
                     # The progress message says it was sent; the 👍 says it went in, as in the Claude relay,
                     # and takes an image's 👀 off. No line when it fails: the progress message is that line.
                     await self._receipt(chat_id, message_id, DELIVERED_REACTION)
-                await self._end_codex_progress(PROGRESS_CLOSED_LINE)
-                # Its Stop interrupts this Codex chat, under this epoch: a later chat is never reached.
-                self._codex_progress = self._open_progress(
-                    chat_id, CODEX_SENT_LINE,
-                    lambda cid: self._spawn(self._codex_send(cid, "", epoch, interrupt=True), "telegram-codex"),
-                    title=CODEX_TITLE, subtitle=self._codex_title, request_id=message_id)
                 return True
             except (codex_chat.CodexUnavailable, OSError, TimeoutError) as exc:
                 log.warning('telegram: codex send failed error=%s', type(exc).__name__)
+                if interrupt:
+                    self._restore_stop(self._codex_progress)
+                elif opened is not None and self._codex_progress is opened:
+                    self._codex_progress = None
+                    await self._close_progress(opened, CODEX_NOT_SENT_LINE)
                 if not self._codex.connected:
                     self._codex_chat = None
+                    await self._end_codex_progress(PROGRESS_CLOSED_LINE)   # a disconnect: no Stop left live
                 await self._say(chat_id, str(exc) if isinstance(exc, codex_chat.CodexUnavailable)
                                 else "Codex did not confirm the message. It was not retried.")
             return False
@@ -2596,7 +2651,8 @@ class TelegramInlet:
             self._retire(board)
             line = {"allow": ALLOW_DENY[0].done, "deny": ALLOW_DENY[1].done}.get(outcome or "",
                                                                                 PERMISSION_DEFERRED_LINE)
-            self._spawn(self._settle_prompt(board, command + "\n\n" + line, title, subtitle), "telegram-edit")
+            if not self._stopping:
+                self._spawn(self._settle_prompt(board, command, line, title, subtitle), "telegram-edit")
         return outcome
 
     async def _stop_task(self, progress: _Progress, chat_id: int) -> None:
@@ -2948,6 +3004,11 @@ class TelegramInlet:
             said = answer.strip().lower().rstrip(".!")
             line = next((c.done or c.label for c in choices if c.value == said), ANSWERED_LINE)
             return answer
+        except asyncio.CancelledError:
+            # The asker went away (a stopped task, Chrome's dialog answered at the Mac, a restart): nothing was
+            # taken as a no, so the question must not say so (review, 2026-09-23).
+            line = ASK_CLOSED_LINE
+            raise
         except asyncio.TimeoutError:
             await self._say(chat_id, UNANSWERED_LINE)
             return f"no (no answer within {int(self.config.ask_timeout_secs)} seconds)"
@@ -2963,7 +3024,8 @@ class TelegramInlet:
                     self._pending_words = frozenset()
             if board is not None:
                 self._retire(board)
-                self._spawn(self._settle_prompt(board, question + "\n\n" + line, title, None), "telegram-edit")
+                if not self._stopping:                     # a restart's buttons answer "expired" anyway
+                    self._spawn(self._settle_prompt(board, question, line, title, None), "telegram-edit")
             if self._paused_typing.get(chat_id) is paused:
                 del self._paused_typing[chat_id]
             for reason, ticks in paused.items():

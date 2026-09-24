@@ -83,6 +83,7 @@ class CodexChat(CodexComputerAgent):
         # message and sends the result as a new one); without it the result goes to the output like a step.
         self._result: Callable[[str], Awaitable[None]] | None = None
         self._turn_job: asyncio.Task | None = None
+        self._outputs: set[asyncio.Task] = set()     # steps on their way to the caller, awaited before the result
         self._connected = False
         self.cwd: Path | None = None
 
@@ -93,7 +94,11 @@ class CodexChat(CodexComputerAgent):
 
     def _event(self, event) -> None:
         if event.kind == 'progress' and self._output:
-            self._background(self._output(event.text))
+            # Not one of the permission jobs _finish_turn cancels: a step is delivered, never dropped.
+            task = asyncio.create_task(self._output(event.text))
+            self._outputs.add(task)
+            task.add_done_callback(self._outputs.discard)
+            task.add_done_callback(lambda t: None if t.cancelled() else t.exception())
 
     async def start(self, folder: Path, emit: Callable[[str], Awaitable[None]],
                     picture: Callable[[], Awaitable[None]] | None = None,
@@ -148,6 +153,11 @@ class CodexChat(CodexComputerAgent):
     async def _finish_turn(self) -> None:
         try:
             turn = await asyncio.wait_for(asyncio.shield(self._done), self.max_secs)
+            # A step emitted just before the turn completed is delivered first, in order: cancelled with the
+            # jobs below it was lost, and left running it arrived after the result (review, 2026-09-23).
+            outputs = [t for t in self._outputs if not t.done()]
+            if outputs:
+                await asyncio.gather(*outputs, return_exceptions=True)
             # An interrupted/failed turn can leave a permission question waiting.
             # Cancel it before the next turn so its answer cannot approve stale work.
             jobs = list(self._jobs)

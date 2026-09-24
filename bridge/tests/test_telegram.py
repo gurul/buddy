@@ -3839,3 +3839,198 @@ def test_a_quick_turn_that_ends_while_the_receipt_is_on_its_way_leaves_no_bubble
         await rig.inlet._shutdown()
 
     asyncio.run(go())
+
+
+# ---- review fixes: prompts and progress messages end saying the truth (2026-09-23) ----------------------
+
+def test_a_question_whose_asker_went_away_does_not_claim_it_was_taken_as_a_no() -> None:
+    """Review finding: a cancelled ask (Chrome answered at the Mac, a stopped task) was edited to "No answer,
+    so I took that as a no.", which never happened."""
+    async def go() -> None:
+        api = FakeApi()
+        rig = Rig(api, FakeCreate())
+        ask = asyncio.ensure_future(rig.inlet._ask_user("Open Chrome? yes / no?", OWNER))
+        await jobs(rig)
+        ask.cancel()
+        await asyncio.gather(ask, return_exceptions=True)
+        await jobs(rig)
+        assert api.edits[-1][1].endswith(telegram.ASK_CLOSED_LINE)
+        assert telegram.UNANSWERED_LINE not in api.edits[-1][1]
+        # A restart during a question: nothing is left running after _shutdown
+        asyncio.ensure_future(rig.inlet._ask_user("Open Chrome? yes / no?", OWNER))
+        await jobs(rig)
+        await rig.inlet._shutdown()
+        assert not rig.inlet._jobs
+
+    asyncio.run(go())
+
+
+def test_a_prompt_longer_than_one_message_keeps_its_text_and_says_the_outcome_below() -> None:
+    """Review finding: the settling edit wrote the prompt's first piece over its last one and cut the
+    outcome line. A long prompt loses its buttons and the outcome goes as its own message."""
+    async def go() -> None:
+        api = FakeApi()
+        rig = Rig(api, FakeCreate())
+        question = "\n\n".join(["word " * 700] * 2) + "\n\nyes / no?"
+        ask = asyncio.ensure_future(rig.inlet._ask_user(question, OWNER))
+        await jobs(rig)
+        message_id, key = api.key("Allow")
+        await tap(rig, key, message_id)
+        assert await ask == "yes"
+        await jobs(rig)
+        assert api.edits == [] and message_id in api.dropped and api.sent[-1] == (OWNER, "Allowed.")
+        await rig.inlet._shutdown()
+
+    asyncio.run(go())
+
+
+def test_the_owners_own_tap_outside_their_chat_is_answered_and_a_strangers_is_not() -> None:
+    async def go() -> None:
+        api = FakeApi()
+        rig = Rig(api, FakeCreate())
+        await tap(rig, "k.1", 5, uid=STRANGER)
+        assert api.answered == []
+        await tap(rig, "k.1", 5, chat_id=-100, chat_type="group")
+        assert api.answered == [("q1", "")] and not api.sent
+        await rig.inlet._shutdown()
+
+    asyncio.run(go())
+
+
+def test_a_restart_closes_an_open_progress_message_and_its_stop_button() -> None:
+    """Review finding: after a restart the progress message still said "On it" above a Stop button."""
+    async def go() -> None:
+        api = FakeApi()
+        rig = Rig(api, FakeCreate())
+        rig.inlet._task_progress = rig.inlet._open_progress(OWNER, ON_IT_LINE, lambda cid: None)
+        await jobs(rig)
+        await rig.inlet._shutdown()
+        assert api.edits[-1] == (api.message_id, ON_IT_LINE + "\n\n" + telegram.PROGRESS_STOPPED_LINE)
+        assert api.edit_keyboards[-1][1] is None
+
+    asyncio.run(go())
+
+
+def test_a_codex_stop_that_fails_puts_the_stop_button_back() -> None:
+    """Review finding: a Stop tap retired its key before the interrupt ran; when Codex refused ("still
+    starting"), the work went on with no button left to stop it."""
+    class Refuses(FakeCodex):
+        async def interrupt(self):
+            raise telegram.codex_chat.CodexUnavailable("Codex is still starting your last message. Please wait.")
+
+    async def go() -> None:
+        codex, api = Refuses(), FakeApi()
+        rig = Rig(api, FakeCreate(), codex=codex, codex_folders=lambda: [CODEX_FOLDER])
+        await dispatch(rig, "codex buddy")
+        await dispatch(rig, "implement it", update_id=7)
+        progress_id, key = api.key("Stop")
+        await tap(rig, key, progress_id)
+        await settle()
+        assert api.edits[-1][0] == progress_id
+        rows = api.edit_keyboards[-1][1]
+        assert rows and rows[0][0][0] == "Stop" and rows[0][0][1] != key      # back, under a fresh key
+        await rig.inlet._shutdown()
+
+    asyncio.run(go())
+
+
+def test_a_codex_send_that_fails_closes_its_progress_message() -> None:
+    """Review finding: a disconnect left the turn's progress message open with a live Stop button."""
+    class SlowFail(FakeCodex):
+        async def send(self, text):
+            await settle(5)                                            # the wire takes a moment, then fails
+            await super().send(text)
+
+    async def go() -> None:
+        codex, api = SlowFail(), FakeApi()
+        rig = Rig(api, FakeCreate(), codex=codex, codex_folders=lambda: [CODEX_FOLDER])
+        await dispatch(rig, "codex buddy")
+        await dispatch(rig, "implement it", update_id=7)
+        first = api.message_id
+        codex.fail = True
+        await dispatch(rig, "and the docs", update_id=8)
+        second = api.message_id
+        closed = dict(api.edits)
+        assert closed[first].endswith(telegram.PROGRESS_CLOSED_LINE)
+        assert closed[second].endswith(telegram.CODEX_NOT_SENT_LINE)
+        assert rig.inlet._codex_chat is None and rig.inlet._codex_progress is None
+        await rig.inlet._shutdown()
+
+    asyncio.run(go())
+
+
+def test_a_codex_disconnect_noticed_at_the_next_message_closes_the_open_progress() -> None:
+    async def go() -> None:
+        codex, api = FakeCodex(), FakeApi()
+        rig = Rig(api, FakeCreate(), codex=codex, codex_folders=lambda: [CODEX_FOLDER])
+        await dispatch(rig, "codex buddy")
+        await dispatch(rig, "implement it", update_id=7)
+        progress_id = api.message_id
+        codex.connected = False                                        # the app-server went away
+        await dispatch(rig, "and the docs", update_id=8)
+        assert dict(api.edits)[progress_id].endswith(telegram.PROGRESS_CLOSED_LINE)
+        await rig.inlet._shutdown()
+
+    asyncio.run(go())
+
+
+def test_codex_commentary_emitted_while_the_send_is_awaited_is_a_step_of_its_turn() -> None:
+    """Review finding: the progress message was opened only after send returned, so a step Codex emitted
+    meanwhile went as a message of its own."""
+    class Chatty(FakeCodex):
+        async def send(self, text):
+            await super().send(text)
+            await self.emit("Reading the tests")
+
+    async def go() -> None:
+        codex, api = Chatty(), FakeApi()
+        rig = Rig(api, FakeCreate(), codex=codex, codex_folders=lambda: [CODEX_FOLDER])
+        await dispatch(rig, "codex buddy")
+        await dispatch(rig, "implement it", update_id=7)
+        await settle()
+        assert ("Codex", "buddy", "Reading the tests") not in api.titled      # not a message of its own
+        progress = rig.inlet._codex_progress
+        assert progress is not None and progress.shown == "Sent to Codex.\n\n- Reading the tests"
+        await rig.inlet._shutdown()
+
+    asyncio.run(go())
+
+
+def test_a_step_during_the_first_send_waits_out_its_second_before_the_edit() -> None:
+    """Review finding: the pacing wait was read before the lock; a step arriving while the first send held
+    it saw no send yet and edited the moment the send landed."""
+    class SlowSend(FakeApi):
+        def __init__(self) -> None:
+            super().__init__()
+            self.gate = asyncio.Event()
+            self.stamps: list[tuple[str, float]] = []
+
+        async def send_inline(self, *a: Any, **kw: Any) -> int:
+            await self.gate.wait()
+            self.stamps.append(("send", now["t"]))
+            return await super().send_inline(*a, **kw)
+
+        async def edit_message(self, *a: Any, **kw: Any) -> None:
+            self.stamps.append(("edit", now["t"]))
+            await super().edit_message(*a, **kw)
+
+    now = {"t": 100.0}
+
+    async def sleep(secs: float) -> None:
+        now["t"] += secs
+        await asyncio.sleep(0)
+
+    async def go() -> None:
+        api = SlowSend()
+        rig = Rig(api, FakeCreate(), clock=lambda: now["t"], sleep=sleep)
+        progress = rig.inlet._open_progress(OWNER, ON_IT_LINE, lambda cid: None)
+        await settle()
+        rig.inlet._progress_step(progress, "Opening the calculator")
+        await settle()
+        api.gate.set()
+        await jobs(rig)
+        (_, sent_at), (_, edited_at) = api.stamps[0], api.stamps[1]
+        assert edited_at - sent_at >= telegram.PROGRESS_EDIT_SECS
+        await rig.inlet._shutdown()
+
+    asyncio.run(go())

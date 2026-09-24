@@ -216,3 +216,34 @@ def test_the_turn_result_goes_to_done_when_the_caller_tells_it_from_progress(tmp
             assert 'Calculator displays 4.' not in steps       # the result is not also a step
             await chat.close()
     asyncio.run(go())
+
+
+def test_a_step_emitted_just_before_the_turn_ends_arrives_before_the_result():
+    """Review finding: a step's delivery was a background job that _finish_turn cancelled (the step was lost)
+    or left running (it arrived after the result)."""
+    from cc_buddy_bridge.agent_contract import AgentEvent
+
+    async def go():
+        order = []
+
+        async def emit(text):
+            await asyncio.sleep(0)
+            await asyncio.sleep(0)
+            order.append(('step', text))
+
+        async def done(text):
+            order.append(('result', text))
+
+        async def ask(q):
+            raise AssertionError(q)
+
+        chat = CodexChat(ask_user=ask)
+        chat._output, chat._result = emit, done
+        chat.final = 'All done.'
+        chat._done = asyncio.get_running_loop().create_future()
+        chat._event(AgentEvent('progress', 'Running the tests'))
+        chat._done.set_result({'status': 'completed'})
+        await chat._finish_turn()
+        assert order == [('step', 'Running the tests'), ('result', 'All done.')]
+
+    asyncio.run(go())
