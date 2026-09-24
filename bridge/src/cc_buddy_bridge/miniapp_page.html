@@ -3,7 +3,7 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
-<title>Ask Claude</title>
+<title>buddy</title>
 <script src="https://telegram.org/js/telegram-web-app.js"></script>
 <style>
   :root {
@@ -55,15 +55,65 @@
     font: 600 15px system-ui, sans-serif; padding: 10px 16px; min-height: 40px; }
   form button:focus-visible, header button:focus-visible { outline: 2px solid var(--link); outline-offset: 2px; }
   form button:disabled { opacity: 0.5; }
+  .tabs { display: flex; gap: 4px; background: var(--bubble); border-radius: 10px; padding: 3px; }
+  .tabs button { border: 0; background: none; color: var(--text); font: 600 14px system-ui, sans-serif;
+    padding: 7px 14px; border-radius: 8px; min-height: 34px; }
+  .tabs button[aria-selected="true"] { background: var(--bg); box-shadow: 0 1px 3px rgba(0,0,0,.12); }
+  .tabs button:focus-visible { outline: 2px solid var(--link); outline-offset: 1px; }
+  [hidden] { display: none !important; }
+  #apps { flex: 1; overflow-y: auto; padding: 16px; }
+  .make { background: var(--bubble); border-radius: 16px; padding: 14px; margin-bottom: 18px; }
+  .make label { display: block; font-weight: 600; margin-bottom: 8px; }
+  .make textarea { width: 100%; min-height: 64px; background: var(--bg); }
+  .make .row { display: flex; justify-content: space-between; align-items: center; gap: 10px; margin-top: 10px; }
+  .make .row span { color: var(--hint); font-size: 13px; }
+  .btn { border: 0; border-radius: 12px; background: var(--accent); color: var(--accent-text);
+    font: 600 15px system-ui, sans-serif; padding: 10px 16px; min-height: 44px; }
+  .btn:disabled { opacity: .5; }
+  .btn:focus-visible { outline: 2px solid var(--link); outline-offset: 2px; }
+  .ideas { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 10px; }
+  .ideas button { border: 1px solid var(--code); background: var(--bg); color: var(--text); border-radius: 999px;
+    padding: 6px 12px; font: 14px system-ui, sans-serif; min-height: 34px; }
+  h2.section { font-size: 13px; text-transform: uppercase; letter-spacing: .04em; color: var(--hint); margin: 0 0 8px; }
+  .app { display: flex; align-items: center; gap: 12px; padding: 12px; border-radius: 14px; background: var(--bubble);
+    margin-bottom: 8px; }
+  .app .icon { width: 44px; height: 44px; border-radius: 12px; background: var(--accent); color: var(--accent-text);
+    display: grid; place-items: center; font: 700 19px system-ui, sans-serif; flex: none; }
+  .app .name { font-weight: 600; }
+  .app .when { color: var(--hint); font-size: 13px; }
+  .app .open { flex: 1; min-width: 0; background: none; border: 0; text-align: left; color: inherit; font: inherit;
+    display: flex; align-items: center; gap: 12px; padding: 0; min-height: 44px; }
+  .app .change { background: none; border: 0; color: var(--link); font: 15px system-ui, sans-serif; min-height: 44px; padding: 0 4px; }
+  .none { color: var(--hint); }
 </style>
 </head>
 <body>
 <header>
-  <div><div class="who">Claude</div><div class="left" id="left" role="status" aria-live="polite"></div></div>
-  <button type="button" id="new">New chat</button>
+  <div class="tabs" role="tablist">
+    <button type="button" role="tab" id="tab-apps" aria-selected="true">Apps</button>
+    <button type="button" role="tab" id="tab-chat" aria-selected="false">Chat</button>
+  </div>
+  <div class="left" id="left" role="status" aria-live="polite"></div>
+  <button type="button" id="new" hidden>New chat</button>
 </header>
-<main id="log" aria-live="polite"><div class="empty" id="empty">Ask anything. Answers stream in full.</div></main>
-<form id="form">
+<section id="apps" role="tabpanel" aria-labelledby="tab-apps">
+  <div class="make">
+    <label for="want" id="want-label">What should I build?</label>
+    <textarea id="want" rows="2" placeholder="A habit tracker with daily check-ins and streaks"></textarea>
+    <div class="ideas" id="ideas">
+      <button type="button">Habit tracker with streaks</button>
+      <button type="button">Workout log</button>
+      <button type="button">Reading list</button>
+      <button type="button">Expense splitter</button>
+    </div>
+    <div class="row"><span id="make-status" role="status" aria-live="polite"></span>
+      <button class="btn" id="make" type="button">Build it</button></div>
+  </div>
+  <h2 class="section">Your apps</h2>
+  <div id="app-list"><div class="none">Nothing yet. Describe one above.</div></div>
+</section>
+<main id="log" hidden aria-live="polite"><div class="empty" id="empty">Ask anything. Answers stream in full.</div></main>
+<form id="form" hidden>
   <textarea id="q" rows="1" placeholder="Message Claude" aria-label="Message Claude"></textarea>
   <button id="send" type="submit">Send</button>
 </form>
@@ -125,6 +175,80 @@
   if (!initData) { left.textContent = "Open this from buddy's menu button in Telegram."; send.disabled = true; }
   else fetch("api/me", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ initData }) })
     .then((r) => r.json()).then((j) => { if (j.error) left.textContent = j.error; else showLeft(j.left); }).catch(() => {});
+
+  // ---- tabs ----
+  const views = { apps: [$("apps")], chat: [log, $("form"), $("new")] };
+  function show(which) {
+    ["apps", "chat"].forEach((v) => { const on = v === which;
+      $("tab-" + v).setAttribute("aria-selected", String(on)); views[v].forEach((el) => { el.hidden = !on; }); });
+    try { localStorage.setItem("buddy-tab", which); } catch (e) {}
+    if (which === "chat") bottom();
+  }
+  $("tab-apps").onclick = () => show("apps");
+  $("tab-chat").onclick = () => show("chat");
+  let startTab = "apps"; try { startTab = localStorage.getItem("buddy-tab") || "apps"; } catch (e) {}
+  show(startTab === "chat" ? "chat" : "apps");
+
+  // ---- apps ----
+  const want = $("want"), makeBtn = $("make"), makeStatus = $("make-status");
+  let editing = null;                                   // the app being changed, or null for a new one
+  const ago = (iso) => { const d = new Date(iso); return isNaN(d) ? "" : d.toLocaleDateString(undefined, { month: "short", day: "numeric" }); };
+  async function post(path, body) {
+    const r = await fetch(path, { method: "POST", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(Object.assign({ initData }, body || {})) });
+    return r;
+  }
+  async function loadApps() {
+    if (!initData) return;
+    try {
+      const j = await (await post("api/apps")).json();
+      const list = $("app-list"); list.innerHTML = "";
+      if (!j.apps || !j.apps.length) { list.innerHTML = '<div class="none">Nothing yet. Describe one above.</div>'; return; }
+      j.apps.forEach((a) => {
+        const row = document.createElement("div"); row.className = "app";
+        row.innerHTML = '<button class="open" type="button"><span class="icon"></span><span><div class="name"></div>' +
+          '<div class="when"></div></span></button><button class="change" type="button">Change</button>';
+        row.querySelector(".icon").textContent = (a.title || "?").trim().charAt(0).toUpperCase();
+        row.querySelector(".name").textContent = a.title;
+        row.querySelector(".when").textContent = "Updated " + ago(a.updated);
+        row.querySelector(".open").onclick = () => { location.href = "apps/" + a.slug + "/"; };
+        row.querySelector(".change").onclick = () => {
+          editing = a; $("want-label").textContent = "What should change in " + a.title + "?";
+          want.placeholder = "Add a weekly chart"; makeBtn.textContent = "Change it"; want.focus();
+        };
+        list.appendChild(row);
+      });
+    } catch (e) {}
+  }
+  $("ideas").querySelectorAll("button").forEach((b) => { b.onclick = () => { want.value = b.textContent; want.focus(); }; });
+  makeBtn.onclick = async () => {
+    const text = want.value.trim(); if (!text || makeBtn.disabled || !initData) return;
+    makeBtn.disabled = true; makeStatus.textContent = editing ? "Changing it…" : "Building it… this takes about a minute.";
+    try {
+      const r = await post("api/make", editing ? { request: text, app: editing.slug } : { request: text });
+      if (!r.ok || !r.body) { let m = "Something went wrong."; try { m = (await r.json()).error || m; } catch (x) {} makeStatus.textContent = m; return; }
+      const reader = r.body.getReader(), dec = new TextDecoder(); let buf = "", result = null;
+      for (;;) {
+        const { value, done } = await reader.read(); if (done) break;
+        buf += dec.decode(value, { stream: true }); let cut;
+        while ((cut = buf.indexOf("\n\n")) >= 0) {
+          const ev = buf.slice(0, cut); buf = buf.slice(cut + 2);
+          if (!ev.startsWith("data: ")) continue;
+          const d = JSON.parse(ev.slice(6));
+          if (typeof d.p === "number") makeStatus.textContent = d.p ? "Writing it… " + Math.round(d.p / 100) / 10 + "k characters" : "Thinking it through…";
+          if (d.error) makeStatus.textContent = d.error;
+          if (d.done) { result = d; showLeft(d.left); }
+        }
+      }
+      if (result) {
+        makeStatus.textContent = "Ready: " + result.app.title; want.value = "";
+        editing = null; $("want-label").textContent = "What should I build?"; makeBtn.textContent = "Build it";
+        await loadApps(); setTimeout(() => { location.href = result.url.replace(/^\//, ""); }, 600);
+      }
+    } catch (e) { makeStatus.textContent = "The connection dropped. Check Your apps in a minute."; }
+    finally { makeBtn.disabled = false; }
+  };
+  loadApps();
 
   $("new").onclick = () => { history = []; save(); log.innerHTML = '<div class="empty" id="empty">New chat.</div>'; q.focus(); };
   q.addEventListener("input", () => { q.style.height = "auto"; q.style.height = q.scrollHeight + "px"; });

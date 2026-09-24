@@ -252,13 +252,22 @@ class FakeTunnel:
         self.stopped = True
 
 
-def test_the_menu_button_points_at_the_tunnel_and_goes_back_on_stop(tmp_path: Path) -> None:
-    menus: list[tuple[int, str]] = []
-    tunnels: list[FakeTunnel] = []
+class FakeBot:
+    """The Bot API as the pins see it: records calls, hands out message ids, can refuse an edit."""
 
-    async def menu(token: str, chat: int, url: str = "") -> bool:
-        menus.append((chat, url))
-        return True
+    def __init__(self, refuse_edit: bool = False) -> None:
+        self.calls: list[tuple[str, dict]] = []
+        self.refuse_edit = refuse_edit
+
+    async def __call__(self, method: str, data: dict):
+        self.calls.append((method, data))
+        if method == "editMessageText" and self.refuse_edit:
+            return {"ok": False, "description": "Bad Request: message to edit not found"}
+        return {"ok": True, "result": {"message_id": 900 + len(self.calls)}}
+
+
+def run_app(tmp_path: Path, bot: FakeBot):
+    tunnels: list[FakeTunnel] = []
 
     def factory() -> FakeTunnel:
         tunnels.append(FakeTunnel())
@@ -266,10 +275,11 @@ def test_the_menu_button_points_at_the_tunnel_and_goes_back_on_stop(tmp_path: Pa
 
     async def go():
         cfg = MiniAppConfig(enabled=True, token=TOKEN, owner_ids=OWNERS, ledger_path=tmp_path / "s.json")
-        app = MiniApp(cfg, stream_fn=fake_stream()[0], tunnel_factory=factory, menu=menu)
+        app = MiniApp(cfg, stream_fn=fake_stream()[0], tunnel_factory=factory, bot=bot,
+                      pins_path=tmp_path / "pins.json", apps_root=tmp_path / "apps")
         task = asyncio.create_task(app.run())
-        for _ in range(100):
-            if menus:
+        for _ in range(200):
+            if any(m == "pinChatMessage" or m == "editMessageText" for m, _ in bot.calls):
                 break
             await asyncio.sleep(0.01)
         url = app.url
@@ -278,9 +288,39 @@ def test_the_menu_button_points_at_the_tunnel_and_goes_back_on_stop(tmp_path: Pa
             await task
         return url
 
-    url = asyncio.run(go())
-    assert url == "https://quiet-owl.trycloudflare.com"
-    assert menus == [(OWNER, url), (OWNER, "")] and tunnels[0].stopped
+    return asyncio.run(go()), tunnels
+
+
+def test_the_menu_stays_the_commands_and_a_pinned_button_opens_the_app(tmp_path: Path) -> None:
+    bot = FakeBot()
+    url, tunnels = run_app(tmp_path, bot)
+    assert url == "https://quiet-owl.trycloudflare.com" and tunnels[0].stopped
+    methods = [m for m, _ in bot.calls]
+    assert methods[:3] == ["setChatMenuButton", "sendMessage", "pinChatMessage"]
+    assert bot.calls[0][1]["menu_button"] == {"type": "commands"}                       # the / menu, kept
+    button = bot.calls[1][1]["reply_markup"]["inline_keyboard"][0][0]
+    assert button["web_app"]["url"] == url + "/"
+    # on stop the pinned message says offline instead of leading nowhere
+    assert methods[-1] == "editMessageText" and "reply_markup" not in bot.calls[-1][1]
+    assert json.loads((tmp_path / "pins.json").read_text()) == {str(OWNER): 902}
+
+
+def test_the_next_start_edits_the_same_pinned_message(tmp_path: Path) -> None:
+    (tmp_path / "pins.json").write_text(json.dumps({str(OWNER): 555}))
+    bot = FakeBot()
+    run_app(tmp_path, bot)
+    edit = next(d for m, d in bot.calls if m == "editMessageText")
+    assert edit["message_id"] == 555 and "reply_markup" in edit
+    assert "sendMessage" not in [m for m, _ in bot.calls] and "pinChatMessage" not in [m for m, _ in bot.calls]
+
+
+def test_a_deleted_pinned_message_is_sent_and_pinned_again(tmp_path: Path) -> None:
+    (tmp_path / "pins.json").write_text(json.dumps({str(OWNER): 555}))
+    bot = FakeBot(refuse_edit=True)
+    run_app(tmp_path, bot)
+    methods = [m for m, _ in bot.calls]
+    assert "sendMessage" in methods and "pinChatMessage" in methods
+    assert json.loads((tmp_path / "pins.json").read_text())[str(OWNER)] != 555
 
 
 def test_the_tunnel_url_pattern_matches_cloudflared_output() -> None:

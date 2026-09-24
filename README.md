@@ -378,7 +378,7 @@ Every message is shaped for the phone by `telegram_format.py`.
 | Memory (`CC_BUDDY_MEMORY=1`) | One memory for both channels ([memory.md](docs/stackchan/memory.md)): every line kept in a local per-day transcript, records and a profile rewritten by a nightly dream, and a self-hosted mem0 index (`CC_BUDDY_MEM0=0` turns just that off). Tools: `memory_search`, `memory_read`, `forget_preview`, `forget_apply`. |
 | Composio (`CC_BUDDY_COMPOSIO=1`) | Your apps by API (`composio_tools.py`): Gmail read-only, calendar writable, Drive and the rest asked first. |
 | Second brain (`CC_BUDDY_SECOND_BRAIN=1`) | Texts become notes in a local markdown vault Obsidian opens (`second_brain.py`). |
-| Ask Claude (`CC_BUDDY_MINIAPP=1`) | The menu button opens a Mini App chat with Claude (`claude-opus-5-5` by default), streamed in full with no 4096-character cut. Owner-only (signed `initData`), with a daily spend cap, served through a Cloudflare quick tunnel. See [the Mini App](docs/stackchan/miniapp.md). |
+| Apps and Ask Claude (`CC_BUDDY_MINIAPP=1`) | "Make me a habit tracker" builds a small app with `claude-opus-5-5` that opens inside Telegram and saves its data on the Mac. The same Mini App has a Claude chat, streamed in full. Open it from the pinned message or `/apps`; the menu button stays the `/` commands. Owner-only (signed `initData`), with a daily spend cap, through a Cloudflare quick tunnel. See [the Mini App](docs/stackchan/miniapp.md). |
 
 buddy also gets a local clock snapshot and your configured location and timezone
 ([voice settings](docs/stackchan/voice.md#knobs)). Full guide:

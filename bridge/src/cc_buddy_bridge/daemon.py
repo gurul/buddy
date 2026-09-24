@@ -1213,6 +1213,13 @@ class Daemon:
             return
         self._miniapp = miniapp.MiniApp(cfg)
         tasks.append(asyncio.create_task(self._miniapp.run(), name="miniapp"))
+        if getattr(self, "_telegram", None) is not None:
+            # "make me a habit tracker" texted to buddy builds an app (apps_maker.ChatMaker); its Open button
+            # is sent to the chat when the build is done.
+            from . import apps_maker
+
+            inlet = self._telegram
+            self._telegram._maker = apps_maker.ChatMaker(self._miniapp, lambda coro, name: inlet._spawn(coro, name))
 
     def _make_chrome_lane(self) -> Any:
         """CC_BUDDY_BROWSER_ATTACH=1: the browser lane attached to the owner's own Chrome, kept for the daemon's

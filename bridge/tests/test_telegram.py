@@ -2097,7 +2097,12 @@ def _check_rundown(rig: Rig) -> None:
     assert rig.api.sent[-1] == (OWNER, "Your day.")
 
 
+def _check_apps(rig: Rig) -> None:
+    assert rig.api.sent[-1] == (OWNER, telegram.APPS_OFF_LINE)          # no Mini App in this rig: says so
+
+
 MENU_CHECKS = {
+    "apps": ([], _check_apps),
     "claude_on": ([], _check_claude_on),
     "claude_off": (["/claude_on"], _check_claude_off),
     "new_claude": ([], _check_new_claude),

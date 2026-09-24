@@ -71,6 +71,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Any, Awaitable, Callable, Collection, Optional, Sequence
 
 from . import (
+    apps_maker,
     claude_launch,
     codex_chat,
     composio_tools,
@@ -118,6 +119,11 @@ MAX_OUTPUT_TOKENS = 1200
 BACKOFF_MAX_SECS = 60.0
 DONE_HOLD_SECS = 3.0                # the board shows "done" this long after a texted task, then idle
 STOP_WORDS = ("stop", "/stop", "cancel", "/cancel")
+# The Mini App's way in from the chat (miniapp.py): an Open button, answered by code like the stealth words, relay
+# or not (owner, 2026-09-24: the menu button stays the / commands, "i want both").
+APPS_WORDS = ("/apps", "apps", "my apps", "open apps", "open buddy")
+APPS_TEXT = "Your apps, and a chat with Claude:"
+APPS_OFF_LINE = "The apps aren't running right now (CC_BUDDY_MINIAPP, or the tunnel is still starting)."
 STEALTH_ON = ("stealth mode", "stealth", "stealth on", "go stealth", "/stealth", "play dead", "act asleep")
 STEALTH_OFF = ("stealth off", "wake up", "/wake", "stop stealth", "end stealth", "you can wake up")
 # "/claude_on" and "/claude_off" are the forms the / menu sends (BOT_COMMANDS): a command has no spaces.
@@ -191,6 +197,7 @@ FATAL_CODES = (401, 404, 409)       # bad token, malformed token, another poller
 # accepted by _dispatch exactly as typed from the menu (tests hold it), so the menu never offers a dead word
 # (owner, 2026-09-23).
 BOT_COMMANDS: tuple[tuple[str, str], ...] = (
+    ("apps", "Your apps, and a chat with Claude"),
     ("claude_on", "Join a running Claude Code session"),
     ("claude_off", "Stop relaying Claude Code"),
     ("new_claude", "Open a new Claude Code session"),
@@ -1147,6 +1154,12 @@ class BotApi:
             data["text"] = text
         await self._call("sendMessageDraft", data)
 
+    async def send_web_apps(self, chat_id: int, text: str, buttons: Sequence[tuple[str, str]]) -> None:
+        """A message with inline ``web_app`` buttons, one per row: each opens its URL as a Mini App (with the
+        owner's signed initData), not in a browser. Private chats only, which is all the door serves."""
+        rows = [[{"text": label[:MAX_BUTTON_CHARS], "web_app": {"url": url}}] for label, url in buttons]
+        await self._call("sendMessage", {"chat_id": chat_id, "text": text, "reply_markup": {"inline_keyboard": rows}})
+
     async def set_commands(self, commands: Sequence[tuple[str, str]], chat_id: int) -> None:
         """The / menu for one chat only (setMyCommands with a BotCommandScopeChat scope): the owner's
         private chat shows buddy's code words, and no other chat's menu changes."""
@@ -1331,6 +1344,7 @@ class TelegramInlet:
         self._on_state = on_state
         self._on_closed = on_closed
         self._apps = apps                                  # composio_tools.ComposioBridge, or None
+        self._maker: Any = None                            # apps_maker.ChatMaker once the Mini App runs, or None
         self._app_policy = composio_tools.toolkit_policy()
         self._vault = vault                                # second_brain.VaultConfig (enabled), or None
         self._screen = screen
@@ -1818,7 +1832,7 @@ class TelegramInlet:
                                          message_id=inbound.message_id), "telegram-codex")
             return
         if (self._codex_chat == inbound.chat_id
-                and word not in STEALTH_ON + STEALTH_OFF and not SCREEN_NOW.match(inbound.text)
+                and word not in STEALTH_ON + STEALTH_OFF + APPS_WORDS and not SCREEN_NOW.match(inbound.text)
                 and not self._answers_pending(inbound.text)):
             for_buddy = BUDDY_PREFIX.match(inbound.text)
             if for_buddy is None:
@@ -1835,7 +1849,7 @@ class TelegramInlet:
             self._spawn(self._type_to_claude(inbound.chat_id, typed.group(2).strip(), inbound.message_id),
                         "telegram-claude")
             return
-        if word in STEALTH_ON or word in STEALTH_OFF or SCREEN_NOW.match(inbound.text):
+        if word in STEALTH_ON or word in STEALTH_OFF or word in APPS_WORDS or SCREEN_NOW.match(inbound.text):
             pass                                          # buddy's own code words, relay or not
         elif self.claude and not self._answers_pending(inbound.text):
             # Relay on: the chat IS the terminal. A yes/no while Claude is asking answers Claude (below);
@@ -1850,6 +1864,10 @@ class TelegramInlet:
             inbound = dataclasses.replace(inbound, text=for_buddy.group(2).strip())
             word = inbound.text.lower().rstrip(".! ")
             addressed_buddy = True
+        if word in APPS_WORDS:
+            self._note("user", inbound.text, "command")
+            self._spawn(self._open_apps(inbound.chat_id), "telegram-apps")
+            return
         if word in STEALTH_ON or word in STEALTH_OFF:
             self.stealth = word in STEALTH_ON
             self._note("user", inbound.text, "command")
@@ -3053,6 +3071,9 @@ class TelegramInlet:
             handler = TOOL_HANDLERS.get(name)
             if handler is not None:
                 return await handler(self, name, args, chat_id)
+            if self._maker is not None and name in apps_maker.MAKER_TOOL_NAMES:
+                return await self._maker.handle(name, args, chat_id, self.api.send_web_apps,
+                                                lambda chat, text: self._say(chat, text))
             if self._memory is not None and name in {t["name"] for t in self._memory_tools()}:
                 return await self._memory_tool(name, args)
             if self._apps is not None and name in self._apps.names:
@@ -3120,15 +3141,25 @@ class TelegramInlet:
         # Exa through OpenRouter (websearch.py), off the loop: a second or two of network
         return await asyncio.to_thread(websearch.search, str(args.get("query") or ""), self.config.search)
 
+    async def _open_apps(self, chat_id: int) -> None:
+        """/apps: the Mini App's Open button, at its address right now."""
+        url = self._maker.home_url() if self._maker is not None else ""
+        if not url:
+            await self._say(chat_id, APPS_OFF_LINE)
+            return
+        await self.api.send_web_apps(chat_id, APPS_TEXT, [("Open buddy", url)])
+
     def _app_tools(self) -> list[dict[str, Any]]:
-        """The apps' tools for this turn: none until the Composio session is up (it starts on a thread)."""
+        """The apps' tools for this turn: buddy's app maker while the Mini App is live, then Composio's once its
+        session is up (it starts on a thread)."""
+        maker = list(self._maker.tools()) if self._maker is not None else []
         if self._apps is None or not getattr(self._apps, "started", False):
-            return []
+            return maker
         try:
-            return list(self._apps.tools())
+            return maker + list(self._apps.tools())
         except Exception as e:  # noqa: BLE001 — a session that cannot list its tools offers none this turn
             log.warning("telegram: the apps' tools are unavailable (%s)", type(e).__name__)
-            return []
+            return maker
 
     async def _app_tool(self, name: str, args: dict[str, Any], chat_id: int) -> dict[str, Any]:
         """One Composio call under the owner's policy (composio_tools.decide): a reading call runs; a writing

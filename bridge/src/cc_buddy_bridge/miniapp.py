@@ -1,23 +1,23 @@
-"""The "Ask Claude" Mini App: the bot's menu button opens a chat with Claude inside Telegram.
+"""buddy's Telegram Mini App: the apps buddy makes, and a chat with Claude, opened from the chat.
 
-Owner, 2026-09-24: "I don't want rest in terminal", then "Miniapp", "opus 5.5 please". A Telegram chat
-message caps at 4096 characters and arrives whole; a Mini App is a web page Telegram opens over the chat,
-so a long answer streams in as it is written and is never cut.
+Owner, 2026-09-24: "I don't want rest in terminal", then "Miniapp", "opus 5.5 please", then "mini apps are to
+replace websites, like i want to build a habit tracker, it should do it". A chat message caps at 4096 characters;
+a Mini App is a web page Telegram opens over the chat. Its home has two tabs: **Apps** (what buddy built, and
+"What should I build?", apps_maker.py) and **Chat** (Claude, streamed, never cut).
 
-* **The page** (``miniapp_page.html``) is served by the daemon on 127.0.0.1 only. Telegram needs a public
-  HTTPS address, so a Cloudflare quick tunnel (``cloudflared tunnel --url``: no account, no domain) fronts
-  it. Its address changes each time it starts, so the daemon points the owners' menu button at the new one
-  (setChatMenuButton) every start, and puts the / menu back when it stops.
+* **Served by the daemon** on 127.0.0.1 only. Telegram needs a public HTTPS address, so a Cloudflare quick tunnel
+  (``cloudflared tunnel --url``: no account, no domain) fronts it. Its address changes each start.
+* **The way in.** The menu button stays the / commands (owner: "i want both"); a message pinned at the top of the
+  chat carries an **Open buddy** button, edited to the new address every start and marked offline on stop.
+  ``/apps`` sends the same button, and a finished build sends an Open button for that app.
 * **Only the owners.** Every API call carries Telegram's signed ``initData``; the server checks its HMAC
   with the bot token (Telegram's WebAppData scheme), its age, and that the user is in
-  ``CC_BUDDY_TELEGRAM_OWNER``. The page itself holds nothing; without a valid signature nothing is answered.
+  ``CC_BUDDY_TELEGRAM_OWNER``. The pages themselves hold nothing; without a valid signature nothing is answered.
 * **Claude** is ``claude-opus-5-5`` (``CC_BUDDY_MINIAPP_MODEL``) through the Anthropic SDK with the owner's
-  ``ANTHROPIC_API_KEY``, streamed back as server-sent events. Adaptive thinking is always on for this model;
-  effort (``CC_BUDDY_MINIAPP_EFFORT``, default medium) is the cost and depth control.
-* **A daily spend cap** (``CC_BUDDY_MINIAPP_DAILY_USD``, default 5): each answer's cost is computed from its
-  usage at the model's list price and added to a per-day ledger; at the cap the app says so and asks nothing
-  more until tomorrow. The history lives in the page (the phone), sent with each question; the server keeps
-  no conversation.
+  ``ANTHROPIC_API_KEY``. Adaptive thinking is always on for this model; effort (``CC_BUDDY_MINIAPP_EFFORT``,
+  default medium for chat; ``CC_BUDDY_MINIAPP_MAKE_EFFORT``, default high for building) is the depth control.
+* **A daily spend cap** (``CC_BUDDY_MINIAPP_DAILY_USD``, default 5) covers chat and building: each answer's cost
+  is computed from its usage at the model's list price and added to a per-day ledger.
 
 Off unless ``CC_BUDDY_MINIAPP=1`` with the Telegram door configured and ``ANTHROPIC_API_KEY`` set.
 """
@@ -46,6 +46,7 @@ DEFAULT_MODEL = "claude-opus-5-5"
 DEFAULT_EFFORT = "medium"
 EFFORTS = ("low", "medium", "high", "xhigh", "max")
 DEFAULT_DAILY_USD = 5.0
+DEFAULT_MAKE_EFFORT = "high"          # building an app is real work: more thought than a chat answer
 MAX_TOKENS = 32000                    # one answer's ceiling; streaming, so no HTTP timeout concern
 # $ per million tokens, from the Claude API model table (cached 2026-06-24): claude-opus-5-5 input 4, output 20,
 # cache reads 0.20; a 5-minute cache write is 1.25x input. A model not listed costs as the most expensive
@@ -58,10 +59,11 @@ INIT_DATA_MAX_AGE_SECS = 24 * 3600    # a Mini App left open all day still works
 MAX_BODY_BYTES = 2_000_000
 MAX_TURNS = 60                         # the newest turns of the page's history
 MAX_HISTORY_CHARS = 400_000
+APP_ROUTE_RE = re.compile(r"^/apps/([a-z0-9][a-z0-9-]{0,47})/(index\.html)?$")
+API_APP_RE = re.compile(r"^/api/apps/([a-z0-9][a-z0-9-]{0,47})/(load|save)$")
 TUNNEL_URL_RE = re.compile(r"https://[a-z0-9-]+\.trycloudflare\.com")
 TUNNEL_START_SECS = 45.0
 TUNNEL_RETRY_SECS = 10.0
-MENU_TEXT = "Ask Claude"
 PAGE_PATH = Path(__file__).with_name("miniapp_page.html")
 SYSTEM_PROMPT = (
     "You are Claude, answering the owner of buddy (their personal desk assistant) inside a Telegram Mini App "
@@ -81,6 +83,7 @@ class MiniAppConfig:
     model: str = DEFAULT_MODEL
     effort: str = DEFAULT_EFFORT
     daily_usd: float = DEFAULT_DAILY_USD
+    make_effort: str = DEFAULT_MAKE_EFFORT
     ledger_path: Path = field(default_factory=lambda: Path.home() / ".config" / "cc-buddy-bridge" /
                               "miniapp-spend.json")
 
@@ -110,9 +113,12 @@ def configured(environ: Any = None) -> MiniAppConfig:
         cap = float(env.get("CC_BUDDY_MINIAPP_DAILY_USD") or DEFAULT_DAILY_USD)
     except ValueError:
         cap = DEFAULT_DAILY_USD
+    make_effort = (env.get("CC_BUDDY_MINIAPP_MAKE_EFFORT") or DEFAULT_MAKE_EFFORT).strip().lower()
+    if make_effort not in EFFORTS:
+        make_effort = DEFAULT_MAKE_EFFORT
     return MiniAppConfig(enabled=True, token=tg.token, owner_ids=tg.owner_ids,
                          model=(env.get("CC_BUDDY_MINIAPP_MODEL") or DEFAULT_MODEL).strip(), effort=effort,
-                         daily_usd=max(0.0, cap))
+                         daily_usd=max(0.0, cap), make_effort=make_effort)
 
 
 # ---- who is asking: Telegram's signed initData ----------------------------------------------------
@@ -276,9 +282,10 @@ def _error_line(e: Exception) -> str:
 
 class MiniAppServer:
     def __init__(self, cfg: MiniAppConfig, stream_fn: StreamFn, ledger: SpendLedger,
-                 page: Optional[bytes] = None) -> None:
+                 page: Optional[bytes] = None, store: Any = None, maker: Any = None) -> None:
         self.cfg, self._stream, self.ledger = cfg, stream_fn, ledger
         self._page = page
+        self.store, self.maker = store, maker             # apps_maker.AppStore / AppMaker; None: no apps
         self._busy: set[int] = set()                      # one answer at a time per owner
         self._server: Optional[asyncio.base_events.Server] = None
         self.port = 0
@@ -320,7 +327,24 @@ class MiniAppServer:
         if method == "GET" and path == "/healthz":
             await self._send(writer, 200, b"ok", "text/plain")
             return
-        if method != "POST" or path not in ("/api/chat", "/api/me"):
+        if method == "GET" and path == "/buddy.js" and self.store is not None:
+            from .apps_maker import BUDDY_JS
+
+            await self._send(writer, 200, BUDDY_JS.encode(), "application/javascript; charset=utf-8")
+            return
+        app_route = APP_ROUTE_RE.match(path)
+        if method == "GET" and app_route and self.store is not None:
+            from .apps_maker import serve_app_html
+
+            html = self.store.html(app_route.group(1))
+            if html is None:
+                await self._send(writer, 404, b"no such app", "text/plain")
+            else:
+                await self._send(writer, 200, serve_app_html(html).encode(), "text/html; charset=utf-8")
+            return
+        api_app = API_APP_RE.match(path)
+        known = path in ("/api/chat", "/api/me", "/api/apps", "/api/make") or api_app is not None
+        if method != "POST" or not known:
             await self._send(writer, 404, b"not found", "text/plain")
             return
         size = int(headers.get("content-length") or 0)
@@ -338,7 +362,10 @@ class MiniAppServer:
             return
         if path == "/api/me":
             await self._json(writer, 200, {"model": self.cfg.model, "left": round(self.ledger.left(), 4),
-                                           "cap": self.cfg.daily_usd})
+                                           "cap": self.cfg.daily_usd, "apps": self.store is not None})
+            return
+        if path == "/api/apps" or api_app is not None or path == "/api/make":
+            await self._apps_api(writer, path, api_app, body, user)
             return
         history = clean_history(body.get("messages"))
         if history is None:
@@ -355,6 +382,81 @@ class MiniAppServer:
             await self._answer(writer, history)
         finally:
             self._busy.discard(user)
+
+    async def _apps_api(self, writer: asyncio.StreamWriter, path: str, api_app: Any, body: dict[str, Any],
+                        user: int) -> None:
+        if self.store is None:
+            await self._json(writer, 404, {"error": "Apps are off."})
+            return
+        if path == "/api/apps":
+            await self._json(writer, 200, {"apps": [a.as_dict() for a in self.store.list()]})
+            return
+        if api_app is not None:
+            slug, action = api_app.group(1), api_app.group(2)
+            try:
+                if action == "load":
+                    await self._json(writer, 200, {"data": self.store.load_data(slug)})
+                else:
+                    await self._json(writer, 200, {"ok": True, "bytes": self.store.save_data(slug, body.get("data"))})
+            except KeyError:
+                await self._json(writer, 404, {"error": "There is no such app."})
+            except ValueError:
+                await self._json(writer, 413, {"error": "That is too much data for one app (1 MB)."})
+            return
+        # /api/make: {request} makes a new app; {app, request} changes an existing one. Progress as SSE.
+        request_text = str(body.get("request") or "").strip()[:4000]
+        if not request_text or self.maker is None:
+            await self._json(writer, 400, {"error": "Say what the app should do."})
+            return
+        if self.ledger.left() <= 0:
+            await self._json(writer, 429, {"error": CAP_LINE.format(cap=self.cfg.daily_usd)})
+            return
+        if user in self._busy:
+            await self._json(writer, 409, {"error": "Still working on the last one."})
+            return
+        self._busy.add(user)
+        try:
+            await self._make(writer, request_text, str(body.get("app") or ""))
+        finally:
+            self._busy.discard(user)
+
+    async def _make(self, writer: asyncio.StreamWriter, request_text: str, app: str) -> None:
+        writer.write(b"HTTP/1.1 200 OK\r\nContent-Type: text/event-stream; charset=utf-8\r\n"
+                     b"Cache-Control: no-store\r\nX-Accel-Buffering: no\r\nConnection: close\r\n\r\n")
+        await writer.drain()
+        progress = {"chars": 0}
+        done = asyncio.Event()
+
+        async def ticker() -> None:
+            while not done.is_set():
+                writer.write(b"data: " + json.dumps({"p": progress["chars"]}).encode() + b"\n\n")
+                await writer.drain()
+                with contextlib.suppress(asyncio.TimeoutError):
+                    await asyncio.wait_for(done.wait(), 2)
+
+        tick = asyncio.create_task(ticker())
+
+        def on_progress(n: int) -> None:
+            progress["chars"] = n
+
+        try:
+            made = await (self.maker.edit(app, request_text, on_progress) if app
+                          else self.maker.make(request_text, on_progress))
+        except Exception as e:  # noqa: BLE001 — a failure is a line on the phone
+            log.warning("apps: making failed (%s)", type(e).__name__)
+            made = None
+            reason = _error_line(e)
+        finally:
+            done.set()
+            with contextlib.suppress(Exception):
+                await tick
+        if made is not None and made.ok and made.app is not None:
+            out = {"done": True, "app": made.app.as_dict(), "url": f"/apps/{made.app.slug}/",
+                   "left": round(self.ledger.left(), 4)}
+        else:
+            out = {"error": f"I couldn't build it: {made.reason}." if made is not None else reason}
+        writer.write(b"data: " + json.dumps(out).encode() + b"\n\n")
+        await writer.drain()
 
     async def _answer(self, writer: asyncio.StreamWriter, history: list[dict[str, str]]) -> None:
         writer.write(b"HTTP/1.1 200 OK\r\nContent-Type: text/event-stream; charset=utf-8\r\n"
@@ -455,29 +557,84 @@ class QuickTunnel:
                 self.proc.kill()
 
 
-# ---- the menu button ------------------------------------------------------------------------------
+# ---- the way in: a pinned Open button (the menu button stays the / commands) -------------------------
+#
+# Owner, 2026-09-24: "menu disappeared, all that's left is ask claude, i want both". Telegram's menu button is
+# either the / command list or one Mini App, never both, so it stays the commands, and the Mini App is one tap
+# away in a message pinned at the top of the chat (plus /apps, and the Open button a build sends). The tunnel's
+# address changes every start, so the pinned message's button is edited to the new one each time.
 
-async def set_menu_button(token: str, chat_id: int, url: str = "", *, post: Any = None) -> bool:
-    """Point one owner's menu button at the Mini App (``url``), or back to the / commands (no url)."""
-    import httpx
+Bot = Callable[[str, dict], Awaitable[Any]]
+PIN_TEXT = "buddy: your apps and a chat with Claude."
+PIN_OFFLINE_TEXT = "buddy's apps are offline (the Mac is asleep or restarting). This button comes back by itself."
+OPEN_TEXT = "Open buddy"
 
-    button: dict[str, Any] = ({"type": "web_app", "text": MENU_TEXT, "web_app": {"url": url}} if url
-                              else {"type": "commands"})
-    try:
-        if post is not None:
-            data = await post("setChatMenuButton", {"chat_id": chat_id, "menu_button": button})
-        else:
-            async with httpx.AsyncClient(timeout=20) as c:
-                r = await c.post(f"https://api.telegram.org/bot{token}/setChatMenuButton",
-                                 json={"chat_id": chat_id, "menu_button": button})
-                data = r.json()
-    except Exception as e:  # noqa: BLE001 — a menu that did not change is logged, never fatal
-        log.warning("miniapp: setChatMenuButton failed (%s)", type(e).__name__)
-        return False
-    ok = bool(isinstance(data, dict) and data.get("ok"))
-    if not ok:
-        log.warning("miniapp: setChatMenuButton refused (%s)", str(data.get("description") if isinstance(data, dict) else data)[:120])
-    return ok
+
+def bot_caller(token: str) -> Bot:
+    """One Bot API call as ``await bot(method, data)`` -> Telegram's JSON reply (``{"ok": ...}``)."""
+    async def call(method: str, data: dict) -> Any:
+        import httpx
+
+        async with httpx.AsyncClient(timeout=20) as c:
+            return (await c.post(f"https://api.telegram.org/bot{token}/{method}", json=data)).json()
+
+    return call
+
+
+def open_button(url: str) -> dict[str, Any]:
+    return {"inline_keyboard": [[{"text": OPEN_TEXT, "web_app": {"url": url}}]]}
+
+
+class Pins:
+    """The pinned Open message per owner chat: {chat id: message id} in a small JSON file."""
+
+    def __init__(self, path: Path, bot: Bot) -> None:
+        self.path, self._bot = Path(path), bot
+
+    def _load(self) -> dict[str, int]:
+        try:
+            return {str(k): int(v) for k, v in json.loads(self.path.read_text()).items()}
+        except (OSError, ValueError, AttributeError):
+            return {}
+
+    def _save(self, pins: dict[str, int]) -> None:
+        self.path.parent.mkdir(parents=True, exist_ok=True)
+        self.path.write_text(json.dumps(pins))
+
+    async def _ok(self, method: str, data: dict) -> Any:
+        try:
+            reply = await self._bot(method, data)
+        except Exception as e:  # noqa: BLE001 — a failed call is logged, never fatal
+            log.warning("miniapp: %s failed (%s)", method, type(e).__name__)
+            return None
+        if isinstance(reply, dict) and (reply.get("ok") or "not modified" in str(reply.get("description", ""))):
+            return reply
+        log.info("miniapp: %s refused (%s)", method,
+                 str(reply.get("description") if isinstance(reply, dict) else reply)[:120])
+        return None
+
+    async def show(self, chat_id: int, url: str) -> None:
+        """The / menu on the menu button, and the pinned message's button pointing at ``url``."""
+        await self._ok("setChatMenuButton", {"chat_id": chat_id, "menu_button": {"type": "commands"}})
+        pins = self._load()
+        old = pins.get(str(chat_id))
+        if old and await self._ok("editMessageText", {"chat_id": chat_id, "message_id": old, "text": PIN_TEXT,
+                                                      "reply_markup": open_button(url)}):
+            return
+        sent = await self._ok("sendMessage", {"chat_id": chat_id, "text": PIN_TEXT, "disable_notification": True,
+                                              "reply_markup": open_button(url)})
+        if not sent:
+            return
+        mid = int(sent["result"]["message_id"])
+        await self._ok("pinChatMessage", {"chat_id": chat_id, "message_id": mid, "disable_notification": True})
+        pins[str(chat_id)] = mid
+        self._save(pins)
+
+    async def offline(self, chat_id: int) -> None:
+        """The daemon is stopping: the pinned button would lead nowhere, so it says so instead."""
+        old = self._load().get(str(chat_id))
+        if old:
+            await self._ok("editMessageText", {"chat_id": chat_id, "message_id": old, "text": PIN_OFFLINE_TEXT})
 
 
 # ---- the whole thing, for the daemon's life ---------------------------------------------------------
@@ -485,18 +642,30 @@ async def set_menu_button(token: str, chat_id: int, url: str = "", *, post: Any 
 class MiniApp:
     def __init__(self, cfg: MiniAppConfig, *, stream_fn: Optional[StreamFn] = None,
                  tunnel_factory: Optional[Callable[[], Any]] = None,
-                 menu: Callable[..., Awaitable[bool]] = set_menu_button) -> None:
+                 bot: Optional[Bot] = None, pins_path: Optional[Path] = None,
+                 generate: Any = None, apps_root: Optional[Path] = None) -> None:
+        from . import apps_maker
+
         self.cfg = cfg
-        self.server = MiniAppServer(cfg, stream_fn or claude_stream(cfg.model, cfg.effort),
-                                    SpendLedger(cfg.ledger_path, cfg.daily_usd))
+        ledger = SpendLedger(cfg.ledger_path, cfg.daily_usd)
+        self.store = apps_maker.AppStore(apps_root or apps_maker.DEFAULT_ROOT)
+        self.maker = apps_maker.AppMaker(
+            self.store, generate or apps_maker.claude_generate(cfg.model, cfg.make_effort),
+            cost=lambda usage: cost_usd(cfg.model, usage), spend=ledger.add, left=ledger.left)
+        self.server = MiniAppServer(cfg, stream_fn or claude_stream(cfg.model, cfg.effort), ledger,
+                                    store=self.store, maker=self.maker)
         binary = cloudflared_bin()
         self._tunnel_factory = tunnel_factory or ((lambda: QuickTunnel(binary)) if binary else None)
-        self._menu = menu
+        self.pins = Pins(pins_path or cfg.ledger_path.with_name("miniapp-pin.json"), bot or bot_caller(cfg.token))
         self.url = ""
 
-    async def _point_menus(self, url: str) -> None:
+    def app_url(self, slug: str) -> str:
+        """The public address of one app right now ("" while the tunnel is down)."""
+        return f"{self.url}/apps/{slug}/" if self.url else ""
+
+    async def _point_pins(self, url: str) -> None:
         for chat in sorted(self.cfg.owner_ids):           # a private chat's id is the owner's user id
-            await self._menu(self.cfg.token, chat, url)
+            await (self.pins.show(chat, url) if url else self.pins.offline(chat))
 
     async def run(self) -> None:
         if self._tunnel_factory is None:
@@ -515,8 +684,8 @@ class MiniApp:
                     log.warning("miniapp: the tunnel did not start (%s); retrying in %.0f s", e, TUNNEL_RETRY_SECS)
                     await asyncio.sleep(TUNNEL_RETRY_SECS)
                     continue
-                log.info("miniapp: live at %s; menu button \"%s\" points there", self.url, MENU_TEXT)
-                await self._point_menus(self.url)
+                log.info("miniapp: live at %s; the pinned Open button points there", self.url)
+                await self._point_pins(self.url + "/")
                 code = await tunnel.wait()
                 log.warning("miniapp: the tunnel exited (%s); starting a new one", code)
                 self.url = ""
@@ -526,4 +695,4 @@ class MiniApp:
                 await tunnel.stop()
             await self.server.close()
             with contextlib.suppress(Exception):
-                await asyncio.shield(self._point_menus(""))  # the / menu again, not a dead Mini App link
+                await asyncio.shield(self._point_pins(""))   # the pinned button says offline, not a dead link
