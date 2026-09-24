@@ -184,7 +184,7 @@ A correct small app takes about 3.5 s to check; the habit trackers above took
 
 ```sh
 brew install cloudflared
-pip install -e "bridge[miniapp,browser]"   # the Anthropic SDK, and Playwright for the phone check
+pip install -e "bridge[miniapp]"           # the Anthropic SDK, and Playwright for the phone check
 python -m playwright install chromium
 ```
 
@@ -264,8 +264,9 @@ limit, just track spend".
 
 After each answer and each build round, its cost is worked out from the usage
 the API reports, at list price. For `claude-opus-5-5` that's $4 per million
-input tokens, $20 per million output, $0.20 per million cache reads, and $5
-per million cache writes. A model that isn't in the price table is charged at
+input tokens, $20 per million output, $0.20 per million cache reads, and for
+cache writes $5 per million when the cache lasts 5 minutes or $8 per million
+when it lasts an hour (the build prompt's cache). A model that isn't in the price table is charged at
 the highest price, so it is never under-counted.
 
 Every day's total is kept in `~/.config/cc-buddy-bridge/miniapp-spend.json`

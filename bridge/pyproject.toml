@@ -96,7 +96,7 @@ composio = ["composio>=0.22,<0.23", "composio-openai>=0.22,<0.23"]
 # The "Ask Claude" Telegram Mini App (miniapp.py): the Anthropic SDK streams claude-opus-5-5 with the owner's
 # ANTHROPIC_API_KEY. 1.8.0 current per PyPI, 2026-09-24, Python >=3.10. Imported lazily; the daemon runs without it
 # and with CC_BUDDY_MINIAPP off. Install with `pip install -e ".[miniapp]"` plus `brew install cloudflared`.
-miniapp = ["anthropic>=1.8,<2"]
+miniapp = ["anthropic>=1.8,<2", "playwright>=1.63,<2"]   # playwright: app_check tries every build on a headless phone
 
 [project.scripts]
 cc-buddy-bridge = "cc_buddy_bridge.cli:main"

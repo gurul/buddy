@@ -71,6 +71,13 @@ def test_cost_is_the_list_price_per_million_tokens() -> None:
     assert cost_usd("claude-opus-5-5", usage) == pytest.approx(4.0 + 20.0 + 0.20)
 
 
+def test_hour_long_cache_writes_cost_twice_the_input_price() -> None:
+    usage = {"input_tokens": 0, "output_tokens": 0, "cache_creation_input_tokens": 3_000_000,
+             "cache_creation": {"ephemeral_5m_input_tokens": 1_000_000, "ephemeral_1h_input_tokens": 2_000_000}}
+    assert cost_usd("claude-opus-5-5", usage) == pytest.approx(5.0 + 2 * 8.0)
+    assert cost_usd("claude-opus-5-5", {"cache_creation_input_tokens": 1_000_000}) == pytest.approx(5.0)
+
+
 def test_an_unknown_model_costs_at_the_worst_price() -> None:
     usage = {"input_tokens": 1_000_000, "output_tokens": 0}
     assert cost_usd("some-future-model", usage) >= cost_usd("claude-opus-5-5", usage)

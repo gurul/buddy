@@ -62,9 +62,9 @@ MAX_TOKENS = 32000                    # one answer's ceiling; streaming, so no H
 # cache reads 0.20; a 5-minute cache write is 1.25x input. A model not listed costs as the most expensive
 # listed one, so an unknown model is never under-counted.
 PRICES: dict[str, dict[str, float]] = {
-    "claude-opus-5-5": {"in": 4.0, "out": 20.0, "cache_read": 0.20, "cache_write": 5.0},
+    "claude-opus-5-5": {"in": 4.0, "out": 20.0, "cache_read": 0.20, "cache_write": 5.0, "cache_write_1h": 8.0},
 }
-_WORST = {"in": 10.0, "out": 50.0, "cache_read": 1.0, "cache_write": 12.5}
+_WORST = {"in": 10.0, "out": 50.0, "cache_read": 1.0, "cache_write": 12.5, "cache_write_1h": 20.0}
 INIT_DATA_MAX_AGE_SECS = 24 * 3600    # a Mini App left open all day still works; an old leaked string does not
 MAX_BODY_BYTES = 2_000_000
 MAX_TURNS = 60                         # the newest turns of the page's history
@@ -226,9 +226,17 @@ def cost_usd(model: str, usage: Any) -> float:
         v = getattr(usage, name, None) if not isinstance(usage, dict) else usage.get(name)
         return int(v or 0)
 
+    # A cache write costs by how long it lives: 5 minutes at 1.25x input, 1 hour at 2x (the maker's prompt is
+    # cached for an hour). usage.cache_creation splits the writes; without it every write is a 5-minute one.
+    split = getattr(usage, "cache_creation", None) if not isinstance(usage, dict) else usage.get("cache_creation")
+    def part(name: str) -> int:
+        v = getattr(split, name, None) if not isinstance(split, dict) else split.get(name)
+        return int(v or 0)
+    hour = part("ephemeral_1h_input_tokens") if split is not None else 0
+    writes = n("cache_creation_input_tokens")
     return (n("input_tokens") * p["in"] + n("output_tokens") * p["out"]
             + n("cache_read_input_tokens") * p["cache_read"]
-            + n("cache_creation_input_tokens") * p["cache_write"]) / 1_000_000
+            + max(0, writes - hour) * p["cache_write"] + hour * p["cache_write_1h"]) / 1_000_000
 
 
 class SpendLedger:
