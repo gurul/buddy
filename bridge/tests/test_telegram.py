@@ -4663,3 +4663,19 @@ def test_the_restart_line_never_holds_up_the_shutdown() -> None:
 
     asyncio.run(go())
     assert waited and max(waited) <= telegram.TURN_RESTART_SECS <= 2.0
+
+
+def test_empty_citation_links_never_reach_the_phone() -> None:
+    # Live, 2026-09-24 23:35:17: a reply carried "([]())", an empty markdown link left by the hosted web
+    # search's citations. It is taken out before the reply is kept or sent; real links and code are not.
+    reply = ("Ramen Taro opens at 11 ([]()). The menu is online ([Taro](https://example.com/menu)) "
+             "and so is a map []() [here]().\nIn code, `x = f([]())` stays.")
+    api = FakeApi([update("when does the ramen place open?")])
+    rig = Rig(api, FakeCreate(say(reply)))
+    run_rig(rig)
+    sent = api.sent[0][1]
+    assert sent == ("Ramen Taro opens at 11. The menu is online ([Taro](https://example.com/menu)) "
+                    "and so is a map here.\nIn code, `x = f([]())` stays.")
+    assert rig.closed == [[("user", "when does the ramen place open?"), ("buddy", sent)]]
+    for text, clean in (("Done ([](https://a.example), []()).", "Done."), ("[]()", ""), ("plain", "plain")):
+        assert telegram.strip_empty_links(text) == clean, text

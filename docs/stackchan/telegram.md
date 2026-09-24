@@ -299,6 +299,13 @@ requires `OPENROUTER_API_KEY`. Only that mode uses the search model/results
 settings above and returns a summarized answer through a function tool.
 Restart the daemon after changing the setting so new voice sessions pick it up.
 
+The hosted search can leave empty citation links in a text reply, such as
+`([]())` (seen on 2026-09-24). Buddy takes empty markdown links out of the
+brain's text before the reply is kept or sent. A group of links with no labels
+is removed with its parentheses. A link with no label is removed. A label with
+no address stays as plain words. Real links, inline code and code blocks are
+not changed.
+
 ## The apps: Composio
 
 Owner's decision, 2026-09-21: Gmail, Google Calendar, Google Drive and the rest

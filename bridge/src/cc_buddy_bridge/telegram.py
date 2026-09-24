@@ -835,6 +835,26 @@ def message_item(role: str, text: str) -> dict[str, Any]:
     return {"type": "message", "role": role, "content": [{"type": kind, "text": text}]}
 
 
+# Empty markdown links, which the hosted web search's citations can leave in a reply (live, 2026-09-24
+# 23:35:17: "([]())" reached the phone). A group in parentheses holding only links with no label goes whole,
+# with the space before it; a link with no label goes; a label with no address stays as plain words.
+_CODE_SPAN = re.compile(r"(```.*?```|`[^`\n]*`)", re.S)
+_EMPTY_LINK_GROUP = re.compile(r"[ \t]*\(\s*\[\s*\]\([^)]*\)(?:\s*[,;]?\s*\[\s*\]\([^)]*\))*\s*\)")
+_UNLABELLED_LINK = re.compile(r"[ \t]*\[\s*\]\([^)]*\)")
+_ADDRESSLESS_LINK = re.compile(r"\[([^\]\n]+)\]\(\s*\)")
+
+
+def strip_empty_links(text: str) -> str:
+    """`text` without empty markdown links ("([]())", "[](url)", "[label]()" → "label"). Code spans and
+    fenced blocks are left exactly as written: there "[]()" may be code."""
+    parts = _CODE_SPAN.split(text)
+    for i in range(0, len(parts), 2):                      # the even parts are prose, the odd ones code
+        prose = _EMPTY_LINK_GROUP.sub("", parts[i])
+        prose = _UNLABELLED_LINK.sub("", prose)
+        parts[i] = _ADDRESSLESS_LINK.sub(r"\1", prose)
+    return "".join(parts)
+
+
 def parse_response(response: Any, allowed: Collection[str] = ()) -> tuple[list[dict[str, Any]], str, list[dict[str, Any]]]:
     """→ (function calls, text, items to send back next round). Raises on a reply the loop cannot read.
     `allowed` names the lent tools (the apps') this turn offered beside TOOL_NAMES."""
@@ -864,7 +884,7 @@ def parse_response(response: Any, allowed: Collection[str] = ()) -> tuple[list[d
         elif kind == "message":
             for part in item.get("content") or []:
                 if part.get("type") == "output_text" and part.get("text"):
-                    texts.append(part["text"])
+                    texts.append(strip_empty_links(part["text"]))
                 elif part.get("type") == "refusal":
                     texts.append(part.get("refusal") or "I can't do that.")
     return calls, "\n".join(t.strip() for t in texts if t.strip()), carry
