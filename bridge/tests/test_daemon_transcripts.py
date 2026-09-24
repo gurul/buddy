@@ -22,6 +22,7 @@ from test_daemon_membus import _install_fakes
 from cc_buddy_bridge import daemon as daemon_mod
 from cc_buddy_bridge import mem0_memory, records, telegram, transcripts
 from cc_buddy_bridge import memory as memory_mod
+from cc_buddy_bridge import recall as recall_mod
 from cc_buddy_bridge.daemon import Daemon
 from cc_buddy_bridge.memory import Memory
 from cc_buddy_bridge.recall import RecallConfig
@@ -111,6 +112,10 @@ def test_the_real_move_puts_the_old_store_under_the_new_root(tmp_path: Path, mon
     monkeypatch.setenv("CC_BUDDY_MEM0", "0")
     monkeypatch.setenv("CC_BUDDY_MEMORY_DIR", str(tmp_path / "memory"))
     monkeypatch.setenv("CC_BUDDY_DEBRIEF_DIR", str(legacy))
+    # The old mem0 home is always ~/.config/cc-buddy-bridge/mem0: without a private HOME this test moved the
+    # owner's real mem0 folder into tmp_path, where pytest later deleted it (2026-09-23; restored from backup).
+    monkeypatch.setenv("HOME", str(tmp_path / "home"))
+    assert recall_mod.legacy_mem0().is_relative_to(tmp_path)
     cfg = _cfg(tmp_path)
     memory = Daemon._build_memory(SimpleNamespace(_recall_cfg=cfg))
     assert memory is not None and memory.index is None
