@@ -178,3 +178,82 @@ def test_changed_relay_does_not_receive_download(tmp_path):
         await rig.inlet._image(telegram.Inbound(OWNER, OWNER, '', media.Attachment('f')), 'claude', 0)
         assert 'relay changed' in api.sent[-1][1]
     asyncio.run(go())
+
+
+@pytest.mark.parametrize('mode', ['claude', 'codex'])
+def test_a_relayed_image_is_seen_then_delivered_as_reactions(tmp_path, monkeypatch, mode):
+    """👀 when it arrives, 👍 when it reached Claude or Codex, on the owner's own message, and no line
+    (owner, 2026-09-23)."""
+    original_save = media.save
+    monkeypatch.setattr(media, 'save', lambda image: original_save(image, tmp_path / 'images'))
+
+    async def go():
+        class Api(FakeApi):
+            async def receive_image(self, item):
+                return media.validate(png())
+
+        class Codex:
+            connected, running = True, False
+
+            async def send(self, text):
+                pass
+
+            async def close(self):
+                pass
+
+        async def terminal(cwd, text):
+            return ''                                           # typed
+
+        api = Api()
+        rig = Rig(api, FakeCreate(), terminal=terminal, codex=Codex())
+        rig.inlet.claude = mode == 'claude'
+        rig.inlet._codex_chat = OWNER if mode == 'codex' else None
+        rig.inlet._dispatch(photo('explain the error', update_id=9))
+        await asyncio.gather(*list(rig.inlet._jobs))
+        assert api.reactions == [(OWNER, 9, telegram.SEEN_REACTION), (OWNER, 9, telegram.DELIVERED_REACTION)]
+        assert (OWNER, 'Typed.') not in api.sent
+        await rig.inlet._shutdown()
+    asyncio.run(go())
+
+
+def test_an_image_that_is_not_delivered_takes_its_eyes_off():
+    async def go():
+        class Api(FakeApi):
+            async def receive_image(self, item):
+                raise telegram.BotApiError(400, 'Bad Request: file is too big')
+
+        api = Api()
+        rig = Rig(api, FakeCreate())
+        rig.inlet.claude = True
+        await rig.inlet._image(telegram.Inbound(OWNER, OWNER, '', media.Attachment('f'), message_id=5), 'claude', 0)
+        assert api.reactions == [(OWNER, 5, telegram.SEEN_REACTION), (OWNER, 5, '')]
+        assert api.sent[-1] == (OWNER, "I couldn't receive that image. Please send it again.")
+    asyncio.run(go())
+
+
+def test_an_image_whose_eyes_are_refused_is_still_delivered_with_the_line(tmp_path, monkeypatch):
+    """Reactions refused everywhere: the image still reaches Claude and "Typed." says so, as before."""
+    original_save = media.save
+    monkeypatch.setattr(media, 'save', lambda image: original_save(image, tmp_path / 'images'))
+
+    async def go():
+        typed = []
+
+        class Api(FakeApi):
+            async def receive_image(self, item):
+                return media.validate(png())
+
+            async def react(self, chat_id, message_id, emoji):
+                raise telegram.BotApiError(400, 'Bad Request: REACTION_INVALID')
+
+        async def terminal(cwd, text):
+            typed.append(text)
+            return ''
+
+        api = Api()
+        rig = Rig(api, FakeCreate(), terminal=terminal)
+        rig.inlet.claude = True
+        await rig.inlet._image(telegram.Inbound(OWNER, OWNER, 'look', media.Attachment('f'), message_id=5), 'claude', 0)
+        assert len(typed) == 1 and api.sent[-1] == (OWNER, 'Typed.')
+        await rig.inlet._shutdown()
+    asyncio.run(go())

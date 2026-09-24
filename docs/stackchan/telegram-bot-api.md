@@ -29,7 +29,7 @@ nothing else:
 | `getMe` | the token check (`telegram-check`) |
 | `getUpdates` | the long poll, `timeout` 50 s, `allowed_updates: ["message"]` |
 | `sendMessage` | every line, `parse_mode: "HTML"`, split at 4096; an optional one-time reply keyboard |
-| `setMessageReaction` | a 👍 on the owner's message when a line reached the Claude terminal |
+| `setMessageReaction` | receipts on the owner's message: 👍 typed or sent, ✍ saved to the vault, 🏆 starred, 👀 an image on its way |
 | `sendPhoto` | screenshots, robot photos, browser pictures |
 | `sendDocument` | `send_file`, up to 50 MB |
 | `sendChatAction` | `typing` once, at the start of a buddy turn |
@@ -163,10 +163,16 @@ Limits and gotchas:
   don't say how that applies to a private chat, so test it before relying on it.
 - Reactions set by bots never produce an update.
 
-For buddy: **in use**, once. `react()` puts 👍 on the owner's message when the
-line reached the Claude terminal (`TYPED_REACTION`). Good next uses are receipts
-that replace one-line replies: ✍ for a note saved to the vault, 🏆 for a fact
-starred, 👀 while an image downloads.
+For buddy: **in use** as receipts (proposal 7, done 2026-09-23). `react()`
+puts 👍 on the owner's message when a line reached the Claude terminal
+(`TYPED_REACTION`) or steered a running Codex turn, ✍ when a capture went into
+the vault (`VAULT_REACTION`), 🏆 when a fact was starred (`STAR_REACTION`), and
+👀 while a relayed image downloads (`SEEN_REACTION`), replaced by 👍 once it
+was delivered or taken off (`react(..., "")`, an empty list) when it was not.
+Every emoji is on the list above, and a test checks them against the local
+copy of the docs. `TelegramInlet._receipt` sends the line the reaction stands
+for when the reaction fails. A text-brain round of only `capture_note` /
+`remember` calls, all ok, ends with the reaction and no second model call.
 
 ## 3. Menu button and commands
 
@@ -604,7 +610,7 @@ the Mac. Once that exists, each later button costs little.
 | 4 | Inline Allow/Deny on Composio, Jev and Codex app prompts | apps, tasks | high | low after 3 |
 | 5 | AskUserQuestion options as buttons | relay | high | low after 3 |
 | 6 | Repeated `typing` for relay turns, buddy turns and think_hard | relay, chat | medium | low |
-| 7 | Reactions as receipts (✍ vault, 🏆 star, 👀 image, 👀→👍 relay) | chat, relay | medium | low |
+| 7 | Reactions as receipts (✍ vault, 🏆 star, 👀 image, 👀→👍 relay). *Done 2026-09-23.* | chat, relay | medium | low |
 | 8 | Stop button on a running task | tasks | high | low after 3 |
 | 9 | "Thinking…" draft for relayed Claude turns (`sendMessageDraft`) | relay | medium | medium |
 | 10 | Task progress in one edited message, result as a reply | tasks, Codex | high | medium |

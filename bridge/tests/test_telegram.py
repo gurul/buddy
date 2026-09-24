@@ -6,6 +6,7 @@ import asyncio
 import json
 import logging
 import math
+import re
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any, Optional
@@ -1002,15 +1003,16 @@ def test_a_text_is_a_word_said_to_the_robot() -> None:
     rig = Rig(api, FakeCreate(call("move_head", {"yaw": -60, "pitch": None, "relative": False, "hold_secs": None}), say("Looking left."),
                               call("take_notes", {"action": "start"}, "c2"), say("Taking notes."),
                               call("set_sound", {"on": False}, "c3"), say("Muted."),
-                              call("remember", {"claim": "I like ramen"}, "c4"), say("Noted for good."),
+                              call("remember", {"claim": "I like ramen"}, "c4"),     # 🏆 is the answer
                               call("look", {}, "c5"), say("A desk with a mug.")),
               head=head, scene=SimpleNamespace(look=look), notes=lambda: notes, on_sound=sounds.append,
               on_star=lambda c: (stars.append(c), "kept")[1])
     run_rig(rig)
     assert head.moves == [(-60.0, None, False, 15.0)] and notes.calls == ["start"]
     assert sounds == [False] and stars == ["I like ramen"]
-    assert [t for _, t in rig.api.sent] == ["Looking left.", "Taking notes.", "Muted.", "Noted for good.", "A desk with a mug."]
-    assert json.loads(rig.create.requests[9]["input"][-1]["output"])["view"] == "a desk with a mug"
+    assert [t for _, t in rig.api.sent] == ["Looking left.", "Taking notes.", "Muted.", "A desk with a mug."]
+    assert rig.api.reactions == [(OWNER, 4, telegram.STAR_REACTION)]      # starred: a receipt, not a line
+    assert json.loads(rig.create.requests[8]["input"][-1]["output"])["view"] == "a desk with a mug"
     for name in ("look", "look_around", "find", "move_head", "go_explore", "set_sound", "remember", "take_notes"):
         assert any(t.get("name") == name for t in telegram.TOOLS), name
 
@@ -1509,18 +1511,20 @@ def test_the_second_brain_is_offered_and_captures_from_the_chat(tmp_path: Path) 
 
     vault = second_brain.VaultConfig(enabled=True, root=tmp_path / "vault")
     api = FakeApi([update("note: the pasta place on 5th is great", update_id=1)])
-    rig = Rig(api, FakeCreate(call("capture_note", {"text": "the pasta place on 5th is great", "kind": "note"}),
-                              say("Saved to your inbox.")), vault=vault)
+    rig = Rig(api, FakeCreate(call("capture_note", {"text": "the pasta place on 5th is great", "kind": "note"})),
+              vault=vault)
     # Wait for the actual filesystem-backed turn, not a fixed number of scheduler yields.
-    asyncio.run(rig.inlet._turn(telegram.Inbound(OWNER, OWNER, "note: the pasta place on 5th is great")))
+    asyncio.run(rig.inlet._turn(telegram.Inbound(OWNER, OWNER, "note: the pasta place on 5th is great",
+                                                 message_id=7)))
     first = rig.create.requests[0]
     assert [t["name"] for t in first["tools"] if t.get("name") in second_brain.SECOND_BRAIN_TOOL_NAMES] == \
         list(second_brain.SECOND_BRAIN_TOOL_NAMES)
     assert second_brain.INSTRUCTIONS_BLOCK in first["instructions"]
-    out = json.loads(rig.create.requests[1]["input"][-1]["output"])
-    assert out["ok"] and out["path"].startswith("01-inbox/") and "pasta" in out["path"]
-    assert (tmp_path / "vault" / out["path"]).read_text().rstrip().endswith("the pasta place on 5th is great")
-    assert api.sent[-1] == (OWNER, "Saved to your inbox.")
+    assert len(rig.create.requests) == 1                              # no second model call to say "Saved."
+    notes = list((tmp_path / "vault" / "01-inbox").glob("*pasta*"))
+    assert len(notes) == 1 and notes[0].read_text().rstrip().endswith("the pasta place on 5th is great")
+    assert api.reactions == [(OWNER, 7, telegram.VAULT_REACTION)] and api.sent == []   # ✍ is the receipt
+    assert rig.inlet.turns[-1][0] == "buddy" and "01-inbox/" in rig.inlet.turns[-1][1]  # history says where
     # off: the tools are not offered and a stray call is told why
     api = FakeApi([update("note: x", update_id=1)])
     rig = Rig(api, FakeCreate(say("ok")))
@@ -1529,6 +1533,67 @@ def test_the_second_brain_is_offered_and_captures_from_the_chat(tmp_path: Path) 
     assert second_brain.INSTRUCTIONS_BLOCK not in rig.create.requests[0]["instructions"]
     result = asyncio.run(rig.inlet._tool("capture_note", {"text": "x", "kind": "note"}, OWNER))
     assert result == {"ok": False, "reason": "the second brain is off on this computer (CC_BUDDY_SECOND_BRAIN)"}
+
+
+def test_a_refused_vault_receipt_says_where_it_went(tmp_path: Path) -> None:
+    from cc_buddy_bridge import second_brain
+
+    class NoReactions(FakeApi):
+        async def react(self, chat_id: int, message_id: int, emoji: str) -> None:
+            raise BotApiError(400, "Bad Request: REACTION_INVALID")
+
+    vault = second_brain.VaultConfig(enabled=True, root=tmp_path / "vault")
+    api = NoReactions()
+    rig = Rig(api, FakeCreate(call("capture_note", {"text": "buy milk", "kind": "todo"})), vault=vault)
+    asyncio.run(rig.inlet._turn(telegram.Inbound(OWNER, OWNER, "todo: buy milk", message_id=7)))
+    assert len(api.sent) == 1 and api.sent[0][1].startswith("Added to the todo list (")
+    assert len(rig.create.requests) == 1
+
+
+def test_a_star_is_a_trophy_and_a_refused_one_is_a_line() -> None:
+    stars: list[str] = []
+    api = FakeApi()
+    rig = Rig(api, FakeCreate(call("remember", {"claim": "I like ramen"})),
+              on_star=lambda c: (stars.append(c), "kept")[1])
+    asyncio.run(rig.inlet._turn(telegram.Inbound(OWNER, OWNER, "remember that I like ramen", message_id=4)))
+    assert stars == ["I like ramen"] and api.reactions == [(OWNER, 4, telegram.STAR_REACTION)] and api.sent == []
+    # no message id to put it on: the line it stands for
+    api = FakeApi()
+    rig = Rig(api, FakeCreate(call("remember", {"claim": "I like ramen"})), on_star=lambda c: "kept")
+    asyncio.run(rig.inlet._turn(telegram.Inbound(OWNER, OWNER, "remember that I like ramen")))
+    assert api.sent == [(OWNER, telegram.STARRED_LINE)]
+
+
+def test_only_a_clean_receipt_round_skips_the_answer(tmp_path: Path) -> None:
+    """A capture that failed, or one next to another tool, is answered by the model as before; words the
+    model wrote beside a capture still go, with the ✍."""
+    from cc_buddy_bridge import second_brain
+
+    vault = second_brain.VaultConfig(enabled=True, root=tmp_path / "vault")
+    # failed: the model explains
+    api = FakeApi()
+    rig = Rig(api, FakeCreate(call("capture_note", {"text": "", "kind": "note"}), say("There was nothing to save.")),
+              vault=vault)
+    asyncio.run(rig.inlet._turn(telegram.Inbound(OWNER, OWNER, "note:", message_id=2)))
+    assert api.reactions == [] and api.sent == [(OWNER, "There was nothing to save.")]
+    # beside another tool: the model answers
+    both = {"id": "resp", "output": [
+        {"type": "function_call", "name": "capture_note", "call_id": "a",
+         "arguments": json.dumps({"text": "call the bank", "kind": "todo"})},
+        {"type": "function_call", "name": "list_todos", "call_id": "b", "arguments": json.dumps({})}]}
+    api = FakeApi()
+    rig = Rig(api, FakeCreate(both, say("Added. You have one todo.")), vault=vault)
+    asyncio.run(rig.inlet._turn(telegram.Inbound(OWNER, OWNER, "todo: call the bank, then list them", message_id=3)))
+    assert api.reactions == [] and api.sent == [(OWNER, "Added. You have one todo.")]
+    # with words of its own: they go, and the ✍ too
+    worded = {"id": "resp", "output": [
+        {"type": "message", "role": "assistant", "content": [{"type": "output_text", "text": "Good idea!"}]},
+        {"type": "function_call", "name": "capture_note", "call_id": "a",
+         "arguments": json.dumps({"text": "a bike rack", "kind": "idea"})}]}
+    api = FakeApi()
+    rig = Rig(api, FakeCreate(worded), vault=vault)
+    asyncio.run(rig.inlet._turn(telegram.Inbound(OWNER, OWNER, "idea: a bike rack", message_id=5)))
+    assert api.reactions == [(OWNER, 5, telegram.VAULT_REACTION)] and api.sent == [(OWNER, "Good idea!")]
 
 
 def test_telegram_reads_edits_and_undoes_the_same_note(tmp_path: Path) -> None:
@@ -1796,6 +1861,32 @@ def test_buttons_are_a_one_time_reply_keyboard_and_a_reaction_is_one_emoji() -> 
                                          "one_time_keyboard": True, "resize_keyboard": True}
     assert calls[-1] == ("setMessageReaction", {"chat_id": OWNER, "message_id": 77,
                                                 "reaction": [{"type": "emoji", "emoji": telegram.TYPED_REACTION}]})
+
+
+def test_a_reaction_can_be_taken_off_again() -> None:
+    async def go() -> list[tuple[str, dict[str, Any]]]:
+        calls: list[tuple[str, dict[str, Any]]] = []
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            calls.append((request.url.path.rsplit("/", 1)[-1], json.loads(request.content)))
+            return httpx.Response(200, json={"ok": True, "result": True})
+
+        api = BotApi(TOKEN, client=httpx.AsyncClient(transport=httpx.MockTransport(handler)))
+        await api.react(OWNER, 77, "")
+        await api.close()
+        return calls
+
+    assert asyncio.run(go()) == [("setMessageReaction", {"chat_id": OWNER, "message_id": 77, "reaction": []})]
+
+
+def test_every_receipt_emoji_is_one_telegram_allows() -> None:
+    """The ReactionTypeEmoji list, as the local copy of the Bot API docs has it: anything else is refused."""
+    doc = (Path(__file__).resolve().parents[2] / "docs" / "reference" / "telegram" / "bot-api.md").read_text()
+    row = next(line for line in doc.splitlines() if "Reaction emoji. Currently, it can be one of" in line)
+    allowed = set(re.findall(r'"([^"]+)"', row))
+    for emoji in (telegram.TYPED_REACTION, telegram.VAULT_REACTION, telegram.STAR_REACTION,
+                  telegram.SEEN_REACTION, telegram.DELIVERED_REACTION):
+        assert emoji in allowed, emoji
 
 
 def test_a_failed_reaction_falls_back_to_a_short_line() -> None:
@@ -3209,14 +3300,37 @@ def test_the_codex_stop_button_interrupts_and_a_steer_keeps_the_progress_message
         await dispatch(rig, "fix the tests", update_id=3)
         progress_id, key = api.key("Stop")
         codex.running = True
+        opened = len(api.sent)
         await dispatch(rig, "and the docs", update_id=4)                 # steers the running turn
-        assert codex.sent == ["fix the tests", "and the docs"] and api.sent[-1] == (OWNER, "Sent to Codex.")
+        assert codex.sent == ["fix the tests", "and the docs"] and len(api.sent) == opened   # no line
+        assert api.reactions[-1] == (OWNER, 4, telegram.DELIVERED_REACTION)   # a 👍, not the line
         assert api.key("Stop") == (progress_id, key)                      # no second progress message
         await tap(rig, key, progress_id)
         assert codex.stops == 1 and api.sent[-1] == (OWNER, "Stop requested in Codex.")
         await codex.done("Codex stopped.")
         await settle()
         assert api.replies[-1] == ("Codex stopped.", 3)
+        await dispatch(rig, "codex off")
+        await rig.inlet._shutdown()
+
+    asyncio.run(go())
+
+
+def test_a_codex_steer_whose_thumb_is_refused_says_sent_to_codex() -> None:
+    class NoReactions(FakeApi):
+        async def react(self, chat_id: int, message_id: int, emoji: str) -> None:
+            raise BotApiError(400, "Bad Request: REACTION_INVALID")
+
+    async def go() -> None:
+        codex, api = FakeCodex(), NoReactions()
+        rig = Rig(api, FakeCreate(), codex=codex, codex_folders=lambda: [CODEX_FOLDER])
+        await dispatch(rig, "codex buddy")
+        await dispatch(rig, "fix the tests", update_id=3)
+        opened = len(api.sent)                                            # the progress message, not a line
+        codex.running = True
+        await dispatch(rig, "and the docs", update_id=4)
+        assert codex.sent == ["fix the tests", "and the docs"]
+        assert api.sent[opened:] == [(OWNER, telegram.CODEX_SENT_LINE)]
         await dispatch(rig, "codex off")
         await rig.inlet._shutdown()
 

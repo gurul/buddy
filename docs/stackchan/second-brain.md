@@ -63,8 +63,9 @@ skeleton only ever adds files and never overwrites one.
 ## Capturing from Telegram
 
 Capture is code, not a model: a handful of prefix rules (`classify_capture`)
-decide what a text is, and the file is written before buddy answers. buddy
-confirms in one line naming the file.
+decide what a text is, and the file is written before buddy answers. A ✍
+reaction on your message confirms it (owner, 2026-09-23). Only if the reaction
+fails does buddy send one line naming the file instead.
 
 | You text | What happens |
 |---|---|

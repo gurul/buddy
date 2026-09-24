@@ -83,6 +83,11 @@ documents passing a local image path. Codex can inspect it using `view_image`.
 These relays target sessions running on this Mac; remote sessions cannot read
 its temporary files. `buddy: <caption>` addresses Buddy instead.
 
+A relayed image gets a 👀 reaction when it arrives and a 👍 in its place once it
+reached Claude or Codex (owner, 2026-09-23). If it is not delivered, the 👀 comes
+off and a line says why. If reactions fail, the image still goes, and the usual
+line (`Typed.`) says so.
+
 Without a relay, image bytes go directly to Buddy's configured OpenAI model as
 an `input_image` data URL. The Telegram download URL/token never goes to the
 model. Image bytes are not included in Buddy's text conversation history; a
@@ -409,6 +414,14 @@ Flip it to `ask` if two seconds a command is a price you will pay.
   to the same tool the voice has (`move_head`, `look`, `find`, `look_around`,
   `take_notes`, `go_explore`, `set_sound`, `remember`). Only `lesson` (the
   learning workspace, bound to the microphone) stays voice-only.
+- **Receipts are reactions.** Where buddy used to answer with a one-line
+  acknowledgement, it now reacts to your message (owner, 2026-09-23): ✍ for a
+  note saved to the second brain, 🏆 for a fact starred with "remember that …",
+  👍 for a line typed into Claude or a message that steers a running Codex
+  turn. A turn that only saved or starred makes no second model call. If the
+  reaction fails, the line it stands for is sent instead ("Saved to …",
+  "Starred for good.", `Typed.`, "Sent to Codex."). Anything that carries
+  information is still a message.
 - **What the robot shows.** While the chat drives a task the robot acts it
   out as it does for the voice: the phase on its face, each progress line and
   the result as a caption on its screen. Stealth hides only the robot: the
@@ -428,7 +441,7 @@ Flip it to `ask` if two seconds a command is a price you will pay.
   The Mac needs to be awake, but no existing task or open app window is required.
 
   Plain messages (or `codex: message`) continue the new chat, retaining its context.
-  During a running turn they steer it. Each message that starts a turn gets one
+  During a running turn they steer it, and a 👍 on your message confirms the steer. Each message that starts a turn gets one
   progress message under **Codex** ("Sent to Codex.", then Codex's public steps,
   edited in place, whole, with the same scroll-off rule as a task) with a
   **Stop** button that interrupts that turn, like `stop`. The final
