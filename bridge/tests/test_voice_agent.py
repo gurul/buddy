@@ -11,20 +11,32 @@ from __future__ import annotations
 import asyncio
 import base64
 import json
+import threading
+import time
+from datetime import datetime, timedelta, timezone
 
 import pytest
 
+from cc_buddy_bridge import system_context, websearch
+from cc_buddy_bridge.caption_pager import PagerConfig, caption_instructions
 from cc_buddy_bridge.computer_agent import AgentEvent
+from cc_buddy_bridge.transcripts import TranscriptConfig, Transcripts, render_line
 from cc_buddy_bridge.voice_agent import (
+    BACKEND_INSTRUCTIONS,
+    BACKEND_MEMORY_RULES,
     FAREWELL_MAX_SECS,
     FAREWELL_QUIET_SECS,
+    INSTRUCTIONS,
     LESSON_ROUTE_DELAY_SECS,
     LOOK_ROUTE_DELAY_SECS,
+    MEMORY_TIMEOUT_LINE,
     TOOLS,
     TURN_GAP_SECS,
+    VOICE_TODAY_HEADER,
     VoiceConfig,
     VoiceSession,
     configured,
+    memory_block,
     session_config,
 )
 
@@ -1762,12 +1774,12 @@ def test_outside_listening_buddys_words_are_logged_as_before(caplog) -> None:
     assert "What is left" in caplog.text
 
 
-def test_while_listening_only_goodbye_and_mute_act_and_nothing_is_starred() -> None:
-    starred: list = []
+def test_while_listening_only_goodbye_and_mute_act_and_nothing_is_starred(tmp_path) -> None:
     sounds: list = []
     conn = FakeConnection([])
-    s, _, _, saved = _listening(conn, {"now": 0.0}, on_star=lambda claim: starred.append(claim) or claim,
-                                on_sound=sounds.append)
+    memory = FakeMemory(tmp_path)
+    s, _, _, saved = _listening(conn, {"now": 0.0}, memory=memory, on_sound=sounds.append)
+    starred = memory.starred
     classified: list = []
 
     async def classify(text):
@@ -1783,6 +1795,7 @@ def test_while_listening_only_goodbye_and_mute_act_and_nothing_is_starred() -> N
         await asyncio.sleep(0.05)
     asyncio.run(go())
     assert starred == [] and not s._farewell and classified == []
+    assert memory.lines(s.conv) == []          # and nothing reaches the transcript
     assert sounds == [False]
     assert [t for _, t in saved] == ["I think the answer has a 3 in it", "remember that", "look to your left"]
 
@@ -1862,7 +1875,7 @@ def test_live_expression_callback_receives_streamed_reply_and_user_turn():
     asyncio.run(run())
 
 
-def test_the_records_profile_reaches_the_voice_prompt_and_is_absent_without_one() -> None:
+def test_the_records_profile_reaches_the_voice_prompt_and_is_absent_without_one(tmp_path) -> None:
     plain = session_config(VoiceConfig())
     assert session_config(VoiceConfig(), profile="")["instructions"] == plain["instructions"]
     page = "## Life context\n- Their name is Sam."
@@ -1871,7 +1884,393 @@ def test_the_records_profile_reaches_the_voice_prompt_and_is_absent_without_one(
     assert page in with_page and with_page.replace(profile_block(page), "") == plain["instructions"]
     assert "without reciting it" in with_page
     conn = FakeConnection([_tool_call("end_conversation"), None])
-    s, _, _ = _session(conn, [FakeAgent(None, None)], profile=page)
+    s, _, _ = _session(conn, [FakeAgent(None, None)], memory=FakeMemory(tmp_path, voice_profile=page))
     asyncio.run(s.run())
     started = [kw for name, kw in conn.sent if name == "session.start"]
     assert started and page in started[0]["session"]["instructions"]
+
+
+# ---- memory: capture, prompts, lookups ----------------------------------------------------------------
+#
+# memory.py is built beside this file; FakeMemory is its surface as voice_agent uses it, over a REAL
+# transcript store in a tmp folder, so every capture assertion reads what actually reached the disk.
+
+MEMORY_TOOL_NAMES = ["memory_search", "memory_read", "forget_preview", "forget_apply"]
+
+
+def _memory_schemas(voice: bool = False) -> list[dict]:
+    names = MEMORY_TOOL_NAMES + (["recent_conversation"] if voice else [])
+    return [{"type": "function", "name": n, "description": "d", "strict": True,
+             "parameters": {"type": "object", "properties": {}, "required": [], "additionalProperties": False}}
+            for n in names]
+
+
+class FakeMemory:
+    def __init__(self, tmp_path, profile: str = "", voice_profile: str = "", wall=None, handle=None) -> None:
+        self.transcripts = Transcripts(TranscriptConfig(enabled=True, root=tmp_path / "transcripts"), wall=wall)
+        assert self.transcripts.enabled
+        self._profile, self._voice = profile, voice_profile
+        self.starred: list[str] = []
+        self.calls: list[tuple] = []
+        self.handle = handle
+
+    def profile(self) -> str:
+        return self._profile
+
+    def profile_for_voice(self) -> str:
+        return self._voice
+
+    def today(self, max_chars: int, **kw) -> str:
+        return self.transcripts.today_block(max_chars, **kw)
+
+    def star(self, text: str):
+        self.starred.append(text)
+        return f"- {text} (2026-09-23)"
+
+    def tools(self, *, voice: bool = False) -> list[dict]:
+        return _memory_schemas(voice)
+
+    def handle_tool(self, name, args, *, since=None, channel=""):
+        self.calls.append((name, dict(args), since, channel))
+        if self.handle is not None:
+            return self.handle(name, args)
+        if name == "recent_conversation":
+            return {"ok": True, "lines": [render_line(ln) for ln in
+                                          self.transcripts.lines_since(since, exclude_ch=channel)]}
+        return {"ok": True, "hits": []}
+
+    def lines(self, conv: str) -> list[dict]:
+        return list(self.transcripts.conv_lines(conv)) if conv else []
+
+
+def _run_until_output(conn: FakeConnection, s: VoiceSession, n: int = 1) -> None:
+    async def go():
+        task = asyncio.create_task(s.run())
+        await _eventually(lambda: len(conn.tool_outputs()) >= n, timeout=5.0)
+        conn.feed(_tool_call("end_conversation", "c9"), None)
+        await task
+    asyncio.run(go())
+
+
+FRONT_TOOLS = ["lesson", "start_task", "steer_task", "stop_task", "task_status", "answer_question", "go_explore",
+               "end_conversation", "look", "move_head", "look_around", "find", "take_photo", "set_sound",
+               "think_hard"]
+
+
+def test_with_no_memory_both_prompts_are_byte_identical_to_a_memory_less_session(monkeypatch, tmp_path) -> None:
+    """The pin: memory off (or every block empty) gives the exact prompt of the build before memory."""
+    monkeypatch.setattr(system_context, "context", lambda: "\n\nCLOCK")
+    for out in ("captions", "audio"):
+        cfg = VoiceConfig(output=out)
+        caps = caption_instructions(PagerConfig(read_cps=cfg.caption_cps)) if out == "captions" else ""
+        got = session_config(cfg)
+        assert got["instructions"] == INSTRUCTIONS + "\n\nCLOCK" + caps
+        assert got["delegation"]["responses"]["instructions"] == BACKEND_INSTRUCTIONS + "\n\nCLOCK"
+        assert got["delegation"]["responses"]["tools"] == TOOLS + websearch.tools_for(cfg.search)
+        assert session_config(cfg, "", None, "", backend_profile=" ", today="", backend_today="\n",
+                              memory_tools=[]) == got
+        # the brief keeps its place, right after the clock
+        assert (session_config(cfg, "You last talked yesterday.")["instructions"]
+                == INSTRUCTIONS + "\n\nCLOCK" + memory_block("You last talked yesterday.") + caps)
+    # and a real session with no memory starts with exactly that, writing nothing anywhere
+    conn = FakeConnection([_tool_call("end_conversation"), None])
+    s, _, _ = _session(conn, [FakeAgent(None, None)])
+    s._close_turn("user", "hello there buddy")
+    asyncio.run(s.run())
+    started = [kw["session"] for name, kw in conn.sent if name == "session.start"]
+    assert started == [session_config(s.config)]
+    assert s.conv == "" and list(tmp_path.iterdir()) == []
+
+
+def test_the_live_front_tool_list_is_unchanged_and_the_front_has_no_memory_tools() -> None:
+    assert [t["name"] for t in TOOLS] == FRONT_TOOLS
+    cfg = session_config(VoiceConfig(output="audio"), memory_tools=_memory_schemas(True))
+    assert "tools" not in cfg                                   # the Live front itself calls nothing
+    back = cfg["delegation"]["responses"]["tools"]
+    assert back[:len(TOOLS)] == TOOLS and [t["name"] for t in back[-5:]] == MEMORY_TOOL_NAMES + ["recent_conversation"]
+
+
+def test_memory_blocks_go_before_the_clock_and_the_backend_gets_the_full_profile_today_and_rule(monkeypatch) -> None:
+    monkeypatch.setattr(system_context, "context", lambda: "\n\nCLOCK")
+    cfg = session_config(VoiceConfig(output="audio"), "BRIEF-LINE", None, "VOICE-PAGE", backend_profile="FULL-PAGE",
+                         today="10:00 (texted) Owner: TODAY-FRONT", backend_today="10:00 (texted) Owner: TODAY-BACK",
+                         memory_tools=_memory_schemas(True))
+    front = cfg["instructions"]
+    assert front.startswith(INSTRUCTIONS)
+    order = [front.index(x) for x in ("VOICE-PAGE", VOICE_TODAY_HEADER, "TODAY-FRONT", "CLOCK", "BRIEF-LINE")]
+    assert order == sorted(order)
+    assert "FULL-PAGE" not in front and "TODAY-BACK" not in front and "memory_search" not in front
+    back = cfg["delegation"]["responses"]["instructions"]
+    assert back.startswith(BACKEND_INSTRUCTIONS + BACKEND_MEMORY_RULES)
+    assert "memory tools first" in back
+    order = [back.index(x) for x in ("FULL-PAGE", "TODAY-BACK", "CLOCK")]
+    assert order == sorted(order)
+    assert "VOICE-PAGE" not in back and "TODAY-FRONT" not in back and "BRIEF-LINE" not in back
+    # the rule rides with the tools: no tools, no rule
+    assert "memory tools first" not in session_config(VoiceConfig(output="audio"), backend_profile="FULL-PAGE"
+                                                      )["delegation"]["responses"]["instructions"]
+
+
+def test_think_aloud_gets_no_memory_blocks_and_no_memory_tools() -> None:
+    kw = dict(backend_profile="FULL-PAGE", today="TODAY-FRONT", backend_today="TODAY-BACK",
+              memory_tools=_memory_schemas(True))
+    listening = session_config(VoiceConfig(output="audio"), "BRIEF-LINE", LESSON, "VOICE-PAGE", **kw)
+    plain = session_config(VoiceConfig(output="audio"), think_aloud=LESSON)
+    assert listening == plain
+    text = json.dumps(listening)
+    for word in ("BRIEF-LINE", "VOICE-PAGE", "FULL-PAGE", "TODAY-FRONT", "TODAY-BACK", "memory_search"):
+        assert word not in text
+    # positive control: the same blocks outside think out loud are there
+    assert "TODAY-BACK" in json.dumps(session_config(VoiceConfig(output="audio"), **kw))
+
+
+def test_a_session_with_memory_offers_the_memory_tools_and_logs_its_prompt_sizes(tmp_path, caplog) -> None:
+    caplog.set_level("INFO")
+    memory = FakeMemory(tmp_path, profile="FULL-PAGE", voice_profile="VOICE-PAGE")
+    conn = FakeConnection([_tool_call("end_conversation"), None])
+    s, _, _ = _session(conn, [FakeAgent(None, None)], memory=memory, today="TODAY-FRONT", backend_today="TODAY-BACK",
+                       brief="BRIEF-LINE")
+    asyncio.run(s.run())
+    started = [kw["session"] for name, kw in conn.sent if name == "session.start"][0]
+    names = [t.get("name") for t in started["delegation"]["responses"]["tools"]]
+    assert names[-5:] == MEMORY_TOOL_NAMES + ["recent_conversation"]
+    assert "VOICE-PAGE" in started["instructions"] and "TODAY-FRONT" in started["instructions"]
+    assert "FULL-PAGE" in started["delegation"]["responses"]["instructions"]
+    assert "TODAY-BACK" in started["delegation"]["responses"]["instructions"]
+    assert (f"voice: prompt front {len(started['instructions'])} chars, backend "
+            f"{len(started['delegation']['responses']['instructions'])} chars") in caplog.text
+    # control: no memory, no memory tools
+    conn = FakeConnection([_tool_call("end_conversation"), None])
+    s, _, _ = _session(conn, [FakeAgent(None, None)])
+    asyncio.run(s.run())
+    started = [kw["session"] for name, kw in conn.sent if name == "session.start"][0]
+    assert "memory_search" not in [t.get("name") for t in started["delegation"]["responses"]["tools"]]
+
+
+def test_closed_turns_are_written_as_say_lines_of_one_conversation(tmp_path) -> None:
+    memory = FakeMemory(tmp_path)
+    s, _, _ = _session(FakeConnection([]), [FakeAgent(None, None)], memory=memory)
+
+    async def go():
+        s._close_turn("user", "I moved the dentist to Thursday.")
+        s._close_turn("assistant", "Thursday it is.")
+    asyncio.run(go())
+    lines = memory.lines(s.conv)
+    assert [(ln["ch"], ln["who"], ln["kind"], ln["text"]) for ln in lines] == [
+        ("voice", "owner", "say", "I moved the dentist to Thursday."), ("voice", "buddy", "say", "Thursday it is.")]
+    assert s.conv.startswith("v-")
+    given, _, _ = _session(FakeConnection([]), [FakeAgent(None, None)], memory=memory, conv="v-1-abcd")
+    assert given.conv == "v-1-abcd"
+
+
+def test_a_think_aloud_session_writes_nothing_to_the_transcript(tmp_path) -> None:
+    memory = FakeMemory(tmp_path)
+    conn = FakeConnection([])
+    s, _, _, saved = _listening(conn, {"now": 0.0}, memory=memory)
+
+    async def go():
+        s._close_turn("user", "I think x is four")
+        s._close_turn("assistant", "What makes you say four?")
+        await asyncio.sleep(0.02)
+    asyncio.run(go())
+    assert saved and memory.lines(s.conv) == [] and memory.transcripts.days() == []
+
+
+def test_a_web_search_result_is_kept_as_one_clipped_tool_line_and_the_close_marker_follows(tmp_path,
+                                                                                         monkeypatch) -> None:
+    monkeypatch.setattr(websearch, "search", lambda q, cfg: {"ok": True, "answer": "A" * 3000})
+    memory = FakeMemory(tmp_path)
+    conn = FakeConnection([_tool_call(websearch.TOOL_NAME, "c1", query="the forecast")])
+    s, _, _ = _session(conn, [FakeAgent(None, None)], memory=memory)
+    _run_until_output(conn, s)
+    lines = memory.lines(s.conv)
+    tool = [ln for ln in lines if ln["kind"] == "tool"]
+    assert len(tool) == 1 and tool[0]["tool"] == websearch.TOOL_NAME and tool[0]["who"] == "buddy"
+    assert tool[0]["text"] == "A" * 1500
+    assert [ln["kind"] for ln in lines].count("close") == 1 and lines[-1]["kind"] == "close"
+    # a failed search is not an answer: nothing kept, and a conversation that kept nothing gets no marker
+    monkeypatch.setattr(websearch, "search", lambda q, cfg: {"ok": False, "reason": "the search timed out"})
+    memory = FakeMemory(tmp_path / "second")
+    conn = FakeConnection([_tool_call(websearch.TOOL_NAME, "c1", query="the forecast")])
+    s, _, _ = _session(conn, [FakeAgent(None, None)], memory=memory)
+    _run_until_output(conn, s)
+    assert memory.lines(s.conv) == []
+
+
+def test_a_finished_task_result_is_kept_as_a_tool_line(tmp_path) -> None:
+    memory = FakeMemory(tmp_path)
+    agent = FakeAgent(None, None, final="Mail is open.")
+    conn = FakeConnection([_tool_call("start_task", "c1", goal="open Mail")])
+    s, _, _ = _session(conn, [agent], memory=memory)
+
+    async def go():
+        task = asyncio.create_task(s.run())
+        await _eventually(lambda: bool(conn.tool_outputs()))
+        agent.release.set()
+        await _eventually(lambda: agent.final is not None)
+        await asyncio.sleep(0.02)
+        conn.feed(_tool_call("end_conversation", "c9"), None)
+        await task
+    asyncio.run(go())
+    tool = [ln for ln in memory.lines(s.conv) if ln["kind"] == "tool"]
+    assert [(ln["tool"], ln["text"]) for ln in tool] == [("start_task", "Mail is open.")]
+
+
+def test_a_hush_keeps_the_open_turn_and_writes_the_close_marker(tmp_path) -> None:
+    memory = FakeMemory(tmp_path)
+    conn = FakeConnection([])
+    s, _, _ = _session(conn, [FakeAgent(None, None)], memory=memory)
+
+    async def go():
+        task = asyncio.create_task(s.run())
+        await _eventually(lambda: s._started.is_set())
+        conn.feed(_heard("the blue one, not the red"))
+        await _eventually(lambda: bool(s._turns.text))
+        task.cancel()                                   # a touch on the robot
+        with pytest.raises(asyncio.CancelledError):
+            await task
+    asyncio.run(go())
+    assert [(ln["who"], ln["kind"], ln["text"]) for ln in memory.lines(s.conv)] == [
+        ("owner", "say", "the blue one, not the red"), ("system", "close", "")]
+
+
+def test_recent_conversation_returns_a_text_sent_after_the_session_opened(tmp_path) -> None:
+    """The cross-channel positive control: the Live instructions cannot change after session.start, so a
+    text sent mid-conversation reaches voice only through this tool."""
+    w = {"now": datetime(2026, 9, 23, 12, 0, 0, tzinfo=timezone.utc)}
+    memory = FakeMemory(tmp_path, wall=lambda: w["now"])
+    tg = memory.transcripts.new_conv("telegram")
+    assert memory.transcripts.append("telegram", tg, "owner", "say", "BEFORE-LINE")
+    w["now"] += timedelta(seconds=10)
+    conn = FakeConnection([])
+    s, _, _ = _session(conn, [FakeAgent(None, None)], memory=memory)
+
+    async def go():
+        task = asyncio.create_task(s.run())
+        await _eventually(lambda: s._started.is_set())
+        w["now"] += timedelta(seconds=10)
+        assert memory.transcripts.append("telegram", tg, "owner", "say", "AFTER-LINE")
+        conn.feed(_tool_call("recent_conversation", "c1"))
+        await _eventually(lambda: bool(conn.tool_outputs()))
+        conn.feed(_tool_call("end_conversation", "c9"), None)
+        await task
+    asyncio.run(go())
+    out = json.dumps(conn.tool_outputs()[0])
+    assert "AFTER-LINE" in out and "BEFORE-LINE" not in out
+    assert memory.calls == [("recent_conversation", {}, datetime(2026, 9, 23, 12, 0, 10, tzinfo=timezone.utc),
+                             "voice")]
+
+
+def test_a_slow_lookup_returns_the_timeout_line_in_about_2_5_s_while_the_loop_keeps_running(tmp_path) -> None:
+    release = threading.Event()
+
+    def stuck(name, args):
+        release.wait(5.0)                                # a lookup that would take 5 s
+        return {"ok": True, "hits": []}
+    memory = FakeMemory(tmp_path, handle=stuck)
+    s, _, _ = _session(FakeConnection([]), [FakeAgent(None, None)], memory=memory)
+
+    async def go():
+        ticks = 0
+
+        async def ticker():
+            nonlocal ticks
+            while True:
+                await asyncio.sleep(0.05)
+                ticks += 1
+        other = asyncio.create_task(ticker())
+        t0 = time.monotonic()
+        out = await s._memory_tool("memory_search", {"query": "dentist"})
+        took = time.monotonic() - t0
+        other.cancel()
+        release.set()
+        return out, took, ticks
+    out, took, ticks = asyncio.run(go())
+    assert out == {"ok": False, "reason": MEMORY_TIMEOUT_LINE}
+    assert 2.3 <= took < 3.5
+    assert ticks >= 30                                   # the other coroutine ran all along
+
+
+def test_memory_results_are_clipped_to_valid_json_and_the_log_has_no_query(tmp_path, caplog) -> None:
+    caplog.set_level("INFO")
+    memory = FakeMemory(tmp_path, handle=lambda name, args: {
+        "ok": True, "hits": [{"text": "word " * 40, "day": "2026-09-20"} for _ in range(50)]})
+    conn = FakeConnection([_tool_call("memory_search", "c1", query="secret-query")])
+    s, _, _ = _session(conn, [FakeAgent(None, None)], memory=memory)
+    _run_until_output(conn, s)
+    raw = [kw["item"]["output"] for k, kw in conn.sent
+           if k == "response.item.create" and kw["item"]["type"] == "function_call_output"][0]
+    assert len(raw) <= 1500 and json.loads(raw)["clipped"] is True and json.loads(raw)["ok"] is True
+    assert memory.calls[0][:2] == ("memory_search", {"query": "secret-query"}) and memory.calls[0][3] == "voice"
+    assert "voice: memory_search → ok=True hits=50 in" in caplog.text
+    assert "secret-query" not in caplog.text
+    tool = [ln for ln in memory.lines(s.conv) if ln["kind"] == "tool"]
+    assert len(tool) == 1 and tool[0]["tool"] == "memory_search" and len(tool[0]["text"]) <= 1500
+    # a small result goes through untouched
+    memory = FakeMemory(tmp_path / "small")
+    conn = FakeConnection([_tool_call("memory_search", "c1", query="q")])
+    s, _, _ = _session(conn, [FakeAgent(None, None)], memory=memory)
+    _run_until_output(conn, s)
+    assert conn.tool_outputs()[0] == {"ok": True, "hits": []}
+
+
+def test_memory_tools_are_refused_once_think_aloud_begins(tmp_path) -> None:
+    memory = FakeMemory(tmp_path)
+    conn = FakeConnection([])
+    s, _, _ = _session(conn, [FakeAgent(None, None)], memory=memory)
+    s._memory_tools()
+    s._think_aloud = LESSON
+    asyncio.run(s._tool("memory_search", "c1", '{"query": "q"}'))
+    assert conn.tool_outputs()[0]["ok"] is False and memory.calls == []
+
+
+def test_think_hard_passes_the_profile_and_today_as_context(tmp_path) -> None:
+    memory = FakeMemory(tmp_path, profile="PROFILE-PAGE")
+    tg = memory.transcripts.new_conv("telegram")
+    memory.transcripts.append("telegram", tg, "owner", "say", "TODAY-TEXT")
+    seen: dict = {}
+
+    async def thinker(question: str, context: str = "") -> dict:
+        seen.update(question=question, context=context)
+        return {"ok": True, "answer": "Pasta."}
+    s, _, _ = _session(FakeConnection([]), [FakeAgent(None, None)], thinker=thinker, memory=memory)
+    assert asyncio.run(s._think_hard("what should I cook?")) == {"ok": True, "answer": "Pasta."}
+    assert seen["question"] == "what should I cook?"
+    assert "PROFILE-PAGE" in seen["context"] and "TODAY-TEXT" in seen["context"]
+
+
+def test_remember_that_stars_the_owners_last_turn_through_memory(tmp_path) -> None:
+    memory = FakeMemory(tmp_path)
+    conn = FakeConnection([])
+    s, _, _ = _session(conn, [FakeAgent(None, None)], memory=memory)
+
+    async def go():
+        s._close_turn("user", "My sister's birthday is in May.")
+        s._close_turn("assistant", "Lovely, May it is then.")
+        s._close_turn("user", "remember that")
+        await _eventually(lambda: any("written that down" in t for t in _thinking(conn)))
+    asyncio.run(go())
+    assert memory.starred == ["My sister's birthday is in May."]
+
+
+def test_remember_that_never_stars_buddys_own_words(tmp_path, caplog) -> None:
+    caplog.set_level("INFO")
+    memory = FakeMemory(tmp_path)
+    conn = FakeConnection([])
+    s, _, _ = _session(conn, [FakeAgent(None, None)], memory=memory)
+
+    async def go():
+        s._close_turn("assistant", "Octopuses have three hearts, you know.")
+        s._close_turn("user", "remember that")
+        await _eventually(lambda: any("said nothing before it" in t for t in _thinking(conn)))
+    asyncio.run(go())
+    assert memory.starred == []
+    # no memory lent: nothing to star with, and nothing breaks
+    s, _, _ = _session(FakeConnection([]), [FakeAgent(None, None)])
+
+    async def bare():
+        s._close_turn("user", "My sister's birthday is in May.")
+        s._close_turn("user", "remember that")
+        await asyncio.sleep(0.02)
+    asyncio.run(bare())
+    assert "starred" not in caplog.text
