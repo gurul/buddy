@@ -251,7 +251,11 @@ own profile.
   on Telegram: *"buddy wants to control your Chrome… Allow it? yes / no"*.
   - A clear yes (`consent.py`, fail-closed) makes buddy press **Allow**,
     using Accessibility's AXPress; Chrome's web-UI buttons ignore a
-    synthetic click.
+    synthetic click. A press only counts once the dialog has gone: Chrome
+    ignores a press in the dialog's first moments while still reporting it
+    done (measured 2026-09-24: 9 of 10 first presses did nothing, every
+    second press 0.5 s later landed), so buddy presses, waits half a second,
+    checks, and presses again — up to five times.
   - A no, anything unclear, silence for 3 minutes, or Telegram being off
     makes it press **Cancel**. The task then goes to Codex, which drives your
     Chrome without this prompt.
@@ -264,8 +268,8 @@ own profile.
   your standing yes: buddy presses **Allow** on its own the moment the
   dialog shows, with no text. It still acts only on the dialog raised by its
   own connection, and only on Chrome's own "Allow remote debugging?". If the
-  button can't be pressed, it never presses Cancel; Chrome's own 2-minute
-  wait runs out and Codex takes the task. The daemon logs every outcome as
+  dialog is still up after five presses, it never presses Cancel; Chrome's
+  own 2-minute wait runs out and Codex takes the task. The daemon logs every outcome as
   `chrome-consent: <outcome>` (for example `auto_allowed` or `no_dialog`), and
   logs the mode at startup on the `chrome lane: on` line.
 - **Which profile.** buddy identifies each open Chrome profile by its

@@ -33,7 +33,11 @@ log = logging.getLogger(__name__)
 DIALOG_TEXT = "Allow remote debugging?"
 APPEAR_SECS = 10.0            # how long after buddy starts connecting the dialog may take to show
 POLL_SECS = 0.3
-AUTO_PRESS_TRIES = 5          # on the standing yes: tries at pressing Allow, POLL_SECS apart
+PRESS_TRIES = 5               # presses of one button, SETTLE_SECS apart, until the dialog is gone
+SETTLE_SECS = 0.5             # after a press: Chrome's dialog ignores an AXPress in its first moments and still
+                              # reports the press as done. Measured 2026-09-24 (Chrome, 10 fresh dialogs): a press
+                              # ~0.25 s after the heading appeared did nothing 9 times of 10; a second press
+                              # 0.5 s later dismissed it 5 of 5. So "pressed" is never believed — only "gone".
 ASK_TIMEOUT_SECS = 100.0      # the owner's time to answer: inside browser_lane.CONSENT_TIMEOUT_MS (120 s), so a
                               # late yes never lands after the connection has given up
 GONE_LINE = "Chrome's question was answered at the Mac, so you don't need to reply."
@@ -146,11 +150,12 @@ class ConsentBroker:
                  showing: Callable[[], Awaitable[bool]] = dialog_showing,
                  pressing: Callable[[str], Awaitable[bool]] = press,
                  appear_secs: float = APPEAR_SECS, ask_timeout_secs: float = ASK_TIMEOUT_SECS,
-                 poll_secs: float = POLL_SECS, auto_allow: bool = False) -> None:
+                 poll_secs: float = POLL_SECS, settle_secs: float = SETTLE_SECS, auto_allow: bool = False) -> None:
         self._ask, self._showing, self._pressing = ask_owner, showing, pressing
         self._auto_allow = auto_allow
         self._tell = tell_owner
         self._appear, self._ask_timeout, self._poll = appear_secs, ask_timeout_secs, poll_secs
+        self._settle = settle_secs
         self.last: str = ""                      # what happened last: allowed | declined | no_dialog | …
 
     async def answer_own_connection(self) -> str:
@@ -170,15 +175,10 @@ class ConsentBroker:
                 return self.last
             await asyncio.sleep(self._poll)
         if self._auto_allow:
-            for _ in range(AUTO_PRESS_TRIES):            # the button can lag the heading by a frame
-                if await self._pressing("Allow"):
-                    return "auto_allowed"
-                if not await self._showing():
-                    return "dialog_gone"
-                await asyncio.sleep(self._poll)
-            return "press_failed"
+            outcome = await self._press_home("Allow")
+            return "auto_allowed" if outcome == "pressed" else outcome
         if self._ask is None:
-            await self._pressing("Cancel")
+            await self._press_home("Cancel")
             self.last = "no_way_to_ask"
             return self.last
         asking = asyncio.ensure_future(self._ask(QUESTION))
@@ -202,22 +202,30 @@ class ConsentBroker:
             if not asking.done():
                 asking.cancel()
                 await asyncio.gather(asking, return_exceptions=True)
-            await self._pressing("Cancel")
+            await self._press_home("Cancel")
             self.last = "unanswered"
             return self.last
         if consent.approves(reply):
-            ok = await self._pressing("Allow")
-            if ok:
-                self.last = "allowed"
-            elif await self._showing():
+            outcome = await self._press_home("Allow")
+            if outcome == "press_failed":
                 await self._say(PRESS_FAILED_LINE)           # still up and we could not press it: say why
-                self.last = "press_failed"
-            else:
-                self.last = "dialog_gone"
+            self.last = "allowed" if outcome == "pressed" else outcome
         else:
-            await self._pressing("Cancel")
+            await self._press_home("Cancel")
             self.last = "declined"
         return self.last
+
+    async def _press_home(self, label: str) -> str:
+        """Press ``label`` until the dialog is gone. ``pressed``: gone after a press of ours; ``dialog_gone``:
+        gone though no press landed (answered at the Mac, or the connection gave up); ``press_failed``: still
+        up after PRESS_TRIES. A press is only counted once the dialog has gone (see SETTLE_SECS): the daemon
+        logged ``auto_allowed`` at 15:16 on 2026-09-24 while the dialog stayed on screen for the owner to click."""
+        for _ in range(PRESS_TRIES):
+            pressed = await self._pressing(label)
+            await asyncio.sleep(self._settle)
+            if not await self._showing():
+                return "pressed" if pressed else "dialog_gone"
+        return "press_failed"
 
     async def _say(self, text: str) -> None:
         if self._tell is not None:
