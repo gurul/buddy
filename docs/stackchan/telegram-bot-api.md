@@ -520,6 +520,8 @@ What the relay does now (`telegram.py` and `daemon.py`):
    The 👍 means "typed", not "Claude is on it" or "Claude is done".
    *Fixed 2026-09-23:* "typing…" is repeated from the typed line until Claude
    answers, asks, waits or ends its turn.
+   *Then 2026-09-23:* a "Thinking…" draft replaces it for the whole turn,
+   shown again after each of Claude's messages.
 9. **Picker names can collide.** Two sessions in different folders with the
    same name show the same button, and `names.index` picks the first.
 10. **Codex progress is one message per event** ("Codex progress"), which can
@@ -604,7 +606,7 @@ the Mac. Once that exists, each later button costs little.
 | 6 | Repeated `typing` for relay turns, buddy turns and think_hard | relay, chat | medium | low |
 | 7 | Reactions as receipts (✍ vault, 🏆 star, 👀 image, 👀→👍 relay) | chat, relay | medium | low |
 | 8 | Stop button on a running task | tasks | high | low after 3 |
-| 9 | Stream Claude's replies with `sendMessageDraft` | relay | high | medium |
+| 9 | "Thinking…" draft for relayed Claude turns (`sendMessageDraft`) | relay | medium | medium |
 | 10 | Task progress in one edited message, result as a reply | tasks, Codex | high | medium |
 | 11 | Inline pickers: claude on, new claude, codex folders, files | relay, Codex | medium | medium |
 | 12 | Pinned status message | all | medium | medium |
@@ -616,6 +618,19 @@ the Mac. Once that exists, each later button costs little.
 | 18 | Robot D-pad remote camera | robot | medium (fun) | medium |
 | 19 | One topic per session | relay | medium | high |
 | 20 | Mini App dashboard | all | high | high |
+
+Proposal 9, as built (owner, 2026-09-23). Only the empty "Thinking…"
+placeholder is drafted, never Claude's words. The transcript tailer hands over
+whole text blocks, not tokens, so there is nothing to stream inside a block.
+Each block already goes as a real message within 1.2 s, and a draft vanishes
+when the bot sends a message, so drafting a block first would only show it
+twice. A draft that no `sendMessage` followed would also lose the words. What a
+draft does add is a bubble that lasts the whole turn: it is sent every 20 s
+(a draft lives 30 s) and again after each relayed message, and it ends at the
+Stop hook, a question, a wait or `claude off`. There is no `can_stop` button:
+stopping a Claude turn would need an Esc keystroke into the frontmost window
+(weakness 1). The first refusal turns drafts off for the process and the
+relay's "typing…" takes over. `CC_BUDDY_TELEGRAM_DRAFTS=0` turns it off.
 
 Typing into the frontmost window (weakness 1) is not on this list. It is a Mac
 problem, not a Telegram one, but it is the most serious weakness in the relay.
@@ -632,7 +647,9 @@ problem, not a Telegram one, but it is the most serious weakness in the relay.
    mistaken for a chat message and are taken away once used. A tap feeds the
    same code path as typing the button's words.
 4. **`sendMessageDraft`** for relayed Claude output and think_hard, with a
-   repeated `typing` action between drafts.
+   repeated `typing` action between drafts. *Done 2026-09-23 for the relay,
+   as a "Thinking…" placeholder only* (see section 9). think_hard keeps
+   "typing…".
 5. **Task progress in one edited message**, with a Stop button. *Done
    2026-09-23.* The result is a new message replying to the request, and a
    task's free question uses ForceReply.

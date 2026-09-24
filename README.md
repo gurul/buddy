@@ -66,8 +66,8 @@ The [Telegram door](docs/stackchan/telegram.md) is **off by default**. With it o
   (work) in a folder you pick, with tap buttons. **`claude on`** relays a running
   session to the phone: it picks the only one, offers buttons when there are
   several, and opens a new one when there are none. Sessions whose terminal
-  has closed are left out. A 👍 on your text means it was typed, and
-  "typing…" shows until Claude answers. Permission prompts have **Allow** and
+  has closed are left out. A 👍 on your text means it was typed, and a
+  "Thinking…" bubble shows while Claude works, until its turn ends. Permission prompts have **Allow** and
   **Deny** buttons, and Claude's questions have a button per option. Other text
   you type while a prompt waits still goes to Claude. This holds for app
   consents and Codex approvals too: only a tap or a plain answer ("yes", "no",

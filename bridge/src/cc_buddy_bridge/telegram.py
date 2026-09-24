@@ -173,6 +173,23 @@ TYPING_EVERY_SECS = 4.0
 TYPING_TURN_SECS = 120.0             # a buddy text turn: most answer in seconds, a tool round in tens of seconds
 TYPING_THINK_SECS = 300.0            # think_hard: the slow brain may take its whole timeout (think.py caps it at 300)
 TYPING_RELAY_SECS = 300.0            # a relayed line, until Claude says something, asks, waits or ends its turn
+# A "Thinking…" bubble while Claude works on a relayed line (owner, 2026-09-23; proposal 9 in
+# docs/stackchan/telegram-bot-api.md). sendMessageDraft with an empty text shows Telegram's own "Thinking…"
+# placeholder in the chat itself, not only "typing…" under the bot's name. It is private chats only (the
+# owner's chat is one) and a draft lives 30 s, so it is sent again every DRAFT_REFRESH_SECS; any message the
+# bot sends clears it, so it is shown again after each relayed message while the turn goes on. It replaces the
+# relay's "typing…": the turn keeps its bubble between Claude's messages, where "typing…" stopped at the first.
+#
+# Only the empty placeholder is drafted, never Claude's words. The transcript tailer hands over whole text
+# blocks, not tokens, and each block is sent as a real message within RELAY_BATCH_SECS; streaming a block into
+# a draft first would only show it twice, and a draft that the final send never followed would lose it. So
+# no text ever lives only in a draft. No Stop button (can_stop) either: stopping a Claude turn would mean an
+# Esc keystroke into whatever window is frontmost (relay weakness 1).
+#
+# Fail-soft: the first draft Telegram refuses turns drafts off for the rest of the process, and the relay's
+# "typing…" (TYPING_RELAY_SECS) takes over for the time left. CC_BUDDY_TELEGRAM_DRAFTS=0 keeps "typing…".
+DRAFTS_DEFAULT = True
+DRAFT_REFRESH_SECS = 20.0            # a draft is "a temporary 30-second preview": sent again well inside that
 # Task progress in one message (owner, 2026-09-23; proposal 10 in docs/stackchan/telegram-bot-api.md). A
 # computer task started from the chat, and each Codex relay turn, gets ONE progress message with a Stop button
 # under it. Each step edits that message in place (editMessageText) instead of sending one more: a busy task
@@ -433,6 +450,7 @@ class TelegramConfig:
     ask_timeout_secs: float = DEFAULT_ASK_TIMEOUT_SECS
     idle_close_secs: float = DEFAULT_IDLE_CLOSE_SECS
     ask_permissions: bool = False          # the phone asks about Claude Code's tool calls: off (owner, 2026-09-21)
+    drafts: bool = DRAFTS_DEFAULT          # "Thinking…" (sendMessageDraft) while a relayed Claude turn works
     search: websearch.SearchConfig = field(default_factory=websearch.SearchConfig)   # Exa via OpenRouter, or hosted
 
     def __repr__(self) -> str:       # a config can end up in a log line or a traceback: never the token
@@ -469,13 +487,15 @@ def configured(environ: Any = None) -> TelegramConfig:
                     effort, DEFAULT_EFFORT)
         effort = DEFAULT_EFFORT
     ask = (env.get("CC_BUDDY_TELEGRAM_ASK") or "0").strip().lower() in ("1", "true", "yes", "on")
+    drafts = (env.get("CC_BUDDY_TELEGRAM_DRAFTS") or ("1" if DRAFTS_DEFAULT else "0")).strip().lower() in (
+        "1", "true", "yes", "on")
     enabled = wanted and bool(token) and bool(owners)
     if wanted and not enabled:
         missing = [name for name, have in (("CC_BUDDY_TELEGRAM_TOKEN", token),
                                            ("CC_BUDDY_TELEGRAM_OWNER", owners)) if not have]
         log.warning("telegram: asked for (CC_BUDDY_TELEGRAM=1) but off: %s not set", " and ".join(missing))
     return TelegramConfig(enabled=enabled, token=token, owner_ids=owners, model=model, effort=effort,
-                          ask_permissions=ask, search=websearch.configured(env))
+                          ask_permissions=ask, drafts=drafts, search=websearch.configured(env))
 
 
 # ---- who may speak ----------------------------------------------------------------------------
@@ -993,6 +1013,16 @@ class BotApi:
         inlet repeats it while work goes on (TelegramInlet._keep_typing)."""
         await self._call("sendChatAction", {"chat_id": chat_id, "action": "typing"})
 
+    async def send_draft(self, chat_id: int, draft_id: int, text: str = "") -> None:
+        """A draft in a private chat (sendMessageDraft): an empty ``text`` shows Telegram's "Thinking…"
+        placeholder. ``draft_id`` is non-zero; the same id animates a change, a new one replaces the draft.
+        A draft is not a message: it lasts 30 s, and the bot's next message clears it. The inlet sends only
+        the empty placeholder (TelegramInlet._start_thinking)."""
+        data: dict[str, Any] = {"chat_id": chat_id, "draft_id": draft_id}
+        if text:
+            data["text"] = text
+        await self._call("sendMessageDraft", data)
+
     async def set_commands(self, commands: Sequence[tuple[str, str]], chat_id: int) -> None:
         """The / menu for one chat only (setMyCommands with a BotCommandScopeChat scope): the owner's
         private chat shows buddy's code words, and no other chat's menu changes."""
@@ -1230,6 +1260,13 @@ class TelegramInlet:
         # ticks each reason is worth. One loop per chat sends it while any reason is left (_typing_loop).
         self._typing: dict[int, dict[str, int]] = {}
         self._typing_tasks: dict[int, asyncio.Task] = {}
+        # "Thinking…" while a relayed Claude turn works (_start_thinking): one draft loop at most, how many more
+        # refreshes it is worth, and its draft id (a new one per turn, so a turn's bubble never animates from the
+        # last one's). ``_drafts_ok`` goes False for good at the first refusal; the relay then uses "typing…".
+        self._drafts_ok = config.drafts
+        self._draft_task: Optional[asyncio.Task] = None
+        self._draft_ticks = 0
+        self._draft_id = 0
 
     # -- the loop --
     @property
@@ -1288,6 +1325,7 @@ class TelegramInlet:
                     pass
         for job in list(self._jobs):
             job.cancel()
+        self._stop_thinking(None)
         typing = list(self._typing_tasks.values())
         self._typing.clear()
         self._typing_tasks.clear()
@@ -1365,6 +1403,63 @@ class TelegramInlet:
         finally:
             if self._typing_tasks.get(chat_id) is asyncio.current_task():
                 del self._typing_tasks[chat_id]
+
+    # -- "Thinking…" while a relayed Claude turn works --
+    def _start_thinking(self, chat_id: Optional[int]) -> None:
+        """A line went into Claude's terminal: show the "Thinking…" draft until Claude asks, waits on the
+        owner or ends its turn (``_stop_thinking``), for TYPING_RELAY_SECS at most. With drafts off, or once
+        Telegram has refused one, this is the relay's "typing…" exactly as before."""
+        if chat_id is None:
+            return
+        if not self._drafts_ok:
+            self._keep_typing(chat_id, "relay", TYPING_RELAY_SECS)
+            return
+        self._draft_ticks = max(1, math.ceil(TYPING_RELAY_SECS / DRAFT_REFRESH_SECS))
+        if self._draft_task is None or self._draft_task.done():
+            self._draft_id += 1                            # non-zero, and new for each turn
+            # Not one of self._jobs, as the typing loop is not: only a sign that work is going on.
+            self._draft_task = asyncio.ensure_future(self._draft_loop(chat_id, self._draft_id))
+
+    def _stop_thinking(self, chat_id: Optional[int]) -> None:
+        """The turn is not working any more (it asks, waits, ended, or the relay went off): no bubble is sent
+        again. One already on the screen goes when the next message arrives, or by itself within 30 s."""
+        self._stop_typing(chat_id, "relay")
+        self._draft_ticks = 0
+        task, self._draft_task = self._draft_task, None
+        if task is not None and task is not asyncio.current_task():
+            task.cancel()
+
+    @property
+    def _thinking(self) -> bool:
+        return self._draft_task is not None and not self._draft_task.done() and self._draft_ticks > 0
+
+    async def _draft_loop(self, chat_id: int, draft_id: int) -> None:
+        try:
+            while self._draft_ticks > 0 and self._drafts_ok:
+                if not await self._show_draft(chat_id, draft_id):
+                    return
+                self._draft_ticks -= 1
+                await self._sleep(DRAFT_REFRESH_SECS)
+        finally:
+            if self._draft_task is asyncio.current_task():
+                self._draft_task = None
+
+    async def _show_draft(self, chat_id: int, draft_id: int) -> bool:
+        """One "Thinking…" placeholder → False when Telegram refused it. A refusal turns drafts off for the
+        process and hands the time left to the relay's "typing…", so the owner still sees work going on."""
+        try:
+            await self.api.send_draft(chat_id, draft_id, "")
+            return True
+        except asyncio.CancelledError:
+            raise
+        except Exception as e:  # noqa: BLE001 — a missing bubble is cosmetic; "typing…" takes over
+            log.warning("telegram: could not show a draft (%s); \"typing…\" from now on",
+                        e if isinstance(e, BotApiError) else type(e).__name__)
+            self._drafts_ok = False
+            left, self._draft_ticks = self._draft_ticks, 0
+            if left > 0:
+                self._keep_typing(chat_id, "relay", left * DRAFT_REFRESH_SECS)
+            return False
 
     def _spawn(self, coro: Awaitable[None], name: str) -> asyncio.Task:
         task = asyncio.ensure_future(coro)
@@ -1469,7 +1564,7 @@ class TelegramInlet:
                 if action != "off":
                     self._defer_permission()
                     self.claude, self._relay_pin, self._join_after_launch = False, "", False
-                    self._stop_typing(inbound.chat_id, "relay")
+                    self._stop_thinking(inbound.chat_id)
                     self._relay_lines.clear()
                     if self._relay_flush is not None:
                         self._relay_flush.cancel()
@@ -1497,7 +1592,7 @@ class TelegramInlet:
                 self._retire_options()
                 self._defer_permission()
                 self.claude, self._relay_pin, self._join_after_launch = False, "", False
-                self._stop_typing(inbound.chat_id, "relay")
+                self._stop_thinking(inbound.chat_id)
                 log.info("telegram: claude relay off")
                 self._spawn(self._say(inbound.chat_id, CLAUDE_OFF_LINE), "telegram-say")
                 return
@@ -2169,7 +2264,7 @@ class TelegramInlet:
             await self._say(chat_id, said)
             return False
         if tapped:
-            self._keep_typing(chat_id, "relay", TYPING_RELAY_SECS)
+            self._start_thinking(chat_id)
             return True
         # It went in: a reaction on the owner's own message says so (owner, 2026-09-23), not a line.
         try:
@@ -2179,9 +2274,10 @@ class TelegramInlet:
         except (BotApiError, AttributeError) as e:
             log.warning("telegram: could not react (%s); said it instead", e)
             await self._say(chat_id, "Typed.")
-        # Claude is on it: "typing…" until it says something, asks, waits on the owner or ends its turn
-        # (relay_text, relay_tool_call, relay_notification, decide_permission, relay_turn_ended), or the cap.
-        self._keep_typing(chat_id, "relay", TYPING_RELAY_SECS)
+        # Claude is on it: "Thinking…" until it asks, waits on the owner or ends its turn (relay_tool_call,
+        # relay_notification, decide_permission, relay_turn_ended), or the cap; with drafts off, "typing…" until
+        # it also says something (relay_text).
+        self._start_thinking(chat_id)
         return True
 
     def relay_line(self, body: str, title: str = CLAUDE_TITLE, subtitle: str = "",
@@ -2216,6 +2312,10 @@ class TelegramInlet:
                 continue
             if not options:
                 await self._say(self._chat_id, "\n\n".join(bodies), title=title, subtitle=subtitle or None)
+                if self._thinking and self._chat_id is not None:
+                    # The message just cleared the "Thinking…" draft, and Claude is still at work: show it
+                    # again now, not at the next refresh.
+                    await self._show_draft(self._chat_id, self._draft_id)
                 continue
             self._retire_options()
             board = _Keyboard(self._chat_id, TYPE, list(options), valid=lambda: self.claude)
@@ -2227,7 +2327,7 @@ class TelegramInlet:
         """A tool call the daemon saw. Only a question for the owner (AskUserQuestion) reaches the phone:
         the terminal's gray lines, the call itself and its result tail, stay on the Mac (owner, 2026-09-21)."""
         if tool == "AskUserQuestion":
-            self._stop_typing(self._chat_id, "relay")
+            self._stop_thinking(self._chat_id)
             body = " ".join(str(hint).split()) or "(see the terminal)"
             # One question's options become buttons; a tap types the option's number, as the reply does.
             options = [Choice(f"{n}. {label}", str(n)) for n, label in question_options(body)]
@@ -2248,7 +2348,12 @@ class TelegramInlet:
             self._relay_cwd = cwd
         body = str(text).strip()
         if body:
-            self._stop_typing(self._chat_id, "relay")      # Claude's next words are the sign it answered
+            # Claude's next words: with "typing…" they are the sign it answered, so it stops. The "Thinking…"
+            # draft stays for the rest of the turn (Claude says a line, then keeps working), and its cap starts
+            # again: a turn is capped from Claude's last words, not from the owner's line.
+            self._stop_typing(self._chat_id, "relay")
+            if self._thinking:
+                self._draft_ticks = max(1, math.ceil(TYPING_RELAY_SECS / DRAFT_REFRESH_SECS))
         if len(body) > MAX_RELAY_CHARS:
             # Cut on a paragraph, else a line, else a space near the cap, and say the rest is on the Mac.
             window = body[:MAX_RELAY_CHARS]
@@ -2259,17 +2364,17 @@ class TelegramInlet:
             self.relay_line(body, subtitle=Path(self._relay_cwd).name if self._relay_cwd else "")
 
     def relay_turn_ended(self, cwd: str = "") -> None:
-        """Claude Code's Stop hook: a turn ended. For the joined session, "typing…" stops now, even when the
-        turn ended without a word for the phone. Another session's end changes nothing here."""
+        """Claude Code's Stop hook: a turn ended. For the joined session, "Thinking…" (or "typing…") stops
+        now, even when the turn ended without a word for the phone. Another session's end changes nothing."""
         if cwd and self._relay_pin and not _same_folder(cwd, self._relay_pin):
             return
-        self._stop_typing(self._chat_id, "relay")
+        self._stop_thinking(self._chat_id)
         self._retire_options()                             # the turn is over: its question was answered
 
     async def relay_notification(self, kind: str, message: str, waits: bool) -> None:
         if not self.claude or self._chat_id is None or not waits:
             return
-        self._stop_typing(self._chat_id, "relay")          # waiting on the owner is not working
+        self._stop_thinking(self._chat_id)          # waiting on the owner is not working
         if self._clock() - self._last_ask_at < ASKED_RECENTLY_SECS:
             return                                        # the question itself was just sent: no vague echo
         await self._say(self._chat_id, message.strip(), title=CLAUDE_WAITS_TITLE)
@@ -2290,7 +2395,7 @@ class TelegramInlet:
             return None                                   # one question at a time; this one defers
         if cwd:
             self._relay_cwd = cwd
-        self._stop_typing(self._chat_id, "relay")          # asking is not working
+        self._stop_thinking(self._chat_id)          # asking is not working
         # The command as code, so nothing in it is read as markup; the repo under the title.
         command = "```\n" + hint.strip()[:300] + "\n```"
         question = command + "\n\nyes / no?"

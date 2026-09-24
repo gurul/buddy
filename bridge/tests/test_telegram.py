@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import math
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any, Optional
@@ -41,6 +42,7 @@ STRANGER = 666
 NOW = 1_800_000_000.0
 TOKEN = "123456:AAsecretTOKENvalue"
 CFG = TelegramConfig(enabled=True, token=TOKEN, owner_ids=frozenset({OWNER}))
+NO_DRAFTS = TelegramConfig(enabled=True, token=TOKEN, owner_ids=frozenset({OWNER}), drafts=False)
 
 
 # ---- fakes ------------------------------------------------------------------------------------
@@ -102,6 +104,8 @@ class FakeApi:
         self.edit_keyboards: list[tuple[int, Any]] = []                        # (message id, rows or None) per edit
         self.fail_edits: Optional[BotApiError] = None                          # editMessageText refused with this
         self.refuse_links = False                                              # reply_to / force_reply refused (400)
+        self.drafts: list[tuple[int, int, str]] = []                           # sendMessageDraft (chat, draft id, text)
+        self.fail_drafts: Optional[BotApiError] = None                         # sendMessageDraft refused with this
 
     def feed(self, *updates: dict[str, Any]) -> None:
         """A message that arrives later, while the poll is being held open."""
@@ -176,6 +180,12 @@ class FakeApi:
 
     async def set_commands(self, commands: Any, chat_id: int) -> None:
         self.commands.append((tuple(commands), chat_id))
+
+    async def send_draft(self, chat_id: int, draft_id: int, text: str = "") -> None:
+        if self.fail_drafts is not None:
+            raise self.fail_drafts
+        self.drafts.append((chat_id, draft_id, text))
+        self.order.append("draft")
 
 
 class FakeCreate:
@@ -2051,11 +2061,12 @@ def test_think_hard_keeps_its_own_typing_and_a_question_pauses_it() -> None:
 
 
 def test_a_relayed_line_types_until_claude_answers_asks_or_ends_its_turn() -> None:
+    """With drafts off (CC_BUDDY_TELEGRAM_DRAFTS=0), the relay shows "typing…" exactly as before drafts."""
     async def terminal(cwd: str, text: str) -> str:
         return ""
 
     api = FakeApi([update("claude on", update_id=1)])
-    rig = Rig(api, FakeCreate(), terminal=terminal, claude_sessions=lambda: ["/Users/g/repo"])
+    rig = Rig(api, FakeCreate(), NO_DRAFTS, terminal=terminal, claude_sessions=lambda: ["/Users/g/repo"])
 
     def typing() -> bool:
         return "relay" in rig.inlet._typing.get(OWNER, {})
@@ -2089,6 +2100,155 @@ def test_a_relayed_line_types_until_claude_answers_asks_or_ends_its_turn() -> No
         api.feed(update("claude off", update_id=7))
         await settle(20)
         assert not typing() and OWNER not in inlet._typing_tasks
+
+    run_rig(rig, during)
+
+
+# ---- "Thinking…" drafts while a relayed Claude turn works ---------------------------------------
+
+def _relay_rig(api: FakeApi, config: TelegramConfig = CFG, *, refresh: bool = False) -> Rig:
+    """The relay joined to one session. The fake sleep is instant, so a draft's 20 s refresh wait is held
+    open (a turn stays "Thinking…" while the test looks at it) unless ``refresh`` lets it run through."""
+    async def terminal(cwd: str, text: str) -> str:
+        return ""
+
+    async def sleep(secs: float) -> None:
+        if secs == telegram.DRAFT_REFRESH_SECS and not refresh:
+            await asyncio.Event().wait()                                  # until the loop is cancelled
+        await asyncio.sleep(0)
+
+    return Rig(api, FakeCreate(), config, terminal=terminal, claude_sessions=lambda: ["/Users/g/repo"],
+               sleep=sleep)
+
+
+def test_the_drafts_ship_on_and_the_switch_turns_them_off() -> None:
+    assert telegram.DRAFTS_DEFAULT is True and TelegramConfig().drafts is True
+    assert configured({}).drafts is True
+    assert configured({"CC_BUDDY_TELEGRAM_DRAFTS": "0"}).drafts is False
+    assert configured({"CC_BUDDY_TELEGRAM_DRAFTS": "off"}).drafts is False
+    assert telegram.DRAFT_REFRESH_SECS < 30                              # a draft is a 30-second preview
+
+
+def test_the_draft_request_is_an_empty_placeholder_with_a_draft_id() -> None:
+    async def go() -> list[tuple[str, dict[str, Any]]]:
+        calls: list[tuple[str, dict[str, Any]]] = []
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            calls.append((request.url.path.rsplit("/", 1)[-1], json.loads(request.content)))
+            return httpx.Response(200, json={"ok": True, "result": True})
+
+        api = BotApi(TOKEN, client=httpx.AsyncClient(transport=httpx.MockTransport(handler)))
+        await api.send_draft(OWNER, 7)
+        await api.send_draft(OWNER, 7, "partial")
+        await api.close()
+        return calls
+
+    calls = asyncio.run(go())
+    # empty text is Telegram's "Thinking…" placeholder: no text field at all, and no Stop button (can_stop)
+    assert calls[0] == ("sendMessageDraft", {"chat_id": OWNER, "draft_id": 7})
+    assert calls[1] == ("sendMessageDraft", {"chat_id": OWNER, "draft_id": 7, "text": "partial"})
+
+
+def test_a_relayed_turn_shows_thinking_between_claudes_messages_until_it_ends() -> None:
+    api = FakeApi([update("claude on", update_id=1)])
+    rig = _relay_rig(api)
+
+    async def during() -> None:
+        inlet = rig.inlet
+        assert inlet.claude and not api.drafts
+        api.feed(update("run the tests", update_id=2))
+        await settle(20)
+        # the bubble, not "typing…", and never Claude's words in a draft
+        assert api.drafts and all(d == (OWNER, 1, "") for d in api.drafts)
+        assert inlet._thinking and "relay" not in inlet._typing.get(OWNER, {}) and not api.typings
+        await inlet.relay_text("Running them now.", "/Users/g/repo")      # Claude says a line, keeps working
+        await asyncio.gather(*list(inlet._jobs))
+        assert api.sent[-1] == (OWNER, "Running them now.")
+        assert api.order[-2:] == ["send", "draft"]                         # the message cleared it: shown again
+        assert inlet._thinking
+        inlet.relay_turn_ended("/Users/g/repo")                           # the Stop hook
+        assert not inlet._thinking and inlet._draft_task is None
+        before = len(api.drafts)
+        await inlet.relay_text("All green.", "/Users/g/repo")             # the last words, flushed after the end
+        await asyncio.gather(*list(inlet._jobs))
+        await settle(20)
+        assert api.sent[-1] == (OWNER, "All green.") and len(api.drafts) == before
+        assert api.order[-1] == "send"                                     # no bubble after the turn
+        # the next line is a new turn with a new draft id; asking, waiting and "claude off" each end it
+        api.feed(update("now ship it", update_id=3))
+        await settle(20)
+        assert api.drafts[-1] == (OWNER, 2, "") and inlet._thinking
+        inlet.relay_tool_call("AskUserQuestion", "Ship now? (1. Yes / 2. No)")
+        assert not inlet._thinking
+        api.feed(update("2", update_id=4))
+        await settle(20)
+        assert inlet._thinking
+        rig.now["t"] += telegram.ASKED_RECENTLY_SECS + 1
+        await inlet.relay_notification("permission_prompt", "Claude needs your input", True)
+        assert not inlet._thinking
+        api.feed(update("again", update_id=5))
+        await settle(20)
+        assert inlet._thinking
+        api.feed(update("claude off", update_id=6))
+        await settle(20)
+        assert not inlet._thinking and inlet._draft_task is None and not api.typings
+
+    run_rig(rig, during)
+
+
+def test_the_thinking_draft_stops_at_its_cap_when_the_turn_end_is_never_seen() -> None:
+    async def go() -> None:
+        api = FakeApi()
+        rig = _relay_rig(api, refresh=True)
+        rig.inlet._start_thinking(OWNER)
+        rig.inlet._start_thinking(OWNER)                                  # again: one loop, not two
+        await settle(1000)
+        assert len(api.drafts) == math.ceil(telegram.TYPING_RELAY_SECS / telegram.DRAFT_REFRESH_SECS)
+        assert {d[1] for d in api.drafts} == {1} and rig.inlet._draft_task is None
+
+    asyncio.run(go())
+
+
+def test_a_refused_draft_turns_drafts_off_and_typing_takes_over_with_nothing_lost() -> None:
+    api = FakeApi([update("claude on", update_id=1)])
+    api.fail_drafts = BotApiError(400, "Bad Request: method not found")
+    rig = _relay_rig(api)
+
+    async def during() -> None:
+        inlet = rig.inlet
+        api.feed(update("run the tests", update_id=2))
+        await settle(20)
+        assert not api.drafts and inlet._drafts_ok is False
+        assert "relay" in inlet._typing.get(OWNER, {}) and api.typings    # "typing…" for the time left
+        await inlet.relay_text("All green.", "/Users/g/repo")
+        await asyncio.gather(*list(inlet._jobs))
+        assert api.sent[-1] == (OWNER, "All green.")                       # the words arrive as before
+        assert "relay" not in inlet._typing.get(OWNER, {})
+        api.fail_drafts = None                                             # off for the process: not tried again
+        api.feed(update("next", update_id=3))
+        await settle(20)
+        assert not api.drafts and "relay" in inlet._typing.get(OWNER, {})
+        inlet.relay_turn_ended("/Users/g/repo")
+        assert "relay" not in inlet._typing.get(OWNER, {})
+
+    run_rig(rig, during)
+
+
+def test_a_draft_refused_after_a_message_still_leaves_the_message_sent() -> None:
+    api = FakeApi([update("claude on", update_id=1)])
+    rig = _relay_rig(api)
+
+    async def during() -> None:
+        inlet = rig.inlet
+        api.feed(update("run the tests", update_id=2))
+        await settle(20)
+        assert inlet._thinking
+        api.fail_drafts = BotApiError(429, "Too Many Requests: retry after 3")
+        await inlet.relay_text("Halfway there.", "/Users/g/repo")
+        await asyncio.gather(*list(inlet._jobs))
+        assert api.sent[-1] == (OWNER, "Halfway there.")
+        assert inlet._drafts_ok is False and not inlet._thinking
+        assert "relay" in inlet._typing.get(OWNER, {})                     # the turn still shows work
 
     run_rig(rig, during)
 

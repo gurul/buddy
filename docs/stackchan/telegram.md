@@ -129,6 +129,7 @@ token without an owner id is off. A door with no allowlist never opens.
 | `CC_BUDDY_TELEGRAM_OWNER` | unset | Numeric user ids allowed to text buddy, comma-separated. A `@username` is ignored: it can be changed and re-registered, a number cannot. |
 | `CC_BUDDY_TELEGRAM_MODEL` | `gpt-6-astra` | The text brain. |
 | `CC_BUDDY_TELEGRAM_ASK` | `0` | `1`: with the Claude relay on, every tool call is asked in the chat, not only the always-ask ones (never in bypass mode). |
+| `CC_BUDDY_TELEGRAM_DRAFTS` | `1` | `0`: while Claude works on a relayed line, show "typing…" instead of the "Thinking…" bubble. |
 | `CC_BUDDY_TELEGRAM_EFFORT` | `low` | Its reasoning effort (`low`, `medium`, `high`, `xhigh`, `max`). Hard questions go to `think_hard` instead. |
 | `CC_BUDDY_WEB_SEARCH` | `openai` | How every brain searches the web ([below](#web-search)): `openrouter-exa`, `openai` (the hosted tool), `off`. |
 | `CC_BUDDY_WEB_SEARCH_MODEL` | `openai/gpt-5.4-nano` | The OpenRouter model that carries the Exa results back (the cheapest with the web plugin, 2026-09-21). |
@@ -472,9 +473,14 @@ Flip it to `ask` if two seconds a command is a price you will pay.
   session (`focus_terminal.py`) and typed with Return through System Events.
   A 👍 reaction on your message says it went in; buddy sends no "typed" line
   (owner, 2026-09-23), and only if the reaction fails does a short `Typed.`
-  arrive instead. Then "typing…" shows until Claude says something, asks you
-  something, waits on you, or ends its turn (the Stop hook), for 5 minutes at
-  most;
+  arrive instead. Then a "Thinking…" bubble shows in the chat while Claude
+  works (`sendMessageDraft` with empty text). It comes back after each of
+  Claude's messages and stops when Claude asks you something, waits on you,
+  or ends its turn (the Stop hook), or 5 minutes after Claude last said
+  anything. Claude's words never go into the bubble: each one is a real
+  message, as before. If Telegram refuses the bubble once, buddy uses
+  "typing…" from then on, which stops at Claude's first words.
+  `CC_BUDDY_TELEGRAM_DRAFTS=0` keeps "typing…" from the start;
   `buddy: <text>` talks to buddy instead, and buddy's code words (`stop`,
   `screenshot`, `stealth mode`, `claude off`) still work. **The relay is
   bypass**: while it is on, the daemon's pretooluse hook allows a tool call
