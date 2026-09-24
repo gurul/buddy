@@ -23,9 +23,13 @@ apps"): the apps are the point.
   ``ANTHROPIC_API_KEY``. Adaptive thinking is always on for this model; effort
   (``CC_BUDDY_MINIAPP_MAKE_EFFORT``, default high) is the depth control.
 * **Spend is tracked, not capped.** Owner, 2026-09-24: "no claude limit, just track spend". Each
-  build's cost is computed from its usage at the model's list price and added to a per-day ledger; the page shows
-  what today has cost, and a line in the chat marks each of ``SPEND_ALERTS_USD`` the day crosses (tracking, not
-  a limit). ``CC_BUDDY_MINIAPP_DAILY_USD`` set above 0 turns that total into a daily cap again.
+  build's cost is computed from its usage at the model's list price and added to a per-day ledger, and a line in
+  the chat marks each of ``SPEND_ALERTS_USD`` the day crosses (tracking, not a limit).
+  ``CC_BUDDY_MINIAPP_DAILY_USD`` set above 0 turns that total into a daily cap again.
+* **Everything buddy spends is on the page.** The header's "$X spent today" is ALL of buddy's spend today (the
+  daily meter, spend.py), not only the builds; tapping it opens the Spending view (``/api/spend``, owner only,
+  aggregates only): today by provider and feature, the last 30 days, this month, and each provider's own figure
+  where buddy can read one (spend_sync.py). docs/stackchan/spending.md.
 * **Apps can be changed, undone, renamed and deleted** from the home page's "…" sheet (owner: "allow apps to be
   deleted and mutated easily"). A delete moves the app to buddy's ``apps/.trash`` on the Mac, and Undo on the
   page (or restore_app in the chat) brings it back; nothing is erased.
@@ -56,16 +60,21 @@ from pathlib import Path
 from typing import Any, Awaitable, Callable, Optional
 from urllib.parse import parse_qsl
 
+from . import pricing, spend
+
 log = logging.getLogger(__name__)
 
 DEFAULT_MODEL = "claude-opus-5-5"
 EFFORTS = ("low", "medium", "high", "xhigh", "max")
 DEFAULT_MAKE_EFFORT = "high"          # building an app is real work: think it through
-# $ per million tokens, from the Claude API model table (cached 2026-06-24): claude-opus-5-5 input 4, output 20,
-# cache reads 0.20; a 5-minute cache write is 1.25x input. A model not listed costs as the most expensive
-# listed one, so an unknown model is never under-counted.
+# $ per million tokens: pricing.ANTHROPIC_RATES, grounded on the Claude pricing page (2026-09-24): claude-opus-5-5
+# input 4, output 20, cache reads 0.20, a 5-minute cache write 5, a 1-hour one 8. For the optional daily cap a
+# model not listed costs as the most expensive listed one, so an unknown model is never under-counted there; the
+# daily spend meter (spend.py) records it unpriced instead of guessing.
 PRICES: dict[str, dict[str, float]] = {
-    "claude-opus-5-5": {"in": 4.0, "out": 20.0, "cache_read": 0.20, "cache_write": 5.0, "cache_write_1h": 8.0},
+    name: {"in": r["input"], "out": r["output"], "cache_read": r["cache_read"], "cache_write": r["cache_write_5m"],
+           "cache_write_1h": r["cache_write_1h"]}
+    for name, r in pricing.ANTHROPIC_RATES.items()
 }
 _WORST = {"in": 10.0, "out": 50.0, "cache_read": 1.0, "cache_write": 12.5, "cache_write_1h": 20.0}
 INIT_DATA_MAX_AGE_SECS = 24 * 3600    # a Mini App left open all day still works; an old leaked string does not
@@ -353,8 +362,19 @@ class MiniAppServer:
         return self._page
 
     def spend(self) -> dict[str, Any]:
-        """What the page shows in its header: today's spend, and the cap (None: none)."""
-        return {"spent_today": round(self.ledger.spent(), 4), "cap": self.ledger.cap}
+        """What the page shows in its header: ALL of buddy's spend today (spend.py's meter: chat, voice, search,
+        builds, everything), the app builder's own share, and its cap (None: none)."""
+        return {"spent_today": round(spend.today_total(), 4), "apps_today": round(self.ledger.spent(), 4),
+                "cap": self.ledger.cap}
+
+    def spending(self) -> dict[str, Any]:
+        """The Spending view: buddy's own meter (today split by provider, feature and model, yesterday, the last
+        30 days, this month) and each provider's own figure where one can be read (spend_sync.py). Aggregates
+        only: no prompt, no answer, no key ever leaves in it."""
+        from . import spend_sync
+
+        return {**spend.summary(), "providers": spend_sync.reported(), "cap": self.ledger.cap,
+                "apps_today": round(self.ledger.spent(), 4)}
 
     def open_url(self, slug: str) -> str:
         """An app's page with a fresh app token, relative to the home page."""
@@ -426,7 +446,7 @@ class MiniAppServer:
                                                                      "Access-Control-Allow-Headers": "content-type",
                                                                      "Access-Control-Max-Age": "600"})
             return
-        known = path in ("/api/me", "/api/apps", "/api/make") or api_app is not None
+        known = path in ("/api/me", "/api/spend", "/api/apps", "/api/make") or api_app is not None
         if method != "POST" or not known:
             await self._send(writer, 404, b"not found", "text/plain")
             return
@@ -461,6 +481,9 @@ class MiniAppServer:
             return
         if path == "/api/me":
             await self._json(writer, 200, {"model": self.cfg.model, "apps": self.store is not None, **self.spend()})
+            return
+        if path == "/api/spend":
+            await self._json(writer, 200, await asyncio.to_thread(self.spending))    # ~30 small file reads
             return
         if path == "/api/apps" or api_app is not None or path == "/api/make":
             await self._apps_api(writer, path, api_app, body, user)
@@ -871,7 +894,7 @@ class MiniApp:
         self.store = apps_maker.AppStore(apps_root or apps_maker.DEFAULT_ROOT)
         self.maker = apps_maker.AppMaker(
             self.store, generate or apps_maker.claude_generate(cfg.model, cfg.make_effort),
-            cost=lambda usage: cost_usd(cfg.model, usage), spend=self.ledger.add,
+            cost=lambda usage: self._meter_build(usage), spend=self.ledger.add,
             context=context or apps_maker.owner_context,
             check=app_check.check_app if check is _DEFAULT else check)
         self.changing: set[str] = set()
@@ -885,6 +908,12 @@ class MiniApp:
         self.url = ""
         self._notes: set[asyncio.Task] = set()
         self.ledger.on_cross = self._spend_note
+
+    def _meter_build(self, usage: Any) -> float:
+        """One build round's cost: into the daily spend meter (spend.py, feature "app builder", unpriced for a
+        model pricing.py does not know), and returned at the cap's never-under-counted price for this ledger."""
+        spend.record_anthropic(spend.APPS, self.cfg.model, usage)
+        return cost_usd(self.cfg.model, usage)
 
     def app_url(self, slug: str) -> str:
         """An Open button's address for one app right now ("" while the tunnel is down). It goes through the

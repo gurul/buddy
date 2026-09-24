@@ -449,10 +449,15 @@ Flip it to `ask` if two seconds a command is a price you will pay.
   no sign (2026-09-24). This is best effort. All of these lines together get at
   most 2 seconds, so a slow Telegram never holds up the restart.
 - **The `/` menu.** At startup buddy sets its code words as bot commands in
-  your own chat only (`setMyCommands`, scoped to your chat): `/claude_on`,
-  `/claude_off`, `/new_claude`, `/codex`, `/rundown`, `/screenshot`,
-  `/stealth`, `/wake` and `/stop`. Each works exactly like the typed word. If
-  Telegram refuses the menu, the words still work when typed.
+  your own chat only (`setMyCommands`, scoped to your chat): `/apps`, `/spend`,
+  `/claude_on`, `/claude_off`, `/new_claude`, `/codex`, `/rundown`,
+  `/screenshot`, `/stealth`, `/wake` and `/stop`. Each works exactly like the
+  typed word. If Telegram refuses the menu, the words still work when typed.
+- **`/spend`** (or `spend`, `spending`) — what buddy has spent: today,
+  yesterday, this month, the top three features today and OpenRouter's own
+  figure for today. It is answered by code from the spend ledger, with no model
+  call, and it works while a relay is on. The full dashboard is the Mini App's
+  Spending view. See [what buddy spends](spending.md).
 - **"typing…"** shows while buddy works on a reply, for the whole turn, not only
   the first 5 seconds. It is sent again every 4 s and stops when the reply goes
   out. `think_hard` keeps it up for up to 5 minutes. It pauses while buddy waits

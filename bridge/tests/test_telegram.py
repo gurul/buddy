@@ -2102,8 +2102,14 @@ def _check_apps(rig: Rig) -> None:
     assert rig.api.sent[-1] == (OWNER, telegram.APPS_OFF_LINE)          # no Mini App in this rig: says so
 
 
+def _check_spend(rig: Rig) -> None:
+    assert rig.api.sent[-1][1].startswith("Spending (buddy's own meter)")   # answered by code: no model turn
+    assert rig.create.requests == []
+
+
 MENU_CHECKS = {
     "apps": ([], _check_apps),
+    "spend": ([], _check_spend),
     "claude_on": ([], _check_claude_on),
     "claude_off": (["/claude_on"], _check_claude_off),
     "new_claude": ([], _check_new_claude),
@@ -2135,6 +2141,45 @@ def test_each_menu_command_is_accepted_as_the_menu_sends_it(command: str) -> Non
             assert rig.create.requests == []                              # code words: no model call
 
     asyncio.run(go())
+
+
+def test_spend_is_answered_by_code_even_while_the_claude_relay_is_on(_spend_ledger_in_tmp) -> None:
+    from cc_buddy_bridge import spend
+
+    spend.record("openai", "gpt-6-luna", spend.CHAT, 0.30)
+    spend.record("openai", "gpt-live-1", spend.VOICE, 1.20)
+    api = FakeApi()
+    rig = _menu_rig(api)
+
+    async def go() -> None:
+        await dispatch(rig, "/claude_on", update_id=1)
+        await dispatch(rig, "spend", update_id=2)
+        await settle()
+        text = rig.api.sent[-1][1]
+        assert text.startswith("Spending (buddy's own meter)") and "Today: $1.50" in text
+        assert "Top today: voice $1.20, chat $0.30" in text
+        assert rig.create.requests == []                                  # no model call, not typed to Claude
+
+    asyncio.run(go())
+
+
+def test_each_chat_model_call_is_metered(_spend_ledger_in_tmp) -> None:
+    from datetime import date
+
+    from cc_buddy_bridge import spend
+
+    reply = {**say("Hi!"), "usage": {"input_tokens": 1_000_000, "input_tokens_details": {"cached_tokens": 0},
+                                     "output_tokens": 0}}
+    api = FakeApi([update("hello", update_id=1)])
+    rig = Rig(api, FakeCreate(reply))
+
+    async def during() -> None:
+        assert api.sent[-1] == (OWNER, "Hi!")
+
+    run_rig(rig, during)
+    [row] = spend.day_rows(date.today().isoformat(), _spend_ledger_in_tmp)
+    assert (row["f"], row["m"]) == ("chat", rig.create.requests[0]["model"])
+    assert row["usd"] == pytest.approx(0.10)                                  # gpt-6-luna: $0.10 per million in
 
 
 def test_the_underscore_words_also_take_a_target() -> None:

@@ -11,7 +11,7 @@ from pathlib import Path
 import httpx
 import pytest
 
-from cc_buddy_bridge import miniapp
+from cc_buddy_bridge import miniapp, spend
 from cc_buddy_bridge.miniapp import (
     MiniApp,
     MiniAppConfig,
@@ -185,10 +185,15 @@ def test_anyone_else_gets_nothing_and_the_chat_route_is_gone(tmp_path: Path) -> 
 
 
 @pytest.mark.parametrize("cap, want", [(0.0, None), (2.0, 2.0)])
-def test_me_reports_todays_spend_and_the_cap_if_any(tmp_path: Path, cap: float, want) -> None:
+def test_me_reports_all_of_todays_spend_the_builds_share_and_the_cap_if_any(tmp_path: Path, cap: float,
+                                                                            want) -> None:
+    from cc_buddy_bridge import spend
+
     async def go():
         srv = run_server(tmp_path, cap=cap)
-        srv.ledger.add(0.5)
+        srv.ledger.add(0.5)                                       # the app builder's own ledger
+        spend.record("openai", "gpt-6-luna", spend.CHAT, 0.25)     # the chat, metered by spend.py
+        spend.record("anthropic", "claude-opus-5-5", spend.APPS, 0.5)
         port = await srv.start()
         try:
             return await post(port, "/api/me", {"initData": signed()})
@@ -196,8 +201,47 @@ def test_me_reports_todays_spend_and_the_cap_if_any(tmp_path: Path, cap: float, 
             await srv.close()
 
     r = asyncio.run(go())
-    assert r.status_code == 200 and r.json()["spent_today"] == pytest.approx(0.5) and r.json()["cap"] == want
+    assert r.status_code == 200 and r.json()["cap"] == want
+    assert r.json()["spent_today"] == pytest.approx(0.75)         # ALL of buddy today, not only the builds
+    assert r.json()["apps_today"] == pytest.approx(0.5)
     assert "left" not in r.json()
+
+
+def test_an_app_build_round_is_metered_and_still_costs_the_cap_price(_spend_ledger_in_tmp: Path) -> None:
+    import types
+
+    owner = types.SimpleNamespace(cfg=types.SimpleNamespace(model="claude-opus-5-5"))
+    usage = {"input_tokens": 1_000_000, "output_tokens": 1_000_000}
+    assert miniapp.MiniApp._meter_build(owner, usage) == pytest.approx(24.0)      # type: ignore[arg-type]
+    today = time.strftime("%Y-%m-%d")
+    row = spend.day_rows(today, _spend_ledger_in_tmp)[0]
+    assert (row["p"], row["f"], row["usd"]) == ("anthropic", "app builder", pytest.approx(24.0))
+    owner.cfg.model = "claude-future-9"
+    assert miniapp.MiniApp._meter_build(owner, usage) > 0                          # the cap never under-counts
+    assert spend.day_rows(today, _spend_ledger_in_tmp)[-1]["usd"] is None           # the meter never guesses
+
+
+def test_the_spending_route_is_owner_only_and_carries_aggregates_not_words(tmp_path: Path, monkeypatch) -> None:
+    monkeypatch.delenv("OPENROUTER_API_KEY", raising=False)
+    spend.record("openai", "gpt-6-luna", spend.CHAT, 0.25, tokens={"in": 1000})
+    spend.record("chatgpt", "codex", spend.CODEX, None, note="ChatGPT plan, not per-call (computer task)")
+
+    async def go():
+        srv = run_server(tmp_path)
+        port = await srv.start()
+        try:
+            refused = [await post(port, "/api/spend", {"initData": d}) for d in ("", signed(999))]
+            return refused, await post(port, "/api/spend", {"initData": signed()})
+        finally:
+            await srv.close()
+
+    refused, ok = asyncio.run(go())
+    assert [r.status_code for r in refused] == [403, 403] and all("today" not in r.text for r in refused)
+    body = ok.json()
+    assert ok.status_code == 200 and body["today"]["usd"] == pytest.approx(0.25) and body["today"]["unpriced"] == 1
+    assert body["today"]["by_feature"] == {"chat": 0.25, "codex": 0.0} and len(body["days"]) == 30
+    assert body["providers"]["openai"]["status"] == "no_key" and "month" in body
+    assert set(body) == {"today", "yesterday", "days", "month", "providers", "cap", "apps_today"}
 
 
 # ---- the tunnel and the menu button ---------------------------------------------------------------
@@ -659,6 +703,7 @@ def seed_apps(app) -> None:
     app.store.save(page_doc("v1"), "habit tracker")
     app.store.save(page_doc("v2"), "add streaks", slug="habit-tracker")
     app.ledger.add(0.25)
+    spend.record("anthropic", "claude-opus-5-5", spend.APPS, 0.25)     # the header shows the daily meter
 
 
 def test_the_home_page_lists_apps_with_icons_descriptions_and_todays_spend(tmp_path: Path) -> None:
@@ -681,6 +726,42 @@ def test_the_home_page_lists_apps_with_icons_descriptions_and_todays_spend(tmp_p
         ("✅", "Habit Tracker", "Check in daily and keep streaks."), ("🏋️", "Workout Log", "Sets, reps and weights.")]
     assert out["rows"][0]["more"] == "More for Habit Tracker" and out["rows"][0]["moreIsButton"] == "BUTTON"
     assert out["spent"] == "$0.25 spent today" and out["wide"] is False
+
+
+def test_tapping_todays_spend_opens_the_spending_view_with_a_30_day_chart(tmp_path: Path) -> None:
+    hostile = '<img src=x onerror="window.__pwned=1">'
+    spend.record("openai", "gpt-live-1", spend.VOICE, 1.2)
+    spend.record("openai", "gpt-6-luna", hostile, 0.3)
+
+    async def script(page, app):
+        await page.reload()
+        await page.wait_for_function("document.getElementById('spent').textContent.includes('spent today')")
+        header = await page.evaluate("document.getElementById('spent').textContent")
+        await page.click("#spent")
+        await page.wait_for_selector("#spending .hero")
+        out = await page.evaluate("""() => ({
+            big: document.querySelector('#spending .big').textContent,
+            features: [...document.querySelectorAll('#spending .card:nth-of-type(2) .split .name')].map((e) => e.textContent),
+            bars: document.querySelectorAll('#spending .chart .bar-mark').length,
+            hits: document.querySelectorAll('#spending .chart .hit').length,
+            label: document.querySelector('#spending .chart svg').getAttribute('aria-label'),
+            appsHidden: getComputedStyle(document.getElementById('apps')).display === 'none',
+            providers: document.querySelector('#spending .rows').textContent,
+            pwned: window.__pwned === 1, imgs: document.querySelectorAll('img').length,
+            wide: document.documentElement.scrollWidth > document.documentElement.clientWidth })""")
+        await page.click("#spend-back")
+        out["back"] = await page.evaluate("document.getElementById('spending').hidden")
+        return {"header": header, **out}
+
+    for scheme in ("light", "dark"):
+        out, errors = browse(tmp_path, script, color_scheme=scheme)
+        assert errors == []
+        assert out["header"] == "$1.50 spent today" and out["big"] == "$1.50"
+        assert out["features"] == ["voice", hostile[:32]]                       # text, never markup
+        assert out["pwned"] is False and out["imgs"] == 0
+        assert out["bars"] == 1 and out["hits"] == 30 and "Last 30 days, $1.50 in all" in out["label"]
+        assert out["appsHidden"] and "CC_BUDDY_OPENAI_ADMIN_KEY" in out["providers"] and out["wide"] is False
+        assert out["back"] is True
 
 
 def test_a_hostile_app_name_is_shown_as_text_never_run(tmp_path: Path) -> None:

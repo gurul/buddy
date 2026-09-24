@@ -150,6 +150,37 @@
   .chat-hint:empty { display: none; }
   .chat-head .back:focus-visible, .chat-head .btn:focus-visible, .msg .btn:focus-visible {
     outline: 2px solid var(--link); outline-offset: 2px; }
+  /* the Spending view: opened from the header's "$X spent today" */
+  header .spent { background: none; border: 0; font: inherit; font-size: 13px; color: var(--link); min-height: 44px;
+    padding: 0 0 0 8px; cursor: pointer; }
+  header .spent:disabled { color: var(--hint); cursor: default; }
+  header .spent:focus-visible { outline: 2px solid var(--link); outline-offset: 2px; }
+  body.spending > header, body.spending #apps { display: none; }
+  #spending { flex: 1; min-height: 0; overflow-y: auto; padding: 0 16px calc(24px + env(safe-area-inset-bottom)); }
+  #spending .chat-head { margin: 0 -16px 12px; }
+  .hero { margin: 4px 0 18px; }
+  .hero .big { font: 700 34px/1.1 system-ui, sans-serif; font-variant-numeric: tabular-nums; margin: 0; }
+  .hero .sub { color: var(--hint); font-size: 14px; margin: 4px 0 0; }
+  .card { background: var(--bubble); border-radius: 14px; padding: 12px 14px; margin-bottom: 14px; }
+  .card h2 { font-size: 13px; text-transform: uppercase; letter-spacing: .04em; color: var(--hint); margin: 0 0 8px; }
+  .split { list-style: none; margin: 0; padding: 0; }
+  .split li { display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 2px 10px; padding: 5px 0; }
+  .split .name { overflow-wrap: anywhere; }
+  .split .val { font-variant-numeric: tabular-nums; text-align: right; }
+  .split .bar { grid-column: 1 / -1; height: 6px; border-radius: 3px; background: var(--code); overflow: hidden; }
+  .split .bar span { display: block; height: 100%; border-radius: 3px; background: var(--accent); }
+  .chart svg { display: block; width: 100%; height: 140px; }
+  .chart .bar-mark { fill: var(--accent); }
+  .chart .bar-mark.today { fill: var(--link); }
+  .chart .base { stroke: var(--code); stroke-width: 1; }
+  .chart .axis { fill: var(--hint); font: 11px system-ui, sans-serif; }
+  .chart .hit { fill: transparent; cursor: pointer; }
+  .chart .hit:focus-visible { outline: none; stroke: var(--link); stroke-width: 2; }
+  .chart .readout { color: var(--hint); font-size: 13px; min-height: 1.4em; margin: 6px 0 0; font-variant-numeric: tabular-nums; }
+  .rows { display: grid; gap: 10px; }
+  .prov .head { display: flex; justify-content: space-between; gap: 10px; font-weight: 600; }
+  .prov p { margin: 2px 0 0; color: var(--hint); font-size: 14px; font-variant-numeric: tabular-nums; }
+  .note { color: var(--hint); font-size: 13px; margin: 6px 0 0; }
   @media (prefers-reduced-motion: no-preference) {
     dialog.sheet[open] .panel { animation: rise .18s ease-out; }
     @keyframes rise { from { transform: translateY(24px); opacity: .6; } to { transform: none; opacity: 1; } }
@@ -159,7 +190,7 @@
 <body>
 <header>
   <h1 class="who">Your apps</h1>
-  <div class="spent" id="spent" role="status" aria-live="polite"></div>
+  <button type="button" class="spent" id="spent" aria-label="Spent today. Open spending" disabled></button>
 </header>
 <section id="apps">
   <div class="make" id="make-card">
@@ -197,6 +228,13 @@
   </form>
   <div class="sr" id="chat-live" role="status" aria-live="polite"></div>
 </section>
+<section id="spending" aria-labelledby="spend-title" hidden>
+  <div class="chat-head">
+    <button type="button" class="back" id="spend-back" aria-label="Back to your apps"><span aria-hidden="true">‹</span></button>
+    <div class="chat-name"><h1 id="spend-title" tabindex="-1">Spending</h1><span>What buddy has spent, by its own meter</span></div>
+  </div>
+  <div id="spend-body"><p class="note" role="status">Loading…</p></div>
+</section>
 <dialog class="sheet" id="sheet" aria-labelledby="sheet-title">
   <div class="panel">
     <div class="head"><span class="icon" id="sheet-icon" aria-hidden="true"></span><h2 id="sheet-title"></h2></div>
@@ -224,12 +262,18 @@
   const spent = $("spent");
   const can = (v) => !!(tg && tg.isVersionAtLeast && tg.isVersionAtLeast(v));
   // What today's building has cost. Spend is tracked, not capped, unless a cap was set.
+  // The header's figure is ALL of buddy's spend today (spend.py's meter), not only the app builds. With a build
+  // cap set, the builds' share is shown against it. A tap opens the Spending view.
   function showSpent(d) {
     if (!d || typeof d.spent_today !== "number") return;
-    spent.textContent = "$" + d.spent_today.toFixed(2) + (typeof d.cap === "number" ? " of $" + d.cap.toFixed(2) : "") + " spent today";
+    const capped = typeof d.cap === "number" && typeof d.apps_today === "number"
+      ? " · builds $" + d.apps_today.toFixed(2) + " of $" + d.cap.toFixed(2) : "";
+    spent.textContent = "$" + d.spent_today.toFixed(2) + " spent today" + capped;
+    spent.setAttribute("aria-label", spent.textContent + ". Open spending");
+    spent.disabled = false;
   }
 
-  if (!initData) { spent.textContent = "Open this from buddy's pinned message in Telegram."; $("make").disabled = true; }
+  if (!initData) { spent.textContent = "Open this from buddy's pinned message in Telegram."; spent.disabled = true; $("make").disabled = true; }
   else fetch("api/me", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ initData }) })
     .then((r) => r.json()).then((j) => { if (j.error) spent.textContent = j.error; else showSpent(j); }).catch(() => {});
 
@@ -755,6 +799,125 @@
   }
   // Settings in Telegram's "…" menu belongs to an app (it leads to the app's change chat); not here.
   try { if (can("7.0") && tg.SettingsButton) tg.SettingsButton.hide(); } catch (e) {}
+
+  // ---- the Spending view: every figure comes from /api/spend (aggregates only) and reaches the page as
+  // textContent or as numbers in SVG attributes; nothing from the server is ever parsed as HTML ----
+  const usdText = (v) => typeof v !== "number" || !isFinite(v) ? "–" : "$" + (v >= 0.1 || v === 0 ? v.toFixed(2) : v.toFixed(3));
+  const shortDay = (iso) => { const d = new Date(iso + "T12:00:00"); return isNaN(d) ? iso : d.toLocaleDateString(undefined, { month: "short", day: "numeric" }); };
+  const SVGNS = "http://www.w3.org/2000/svg";
+  function svgEl(tag, attrs) { const e = document.createElementNS(SVGNS, tag); for (const k in attrs) e.setAttribute(k, attrs[k]); return e; }
+  let spending = false;
+  function card(title) { const c = el("section", "card"); c.appendChild(el("h2", null, title)); return c; }
+  function splitList(obj, total) {
+    const ul = el("ul", "split"), rows = Object.entries(obj || {}).filter((kv) => typeof kv[1] === "number" && kv[1] > 0);
+    if (!rows.length) { const li = el("li"); li.appendChild(el("span", "name", "Nothing yet today.")); ul.appendChild(li); return ul; }
+    const top = Math.max.apply(null, rows.map((kv) => kv[1]));
+    rows.forEach(([name, usd]) => {
+      const li = el("li"); li.appendChild(el("span", "name", name));
+      li.appendChild(el("span", "val", usdText(usd) + (total > 0 ? " · " + Math.round(usd / total * 100) + "%" : "")));
+      const bar = el("span", "bar"), fill = el("span"); fill.style.width = Math.max(2, usd / top * 100) + "%";
+      bar.setAttribute("aria-hidden", "true"); bar.appendChild(fill); li.appendChild(bar); ul.appendChild(li);
+    });
+    return ul;
+  }
+  function dayChart(days) {
+    const wrap = el("div", "chart"), W = 300, H = 140, pad = 16, n = days.length || 1;
+    const top = Math.max(0.01, ...days.map((d) => d.usd || 0)), step = W / n, bw = Math.max(2, step - 2);
+    const total = days.reduce((a, d) => a + (d.usd || 0), 0), peak = days.reduce((a, d) => (d.usd || 0) > (a.usd || 0) ? d : a, days[0] || {});
+    const svg = svgEl("svg", { viewBox: "0 0 " + W + " " + H, role: "img", preserveAspectRatio: "none" });
+    const label = "Last " + n + " days, " + usdText(total) + " in all" + (peak && peak.usd ? "; the most was " + usdText(peak.usd) + " on " + shortDay(peak.date) : "") + ".";
+    svg.setAttribute("aria-label", label);
+    const readout = el("p", "readout"); readout.setAttribute("aria-live", "polite");
+    const show = (d) => { readout.textContent = shortDay(d.date) + ": " + usdText(d.usd); };
+    days.forEach((d, i) => {
+      const h = d.usd > 0 ? Math.max(2, (d.usd / top) * (H - pad - 4)) : 0, x = i * step + 1, y = H - pad - h;
+      if (h > 0) {
+        const r = Math.min(4, bw / 2, h);             // a 4px rounded data end, anchored flat on the baseline
+        svg.appendChild(svgEl("path", { class: "bar-mark" + (i === n - 1 ? " today" : ""),
+          d: "M" + x + "," + (H - pad) + "V" + (y + r) + "Q" + x + "," + y + " " + (x + r) + "," + y + "H" + (x + bw - r)
+            + "Q" + (x + bw) + "," + y + " " + (x + bw) + "," + (y + r) + "V" + (H - pad) + "Z" }));
+      }
+      const hit = svgEl("rect", { class: "hit", x: i * step, y: 0, width: step, height: H - pad, tabindex: "-1" });
+      const t = svgEl("title", {}); t.textContent = shortDay(d.date) + ": " + usdText(d.usd); hit.appendChild(t);
+      hit.addEventListener("pointerenter", () => show(d)); hit.addEventListener("click", () => show(d));
+      svg.appendChild(hit);
+    });
+    svg.appendChild(svgEl("line", { class: "base", x1: 0, x2: W, y1: H - pad + 0.5, y2: H - pad + 0.5 }));
+    if (days.length) {
+      const a = svgEl("text", { class: "axis", x: 0, y: H - 3 }); a.textContent = shortDay(days[0].date);
+      const b = svgEl("text", { class: "axis", x: W, y: H - 3, "text-anchor": "end" }); b.textContent = "today";
+      svg.append(a, b);
+    }
+    wrap.appendChild(svg); wrap.appendChild(readout);
+    // the same numbers as a list, for a screen reader
+    const table = el("ul", "sr"); days.forEach((d) => table.appendChild(el("li", null, shortDay(d.date) + ": " + usdText(d.usd))));
+    wrap.appendChild(table);
+    readout.textContent = "Tap a bar for its day. " + label;
+    return wrap;
+  }
+  function providerRows(p, today) {
+    const box = el("div", "rows"), mine = (today && today.by_provider) || {};
+    const row = (name, lines) => { const r = el("div", "prov"), h = el("div", "head"); h.appendChild(el("span", null, name));
+      r.appendChild(h); lines.forEach((l) => r.appendChild(el("p", null, l))); box.appendChild(r); };
+    const or = (p && p.openrouter) || {};
+    if (or.status === "ok") {
+      const lines = ["Buddy's key today (UTC day): " + usdText(or.key_today) + " · buddy's meter: " + usdText(mine.openrouter || 0)];
+      if (typeof or.account_today === "number") lines.push("Whole account today, every key: " + usdText(or.account_today) + (or.account_partial ? " (since the first check today)" : ""));
+      if (typeof or.key_month === "number") lines.push("Buddy's key this month (UTC): " + usdText(or.key_month));
+      row("OpenRouter", lines);
+    } else if (or.status === "error") row("OpenRouter", ["Its own figure could not be read (" + (or.error || "error") + ")."]);
+    else if (or.status === "pending") row("OpenRouter", ["Checked hourly; the first check has not come back yet."]);
+    [["openai", "OpenAI", "CC_BUDDY_OPENAI_ADMIN_KEY"], ["anthropic", "Anthropic", "CC_BUDDY_ANTHROPIC_ADMIN_KEY"]].forEach(([k, name, env]) => {
+      const r = (p && p[k]) || {};
+      if (r.status === "ok") row(name, ["Account today (UTC day): " + usdText(r.today) + " · buddy's meter: " + usdText(mine[k] || 0),
+        "This month: " + usdText(r.month)]);
+      else if (r.status === "error") row(name, ["Its own figure could not be read (" + (r.error || "error") + ")."]);
+      else if (r.status === "pending") row(name, ["Checked hourly; the first check has not come back yet."]);
+      else row(name, ["Buddy's meter today: " + usdText(mine[k] || 0) + ". Add " + env + " (an admin key) on the Mac to see " + name + "'s own total."]);
+    });
+    return box;
+  }
+  function renderSpending(j) {
+    const body = $("spend-body"); body.textContent = "";
+    const t = j.today || {}, hero = el("div", "hero");
+    hero.appendChild(el("p", "big", usdText(t.usd)));
+    hero.appendChild(el("p", "sub", "today · " + (t.calls || 0) + " metered call" + (t.calls === 1 ? "" : "s")
+      + (t.unpriced ? " · " + t.unpriced + " without a price, not in the total" : "")));
+    hero.appendChild(el("p", "sub", "Yesterday " + usdText((j.yesterday || {}).usd) + " · this month " + usdText((j.month || {}).usd)));
+    body.appendChild(hero);
+    const byP = card("Today by provider"); byP.appendChild(splitList(t.by_provider, t.usd)); body.appendChild(byP);
+    const byF = card("Today by feature"); byF.appendChild(splitList(t.by_feature, t.usd)); body.appendChild(byF);
+    const days = card("Last 30 days"); days.appendChild(dayChart(Array.isArray(j.days) ? j.days : [])); body.appendChild(days);
+    const prov = card("What the providers say"); prov.appendChild(providerRows(j.providers, t));
+    prov.appendChild(el("p", "note", "Providers count in UTC days; buddy's meter counts your local day, so the two can differ near midnight."));
+    body.appendChild(prov);
+    const gaps = card("Not tracked");
+    gaps.appendChild(el("p", "note", "Codex runs on your ChatGPT plan: its tasks are counted but have no per-call price. Composio bills on its own account. Other keys show up only in a provider's own figure above."));
+    if (Array.isArray(t.unpriced_models) && t.unpriced_models.length) gaps.appendChild(el("p", "note", "No price today for: " + t.unpriced_models.join(", ") + "."));
+    body.appendChild(gaps);
+  }
+  async function loadSpending() {
+    try {
+      const r = await post("api/spend"), j = await reply(r);
+      if (!r.ok) { $("spend-body").textContent = ""; $("spend-body").appendChild(el("p", "note", j.error || "Couldn't load spending.")); return; }
+      if (spending) renderSpending(j);
+    } catch (e) { $("spend-body").textContent = ""; $("spend-body").appendChild(el("p", "note", "The connection dropped. Try again.")); }
+  }
+  function openSpending() {
+    if (!initData || spending) return;
+    spending = true; document.body.classList.add("spending"); $("spending").hidden = false;
+    $("spend-title").focus();
+    if (can("6.1")) { tg.BackButton.onClick(closeSpending); tg.BackButton.show(); }
+    loadSpending();
+  }
+  function closeSpending() {
+    if (!spending) return;
+    spending = false; document.body.classList.remove("spending"); $("spending").hidden = true;
+    if (can("6.1")) { tg.BackButton.offClick(closeSpending); tg.BackButton.hide(); }
+    spent.focus();
+  }
+  spent.onclick = openSpending;
+  $("spend-back").onclick = closeSpending;
 
   loadApps().then(() => {
     if (chatting) { openChat(chatting, false); return; }

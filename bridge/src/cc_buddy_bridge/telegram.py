@@ -79,6 +79,7 @@ from . import (
     consent,
     rundown,
     second_brain,
+    spend,
     system_context,
     telegram_images,
     websearch,
@@ -124,6 +125,8 @@ STOP_WORDS = ("stop", "/stop", "cancel", "/cancel")
 # The Mini App's way in from the chat (miniapp.py): an Open button, answered by code like the stealth words, relay
 # or not (owner, 2026-09-24: the menu button stays the / commands, "i want both").
 APPS_WORDS = ("/apps", "apps", "my apps", "open apps", "open buddy")
+# /spend: what buddy has spent, answered by code like /apps (no model call, relay or not). spend.brief writes it.
+SPEND_WORDS = ("/spend", "spend", "spending", "/spending", "what did i spend", "how much did i spend")
 APPS_TEXT = "Your apps:"
 APPS_OFF_LINE = "The apps aren't running right now (CC_BUDDY_MINIAPP, or the tunnel is still starting)."
 STEALTH_ON = ("stealth mode", "stealth", "stealth on", "go stealth", "/stealth", "play dead", "act asleep")
@@ -200,6 +203,7 @@ FATAL_CODES = (401, 404, 409)       # bad token, malformed token, another poller
 # (owner, 2026-09-23).
 BOT_COMMANDS: tuple[tuple[str, str], ...] = (
     ("apps", "Your apps, and build a new one"),
+    ("spend", "What buddy has spent today and this month"),
     ("claude_on", "Join a running Claude Code session"),
     ("claude_off", "Stop relaying Claude Code"),
     ("new_claude", "Open a new Claude Code session"),
@@ -1895,7 +1899,8 @@ class TelegramInlet:
                                          message_id=inbound.message_id), "telegram-codex")
             return
         if (self._codex_chat == inbound.chat_id
-                and word not in STEALTH_ON + STEALTH_OFF + APPS_WORDS and not SCREEN_NOW.match(inbound.text)
+                and word not in STEALTH_ON + STEALTH_OFF + APPS_WORDS + SPEND_WORDS
+                and not SCREEN_NOW.match(inbound.text)
                 and not self._answers_pending(inbound.text)):
             for_buddy = BUDDY_PREFIX.match(inbound.text)
             if for_buddy is None:
@@ -1912,7 +1917,8 @@ class TelegramInlet:
             self._spawn(self._type_to_claude(inbound.chat_id, typed.group(2).strip(), inbound.message_id),
                         "telegram-claude")
             return
-        if word in STEALTH_ON or word in STEALTH_OFF or word in APPS_WORDS or SCREEN_NOW.match(inbound.text):
+        if (word in STEALTH_ON or word in STEALTH_OFF or word in APPS_WORDS or word in SPEND_WORDS
+                or SCREEN_NOW.match(inbound.text)):
             pass                                          # buddy's own code words, relay or not
         elif self.claude and not self._answers_pending(inbound.text):
             # Relay on: the chat IS the terminal. A yes/no while Claude is asking answers Claude (below);
@@ -1930,6 +1936,10 @@ class TelegramInlet:
         if word in APPS_WORDS:
             self._note("user", inbound.text, "command")
             self._spawn(self._open_apps(inbound.chat_id), "telegram-apps")
+            return
+        if word in SPEND_WORDS:
+            self._note("user", inbound.text, "command")
+            self._spawn(self._spend_now(inbound.chat_id), "telegram-spend")
             return
         if word in STEALTH_ON or word in STEALTH_OFF:
             self.stealth = word in STEALTH_ON
@@ -3101,6 +3111,7 @@ class TelegramInlet:
                                     or t["name"] == composio_tools.MULTI_EXECUTE]
             response = await self._create(payload)
             self._count_usage(response, usage)
+            spend.record_response(spend.CHAT, response, model=str(payload.get("model") or ""))
             calls, text, carry = parse_response(response, allowed)
             if not calls:
                 return text, round_no
@@ -3225,6 +3236,18 @@ class TelegramInlet:
     async def _tool_web_search(self, name: str, args: dict[str, Any], chat_id: int) -> dict[str, Any]:
         # Exa through OpenRouter (websearch.py), off the loop: a second or two of network
         return await asyncio.to_thread(websearch.search, str(args.get("query") or ""), self.config.search)
+
+    async def _spend_now(self, chat_id: int) -> None:
+        """/spend: today, yesterday, this month, the top features and OpenRouter's own figure, from the ledgers on
+        disk (spend.py, spend_sync.py), off the loop. No model call."""
+        from . import spend_sync
+
+        try:
+            text = await asyncio.to_thread(lambda: spend.brief(spend.summary(), spend_sync.reported()))
+        except Exception as e:  # noqa: BLE001 — a ledger that cannot be read is a line, not a silence
+            log.warning("telegram: /spend failed (%s)", type(e).__name__)
+            text = "I couldn't read the spend ledger just now."
+        await self._say(chat_id, text)
 
     async def _open_apps(self, chat_id: int) -> None:
         """/apps: the Mini App's Open button, at its address right now."""

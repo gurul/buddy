@@ -18,7 +18,7 @@ Code:
 - `app_check.py`: the phone check every build goes through.
 - `jev_verify.py`: Jev walks the app's journeys and judges what the screen
   shows.
-- `miniapp_page.html`: the home screen.
+- `miniapp_page.html`: the home screen and the Spending view.
 - `bridge/tools/app_eval.py`: builds apps from the command line into a scratch
   folder and writes a report with cost, time, the check's result and the
   journeys Jev walked. `--check DIR` runs only the check (script, then
@@ -497,11 +497,24 @@ cache writes $5 per million when the cache lasts 5 minutes or $8 per million
 when it lasts an hour (the build prompt's cache). A model that isn't in the price table is charged at
 the highest price, so it is never under-counted.
 
-Every day's total is kept in `~/.config/cc-buddy-bridge/miniapp-spend.json`
-(the last 400 days), so a restart loses nothing. The header shows
-"$X.XX spent today". With `CC_BUDDY_MINIAPP_DAILY_USD` set above 0, building
-stops for the day once that total is reached, and the header shows
-"$X.XX of $Y.YY spent today".
+Every day's build total is kept in `~/.config/cc-buddy-bridge/miniapp-spend.json`
+(the last 400 days), so a restart loses nothing. With
+`CC_BUDDY_MINIAPP_DAILY_USD` set above 0, building stops for the day once that
+total is reached, and the header adds "builds $X.XX of $Y.YY".
+
+The header's "$X.XX spent today" is **all** of buddy's spend today (chat,
+voice, search, builds, memory and the rest), from the daily spend meter. It is
+not only the builds. Each build round is also written to that meter under
+"app builder". A model with no price in `pricing.py` is recorded there without
+a price, never guessed. Tap the figure to open the **Spending** view:
+- today by provider and by feature
+- the last 30 days as a bar chart
+- this month's total
+- each provider's own figure where buddy can read one
+
+It is owner-only, like every other route (`/api/spend`, signed `initData`),
+and it returns totals only, never prompts. See
+[what buddy spends](spending.md).
 
 A line in the chat marks each of $5, $20, $50, $100, $200, $500 and $1000
 that a day's spend passes ("Claude has cost $21.40 today … Nothing is
