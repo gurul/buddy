@@ -288,7 +288,7 @@ Buddy uses a fresh lookup for current time instead of reusing its start time.
 | `CC_BUDDY_LIVE_BACKEND_EFFORT` | `low` | reasoning effort for that backend |
 | `CC_BUDDY_LIVE_WEB_SEARCH` | on | `0`: the backend gets no `web_search` tool, so live facts are answered from training only |
 | `CC_BUDDY_THINK` | on | `0`: no `think_hard`; hard questions get the low-effort backend only |
-| `CC_BUDDY_THINK_MODEL` | `gpt-6-sol` | the slow brain behind `think_hard` (voice and Telegram) |
+| `CC_BUDDY_THINK_MODEL` | `gpt-6-astra` | the slow brain behind `think_hard` (voice and Telegram) |
 | `CC_BUDDY_THINK_EFFORT` | `high` | its reasoning effort (`none` … `xhigh`) |
 | `CC_BUDDY_THINK_TIMEOUT_SECS` | `90` | how long one `think_hard` may take (10-300); past it the backend answers as best it can |
 | `CC_BUDDY_VOICE_OUTPUT` | `captions` | `captions`: text to the robot's screen + beeps, silent Mac; `audio`: spoken through the Mac speaker |

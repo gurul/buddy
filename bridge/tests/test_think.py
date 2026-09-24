@@ -74,9 +74,9 @@ def test_a_think_that_searches_gets_the_sources_and_answers_in_a_later_round() -
         asyncio.run(OpenAIThinker(cfg, create=loop, search=search)("q"))
 
 
-def test_configured_defaults_to_sol_at_high_effort() -> None:
-    cfg = configured({}, backend_model="gpt-6-astra")                 # thinking is sol, whatever voice uses
-    assert cfg == ThinkConfig(enabled=True, model="gpt-6-sol", effort="high", timeout_secs=90.0,
+def test_configured_defaults_to_astra_at_high_effort() -> None:
+    cfg = configured({}, backend_model="gpt-5-mini")                  # thinking is astra, whatever voice uses
+    assert cfg == ThinkConfig(enabled=True, model="gpt-6-astra", effort="high", timeout_secs=90.0,
                               search=websearch.SearchConfig(engine="openai"))
     assert configured({"OPENROUTER_API_KEY": "r"}, backend_model="m").search.engine == "openrouter-perplexity"
     cfg = configured({"CC_BUDDY_THINK_MODEL": "gpt-5.5", "CC_BUDDY_THINK_EFFORT": "xhigh",

@@ -38,7 +38,7 @@ from . import spend, system_context, websearch
 
 log = logging.getLogger(__name__)
 
-DEFAULT_MODEL = "gpt-6-sol"          # owner, 2026-09-24: "thinking should be sol"; CC_BUDDY_THINK_MODEL overrides
+DEFAULT_MODEL = "gpt-6-astra"        # owner, 2026-09-24 evening: thinking back to astra (sol was one afternoon); CC_BUDDY_THINK_MODEL overrides
 DEFAULT_EFFORT = "high"
 DEFAULT_TIMEOUT_SECS = 90.0
 MAX_OUTPUT_TOKENS = 1200

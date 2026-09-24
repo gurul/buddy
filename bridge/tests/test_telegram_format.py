@@ -92,6 +92,41 @@ def test_underscores_and_stars_inside_words_are_left_alone() -> None:
     assert render_body("_italic_ and *this*") == "<i>italic</i> and <i>this</i>"
 
 
+def test_a_wide_markdown_table_becomes_a_block_per_row_with_header_value_lines() -> None:
+    # Codex reported tonight's showtimes as a pipe table (owner, 2026-09-24: "Format is bad"): Telegram has no
+    # tables, so each row is its first cell in bold and a "header: value" line per filled cell after it
+    text = ("All times below are **PM**.\n\n"
+            "| Movie | Regal Thornton Place | AMC Oak Tree 6 |\n"
+            "|---|---|---|\n"
+            "| Avengers Endgame: Encore | 6:10 | 6:45; 8:45 (3D) |\n"
+            "| Practical Magic 2 | 9:50 | |\n\n"
+            "Regal Thornton Place: 316 NE Thornton Place.")
+    assert render_body(text) == ("All times below are <b>PM</b>.\n\n"
+                                 "<b>Avengers Endgame: Encore</b>\n"
+                                 "Regal Thornton Place: 6:10\n"
+                                 "AMC Oak Tree 6: 6:45; 8:45 (3D)\n\n"
+                                 "<b>Practical Magic 2</b>\n"
+                                 "Regal Thornton Place: 9:50\n\n"
+                                 "Regal Thornton Place: 316 NE Thornton Place.")
+    assert "|" not in visible(render_body(text))
+
+
+def test_a_two_column_table_is_one_line_per_row_and_cells_keep_their_styles() -> None:
+    text = ("| Setting | Default |\n"
+            "|:--|--:|\n"
+            "| `CC_BUDDY_X` | 0 |\n"
+            "| **Y** | *off* — for now |\n"
+            "| | |\n"
+            "| Z | |")
+    assert render_body(text) == ("<b><code>CC_BUDDY_X</code></b>: 0\n"
+                                 "<b>Y</b>: <i>off</i>, for now\n"
+                                 "<b>Z</b>")
+    # a lone pipe line without a separator under it is prose, not a table
+    assert render_body("| just a line |\nnext") == "| just a line |\nnext"
+    # a table right after a fence and one ending the text both close cleanly
+    assert render_body("```\nx | y\n```\n| a | b |\n|-|-|\n| 1 | 2 |") == "<pre>x | y</pre>\n\n<b>1</b>: 2"
+
+
 def test_paragraphs_are_kept_blank_runs_collapsed_and_prose_is_plain() -> None:
     text = "First line  \nsecond line\n\n\n\n\nnew paragraph \u2014 with a dash \U0001F680\r\nwindows line"
     assert render_body(text) == "First line\nsecond line\n\nnew paragraph, with a dash\nwindows line"

@@ -604,7 +604,10 @@ Flip it to `ask` if two seconds a command is a price you will pay.
   repo under it, "Claude asks", "Claude is waiting on you", "Claude asks to
   run Bash". Then a blank line, then the body in short paragraphs: a model's
   markdown becomes Telegram's own bold, italics, `•` bullets, `code` and code
-  blocks, never raw stars and hashes. Everything goes in HTML parse mode with
+  blocks, never raw stars and hashes; a markdown table (Telegram has none)
+  becomes one block per row, the first cell in bold and a `header: value`
+  line for each other cell, so a showtimes grid reads on a phone (owner,
+  2026-09-24). Everything goes in HTML parse mode with
   `&`, `<` and `>` escaped in content; a message over 4096 characters is split
   on a paragraph boundary with its tags closed and reopened at the cut; a
   piece Telegram refuses to parse is sent again as plain text, so nothing is

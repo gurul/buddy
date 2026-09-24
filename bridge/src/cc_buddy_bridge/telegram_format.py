@@ -9,6 +9,8 @@ that is a wall of text. Now every message is composed here, the same way:
   Claude Code speaking through the relay, a permission to grant), one blank line, then the body;
 * the body in short paragraphs: a blank line between paragraphs, ``•`` bullets, headings in bold,
   code in ``<code>`` / ``<pre>`` — markdown from a model turned into Telegram HTML, never shown raw;
+* a markdown table as one block per row (Telegram has no tables, and a pipe grid in a proportional
+  font is a wall of bars on a phone): the row's first cell in bold, then ``header: value`` lines;
 * Telegram's HTML parse mode, which needs only ``&``, ``<`` and ``>`` escaped in content (MarkdownV2
   needs eighteen characters escaped, and a missed one is a 400 and a lost message);
 * split at 4096 characters on a paragraph boundary, then a line, then a space, with the open tags
@@ -68,6 +70,7 @@ _BOLD = re.compile(r"\*\*(?=\S)(.+?)(?<=\S)\*\*|__(?=\S)(.+?)(?<=\S)__")
 _ITALIC_STAR = re.compile(r"(?<![\w*])\*(?=\S)([^*\n]+?)(?<=\S)\*(?![\w*])")
 _ITALIC_UNDER = re.compile(r"(?<!\w)_(?=\S)([^_\n]+?)(?<=\S)_(?!\w)")
 _STRIKE = re.compile(r"~~(?=\S)(.+?)(?<=\S)~~")
+_TABLE_SEP = re.compile(r"^\|?\s*:?-+:?\s*(?:\|\s*:?-+:?\s*)*\|?$")   # |---|:---:|, the line under a header
 
 
 def _styles(escaped: str) -> str:
@@ -92,13 +95,55 @@ def inline(text: str) -> str:
     return "".join(pieces)
 
 
+def _cells(row: str) -> list[str]:
+    """The cells of one ``| a | b |`` line, outer pipes dropped, each cell stripped."""
+    body = row.strip()
+    body = body[1:] if body.startswith("|") else body
+    body = body[:-1] if body.endswith("|") else body
+    return [c.strip() for c in body.split("|")]
+
+
+def _lead(cell: str) -> str:
+    """A row's first cell, bold. Its own ``**stars**`` come off first: bold inside bold is two tags."""
+    return "<b>" + inline(_BOLD.sub(lambda m: m.group(1) or m.group(2), cell)) + "</b>"
+
+
+def table_blocks(lines: list[str]) -> list[str]:
+    """A markdown table (header, separator, rows) as HTML paragraphs a phone can read. Telegram has no
+    tables, and a pipe grid in a proportional font lines nothing up. Two columns or fewer: one
+    paragraph, a line per row, ``<b>first cell</b>: second``. Wider: a paragraph per row, the first
+    cell in bold, then a ``header: value`` line for every filled cell after it (an empty cell is no
+    line). Cells are prose: emoji and dashes go, inline styles and links stay."""
+    header = [plain(c) for c in _cells(lines[0])]
+    rows = [[plain(c) for c in _cells(line)] for line in lines[2:]]
+    rows = [r for r in rows if any(r)]
+    width = max([len(header)] + [len(r) for r in rows])
+    header += [""] * (width - len(header))
+    if width <= 2:
+        out: list[str] = []
+        for r in rows:
+            r += [""] * (width - len(r))
+            first = _lead(r[0]) if r[0] else ""
+            second = inline(r[1]) if width == 2 and r[1] else ""
+            out.append(first + ": " + second if first and second else first or second)
+        return ["\n".join(out)] if out else []
+    blocks: list[str] = []
+    for r in rows:
+        r += [""] * (width - len(r))
+        block = [_lead(r[0])] if r[0] else []
+        block += [(inline(h) + ": " if h else "") + inline(v) for h, v in zip(header[1:], r[1:], strict=True) if v]
+        if block:
+            blocks.append("\n".join(block))
+    return blocks
+
+
 def render_body(text: str) -> str:
     """Free text (a model's answer, a task's result, what Claude Code said) as Telegram HTML paragraphs.
 
     Line structure is kept: a blank line separates paragraphs, and lines inside a paragraph stay on their
     own lines. Fenced code becomes ``<pre>``; ``#`` headings become bold lines; ``-``, ``*`` and numbered
-    lists become ``•`` and ``1.`` lines; ``> quotes`` become italic; a horizontal rule goes. Emoji and
-    dashes are stripped from prose (``plain``), never from code."""
+    lists become ``•`` and ``1.`` lines; ``> quotes`` become italic; a horizontal rule goes; a ``|`` table
+    becomes ``table_blocks``. Emoji and dashes are stripped from prose (``plain``), never from code."""
     paragraphs: list[str] = []
     current: list[str] = []
     fence: Optional[list[str]] = None
@@ -108,7 +153,11 @@ def render_body(text: str) -> str:
             paragraphs.append("\n".join(current))
             current.clear()
 
-    for raw in str(text).replace("\r\n", "\n").replace("\r", "\n").split("\n"):
+    lines = str(text).replace("\r\n", "\n").replace("\r", "\n").split("\n")
+    i = 0
+    while i < len(lines):
+        raw = lines[i]
+        i += 1
         if _FENCE.match(raw):
             if fence is None:
                 flush()
@@ -121,6 +170,14 @@ def render_body(text: str) -> str:
             continue
         if fence is not None:
             fence.append(raw.rstrip())
+            continue
+        if raw.strip().startswith("|") and i < len(lines) and _TABLE_SEP.match(lines[i].strip()):
+            flush()                                    # a header row over its separator: a table until a line
+            end = i + 1                                # that does not start with a pipe
+            while end < len(lines) and lines[end].strip().startswith("|"):
+                end += 1
+            paragraphs.extend(table_blocks(lines[i - 1:end]))
+            i = end
             continue
         line = plain(raw.strip())
         if not line:
