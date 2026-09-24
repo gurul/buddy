@@ -209,6 +209,9 @@ class _Ears:
 def test_converse_lends_the_memory_and_its_blocks_to_the_session(tmp_path: Path, monkeypatch) -> None:
     memory = _memory(tmp_path)
     t = memory.transcripts
+    # The transcript day starts at DAY_START_HOUR (04:00). Between 04:00 and 04:20, "20 minutes ago" is
+    # yesterday's day and this test failed by the clock (2026-09-24, 04:15): start the day 12 hours from now.
+    monkeypatch.setattr(transcripts, "DAY_START_HOUR", (t.now().hour + 12) % 24)
     yesterday = t.now() - timedelta(days=1)
     assert t.append("telegram", "t-1726000000000-abcd", "owner", "say", "the plant needs water", now=yesterday)
     assert t.append("telegram", "t-1726000000001-abcd", "owner", "say", "the kettle is new",
