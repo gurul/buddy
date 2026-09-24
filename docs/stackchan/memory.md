@@ -299,7 +299,7 @@ mem0's own update step and `tidy` absorb what was already there.
 
 The memory folder is this Mac's. Here is exactly what leaves it, and when.
 
-- **The Telegram text brain** (`gpt-6-astra`, OpenAI Responses API, `store=False`)
+- **The Telegram text brain** (`gpt-6-luna`, OpenAI Responses API, `store=False`)
   is sent the profile, today's lines on both channels and each memory tool's result,
   every turn. Telegram's own servers carry the chat itself, as they always did.
 - **The voice** (OpenAI's Live API and its Responses backend) is sent the voice
