@@ -610,7 +610,12 @@ window.Telegram = { WebApp: { initData: %s, ready() {}, expand() {}, isVersionAt
   HapticFeedback: { notificationOccurred(k) { window.__haptics.push(k); }, impactOccurred() {} },
   initDataUnsafe: { user: { id: 4242, first_name: "O" } }, version: "9.1", platform: "ios",
   themeParams: { bg_color: "#000000", button_color: "#3e88f7" },
-  BackButton: { show() {}, hide() {}, onClick() {}, offClick() {} },
+  BackButton: (() => { const cbs = []; const b = { isVisible: false, show() { b.isVisible = true; },
+    hide() { b.isVisible = false; }, onClick(f) { cbs.push(f); },
+    offClick(f) { const i = cbs.indexOf(f); if (i >= 0) cbs.splice(i, 1); },
+    press() { cbs.slice().forEach((f) => f()); } }; return b; })(),
+  SettingsButton: { isVisible: false, show() { this.isVisible = true; },
+    hide() { this.isVisible = false; window.__settingsHid = true; }, onClick() {}, offClick() {} },
   MainButton: { show() {}, hide() {}, setText() {}, onClick() {}, offClick() {} } } };"""
 
 
@@ -1070,7 +1075,7 @@ def test_an_open_button_from_the_chat_opens_the_app_without_the_owners_signature
     assert missing == "That app is no longer here. It may have been deleted."
 
 
-def test_a_change_picked_during_a_build_keeps_its_words_and_target(tmp_path: Path) -> None:
+def test_a_new_build_finishing_while_a_change_chat_is_open_does_not_jump_away(tmp_path: Path) -> None:
     gate = asyncio.Event()
 
     async def script(page, app):
@@ -1082,19 +1087,22 @@ def test_a_change_picked_during_a_build_keeps_its_words_and_target(tmp_path: Pat
         await page.wait_for_function("document.getElementById('make-status').textContent.startsWith('Thinking')")
         await page.click("button[aria-label='More for Reading List']")
         await page.click("#sheet-actions button[data-act=change]")
-        await page.fill("#want", "add a dark mode")
+        await page.fill("#ask", "add a dark mode")
+        during = await page.evaluate("""() => ({ send: document.getElementById('ask-send').disabled,
+            hint: document.getElementById('chat-hint').textContent, focus: document.activeElement.id })""")
         gate.set()
         await page.wait_for_function("document.getElementById('make-status').textContent.startsWith('Ready')")
         await page.wait_for_timeout(1500)
-        return await page.evaluate("""() => ({ url: location.href, want: document.getElementById('want').value,
-            editing: document.getElementById('editing-text').textContent,
-            editingShown: !document.getElementById('editing').hidden,
+        after = await page.evaluate("""() => ({ url: location.search, ask: document.getElementById('ask').value,
+            send: document.getElementById('ask-send').disabled, hint: document.getElementById('chat-hint').textContent,
             open: [...document.querySelectorAll('#make-result button')].map((b) => b.textContent) })""")
+        return during, after
 
-    out, errors = browse(tmp_path, script, claude=SlowClaude(page_doc("v1"), gate=gate))
+    (during, after), errors = browse(tmp_path, script, claude=SlowClaude(page_doc("v1"), gate=gate))
     assert errors == []
-    assert out["want"] == "add a dark mode" and out["editingShown"] and out["editing"] == "Changing Reading List"
-    assert "/apps/" not in out["url"] and out["open"] == ["Open Habit Tracker"]    # no jump away mid-change
+    assert during == {"send": True, "hint": "Another build is running. Change waits for it.", "focus": "ask"}
+    assert after == {"url": "?chat=reading-list", "ask": "add a dark mode", "send": False, "hint": "",
+                     "open": ["Open Habit Tracker"]}                              # no jump away mid-change
 
 
 def test_a_build_with_problems_names_the_first_one_and_does_not_jump_into_the_app(tmp_path: Path) -> None:
@@ -1118,14 +1126,13 @@ def test_a_page_opened_again_mid_build_shows_it_and_holds_off_build_and_the_shee
 
     async def script(page, app):
         app.store.save(page_doc("v1"), "habit tracker")
-        await page.reload()
-        await page.wait_for_selector(".app")
-        await page.click("button[aria-label='More for Habit Tracker']")
-        await page.click("#sheet-actions button[data-act=change]")
-        await page.fill("#want", "add streaks")
-        await page.click("#make")
-        await page.wait_for_function("document.getElementById('make-status').textContent.startsWith('Changing')")
-        await page.reload()                                           # the phone locked; the page is back
+        base = page.url.rstrip("/")
+        await page.goto(base + "/?chat=habit-tracker")
+        await page.wait_for_selector("#thread .msg")
+        await page.fill("#ask", "add streaks")
+        await page.press("#ask", "Enter")
+        await page.wait_for_selector("#chat-progress[aria-busy=true]")     # the change is running (held at gate)
+        await page.goto(base + "/")                                   # the phone locked; the page is back, on the list
         await page.wait_for_function("document.getElementById('make-status').textContent.startsWith('Still building')")
         during = await page.evaluate("""() => ({ build: document.getElementById('make').disabled,
             more: document.querySelector('.app .more').disabled,
@@ -1171,19 +1178,21 @@ def test_changing_an_app_deleted_meanwhile_stops_changing_it(tmp_path: Path) -> 
         await page.wait_for_selector(".app")
         await page.click("button[aria-label='More for Habit Tracker']")
         await page.click("#sheet-actions button[data-act=change]")
+        await page.wait_for_selector("#thread .msg")
         app.store.delete("habit-tracker")                             # from the chat, meanwhile
-        await page.fill("#want", "add streaks")
-        await page.click("#make")
-        await page.wait_for_function("document.getElementById('make-status').textContent.includes('deleted')")
-        return await page.evaluate("""() => ({ line: document.getElementById('make-status').textContent,
-            editing: !document.getElementById('editing').hidden, button: document.getElementById('make').textContent,
-            want: document.getElementById('want').value })""")
+        await page.fill("#ask", "add streaks")
+        await page.click("#ask-send")
+        await page.wait_for_function("document.getElementById('chat-hint').textContent.includes('deleted')")
+        return await page.evaluate("""() => ({ said: document.getElementById('chat-live').textContent,
+            hint: document.getElementById('chat-hint').textContent, send: document.getElementById('ask-send').disabled,
+            ask: document.getElementById('ask').disabled, open: document.getElementById('chat-open').disabled,
+            sub: document.getElementById('chat-sub').textContent })""")
 
-    out, _ = browse(tmp_path, script)
-    assert out == {"line": "Habit Tracker was deleted. Describe it again to build a new one.", "editing": False,
-                   "button": "Build it", "want": "add streaks"}
-
-
+    out, errors = browse(tmp_path, script)
+    assert errors == [] and out == {
+        "said": "Habit Tracker was deleted meanwhile, so nothing was changed.",
+        "hint": "Habit Tracker was deleted. Describe it again on your apps screen to build a new one.",
+        "send": True, "ask": True, "open": True, "sub": "Deleted"}
 
 
 def test_an_app_reports_what_it_does_on_the_phone_to_the_log(tmp_path: Path, caplog) -> None:
@@ -1224,3 +1233,418 @@ def test_opening_loading_and_saving_an_app_are_logged(tmp_path: Path, caplog) ->
     said = " / ".join(r.getMessage() for r in caplog.records)
     assert page.status_code == 200 and "/buddy.js" in page.text
     assert "habit-tracker opened" in said and "habit-tracker saved" in said and "habit-tracker loaded (has data)" in said
+
+
+# ---- each app's change chat: its history, the Change buttons, the view --------------------------------------------
+
+class FailingClaude(SlowClaude):
+    """A maker Claude that cannot be reached for one call, then answers as SlowClaude does."""
+
+    def __init__(self, *answers: str) -> None:
+        super().__init__(*answers)
+        self.fail_next = False
+
+    async def __call__(self, messages, progress):
+        if self.fail_next:
+            self.fail_next = False
+            raise ConnectionError("down")
+        return await super().__call__(messages, progress)
+
+
+def changed_app(tmp_path: Path, claude=None):
+    """A MiniApp with Habit Tracker built, changed, undone and changed again (a failed try in between)."""
+    claude = claude or FailingClaude(page_doc("v1"), page_doc("v2"), page_doc("v3"))
+    app = apps_server(tmp_path, claude)
+    asyncio.run(app.maker.make("a habit tracker"))
+    asyncio.run(app.maker.edit("habit-tracker", "make the buttons bigger"))
+    app.store.revert("habit-tracker")
+    claude.fail_next = True
+    with pytest.raises(ConnectionError):
+        asyncio.run(app.maker.edit("habit-tracker", "add categories"))
+    asyncio.run(app.maker.edit("habit-tracker", "add categories"))
+    return app
+
+
+def test_history_is_the_apps_thread_and_only_the_owner_gets_it(tmp_path: Path) -> None:
+    app = changed_app(tmp_path)
+
+    async def body(port):
+        url = "/api/apps/habit-tracker/history"
+        t = miniapp.app_token("habit-tracker", TOKEN)
+        return {"mine": await post(port, url, {"initData": signed()}),
+                "stranger": await post(port, url, {"initData": signed(999)}),
+                "unsigned": await post(port, url, {}),
+                "app_token": await raw(port, "POST", url, {"t": t}),
+                "sandboxed": await raw(port, "POST", url, {"initData": signed()}, {"Origin": "null"}),
+                "missing": await post(port, "/api/apps/no-such-app/history", {"initData": signed()}),
+                "bad_slug": await post(port, "/api/apps/..%2Fx/history", {"initData": signed()})}
+
+    r = with_server(app, body)
+    assert [r[k].status_code for k in ("stranger", "unsigned", "app_token", "sandboxed")] == [403] * 4
+    assert r["missing"].status_code == 404 and r["missing"].json()["gone"] and r["bad_slug"].status_code == 404
+    j = r["mine"].json()
+    assert j["app"]["slug"] == "habit-tracker" and j["app"]["open"].startswith("apps/habit-tracker/?t=")
+    assert j["building"] is None and j["spent_today"] == pytest.approx(3 * cost_usd("claude-opus-5-5", USAGE))
+    assert [(i["kind"], i["text"]) for i in j["thread"]] == [
+        ("request", "a habit tracker"), ("request", "make the buttons bigger"), ("undo", "(undo)"),
+        ("request", "add categories"), ("request", "add categories")]
+    made, bigger, undo, failed, cats = (i["result"] for i in j["thread"])
+    assert made["ok"] and made["version"] == 1 and made["check"] == "passed: 2 fields filled, 9 taps, 3 saves"
+    assert bigger["version"] == 2 and undo is None and cats["version"] == 3 and cats["ok"]
+    assert made["usd"] == pytest.approx(cost_usd("claude-opus-5-5", USAGE), abs=1e-4) and made["tested"]
+    assert not failed["ok"] and failed["reason"] == "the build stopped before it finished" and failed["usd"] == 0
+
+
+def test_history_shows_the_change_running_on_the_app_now(tmp_path: Path) -> None:
+    gate = asyncio.Event()
+    app = apps_server(tmp_path, SlowClaude(page_doc("v2"), gate=gate))
+    app.store.save(page_doc("v1"), "habit tracker")
+    app.store.save(page_doc("v1", "Reading List"), "reading list")
+
+    async def body(port):
+        reader, writer = await asyncio.open_connection("127.0.0.1", port)
+        raw_body = json.dumps({"initData": signed(), "request": "add streaks", "app": "habit-tracker"}).encode()
+        writer.write(b"POST /api/make HTTP/1.1\r\nHost: x\r\nContent-Type: application/json\r\n"
+                     + f"Content-Length: {len(raw_body)}\r\n\r\n".encode() + raw_body)
+        await writer.drain()
+        await reader.readuntil(b"data: ")
+        mine = (await post(port, "/api/apps/habit-tracker/history", {"initData": signed()})).json()["building"]
+        other = (await post(port, "/api/apps/reading-list/history", {"initData": signed()})).json()["building"]
+        app.changing.add("reading-list")                             # a change from the chat door
+        door = (await post(port, "/api/apps/reading-list/history", {"initData": signed()})).json()["building"]
+        app.changing.discard("reading-list")
+        gate.set()
+        await reader.read()
+        writer.close()
+        after = (await post(port, "/api/apps/habit-tracker/history", {"initData": signed()})).json()
+        return mine, other, door, after
+
+    mine, other, door, after = with_server(app, body)
+    assert mine["app"] == "habit-tracker" and mine["request"] == "add streaks" and mine["stage"] in STAGE_NAMES
+    assert isinstance(mine["secs"], int) and other is None
+    assert door == {"app": "reading-list", "request": "", "stage": "", "secs": None}
+    assert after["building"] is None and after["thread"][-1]["text"] == "add streaks"
+    assert after["thread"][-1]["result"]["version"] == 2
+
+
+STAGE_NAMES = ("thinking", "writing", "testing", "fixing", "saving")
+
+
+@pytest.mark.parametrize("changed", [True, False])
+def test_a_page_build_finished_in_the_chat_has_a_change_button_after_a_change(tmp_path: Path, changed: bool) -> None:
+    app = apps_server(tmp_path)
+    app.url = "https://quiet-owl.trycloudflare.com"
+    out = {"done": True, "changed": changed, "app": {"slug": "habit-tracker", "title": "Habit Tracker", "icon": "✅"}}
+    asyncio.run(app._build_result(OWNER, out))
+    sent = [d for m, d in app.pins._bot.calls if m == "sendMessage"]
+    rows = sent[0]["reply_markup"]["inline_keyboard"]
+    want = [[{"text": "Open Habit Tracker", "web_app": {"url": "https://quiet-owl.trycloudflare.com/?open=habit-tracker"}}]]
+    if changed:
+        want.append([{"text": "Change", "web_app": {"url": "https://quiet-owl.trycloudflare.com/?chat=habit-tracker"}}])
+    assert rows == want and sent[0]["text"] == f"✅ Habit Tracker is {'updated' if changed else 'ready'}."
+    assert app.chat_url("habit-tracker").endswith("/?chat=habit-tracker")
+
+
+def thread_texts(page):
+    return page.evaluate("""() => [...document.querySelectorAll('#thread > li')].map((li) =>
+        [li.className, [...li.children].filter((c) => c.tagName === 'SPAN').map((c) => c.textContent)])""")
+
+
+def test_the_change_chat_view_opens_from_its_link_and_shows_the_thread_as_text(tmp_path: Path) -> None:
+    async def script(page, app):
+        claude = FailingClaude(page_doc("v1"), page_doc("v2"), page_doc("v3"))
+        app.maker._generate = claude
+        asyncio.get_running_loop()
+        await app.maker.make("a habit tracker")
+        await app.maker.edit("habit-tracker", '<img src=x onerror="window.__pwned=1"> bigger buttons')
+        app.store.revert("habit-tracker")
+        claude.fail_next = True
+        with pytest.raises(ConnectionError):
+            await app.maker.edit("habit-tracker", "add categories")
+        base = page.url.rstrip("/")
+        await page.goto(base + "/?chat=habit-tracker")
+        await page.wait_for_selector("#thread .msg.built")
+        seen = await page.evaluate("""() => ({ list: getComputedStyle(document.getElementById('apps')).display,
+            header: getComputedStyle(document.querySelector('body > header')).display,
+            title: document.getElementById('chat-title').textContent, sub: document.getElementById('chat-sub').textContent,
+            icon: document.getElementById('chat-icon').textContent, focus: document.activeElement.id,
+            pwned: window.__pwned === 1, imgs: document.querySelectorAll('#thread img').length,
+            open: document.getElementById('chat-open').getAttribute('aria-label'),
+            wide: document.documentElement.scrollWidth > document.documentElement.clientWidth,
+            composer: document.getElementById('composer').getBoundingClientRect().bottom, height: innerHeight })""")
+        rows = await thread_texts(page)
+        await page.click("#chat-back")
+        await page.wait_for_function("document.activeElement.getAttribute('aria-label') !== 'Back to your apps'")
+        back = await page.evaluate("""() => ({ url: location.search, focus: document.activeElement.getAttribute('aria-label'),
+            list: getComputedStyle(document.getElementById('apps')).display })""")
+        return seen, rows, back
+
+    (seen, rows, back), errors = browse(tmp_path, script)
+    assert errors == []
+    assert seen["list"] == "none" and seen["header"] == "none" and seen["title"] == "Habit Tracker"
+    assert seen["icon"] == "✅" and seen["focus"] == "chat-title" and seen["open"] == "Open Habit Tracker"
+    assert seen["sub"] == "3 requests · $" + f"{2 * cost_usd('claude-opus-5-5', USAGE):.2f} spent on it"
+    assert not seen["pwned"] and seen["imgs"] == 0 and not seen["wide"]
+    assert abs(seen["composer"] - seen["height"]) <= 1                         # the composer sits at the bottom
+    kinds = [r[0] for r in rows]
+    assert kinds == ["msg asked", "msg built", "msg asked", "msg built", "msg note", "msg asked", "msg built failed"]
+    assert rows[0][1][0] == "a habit tracker" and rows[1][1][:2] == ["Built. This is version 1.", "Tested on a phone."]
+    assert rows[2][1][0] == '<img src=x onerror="window.__pwned=1"> bigger buttons'
+    assert rows[3][1][0] == "Changed. This is version 2."
+    assert rows[4][1][0] == "Undone: back to the version before its last change."
+    assert rows[6][1][:2] == ["Couldn't change it: the build stopped before it finished.", "The app is unchanged."]
+    assert back == {"url": "", "focus": "More for Habit Tracker", "list": "block"}
+
+
+def test_the_change_chat_runs_a_change_with_its_stages_then_open_returns_to_the_app(tmp_path: Path) -> None:
+    async def script(page, app):
+        app.store.save(page_doc("v1"), "habit tracker")
+        await page.reload()
+        await page.wait_for_selector(".app")
+        await page.click("button[aria-label='More for Habit Tracker']")
+        await page.click("#sheet-actions button[data-act=change]")
+        await page.wait_for_selector("#chat:not([hidden])")
+        await page.wait_for_selector("#thread .msg.asked")
+        first = await page.evaluate("""() => ({ url: location.search, focus: document.activeElement.id,
+            rows: document.querySelectorAll('#thread > li').length })""")
+        await page.evaluate("""() => { window.__said = [];
+            new MutationObserver(() => window.__said.push(document.getElementById('chat-live').textContent))
+              .observe(document.getElementById('chat-live'), { childList: true, characterData: true, subtree: true }); }""")
+        await page.fill("#ask", "make the buttons bigger")
+        await page.press("#ask", "Enter")
+        await page.wait_for_selector("#thread .msg.built .btn")
+        rows = await thread_texts(page)
+        said = await page.evaluate("window.__said")
+        buttons = await page.evaluate("[...document.querySelectorAll('#thread .btn')].map((b) => b.textContent)")
+        await page.click("#thread .msg.built .btn")
+        await page.wait_for_url("**/apps/habit-tracker/?t=*")
+        return first, rows, said, buttons
+
+    (first, rows, said, buttons), errors = browse(tmp_path, script, claude=SlowClaude(page_doc("v2")))
+    assert errors == []
+    # the request that built it, under the note that its result was not kept (it was saved without a build)
+    assert first == {"url": "?chat=habit-tracker", "focus": "ask", "rows": 2}
+    assert "Thinking it through…" in said and "Writing it…" in said and "Testing it on a phone…" in said
+    assert said[-1] == "Changed: Habit Tracker. Tested on a phone."
+    assert rows[-2] == ["msg asked", ["make the buttons bigger", rows[-2][1][1]]]
+    assert rows[-1][1][:2] == ["Changed. This is version 2.", "Tested on a phone."]
+    assert buttons == ["Open Habit Tracker"]
+
+
+def test_a_change_with_problems_can_be_undone_from_the_change_chat(tmp_path: Path) -> None:
+    async def script(page, app):
+        app.maker._check = PhoneCheck(bad="v2")
+        app.maker.max_repairs = 0
+        app.store.save(page_doc("v1"), "habit tracker")
+        await page.goto(page.url.rstrip("/") + "/?chat=habit-tracker")
+        await page.wait_for_selector("#thread .msg")
+        await page.fill("#ask", "add a chart")
+        await page.click("#ask-send")
+        await page.wait_for_selector("#thread .btn.plain")
+        rows = await thread_texts(page)
+        await page.click("#thread .btn.plain")
+        await page.wait_for_selector("#thread .msg.note >> text=Undone")
+        return rows, await page.text_content("#chat-live"), app.store.html("habit-tracker")
+
+    (rows, said, html), errors = browse(tmp_path, script, claude=SlowClaude(page_doc("v2")))
+    assert errors == []
+    assert rows[-1][1] == ["Changed. This is version 2.", "Tested on a phone.",
+                           "1 thing may not work: Tapping Add threw TypeError.", rows[-1][1][3]]
+    assert said == "Habit Tracker is back to how it was." and "v1" in html
+
+
+def test_the_change_chat_follows_both_themes_and_keeps_the_composer_above_the_keyboard(tmp_path: Path) -> None:
+    async def look(page, app):
+        app.store.save(page_doc("v1"), "habit tracker")
+        await page.goto(page.url.rstrip("/") + "/?chat=habit-tracker")
+        await page.wait_for_selector("#thread .msg")
+        colors = await page.evaluate("""() => ({ body: getComputedStyle(document.body).backgroundColor,
+            asked: getComputedStyle(document.querySelector('.msg.asked')).backgroundColor,
+            text: getComputedStyle(document.querySelector('.msg.asked')).color })""")
+        # the keyboard takes the bottom 340px: the page follows the visible height (visualViewport)
+        await page.evaluate("document.documentElement.style.setProperty('--app-h', '420px')")
+        bottom = await page.evaluate("document.getElementById('composer').getBoundingClientRect().bottom")
+        return colors, bottom
+
+    (light, lb), _ = browse(tmp_path / "l", look)
+    (dark, db), _ = browse(tmp_path / "d", look, color_scheme="dark")
+    assert light["body"] == "rgb(255, 255, 255)" and dark["body"] == "rgb(23, 23, 27)"
+    assert light["asked"] == "rgb(47, 111, 222)" and light["text"] == "rgb(255, 255, 255)"
+    assert dark["asked"] == "rgb(62, 123, 240)"
+    assert lb == 420 and db == 420
+
+
+def test_telegrams_back_button_leads_from_the_change_chat_back_to_the_list(tmp_path: Path) -> None:
+    async def script(page, app):
+        app.store.save(page_doc("v1"), "habit tracker")
+        await page.reload()
+        await page.wait_for_selector(".app")
+        await page.click("button[aria-label='More for Habit Tracker']")
+        await page.click("#sheet-actions button[data-act=change]")
+        await page.wait_for_selector("#thread .msg")
+        await page.wait_for_timeout(100)                              # the sheet's close event has come and gone
+        shown = await page.evaluate("Telegram.WebApp.BackButton.isVisible")
+        await page.evaluate("Telegram.WebApp.BackButton.press()")
+        await page.wait_for_function("!document.body.classList.contains('chatting')")
+        return shown, await page.evaluate("({ back: Telegram.WebApp.BackButton.isVisible, url: location.search })")
+
+    (shown, after), errors = browse(tmp_path, script)
+    assert errors == [] and shown is True and after == {"back": False, "url": ""}
+
+
+def test_the_pencil_in_a_served_sandboxed_app_leads_to_its_change_chat(tmp_path: Path) -> None:
+    async def script(page, app):
+        app.store.save(page_doc("v1"), "habit tracker")
+        await page.goto(page.url.rstrip("/") + "/?open=habit-tracker")
+        await page.wait_for_url("**/apps/habit-tracker/?t=*")
+        await page.wait_for_selector("buddy-change")
+        box = await page.evaluate("(() => { const r = document.querySelector('buddy-change').getBoundingClientRect();"
+                                  " return [r.x + r.width / 2, r.y + r.height / 2]; })()")
+        await page.touchscreen.tap(*box)
+        await page.wait_for_url("**/?chat=habit-tracker*")
+        await page.wait_for_selector("#thread .msg")
+        return await page.evaluate("""() => ({ title: document.getElementById('chat-title').textContent,
+            rows: [...document.querySelectorAll('#thread > li')].map((li) => li.className),
+            settingsHid: window.__settingsHid === true })""")
+
+    out, errors = browse(tmp_path, script)
+    # the home page takes Telegram's Settings item away: it belongs to an app, where it leads here
+    assert errors == [] and out == {"title": "Habit Tracker", "rows": ["msg note", "msg asked"], "settingsHid": True}
+
+
+# ---- review round 3: each of these failed on the code before its fix ----------------------------------------
+
+def test_a_change_from_the_page_that_failed_after_the_page_went_away_still_offers_its_change_chat(
+        tmp_path: Path) -> None:
+    app = apps_server(tmp_path)
+    app.url = "https://quiet-owl.trycloudflare.com"
+    app.store.save(page_doc("v1"), "habit tracker")
+    asyncio.run(app._build_result(OWNER, {"error": "I couldn't change it: Claude declined to build that.",
+                                          "changed": True, "slug": "habit-tracker"}))
+    asyncio.run(app._build_result(OWNER, {"error": "I couldn't build it: no.", "changed": False}))
+    sent = [d for m, d in app.pins._bot.calls if m == "sendMessage"]
+    assert sent[0]["reply_markup"]["inline_keyboard"] == [
+        [{"text": "Change", "web_app": {"url": "https://quiet-owl.trycloudflare.com/?chat=habit-tracker"}}]]
+    assert "reply_markup" not in sent[1]
+
+
+class JourneyFails:
+    """The phone check, faked: every page passes the script and fails one journey."""
+
+    async def __call__(self, html: str, *, seed=None, journeys=None):
+        from cc_buddy_bridge.app_check import CheckReport
+        from cc_buddy_bridge.jev_verify import JourneyResult, JourneyRun
+
+        run = JourneyRun(results=[JourneyResult("Add one", "step", steps=2, step=1, step_words='tap "Add"',
+                                                reason='tap "Add": could not find "Add" (the controls on screen: '
+                                                       '"Settings").', evidence='"Habit Tracker"')], total=1)
+        return CheckReport(ok=False, issues=run.issues(), taps=9, fields=2, saves=3, journeys=run)
+
+
+def test_the_page_hears_a_journey_problem_in_plain_words_and_a_failed_change_as_a_change(tmp_path: Path) -> None:
+    class Refuses(SlowClaude):
+        async def __call__(self, messages, progress):
+            from cc_buddy_bridge.apps_maker import Generated
+
+            return Generated("I can't help with that.", dict(USAGE), "refusal")
+
+    app = apps_server(tmp_path, SlowClaude(page_doc("v1")), JourneyFails())
+    app.maker.max_repairs = 0
+    done = events(with_server(app, lambda port: post(port, "/api/make", {"initData": signed(),
+                                                                         "request": "a habit tracker"})).text)[-1]
+    assert done["issues"] == ['Couldn\'t tap "Add" in "Add one".']
+    app.maker._generate = Refuses("x")
+    failed = events(with_server(app, lambda port: post(port, "/api/make", {
+        "initData": signed(), "request": "x", "app": "habit-tracker"})).text)[-1]
+    assert failed["error"] == "I couldn't change it: Claude declined to build that." and failed["slug"] == "habit-tracker"
+
+
+def test_another_apps_change_running_from_this_page_is_not_shown_in_this_chat(tmp_path: Path) -> None:
+    gate = asyncio.Event()
+
+    async def script(page, app):
+        app.store.save(page_doc("v1"), "habit tracker")
+        app.store.save(page_doc("v1", "Reading List"), "reading list")
+        await page.goto(page.url.rstrip("/") + "/?chat=habit-tracker")
+        await page.wait_for_selector("#thread .msg")
+        await page.fill("#ask", "bigger buttons")
+        await page.press("#ask", "Enter")
+        await page.wait_for_selector("#chat-progress")
+        await page.click("#chat-back")
+        await page.wait_for_selector(".app")
+        await page.click("button[aria-label='More for Reading List']")
+        await page.click("#sheet-actions button[data-act=change]")
+        await page.wait_for_function("document.getElementById('chat-title').textContent === 'Reading List'")
+        await page.wait_for_timeout(300)
+        during = await page.evaluate("""() => ({ rows: [...document.querySelectorAll('#thread > li')].map((li) => li.textContent),
+            progress: !!document.getElementById('chat-progress'), send: document.getElementById('ask-send').disabled,
+            hint: document.getElementById('chat-hint').textContent })""")
+        gate.set()
+        await page.wait_for_function("!document.getElementById('ask-send').disabled")
+        await page.wait_for_timeout(1200)
+        after = await page.evaluate("""() => ({ progress: !!document.getElementById('chat-progress'),
+            rows: [...document.querySelectorAll('#thread > li')].map((li) => li.textContent) })""")
+        return during, after
+
+    (during, after), errors = browse(tmp_path, script, claude=SlowClaude(page_doc("v2"), gate=gate))
+    assert errors == []
+    assert not during["progress"] and not any("bigger buttons" in r for r in during["rows"]), during
+    assert during["send"] is True and during["hint"] == "Another build is running. Change waits for it."
+    assert not after["progress"] and not any("bigger buttons" in r for r in after["rows"])
+
+
+def test_a_change_that_failed_says_why_under_the_thread(tmp_path: Path) -> None:
+    import anthropic
+
+    class RateLimited(SlowClaude):
+        async def __call__(self, messages, progress):
+            request = httpx.Request("POST", "https://api.anthropic.com/v1/messages")
+            raise anthropic.RateLimitError("slow", response=httpx.Response(429, request=request), body=None)
+
+    async def script(page, app):
+        app.store.save(page_doc("v1"), "habit tracker")
+        await page.goto(page.url.rstrip("/") + "/?chat=habit-tracker")
+        await page.wait_for_selector("#thread .msg")
+        await page.fill("#ask", "bigger buttons")
+        await page.press("#ask", "Enter")
+        await page.wait_for_selector("#thread .msg.built.failed")
+        return await page.text_content("#chat-hint"), await thread_texts(page)
+
+    (hint, rows), errors = browse(tmp_path, script, claude=RateLimited("x"))
+    assert errors == [] and hint == "Claude is rate-limited right now. Try again in a minute."
+    assert rows[-1][1][0] == "Couldn't change it: Claude is rate-limited right now. Try again in a minute."
+
+
+def test_a_poll_while_a_change_runs_keeps_the_owners_place_in_the_thread(tmp_path: Path) -> None:
+    async def script(page, app):
+        app.store.save(page_doc("v1"), "habit tracker")
+        for n in range(25):
+            app.store.record_build("habit-tracker", f"try number {n} with a longer request to fill the row",
+                                   {"ok": False, "reason": "no"})
+        app.changing.add("habit-tracker")                       # a change from the chat door: the page polls
+        await page.goto(page.url.rstrip("/") + "/?chat=habit-tracker")
+        await page.wait_for_selector("#chat-progress")
+        await page.evaluate("""() => { const t = document.getElementById('thread'); t.scrollTop = 0;
+            window.__first = t.firstElementChild; }""")
+        await page.wait_for_timeout(4600)                     # one poll (every 4 s)
+        seen = await page.evaluate("""() => ({ top: document.getElementById('thread').scrollTop,
+            same: document.getElementById('thread').firstElementChild === window.__first,
+            tall: document.getElementById('thread').scrollHeight > document.getElementById('thread').clientHeight })""")
+        app.changing.discard("habit-tracker")
+        return seen
+
+    seen, errors = browse(tmp_path, script)
+    assert errors == [] and seen == {"top": 0, "same": True, "tall": True}
+
+
+def test_requests_from_before_results_were_kept_say_so_once(tmp_path: Path) -> None:
+    async def script(page, app):
+        app.store.save(page_doc("v1"), "habit tracker")
+        app.store.save(page_doc("v2"), "add streaks", slug="habit-tracker")
+        await page.goto(page.url.rstrip("/") + "/?chat=habit-tracker")
+        await page.wait_for_selector("#thread .msg")
+        return await thread_texts(page)
+
+    rows, errors = browse(tmp_path, script)
+    assert errors == [] and [r[0] for r in rows] == ["msg note", "msg asked", "msg asked"]
+    assert rows[0][1][0] == "Earlier changes show only what was asked: their results were not kept then."

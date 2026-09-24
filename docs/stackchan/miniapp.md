@@ -4,7 +4,8 @@ Ask buddy for an app, like "make me a habit tracker", and it builds one: a
 small, real app that opens inside Telegram and keeps its data on your Mac.
 Before you see it, buddy uses it on a phone-sized screen and fixes what broke.
 You can change, undo, rename or delete an app from the chat or from the Apps
-screen.
+screen, and each app has its own change chat where you keep refining it
+("make the buttons bigger", "add categories").
 
 The Mini App had a Claude chat tab as well. It was removed on 2026-09-24 so the
 Mini App is only your apps.
@@ -15,12 +16,18 @@ Code:
 - `apps_maker.py`: what Claude is told, the build and repair loop, and storing
   and serving apps.
 - `app_check.py`: the phone check every build goes through.
+- `jev_verify.py`: Jev walks the app's journeys and judges what the screen
+  shows.
 - `miniapp_page.html`: the home screen.
 - `bridge/tools/app_eval.py`: builds apps from the command line into a scratch
-  folder and writes a report with cost, time and the check's result.
+  folder and writes a report with cost, time, the check's result and the
+  journeys Jev walked. `--check DIR` runs only the check (script, then
+  journeys) on `DIR/index.html` with `DIR/journeys.json`, for example on a page
+  broken by hand as a negative control.
+- `bridge/tools/journey_eval.py`: fits and scores Jev's cut-offs on real apps.
 
 Tests: `bridge/tests/test_miniapp.py`, `bridge/tests/test_apps_maker.py`,
-`bridge/tests/test_app_check.py`.
+`bridge/tests/test_app_check.py`, `bridge/tests/test_jev_verify.py`.
 
 ## Opening it
 
@@ -49,7 +56,8 @@ request also carries today's date, the local time and time zone
 
 A build is a loop:
 
-1. **Write.** Claude writes the file.
+1. **Write.** Claude writes the file, and 2 to 4 journeys: the app's core
+   purpose as steps and the text it must show afterwards (below).
 2. **Check in code.** The file must call `buddy.load` and `buddy.save`, have a
    `<title>`, and load nothing except from `cdn.jsdelivr.net` and
    `telegram.org`. A library from jsdelivr must be an npm package at an exact
@@ -57,9 +65,11 @@ A build is a loop:
    GitHub path (`/gh/…`) can change after the app was tested. This one is a
    gate, not a hint: a version that loads anything else is never saved.
 3. **Use it on a phone.** The phone check (below) opens the app and uses it.
+   Then Jev walks the journeys (below).
 4. **Repair.** If anything went wrong, the problems go back to Claude as a
-   numbered list, each with the tap that caused it, and Claude returns the
-   whole fixed file. There are at most 2 repair rounds.
+   numbered list, each with the tap that caused it, and Claude answers with
+   edits to the file. A journey that failed is one of those problems. There
+   are at most 2 repair rounds.
 5. **Keep the best.** The version with the fewest problems is saved. A version
    the phone check really ran on always beats one it could not run on.
 
@@ -68,10 +78,9 @@ On the Apps tab the progress line shows the stage in words, with a clock:
 a phone…", "Fixing 2 problems…". When it is done, the line says "Ready: ‹app›.
 Tested on a phone.", or names the first thing that may still not work. A clean
 app opens by itself when you are still on the page and not in the middle of
-something else (a change picked for another app, or words typed for the next
-build); otherwise an **Open ‹app›** button waits under the line, with **Undo
-this change** beside it when a change may have broken something. What you
-typed for another app while this one was building stays in the box.
+something else (an app's change chat, or words typed for the next build);
+otherwise an **Open ‹app›** button waits under the line. What you typed while
+it was building stays in the box.
 
 If the page goes away mid-build (the phone locks, you close Telegram), the
 build goes on and its result comes to the chat instead. Opened again, the page
@@ -100,11 +109,11 @@ first round; no repair round was needed:
 On the Apps tab, each app shows its icon and a short description. Tap **…**
 next to it for:
 
-- **Change.** The box at the top becomes "What should change?". Claude gets
-  the current file, what you asked of the app before, and a shortened sample
-  of its saved data, and returns the whole new file. The new version must open
-  your existing data as it is; the phone check starts from that data, so a
-  change that breaks it is caught.
+- **Change.** Opens the app's change chat (below). Claude gets the current
+  file, what you asked of the app before, and a shortened sample of its saved
+  data, and returns the whole new file. The new version must open your
+  existing data as it is; the phone check starts from that data, so a change
+  that breaks it is caught.
 - **Rename.** Only the name changes. A renamed app keeps your name through
   later changes. Its address stays the same.
 - **Undo last change.** Shown only when there is an earlier version. The app
@@ -133,13 +142,86 @@ While an app is being changed, delete, rename and undo for that app are
 refused until the change is done, whether the change was started from the chat
 or from the Apps tab.
 
+## Each app's change chat
+
+Owner, 2026-09-24: "a chat box for each app where you keep refining it (make
+the buttons bigger, add categories)". Every app has one. It is a view of the
+home page, `/?chat=<name>`, and there are four ways in:
+
+- **Inside the app, Telegram's "…" menu** has a **Settings** item (Telegram
+  7.0 and later) that opens the app's chat.
+- **Inside the app, a small ✎ pencil** in the top right corner, beside the
+  app's title, does the same. It is a 44 px target inside the safe area, it
+  scrolls away with the page, and it stays clear of the MainButton at the
+  bottom. It lives in a closed shadow root with its position set inline and
+  `!important`, so the app's own CSS or a re-rendered page cannot hide it by
+  accident. The corner belongs to the app first: while one of the app's own
+  controls sits under the pencil (a header's Settings button, a dialog's
+  close button), the pencil hides, so a tap there reaches the app. The maker
+  is told to keep the top-right 56 by 56 px of every view free, and the phone
+  check reports a control there as a problem. The app only navigates to the
+  chat; it is never given the power to change apps or spend.
+- **Change** in the app's **…** sheet on the Apps tab.
+- **A Change button in the chat with buddy.** After a change from the chat,
+  the message keeps its **Open ‹app›** button and gets a second one,
+  **Change**, that opens the same view. So does the message a change started
+  on the page sends when the page went away before it finished. A change that
+  failed gets the **Change** button too, so its chat is one tap away.
+
+The view shows the app's icon and name with an **Open** button, the number of
+requests and what the app has cost so far, and a thread:
+
+- **Your requests**, with when you asked. An undo shows as a short note.
+- **How each build went:** the version it made ("Changed. This is version
+  3."), whether it was tested on a phone and how many of Jev's journeys passed
+  ("Tested on a phone; 3 of 3 journeys passed."), the first thing that may
+  still not work, and its cost. A journey's problem is one plain line
+  ("Couldn't tap "Add expense" in "Split a dinner"."); the details go to
+  Claude's repair round, not to you. A change that saved nothing says so
+  ("Couldn't change it: … The app is unchanged."), with the reason (Claude's
+  rate limit, a refused key) and what it cost, including rounds that ran
+  before the failure. The reason also stays under the thread.
+- **The change running now**, with the same stages in words and a clock as
+  the Apps tab. A change started from the chat with buddy, or before the page
+  was reopened, shows too, and the thread fills in when it ends. A change of
+  another app shows only in that app's chat. While a change runs the thread
+  is checked every 4 s but redrawn only when something in it changed, so a
+  place you scrolled to, or focus on a button, is kept.
+
+Type the next change in **What should change?** at the bottom and press
+**Change** (or Enter; Shift+Enter is a new line). It runs the same build, with
+the same stages, as a change from anywhere else. When it is done, an **Open
+‹app›** button under the result goes straight back into the app, and **Undo
+this change** sits beside it when the change may have broken something. If the
+build did not start (another build is running), your words go back into the
+box. Only one build runs at a time, so **Change** waits while **Build it** or
+another app's change is running, and says so. If the app was deleted
+meanwhile, the chat says so and stops taking changes.
+
+The composer follows the phone's visible height (`visualViewport`), so the
+keyboard never covers it. Everything in the thread, your words, Claude's and
+the check's, is set as text, never as HTML. Telegram's Back button, or **‹**,
+goes back to the list of apps. The view works in the light and dark themes.
+
+The thread comes from `POST /api/apps/<name>/history` (owner only, signed
+`initData`, like every other home-page call). It returns the app (with a fresh
+Open address), the thread, and the change running on it now, if any. Each
+build is recorded in the app's `meta.json` under `builds` (the newest 30):
+when, the request, whether a page was saved, the version number, the phone
+check's line, the journeys result (passed, total, or why they did not run),
+how many problems are left and the first two, cost, time and repair rounds.
+A build that saved nothing is recorded there too, but not added to the
+requests, which tell the next build what the app was asked to do. Apps built
+before this was added show their earlier requests without results, under one
+note that says their results were not kept then.
+
 Each app lives in `~/.config/cc-buddy-bridge/apps/<name>/`:
 
 | File | What it holds |
 |---|---|
 | `index.html` | The app |
 | `versions/<n>.html` | Up to 10 earlier versions, newest has the highest number |
-| `meta.json` | Its name, icon, description, dates, what you asked for, and the data version (`v`) each earlier version was written for |
+| `meta.json` | Its name, icon, description, dates, what you asked for, its version number, how each build went (for its change chat), and the data version (`v`) each earlier version was written for |
 | `data.json` | Its saved data |
 
 Apps save through `window.buddy`, which is added to every app:
@@ -150,7 +232,8 @@ and writes its own data and nobody else's.
 
 Telegram's Back button always leads somewhere: inside an app it goes back
 through the app's own screens, and on the app's first screen it goes back to
-buddy's list of apps, where Change, Undo and the other apps are.
+buddy's list of apps, where Change, Undo and the other apps are. The pencil
+and Telegram's Settings item go to the app's change chat.
 
 ## The phone check
 
@@ -165,16 +248,19 @@ the way a person would in the first minute:
   reach (at most 40 taps, and at most 3 of a row of look-alike buttons). It
   presses the MainButton when a view is used up, and Back to leave it. Delete
   and reset buttons come last, after the rest of the view has been used.
-- It opens the app again with the data it saved, and takes the picture that
-  is sent to the chat. Then it opens it once more at a small Android phone's
-  width (360).
+- It opens the app again with the data it saved, and takes a picture. Then it
+  opens it once more at a small Android phone's width (360).
+- The picture sent to the chat is the last screen of the first journey that
+  passed (below): the app doing what it is for, such as the splitter showing
+  who owes whom. With no journey passed, it is the reopened screen above.
 
 What counts as a problem is what a person would see: an error on the page, a
 tap that reloads the whole page, a request to a host the app may not reach, a
 library that didn't load, a page wider than the phone or laid out for a
 desktop, an app that never saves after being used, an app that freezes
 (nothing finishes within 60 s), an app that crashes the browser tab (memory
-that grows without end), and an app that opens a WebSocket. A crash keeps
+that grows without end), an app that opens a WebSocket, and a control of the
+app's under buddy's Change pencil (the top-right 56 by 56 px). A crash keeps
 everything found before it. Only a checker that could not start at all counts
 as "not tested".
 
@@ -182,6 +268,144 @@ It needs Playwright and Chromium in the daemon's environment. Without them the
 check reports "not tested" and the build is saved after the code checks only.
 A correct small app takes about 3.5 s to check; the habit trackers above took
 6 to 9 s.
+
+## Jev verifies: does the app do what it is for?
+
+Owner, 2026-09-24: "Can u use jev as the verification layer instead of
+claude". The phone check above fills every field and taps every button
+blindly. It finds crashes and apps that never save, but it cannot tell whether
+an expense splitter shows who owes whom. That is how an expense splitter
+passed the check and still "doesn't work".
+
+So the work is divided:
+
+- **Claude writes and repairs the code.** With each app it writes 2 to 4
+  **journeys**, in a ```` ```journeys ```` block after the HTML: the steps a
+  person takes (`tap "Add expense"`, `type "30" into "Amount"`, `choose "Sam"
+  in "Paid by"`), each from a fresh app with no data, and the literal text that
+  must be on screen afterwards (`"Alex owes Sam $15.00"`): the result itself,
+  never a toast or a confirmation line. A change returns the journeys updated
+  too. A block that is empty or does not parse keeps the journeys the app
+  had, and is a problem until a good one comes; a repair round's block never
+  drops a journey (one it leaves out is still walked). They are kept as `journeys.json` beside the page
+  and versioned with it, so Undo restores both.
+- **Jev uses the app and judges it.** Jev is TypeSafe's hosted typed-decision
+  model (`jev.py`), on this Mac's route `CC_BUDDY_JEV_ROUTE` (OpenRouter).
+  After the scripted pass, each journey runs in its own fresh copy of the same
+  sandbox. At each step Jev gets the step and the labelled controls on screen
+  that fit the step (a tap is offered buttons, rows and tabs; a type is
+  offered fields), and answers in one request: a **choice** of the control,
+  and an absolute **noul**, "is a control with this label on screen at all?".
+  Code acts only when both clear their cut-offs. A **choose** on anything but
+  a `<select>` (a dropdown the app draws, chips) opens the control, then picks
+  the option by its text on the next screen; a radio group named by its
+  legend is picked by the option's text straight away. A control the app
+  re-rendered while Jev answered (a clock, a running timer) is found again by
+  its label and used, not blamed on the app. After the last step, one
+  request asks one noul per expectation over the screen's text. Code then
+  vetoes a "shown" for a number that is not on the screen, because Jev is
+  weak at counting, and for words that are there but not in the
+  expectation's order (`Streak ended · best 1 day` for `1-day streak`).
+- **Code decides.** A journey that does not go through becomes a problem in
+  the same report, such as `Journey "Split a dinner" failed at step 3 of 7:
+  could not find "Add expense" …` or `… the screen does not show "Alex owes
+  Sam $15.00". The screen showed: …`. The repair round sends it to Claude. The
+  summary line counts journeys: `passed: 4 fields filled, 12 taps, 3 saves,
+  journeys 3/3`.
+
+A page that breaks under one journey (a crashed tab, an app stuck in a loop:
+each read of the page waits at most 5 s) fails that journey; the others
+still count. Jev being down never blocks a build. A failed request is asked
+once more; with no key, no network or a timeout after that, the check still
+returns and says `journeys not run (why)`, and a journey that had already
+finished and failed is still a problem. An app that hung in the scripted pass
+is not walked at all. An app built before
+journeys has none, and the scripted check runs alone.
+`CC_BUDDY_APP_JOURNEYS=0` turns journeys off.
+
+### How the cut-offs were measured
+
+Jev is a literal reader and loses accuracy in a large state, so each question
+is asked the way it is built for. The label is inside the question, the
+controls are in the state, and an expectation is judged against a shortlist of
+the screen: the lines that share a word or number with it, plus their
+neighbours. Before that shortlist, Jev missed 3 of 54 texts that were really
+on screen, all deep in screens of 66 to 73 lines.
+
+The cut-offs were fitted with `tools/journey_eval.py` on the 17 apps built
+overnight (11 kinds). Claude wrote journeys for them under the maker's own
+prompt (63 journeys). The journeys were walked with a code oracle acting in
+Jev's place, and every step the oracle could not place was labelled by hand
+(15 of 349: list rows named by the words before their details). Negatives were
+built on the same screens: another app's label, the right control removed,
+an expectation with a number changed or from another app, and each
+expectation read against the first screen, before any step ran. The fit used
+6 kinds, allowing zero wrong acts and zero false "shown". The other 5 kinds
+were held out:
+
+| Question | Held out | Result |
+|---|---|---|
+| Which control is the step (present ≥ 0.8, choice ≥ 0.9, margin ≥ 0.3) | 367 steps: 127 real, 240 with no such control | 124 right, 3 wrong: precision and recall 97.6% |
+| The choice alone, no noul gate | same | 11 wrong, precision 92.0% |
+| Is the text shown (noul ≥ 0.6, plus the number and word-order vetoes) | 181: 54 shown, 127 not | 53 of 54, 0 false: precision 100%, recall 98.1% |
+| The noul alone at 0.6 | same | 53 of 54, 6 false (5 of them rewords) |
+
+The text cut-off was refitted after a live build let `1-day streak` pass over
+`Streak ended · best 1 day` (Jev read 0.56 to 0.62 across ten asks; the cut
+was 0.4). The calibration had no case where the words and numbers stay and
+the meaning goes, so two were added on the same screens: two names or numbers
+trading places ("swap"), and the phrase broken up around its number
+("reword"). The lowest cut with no false "shown" on the fitted kinds moved
+from 0.4 to 0.6. Jev still read up to 0.89 for a reword, so the word-order
+veto is what stops that class. The labelled positives are the ones a
+normalized text match found (plus hand labels for number formats), and that
+plain match also scores 54 of 54 with 0 false here: on this set Jev adds no
+catch the code does not make.
+
+The 3 wrong acts were all one case: a habit's row was removed, and its check
+toggle "Drink water: done today" was taken for "Drink water". The held-out
+misses were read to design the shortlist and the veto, so by this project's
+rule the held-out figures are tuning numbers. The unread measurement is the
+fresh set below.
+
+**The fresh set.** Six apps the new maker built with its own journeys (two
+expense splitters, two habit trackers, a plant watering tracker, a savings goal
+tracker) were scored once under the shipped cut-offs, with nothing fitted: 21
+journeys, 411 steps and 132 expectations. Steps: 141 of 141 right, and none of
+the 270 steps with a missing or removed control was acted on. Expectations:
+45 of 45 shown, and none of the 87 absent texts passed. Scored again after the
+refit, with the swap and reword cases added (166 expectations): 45 of 45
+shown, none of the 121 absent passed; without the word-order veto, 11 of the
+25 rewords would have. Every step on this set
+matched its label exactly, so it is easier than the calibration set, where 15
+steps named a row by the words before its details.
+
+**Live builds, 2026-09-24** (`tools/app_eval.py`, `claude-opus-5-5` at effort
+high, real Jev). The last three ran on the code as shipped; the four before
+them ran an hour earlier, before the last fixes to the check:
+
+| App | Build | Claude | Repairs | Journeys | Jev (final check) |
+|---|---|---|---|---|---|
+| Expense splitter | 417 s | $1.02 | 0 | 4/4 | 33 calls, 247 ms p50, $0.0009 |
+| Grocery list with categories | 188 s | $0.43 | 0 | 4/4 | 31 calls, 212 ms p50, $0.0009 |
+| Workout log | 293 s | $0.69 | 0 | 4/4 | 33 calls, 233 ms p50, $0.0010 |
+| Expense splitter (earlier) | 287 s | $0.79 | 1 (it never saved) | 4/4 | 36 calls, 225 ms p50, $0.0010 |
+| Plant watering (earlier) | 220 s | $0.51 | 0 | 3/3 | 18 calls, 233 ms p50, $0.0005 |
+| Habit tracker (earlier) | 200 s | $0.46 | 0 | 3/3 | 15 calls, 262 ms p50, $0.0005 |
+| Savings goals (earlier) | 290 s | $0.68 | 0 | 4/4 | 34 calls, 255 ms p50, $0.0010 |
+
+Walking the journeys added 4 to 8 s to a check. On the last three builds Jev
+cost $0.0027 in all, against $2.14 for Claude.
+
+**The negative control.** The last splitter was copied twice. In one copy, its
+save-expense function was made to return before doing anything. The scripted
+pass found nothing wrong with that copy: 13 fields filled, 12 taps, 7 saves.
+That is how the owner's splitter passed. The journeys failed it 2 of 4: after
+"Save expense" the form was still open, so "Settle up" was not on screen. The
+two journeys that do not add an expense still passed. The untouched copy passed
+4 of 4. With Jev's key made invalid, the same broken copy came back `passed:
+… journeys not run (Jev did not answer: HTTP 401 …)`: the build is not
+blocked, and nothing but the journeys would have caught it.
 
 ## Turning it on
 
@@ -223,7 +447,7 @@ your own domain, or Tailscale Funnel.
 ## Who can use it
 
 Only the numeric ids in `CC_BUDDY_TELEGRAM_OWNER`. Every API call (build,
-list, load, save, delete, rename, undo) must carry `initData` that
+list, load, save, delete, rename, undo, an app's history) must carry `initData` that
 Telegram signed for this bot:
 
 - **The signature:** the HMAC-SHA256 has to verify with the bot token
@@ -244,7 +468,9 @@ never gets your `initData`, which answers for everything above:
 - **Its own key.** An app opens as `/apps/<name>/?t=<key>`. The key is signed
   with the bot token, bound to that one app, and lasts 24 hours. It opens that
   app's page and answers its load and save, and nothing else: not the list of
-  apps, not another app's data, not build, delete or the chat.
+  apps, not another app's data or history, not build, delete or the chat. The
+  pencil and the Settings item only open the home page's change chat, which
+  asks for your signed `initData` like everything else there.
 - **Sandboxed.** The page is served with a Content-Security-Policy `sandbox`
   (no `allow-same-origin`), so it runs in an opaque origin: it cannot read the
   home page's storage (your chat history) or call the API as the home page.
@@ -287,6 +513,8 @@ build reads about 7,700 tokens from cache instead of paying for them again.
 
 Measured on 2026-09-24:
 - A build or change cost $0.41 to $0.66 (the table above).
+- Jev, walking the journeys: 15 to 36 requests per check, about $0.0005 to
+  $0.001 per check ($0.042 per million input tokens, output free).
 
 ## What leaves the Mac
 
@@ -299,9 +527,18 @@ Measured on 2026-09-24:
   Cloudflare's servers.
 - **To Telegram:** the pinned message, the Open buttons and their addresses,
   and the picture of each finished app. The phone check takes it, so it shows
-  the made-up entries the check typed in and, when an app was changed, your
-  own saved data too.
+  the made-up entries of a journey that passed. With no journey passed it is
+  the phone check's reopened screen, which, when an app was changed, shows
+  your own saved data too.
   What you do inside the Mini App doesn't go through Telegram.
+- **To TypeSafe, through OpenRouter (Jev):** during a build's check, the
+  labels of the app's controls, a few words of its screen, each journey
+  step, and the screen's text lines after the steps. Each journey starts from
+  an empty app, and its values are made up: a change shows Claude a sample of
+  your saved data, so a journey that holds a name or text from that data
+  (and not from the app's own page) is never walked and goes back to Claude
+  as a problem. The screen text holds the example values the journey typed. Turn it off with
+  `CC_BUDDY_APP_JOURNEYS=0`.
 - **The phone check** runs on the Mac. The only requests it lets out are to
   `cdn.jsdelivr.net`, when an app loads a library from there. Every HTTP
   request goes through the check's own router, WebSockets are answered and
@@ -314,7 +551,8 @@ rewritten to `bot<token>` by the process-wide scrubber (`hide_token`).
 
 ## Limits
 
-- **One build at a time:** a second build waits until the first is done.
+- **One build at a time:** a second build waits until the first is done. This
+  covers **Build it** and every app's change chat together.
 - **Closing the page doesn't stop a build:** it finishes, is saved, shows up
   in Your apps, and its result comes to the chat.
 - **Old buttons expire:** the address changes on every restart. The pinned

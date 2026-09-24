@@ -28,7 +28,8 @@
     }
   }
   * { box-sizing: border-box; }
-  html, body { margin: 0; height: 100%; background: var(--bg); color: var(--text);
+  /* --app-h: the visible height (the phone's keyboard taken off), so a composer at the bottom stays above it */
+  html, body { margin: 0; height: var(--app-h, 100%); background: var(--bg); color: var(--text);
     font: 16px/1.5 -apple-system, BlinkMacSystemFont, "SF Pro Text", system-ui, sans-serif; }
   body { display: flex; flex-direction: column; }
   header { display: flex; align-items: center; justify-content: space-between; gap: 8px;
@@ -75,13 +76,9 @@
     display: flex; align-items: center; gap: 12px; padding: 0; min-height: 44px; border-radius: 10px; }
   .app .more { flex: none; width: 44px; height: 44px; border: 0; border-radius: 22px; background: none;
     color: var(--link); font: 700 20px/1 system-ui, sans-serif; letter-spacing: 1px; }
-  .app .open:focus-visible, .app .more:focus-visible, .editing button:focus-visible,
+  .app .open:focus-visible, .app .more:focus-visible,
   .sheet button:focus-visible, .sheet input:focus-visible { outline: 2px solid var(--link); outline-offset: 2px; }
   .none { color: var(--hint); }
-  .editing { display: flex; align-items: center; justify-content: space-between; gap: 8px; margin: -2px 0 8px;
-    font-size: 14px; color: var(--hint); }
-  .editing button { background: none; border: 0; color: var(--link); font: 15px system-ui, sans-serif;
-    min-height: 36px; padding: 0 4px; }
   .make[aria-busy="true"] textarea { opacity: .7; }
   .notice-row { display: flex; align-items: center; gap: 8px; margin: 0 0 10px; }
   .notice-row:has(.notice:empty) { display: none; }
@@ -117,6 +114,42 @@
   .sheet .rename .row { display: flex; justify-content: flex-end; margin-top: 10px; }
   .sheet .error { color: var(--danger); font-size: 14px; margin: 8px 4px 0; }
   .sheet .error:empty { display: none; }
+  /* one app's change chat (?chat=<slug>): what was asked of it, how each build went, and the next change */
+  body.chatting > header, body.chatting #apps { display: none; }
+  #chat { flex: 1; min-height: 0; display: flex; flex-direction: column; }
+  .chat-head { display: flex; align-items: center; gap: 10px; padding: 6px 12px 6px 4px;
+    border-bottom: 1px solid var(--code); }
+  .chat-head .back { flex: none; width: 44px; height: 44px; border: 0; border-radius: 22px; background: none;
+    color: var(--link); font: 32px/1 system-ui, sans-serif; padding: 0 0 4px; }
+  .chat-head .icon { width: 36px; height: 36px; border-radius: 10px; font-size: 20px; }
+  .chat-head .icon.letter { font-size: 16px; }
+  .chat-name { flex: 1; min-width: 0; }
+  .chat-name h1 { font-size: 17px; line-height: 1.3; margin: 0; overflow: hidden; text-overflow: ellipsis;
+    white-space: nowrap; outline: none; }
+  .chat-name span { display: block; color: var(--hint); font-size: 13px; overflow: hidden; text-overflow: ellipsis;
+    white-space: nowrap; font-variant-numeric: tabular-nums; }
+  .chat-head .btn { flex: none; padding: 8px 14px; }
+  .thread { flex: 1; min-height: 0; overflow-y: auto; overscroll-behavior: contain; list-style: none; margin: 0;
+    padding: 14px 12px 10px; display: flex; flex-direction: column; gap: 8px; }
+  .thread .quiet { color: var(--hint); text-align: center; margin: auto 16px; font-size: 15px; }
+  .msg { max-width: 86%; padding: 8px 12px; border-radius: 18px; overflow-wrap: anywhere; line-height: 1.4; }
+  .msg.asked { align-self: flex-end; background: var(--accent); color: var(--accent-text);
+    border-bottom-right-radius: 6px; white-space: pre-wrap; }
+  .msg.built { align-self: flex-start; background: var(--bubble); border-bottom-left-radius: 6px; }
+  .msg.built.failed .line { color: var(--danger); }
+  .msg.built[aria-busy="true"] .line { color: var(--hint); font-variant-numeric: tabular-nums; }
+  .msg .line { display: block; }
+  .msg .more-line { display: block; font-size: 14px; color: var(--hint); margin-top: 2px; }
+  .msg .when { display: block; font-size: 12px; margin-top: 3px; opacity: .72; font-variant-numeric: tabular-nums; }
+  .msg.built .when { color: var(--hint); opacity: 1; }
+  .msg.note { align-self: center; max-width: 92%; background: none; color: var(--hint); font-size: 13px;
+    text-align: center; padding: 2px 8px; }
+  .msg .btn { margin: 8px 6px 0 0; }
+  .msg .btn.plain { background: none; color: var(--link); padding: 10px 8px; }
+  .chat-hint { margin: 0; padding: 6px 16px 0; color: var(--hint); font-size: 13px; }
+  .chat-hint:empty { display: none; }
+  .chat-head .back:focus-visible, .chat-head .btn:focus-visible, .msg .btn:focus-visible {
+    outline: 2px solid var(--link); outline-offset: 2px; }
   @media (prefers-reduced-motion: no-preference) {
     dialog.sheet[open] .panel { animation: rise .18s ease-out; }
     @keyframes rise { from { transform: translateY(24px); opacity: .6; } to { transform: none; opacity: 1; } }
@@ -131,8 +164,6 @@
 <section id="apps">
   <div class="make" id="make-card">
     <label for="want" id="want-label">What should I build?</label>
-    <div class="editing" id="editing" hidden><span id="editing-text"></span>
-      <button type="button" id="editing-cancel">Build a new one instead</button></div>
     <textarea id="want" rows="2" placeholder="A habit tracker with daily check-ins and streaks"></textarea>
     <div class="ideas" id="ideas">
       <button type="button">Habit tracker with streaks</button>
@@ -149,6 +180,22 @@
   <div class="notice-row"><p class="notice" id="apps-notice" role="status" aria-live="polite"></p>
     <button type="button" id="notice-undo" hidden>Undo</button></div>
   <div id="app-list"><div class="none">Nothing yet. Describe one above.</div></div>
+</section>
+<section id="chat" aria-labelledby="chat-title" hidden>
+  <div class="chat-head">
+    <button type="button" class="back" id="chat-back" aria-label="Back to your apps"><span aria-hidden="true">‹</span></button>
+    <span class="icon" id="chat-icon" aria-hidden="true"></span>
+    <div class="chat-name"><h1 id="chat-title" tabindex="-1"></h1><span id="chat-sub"></span></div>
+    <button type="button" class="btn" id="chat-open">Open</button>
+  </div>
+  <ol class="thread" id="thread" aria-label="What was asked of this app and how each change went"></ol>
+  <p class="chat-hint" id="chat-hint"></p>
+  <form id="composer">
+    <label class="sr" for="ask">What should change?</label>
+    <textarea id="ask" rows="1" maxlength="4000" enterkeyhint="send" placeholder="What should change?"></textarea>
+    <button type="submit" id="ask-send">Change</button>
+  </form>
+  <div class="sr" id="chat-live" role="status" aria-live="polite"></div>
 </section>
 <dialog class="sheet" id="sheet" aria-labelledby="sheet-title">
   <div class="panel">
@@ -190,9 +237,10 @@
   // App titles and descriptions come from pages Claude wrote, so they only ever reach the page as textContent.
   const want = $("want"), makeBtn = $("make"), makeStatus = $("make-status"), makeLive = $("make-live");
   const notice = $("apps-notice"), sheet = $("sheet"), noticeUndo = $("notice-undo"), result = $("make-result");
-  let editing = null;                                   // the app being changed, or null for a new one
   let building = false, apps = [], running = [], poll = null;
-  const opening = new URLSearchParams(location.search).get("open");   // an Open button from the chat
+  const query = new URLSearchParams(location.search);
+  const opening = query.get("open");                    // an Open button from the chat
+  const chatting = query.get("chat");                   // a Change button, or an app's pencil or Settings item
   const ago = (iso) => { const d = new Date(iso); return isNaN(d) ? "" : d.toLocaleDateString(undefined, { month: "short", day: "numeric" }); };
   async function post(path, body) {
     return fetch(path, { method: "POST", headers: { "Content-Type": "application/json" },
@@ -245,7 +293,7 @@
     if (!apps.length) { list.appendChild(el("div", "none", "Nothing yet. Describe one above.")); return; }
     const busy = changingNow();
     apps.forEach((a) => {
-      const row = el("div", "app");
+      const row = el("div", "app"); row.dataset.slug = a.slug;
       const open = el("button", "open"); open.type = "button";
       open.appendChild(iconFor(a, el("span", "icon"))).setAttribute("aria-hidden", "true");
       const text = el("span", "text");
@@ -267,7 +315,7 @@
     if (!initData) return;
     try {
       const j = await reply(await post("api/apps"));
-      if (Array.isArray(j.apps)) { apps = j.apps; running = Array.isArray(j.building) ? j.building : []; renderApps(); watchRunning(); }
+      if (Array.isArray(j.apps)) { apps = j.apps; running = Array.isArray(j.building) ? j.building : []; renderApps(); watchRunning(); paintComposer(); }
     } catch (e) {}
   }
   // A build this page did not start, or whose stream dropped (a locked phone): it keeps running on the Mac,
@@ -300,7 +348,8 @@
   }
   function closeSheet() { if (sheet.open) { if (sheet.close) sheet.close(); else sheet.removeAttribute("open"); } }
   sheet.addEventListener("close", () => {
-    if (can("6.1")) { tg.BackButton.offClick(closeSheet); tg.BackButton.hide(); }
+    // The close event comes after Change has opened the app's chat, whose Back button stays.
+    if (can("6.1")) { tg.BackButton.offClick(closeSheet); if (!chat) tg.BackButton.hide(); }
     // Focus goes back to the "…" that opened the sheet, or to the list when that row is gone.
     const back = trigger && document.body.contains(trigger) && !trigger.disabled ? trigger : $("apps-heading");
     if (sheet.dataset.keepFocus) delete sheet.dataset.keepFocus; else back.focus();
@@ -334,7 +383,7 @@
     const b = e.target.closest("button[data-act]"); if (!b || !current || b.disabled) return;
     const a = current, which = b.dataset.act;
     if (which === "change") {
-      sheet.dataset.keepFocus = "1"; closeSheet(); startEditing(a); return;
+      sheet.dataset.keepFocus = "1"; closeSheet(); openChat(a.slug, true); return;
     }
     if (which === "rename") {
       $("sheet-actions").hidden = true; $("sheet-rename").hidden = false;
@@ -349,7 +398,6 @@
     if (which === "delete") {
       if (!(await ask("Delete " + a.title + "? It goes to buddy's trash on the Mac, with its data, and Undo brings it back.", "Delete"))) return;
       if (await act("delete", {}, "Couldn't delete that.", "Deleting…")) {
-        if (editing && editing.slug === a.slug) stopEditing();
         done("Deleted " + a.title + ".", async () => {
           noticeUndo.hidden = true;
           try {
@@ -370,20 +418,7 @@
     if (j) done("Renamed to " + j.app.title + ".");
   });
 
-  // ---- building and changing ----
-  function startEditing(a) {
-    editing = a;
-    $("want-label").textContent = "What should change?";
-    $("editing-text").textContent = "Changing " + a.title; $("editing").hidden = false; $("ideas").hidden = true;
-    want.placeholder = "Add a weekly chart"; makeBtn.textContent = "Change it";
-    $("make-card").scrollIntoView({ block: "start" }); want.focus();
-  }
-  function stopEditing() {
-    editing = null; $("editing").hidden = true; $("ideas").hidden = false;
-    $("want-label").textContent = "What should I build?";
-    want.placeholder = "A habit tracker with daily check-ins and streaks"; makeBtn.textContent = "Build it";
-  }
-  $("editing-cancel").onclick = () => { if (!building) { stopEditing(); want.focus(); } };
+  // ---- building a new app ----
   $("ideas").querySelectorAll("button").forEach((b) => { b.onclick = () => { want.value = b.textContent; want.focus(); }; });
 
   // A build streams apps_maker's stages: thinking, writing (characters so far), testing, fixing (how many
@@ -404,53 +439,23 @@
     const n = r.problems === 1 ? "1 thing" : r.problems + " things";
     return "Ready: " + title + ", but " + n + " may not work: " + ((r.issues && r.issues[0]) || "") ;
   }
-  // Buttons under the line when the page does not open the app by itself: Open, and for a change that may
-  // have broken something, Undo this change.
+  // The Open button under the line when the page does not open the new app by itself.
   function showResult(r) {
     result.textContent = "";
     const open = el("button", "btn", "Open " + r.app.title); open.type = "button";
     open.onclick = () => openApp(r.url);
     result.appendChild(open);
-    if (r.changed && r.problems && r.app.versions > 0) {
-      const undo = el("button", "btn plain", "Undo this change"); undo.type = "button";
-      undo.onclick = async () => {
-        if (!(await ask("Undo this change to " + r.app.title + "?", "Undo"))) return;
-        undo.disabled = true;
-        try {
-          const res = await post("api/apps/" + encodeURIComponent(r.app.slug) + "/revert", { versions: r.app.versions });
-          const j = await reply(res);
-          makeStatus.textContent = res.ok ? r.app.title + " is back to how it was." : (j.error || "Couldn't undo that.");
-          if (res.ok) result.hidden = true;
-        } catch (e) { makeStatus.textContent = "The connection dropped. Try again."; undo.disabled = false; }
-        loadApps();
-      };
-      result.appendChild(undo);
-    }
     result.hidden = false;
   }
-  makeBtn.onclick = async () => {
-    const text = want.value.trim(); if (!text || building || !initData) return;
-    const target = editing;                             // what this build is for, whatever the sheet does meanwhile
-    building = true; makeBtn.disabled = true; $("make-card").setAttribute("aria-busy", "true"); notice.textContent = "";
-    result.hidden = true;
-    const t0 = Date.now(); let words = "Starting…", spoken = "";
-    const paint = () => { makeStatus.textContent = words + " " + clock(Date.now() - t0); };
-    // The live region hears each stage once (not every character count); the visible line has the numbers.
-    const say = (w) => { words = w; paint(); const plain = w.replace(/ \d+k$/, ""); if (plain !== spoken) { spoken = plain; makeLive.textContent = plain; } };
-    const timer = setInterval(paint, 1000);
-    const finish = (text) => { clearInterval(timer); makeStatus.textContent = text; makeLive.textContent = text; };
-    say(target ? "Changing it…" : "Starting…");
-    let dropped = false;
+  // One build or change over /api/make, its stream read to the end; say(words) hears each stage in words. The
+  // answer is {got} (the done event), {failed} (the build's own error line), {refused, status} (it never
+  // started: another build is running, the app was deleted, a cap), or {dropped} (the stream broke; the build
+  // goes on on the Mac and its result goes to the chat with buddy).
+  async function runBuild(body, say) {
+    let r;
+    try { r = await post("api/make", body); } catch (e) { return { dropped: true }; }
+    if (!r.ok || !r.body) return { refused: await reply(r), status: r.status };
     try {
-      const r = await post("api/make", target ? { request: text, app: target.slug } : { request: text });
-      if (!r.ok || !r.body) {
-        const j = await reply(r);
-        if (j.gone && target) {                          // deleted meanwhile (from the chat): stop changing it
-          if (editing === target) stopEditing();
-          finish(target.title + " was deleted. Describe it again to build a new one."); loadApps();
-        } else finish(j.error || "Something went wrong.");
-        haptic("error"); return;
-      }
       const reader = r.body.getReader(), dec = new TextDecoder(); let buf = "", got = null, failed = "";
       for (;;) {
         const { value, done: end } = await reader.read(); if (end) break;
@@ -464,40 +469,301 @@
           if (d.done) { got = d; showSpent(d); }
         }
       }
-      if (got) {
-        finish(readyLine(got));
-        // Clear the box only when it still holds this build's words and target: a Change picked on another
-        // app while this one built keeps what was typed for it.
-        if (editing === target && want.value.trim() === text) { want.value = ""; if (target) stopEditing(); }
-        haptic(got.problems ? "warning" : "success");
-        await loadApps();
-        // Straight into the app only when it is clean and the owner is still here and not in the middle of
-        // something else (a change picked for another app, words typed for the next build); otherwise the Open
-        // button waits, so nothing they typed is lost.
-        const here = () => !!initData && !sheet.open && document.visibilityState === "visible"
-          && !editing && !want.value.trim();
-        if (!got.problems && here()) setTimeout(() => { if (here()) openApp(got.url); else showResult(got); }, 1200);
-        else showResult(got);
-      } else if (failed) {
-        finish(failed); haptic("error");
-      } else { dropped = true; }
-    } catch (e) { dropped = true; }
-    finally {
-      clearInterval(timer);
-      building = false; makeBtn.disabled = false; $("make-card").removeAttribute("aria-busy");
-    }
-    if (dropped) {
+      return got ? { got } : failed ? { failed } : { dropped: true };
+    } catch (e) { return { dropped: true }; }
+  }
+  // The server runs one build per owner at a time, so Build it and an app's Change wait for each other.
+  function setBuilding(on) { building = on; makeBtn.disabled = on || !initData; paintComposer(); }
+
+  makeBtn.onclick = async () => {
+    const text = want.value.trim(); if (!text || building || !initData) return;
+    setBuilding(true); $("make-card").setAttribute("aria-busy", "true"); notice.textContent = "";
+    result.hidden = true;
+    const t0 = Date.now(); let words = "Starting…", spoken = "";
+    const paint = () => { makeStatus.textContent = words + " " + clock(Date.now() - t0); };
+    // The live region hears each stage once (not every character count); the visible line has the numbers.
+    const say = (w) => { words = w; paint(); const plain = w.replace(/ \d+k$/, ""); if (plain !== spoken) { spoken = plain; makeLive.textContent = plain; } };
+    const timer = setInterval(paint, 1000);
+    const finish = (line) => { clearInterval(timer); makeStatus.textContent = line; makeLive.textContent = line; };
+    say("Starting…");
+    const out = await runBuild({ request: text }, say);
+    clearInterval(timer);
+    setBuilding(false); $("make-card").removeAttribute("aria-busy");
+    if (out.got) {
+      const got = out.got;
+      finish(readyLine(got));
+      if (want.value.trim() === text) want.value = "";    // words typed meanwhile for the next one are kept
+      haptic(got.problems ? "warning" : "success");
+      await loadApps();
+      // Straight into the app only when it is clean and the owner is still here and not in the middle of
+      // something else (an app's change chat, the sheet, words typed for the next build); otherwise the Open
+      // button waits, so nothing they typed is lost.
+      const here = () => !!initData && !sheet.open && document.visibilityState === "visible"
+        && !chat && !want.value.trim();
+      if (!got.problems && here()) setTimeout(() => { if (here()) openApp(got.url); else showResult(got); }, 1200);
+      else showResult(got);
+    } else if (out.failed) {
+      finish(out.failed); haptic("error");
+    } else if (out.refused) {
+      finish(out.refused.error || "Something went wrong."); haptic("error");
+    } else {
       finish("The connection dropped. The build goes on on the Mac; its result will come to the chat with buddy.");
       haptic("error"); loadApps();
     }
   };
+
+  // ---- one app's change chat ----
+  // Owner, 2026-09-24: "a chat box for each app where you keep refining it (make the buttons bigger, add
+  // categories)". Opened by ?chat=<slug> (the Change button buddy sends after a change, and inside the app its
+  // pencil or Telegram's Settings item) and by Change in the "…" sheet. It shows what was asked of the app and
+  // how each build went (/api/apps/<slug>/history) and takes the next change. Requests, check lines and
+  // problems are text people and Claude wrote, so they reach the page as textContent only.
+  const thread = $("thread"), askBox = $("ask"), askSend = $("ask-send"), chatHint = $("chat-hint"), chatLive = $("chat-live");
+  let chat = null;            // the open chat: { slug, app, thread, running, gone, fresh }
+  let pending = null;         // this page's change while it runs: { slug, request, words, t0 }; its app's chat
+                              // may not be the one open, so it is only ever read through mine()
+  let chatPoll = null, chatTick = null;
+  let drawn = "";             // what the thread was last drawn from: a poll that brings nothing new redraws nothing
+  const mine = () => (pending && chat && pending.slug === chat.slug ? pending : null);
+  const when = (iso) => { const d = new Date(iso); return isNaN(d) ? "" : d.toLocaleString(undefined, { month: "short", day: "numeric", hour: "numeric", minute: "2-digit" }); };
+  const money = (usd) => (typeof usd === "number" && usd > 0 ? "$" + usd.toFixed(2) : "");
+  const took = (secs) => (typeof secs !== "number" || secs <= 0 ? "" : secs < 60 ? secs + " s" : Math.round(secs / 60) + " min");
+  const joined = (parts) => parts.filter(Boolean).join(" · ");
+  function bubble(cls, line, more, meta) {
+    const li = el("li", "msg " + cls);
+    li.appendChild(el("span", "line", line));
+    (more || []).filter(Boolean).forEach((m) => li.appendChild(el("span", "more-line", m)));
+    if (meta) li.appendChild(el("span", "when", meta));
+    return li;
+  }
+  // How one build went, in words: the version it made, what the phone check and Jev's journeys found, the
+  // first thing that may still not work, and what it cost.
+  function checkWords(res) {
+    if (!res.tested) return "It could not be tested on a phone this time.";
+    const j = res.journeys;
+    if (j && j.not_run && j.ran) return "Tested on a phone; " + j.passed + " of " + j.total + " journeys passed, " + (j.total - j.ran) + " did not run.";
+    if (j && j.not_run) return "Tested on a phone; its journeys did not run this time.";
+    if (j) return "Tested on a phone; " + j.passed + " of " + j.total + " journeys passed.";
+    return "Tested on a phone.";
+  }
+  function builtBubble(res) {
+    const cost = joined([money(res.usd), took(res.secs)]);
+    if (!res.ok) return bubble("built failed", "Couldn't change it: " + (res.reason || "the build did not finish") + ".", ["The app is unchanged."], cost);
+    const line = res.version === 1 ? "Built. This is version 1." : res.version ? "Changed. This is version " + res.version + "." : "Changed.";
+    const n = res.problems === 1 ? "1 thing" : res.problems + " things";
+    return bubble("built", line, [checkWords(res), res.problems ? n + " may not work: " + ((res.issues && res.issues[0]) || "") : ""], cost);
+  }
+  function progressWords() {
+    const p = mine();
+    if (p) return p.words + " " + clock(Date.now() - p.t0);
+    const run = chat && chat.running;
+    if (!run) return "";
+    if (run.secs == null) return "Being changed from the chat with buddy…";
+    return (STAGES[run.stage] ? STAGES[run.stage](0) : "Changing it…") + " " + clock(Date.now() - run.t0);
+  }
+  // Redrawn only when what it shows changed (a poll every 4 s while a change runs must not throw away the
+  // owner's place or focus), and scrolled to the newest only when the owner was already there or just sent one.
+  function renderChat(toEnd) {
+    if (!chat) return;
+    const a = chat.app;
+    $("chat-title").textContent = a.title || "This app";
+    iconFor(a, $("chat-icon"));
+    const asked = chat.thread.filter((i) => i.kind === "request").length;
+    const spentOn = chat.thread.reduce((n, i) => n + ((i.result && i.result.usd) || 0), 0);
+    $("chat-sub").textContent = chat.gone ? "Deleted" : joined([asked === 1 ? "1 request" : asked + " requests", money(spentOn) && money(spentOn) + " spent on it"]);
+    $("chat-open").disabled = chat.gone || !a.open;
+    $("chat-open").setAttribute("aria-label", "Open " + (a.title || "this app"));
+    const run = mine() || chat.running;
+    const key = JSON.stringify([chat.slug, chat.thread, chat.gone, chat.fresh, !!a.open, a.versions, run ? run.request || "" : null]);
+    if (key === drawn) { paintComposer(); tickWhile(run); return; }      // (the Open link's token is new each time)
+    drawn = key;
+    const atEnd = toEnd || !thread.childElementCount || thread.scrollHeight - thread.scrollTop - thread.clientHeight < 40;
+    const focused = thread.contains(document.activeElement) ? document.activeElement.dataset.focus : "";
+    thread.textContent = "";
+    if (!chat.thread.length && !run) {
+      thread.appendChild(el("li", "quiet", chat.gone ? "" : "Nothing asked of it yet. Say what should change: bigger buttons, categories, a chart."));
+    }
+    let last = null, lastRes = null, older = false;
+    chat.thread.forEach((i) => {
+      if (i.kind === "undo") { thread.appendChild(bubble("note", "Undone: back to the version before its last change.", [], when(i.at))); last = null; return; }
+      // a change from before results were kept: said once, so its request does not read as never answered
+      if (!i.result && !older) { older = true; thread.appendChild(bubble("note", "Earlier changes show only what was asked: their results were not kept then.", [], "")); }
+      thread.appendChild(bubble("asked", i.text, [], when(i.at)));
+      last = null;
+      if (i.result) { last = builtBubble(i.result); lastRes = i.result; thread.appendChild(last); }
+    });
+    // After a change made here: Open goes straight back into the app, and a change that may have broken
+    // something can be undone on the spot.
+    if (chat.fresh && last && lastRes.ok && a.open && !run) {
+      const open = el("button", "btn", "Open " + a.title); open.type = "button"; open.dataset.focus = "open";
+      open.onclick = () => openApp(a.open);
+      last.appendChild(open);
+      if (lastRes.problems && a.versions > 0) {
+        const undo = el("button", "btn plain", "Undo this change"); undo.type = "button"; undo.dataset.focus = "undo";
+        undo.onclick = async () => {
+          if (!(await ask("Undo this change to " + a.title + "?", "Undo"))) return;
+          undo.disabled = true;
+          try {
+            const res = await post("api/apps/" + encodeURIComponent(a.slug) + "/revert", { versions: a.versions });
+            const j = await reply(res);
+            if (chat) chat.fresh = !res.ok;
+            tell(res.ok ? a.title + " is back to how it was." : (j.error || "Couldn't undo that."));
+          } catch (e) { tell("The connection dropped. Try again."); undo.disabled = false; }
+          loadChat(); loadApps();
+        };
+        last.appendChild(undo);
+      }
+    }
+    if (run) {
+      if (run.request) thread.appendChild(bubble("asked", run.request, [], ""));
+      const b = bubble("built", progressWords(), [], ""); b.id = "chat-progress"; b.setAttribute("aria-busy", "true");
+      thread.appendChild(b);
+    }
+    if (atEnd) thread.scrollTop = thread.scrollHeight;
+    const back = focused && thread.querySelector('[data-focus="' + focused + '"]');
+    if (back) back.focus();
+    paintComposer();
+    tickWhile(run);
+  }
+  function tickWhile(run) {
+    if (run && chatTick) return;
+    clearInterval(chatTick); chatTick = null;
+    if (run) chatTick = setInterval(() => { const p = $("chat-progress"); if (p) p.querySelector(".line").textContent = progressWords(); }, 1000);
+  }
+  function paintComposer() {
+    if (!chat) return;
+    const busyHere = !!(mine() || chat.running);         // a change of another app from here is "another build"
+    const busyElse = !busyHere && (building || running.some((b) => b.secs != null));
+    askSend.disabled = !initData || chat.gone || busyHere || busyElse;
+    askBox.disabled = chat.gone;
+    chatHint.textContent = !initData ? "Open this from buddy's pinned message in Telegram."
+      : chat.gone ? (chat.app.title || "This app") + " was deleted. Describe it again on your apps screen to build a new one."
+      : busyElse ? "Another build is running. Change waits for it." : chatHint.dataset.say || "";
+  }
+  function tell(line) { chatHint.dataset.say = line; chatLive.textContent = line; paintComposer(); }
+  async function loadChat(toEnd) {
+    if (!chat || !initData) { paintComposer(); return; }
+    const slug = chat.slug, was = !!chat.running;
+    let r, j;
+    try { r = await post("api/apps/" + encodeURIComponent(slug) + "/history"); j = await reply(r); }
+    catch (e) { tell("The connection dropped. Try again."); return; }
+    if (!chat || chat.slug !== slug) return;
+    if (r.status === 404) { chat.gone = true; chat.running = null; }
+    else if (!r.ok) { tell(j.error || "Couldn't load this app's changes."); return; }
+    else {
+      chat.app = j.app; chat.thread = Array.isArray(j.thread) ? j.thread : []; showSpent(j);
+      chat.running = mine() ? null : (j.building || null);
+      if (chat.running) chat.running.t0 = Date.now() - (chat.running.secs || 0) * 1000;
+    }
+    renderChat(toEnd);
+    // A change this page did not start (from the chat with buddy, or before a reload): follow it until it ends.
+    const waiting = !!chat.running;
+    if (waiting && !chatPoll) chatPoll = setInterval(loadChat, 4000);
+    if (!waiting && chatPoll) { clearInterval(chatPoll); chatPoll = null; }
+    if (was && !waiting) { tell("Finished. The newest result is at the bottom."); loadApps(); }
+  }
+  function openChat(slug, typing) {
+    const known = apps.find((x) => x.slug === slug);
+    chat = { slug, app: known ? Object.assign({}, known) : { slug, title: "", icon: "" }, thread: [], running: null, gone: false, fresh: false };
+    drawn = ""; clearInterval(chatTick); chatTick = null;
+    delete chatHint.dataset.say;
+    document.body.classList.add("chatting"); $("chat").hidden = false;
+    try { history.replaceState(null, "", "?chat=" + encodeURIComponent(slug) + location.hash); } catch (e) {}
+    if (can("6.1")) { tg.BackButton.onClick(closeChat); tg.BackButton.show(); }
+    renderChat();
+    (typing ? askBox : $("chat-title")).focus();
+    return loadChat();
+  }
+  function closeChat() {
+    if (!chat) return;
+    const slug = chat.slug;
+    chat = null; clearInterval(chatPoll); chatPoll = null; clearInterval(chatTick); chatTick = null;
+    document.body.classList.remove("chatting"); $("chat").hidden = true;
+    try { history.replaceState(null, "", location.pathname + location.hash); } catch (e) {}
+    if (can("6.1")) { tg.BackButton.offClick(closeChat); tg.BackButton.hide(); }
+    loadApps().then(() => {
+      const back = document.querySelector('.app[data-slug="' + CSS.escape(slug) + '"] .more');
+      (back && !back.disabled ? back : $("apps-heading")).focus();
+    });
+  }
+  $("chat-back").onclick = closeChat;
+  $("chat-open").onclick = () => { if (chat && chat.app.open && !chat.gone) openApp(chat.app.open); };
+  function fitAsk() { askBox.style.height = "auto"; askBox.style.height = Math.min(askBox.scrollHeight + 2, 160) + "px"; }
+  askBox.addEventListener("input", fitAsk);
+  askBox.addEventListener("focus", () => setTimeout(() => { thread.scrollTop = thread.scrollHeight; }, 250));
+  // Enter sends (the keyboard's key says "send"); Shift+Enter is a new line.
+  askBox.addEventListener("keydown", (e) => {
+    if (e.key === "Enter" && !e.shiftKey && !e.isComposing) { e.preventDefault(); sendChange(); }
+  });
+  $("composer").addEventListener("submit", (e) => { e.preventDefault(); sendChange(); });
+  async function sendChange() {
+    if (!chat || !initData || chat.gone || askSend.disabled) return;
+    const text = askBox.value.trim(); if (!text) { askBox.focus(); return; }
+    const slug = chat.slug, title = chat.app.title;
+    pending = { slug, request: text, words: "Changing it…", t0: Date.now() };
+    chat.fresh = false; delete chatHint.dataset.say;
+    askBox.value = ""; fitAsk();
+    setBuilding(true); renderChat(true);
+    let spoken = "";
+    const hear = (w) => {
+      if (!pending) return;
+      pending.words = w;
+      if (!mine()) return;                               // another app's chat is open: not its news
+      const p = $("chat-progress"); if (p) p.querySelector(".line").textContent = progressWords();
+      const plain = w.replace(/ \d+k$/, ""); if (plain !== spoken) { spoken = plain; chatLive.textContent = plain; }
+    };
+    hear("Changing it…");
+    const out = await runBuild({ request: text, app: slug }, hear);
+    pending = null; setBuilding(false);
+    const here = !!chat && chat.slug === slug;
+    let line;
+    if (out.got) {
+      line = readyLine(out.got).replace(/^Ready/, "Changed");
+      haptic(out.got.problems ? "warning" : "success");
+      if (here) chat.fresh = true;
+    } else if (out.refused && out.refused.gone) {
+      line = (title || "The app") + " was deleted meanwhile, so nothing was changed.";
+      if (here) chat.gone = true;
+      haptic("error");
+    } else if (out.refused) {
+      line = out.refused.error || "Something went wrong.";
+      if (here && !askBox.value.trim()) { askBox.value = text; fitAsk(); }   // it never started: the words come back
+      haptic("error");
+    } else if (out.failed) {
+      line = out.failed; haptic("error");
+    } else {
+      line = "The connection dropped. The change goes on on the Mac; its result will come to the chat with buddy.";
+      haptic("error");
+    }
+    if (here) {
+      chatLive.textContent = line;
+      // why it did not happen stays in sight under the thread (a refused key, a rate limit: the owner knows
+      // whether to wait or to fix something before trying again)
+      if ((out.refused && !out.refused.gone) || out.failed) chatHint.dataset.say = line;
+      await loadChat(true);
+    } else {
+      notice.textContent = line;
+      if (chat) renderChat();                            // another app's chat: its composer is free again
+    }
+    loadApps();
+  }
+  // The phone's keyboard shrinks the visible area; the page follows it so the composer stays above the keys.
+  const vv = window.visualViewport;
+  if (vv) {
+    const fit = () => document.documentElement.style.setProperty("--app-h", Math.round(vv.height * (vv.scale || 1)) + "px");
+    vv.addEventListener("resize", fit); fit();
+  }
+  // Settings in Telegram's "…" menu belongs to an app (it leads to the app's change chat); not here.
+  try { if (can("7.0") && tg.SettingsButton) tg.SettingsButton.hide(); } catch (e) {}
+
   loadApps().then(() => {
+    if (chatting) { openChat(chatting, false); return; }
     if (!opening) return;
     const a = apps.find((x) => x.slug === opening);
     if (a) openApp(a.open, true);
     else notice.textContent = "That app is no longer here. It may have been deleted.";
   });
-  window.addEventListener("pageshow", (e) => { if (e.persisted) loadApps(); });
+  window.addEventListener("pageshow", (e) => { if (e.persisted) { loadApps(); if (chat) loadChat(); } });
 
 })();
 </script>
