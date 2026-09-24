@@ -504,6 +504,47 @@ same `fastlane_eval.py` replay applies once one is recorded (a page snapshot
 is a `Snapshot`, so the fixture format is unchanged). Install:
 `pip install -e ".[browser]"` then `python -m playwright install chromium`.
 
+### Choosing the browser planner model
+
+`tools/browser_model_eval.py` runs `ComputerAgent.run_in_browser` with only
+the planner model changed. The plan request, the executor, Jev on every click,
+and the page read are all production's. It uses buddy's own headless Chromium
+with a throwaway profile, never your Chrome. There are twelve tasks. Nine are
+on local fixture sites (served on 127.0.0.1 and routed as
+`https://*.buddy-eval.test`): a contact form, a filtered shop cart, a search
+then a result, a table read, a toggle behind a tab, a cookie banner, a button
+below the fold, a reservation form, and a two-page read. Three are read-only
+on example.com and Wikipedia. Success is decided by code: the fixture
+server's recorded state, or a pattern in the answer. OpenAI models are called
+directly. Other models go through OpenRouter's Responses API with the same
+request. Measured 2026-09-24, 3 runs per task (36 per model), Codex not
+behind the lane:
+
+| model | success | avg time | planner cost per task | handoffs |
+|---|---|---|---|---|
+| google/gemini-3.7-flash | 18/36 (50%) | 7.4 s | $0.0026 | 18 |
+| gpt-6-sol | 18/36 (50%) | 7.1 s | $0.0034 | 18 |
+| gpt-6-astra (default) | 16/36 (44%) | 7.2 s | $0.0152 | 21 (and 2 wrong answers) |
+| gpt-6-luna | 16/36 (44%) | 6.4 s | $0.0002 | 20 |
+| z-ai/glm-5.3-flash | 9/36 (25%) | 15.0 s | $0.0001 | 26 (does not hold the plan schema) |
+
+The differences among astra, sol, luna and gemini-flash are within noise. A
+cheaper planner holds astra's success rate: luna costs about 75x less and sol
+about 4.5x less. The default is unchanged until the owner decides.
+`CC_BUDDY_AGENT_MODEL` is the knob, and it moves the Mac planner too. The
+bigger lesson: six of the nine local tasks fail for every model, and the
+causes are in the lane, not the planner:
+
+- the typed-field picker returns `ambiguous_field` on a form with several
+  fields;
+- a `checkpoint` after an in-page tab hands off;
+- an open cookie dialog refuses every click;
+- controls below the fold are never collected.
+
+Run it:
+`python tools/browser_model_eval.py run --models gpt-6-luna --repeats 3 --out-dir DIR`,
+then `report --out-dir DIR`.
+
 ## Knobs
 
 | Variable | Default | What it does |
