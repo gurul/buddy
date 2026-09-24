@@ -98,8 +98,9 @@ connected → IDLE (awake, looking around).
 Head motion: the BSP runs a spring per servo. On top of it `body.cpp` glides
 each target along `easeInOutCubic` and streams the pose at 25 Hz
 (auto-angle-sync off, servo speed 100..600 scaled to the step; glide time
-max(300 ms, 6 ms/deg)). While awake and not gliding, a two-sine micro-drift
-(±1.5° yaw, ±1° pitch) keeps the head from looking parked. Pitch is clamped to
+max(300 ms, 6 ms/deg)). There is no idle micro-drift: streaming tiny targets
+forever kept the servos under torque and whining (owner report 2026-09-23), so
+the head now comes to rest and the BSP's auto torque release lets it go. Pitch is clamped to
 5..85, yaw to ±60. `PITCH_LEVEL` 45 / `PITCH_SLEEP` 10 / `PITCH_ATTENTION` 70
 depend on the servo zero (NVS `servo/zero_pos_2`): bench-tune them.
 
@@ -212,6 +213,7 @@ Every other verb is the pet build's (`time`, `status`, `focus`, `key`).
 | host → board | `{"cmd":"move","kind":"stop"}` | stop the motion where it is, and hand the head back to gaze |
 | board → host | `{"pose":{"y":<tenths>,"p":<tenths>}}` | the commanded pose in tenths of a degree, at 10 Hz **while a motion runs** and never otherwise. This exists because an echo saying a motion ran is not evidence it moved: the first dance reported `ran=7200ms` with a motionless head. One last line carries `"end":true` as the motion finishes, so a watcher knows the stream stopped rather than stalled |
 | host → board | `{"cmd":"sound","on":true\|false}` | the owner muted / unmuted buddy; persisted (NVS `s_snd`) and applied to every chirp and beep; motion and LEDs unaffected. The status ack reports it as `"snd"` |
+| host → board | `{"cmd":"led","on":true\|false}` | back LEDs on / off; persisted (NVS `s_led`) and applied every loop. Acked as `led` |
 | host → board | `{"cmd":"mode","explore":true\|false}` | enter/leave explore mode |
 | host → board | `{"cmd":"snap"}` | one full-size photo: the look task answers with a single frame line at 320x240, quality 85, carrying `"snap":true` |
 | host → board | `{"cmd":"owner","op":"reset"}` | forget the owner memory |

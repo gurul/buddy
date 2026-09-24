@@ -132,6 +132,15 @@ inline bool xferCommand(JsonDocument& doc) {
     return true;
   }
 
+  // {"cmd":"led","on":bool}: back LEDs on or off. Persisted (NVS "s_led");
+  // main.cpp hands it to bodyLedPolicy every loop.
+  if (strcmp(cmd, "led") == 0) {
+    settings().led = doc["on"] | true;
+    settingsSave();
+    _xAck("led", true);
+    return true;
+  }
+
   if (strcmp(cmd, "status") == 0) {
     // Dump everything the info screens show. Manual printf rather than
     // ArduinoJson serialize — less heap churn, and the shape is fixed.
