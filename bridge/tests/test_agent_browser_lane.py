@@ -385,3 +385,44 @@ def test_the_browser_wording_never_sends_a_blank_page_to_needs_eyes() -> None:
     assert "blank page" in pc.PLAN_INSTRUCTIONS_BROWSER and "only when no web page could do the request" in pc.PLAN_INSTRUCTIONS_BROWSER
     assert "asked again with the new page's controls" in pc.PLAN_INSTRUCTIONS_BROWSER
     assert "operate the human's own Mac" in pc.PLAN_INSTRUCTIONS                 # the Mac lane's wording is its own
+
+
+NOTHING_LEFT = {"needs_eyes": False, "why": "it is done", "steps": [], "final_say": "", "success": None}
+
+
+def test_a_closing_checkpoint_with_nothing_left_says_the_plans_own_sentence(tmp_path: Path) -> None:
+    # gpt-6-astra, reservation_form: the booking was made, then a closing "check the result" checkpoint handed it off.
+    book = {"needs_eyes": False, "why": "", "final_say": "Your table is requested.", "success": None,
+            "steps": [_step("click", "Request reservation button", hint="Request reservation"), _step("checkpoint")]}
+    closed = {"status": "checkpoint", "next_index": 2, "reason": "the planner asked to look again here", "confirm": "",
+              "sentence": "", "ledger": [{"index": 1, "step": "click Request reservation button", "effect": "confirmed"}]}
+    client = FakeClient([_plan_response(book), _plan_response(NOTHING_LEFT)])
+    lane = PageLane([closed], [["button: Request reservation"]])
+    a, _ = _agent(client, PlanWorker([]), tmp_path, config=_cfg(tmp_path), browser=lane)
+    assert asyncio.run(a.run_in_browser("reserve a table")) == ("Your table is requested.", "")
+
+
+def test_nothing_left_after_a_checkpoint_in_the_middle_is_not_a_finish(tmp_path: Path) -> None:
+    client = FakeClient([_plan_response({**TAB_PLAN, "steps": TAB_PLAN["steps"] + [_step("click", "Save changes")]}),
+                         _plan_response(NOTHING_LEFT)])
+    lane = PageLane([{**AT_CHECKPOINT, "next_index": 2}], [["tab: Notifications"]])
+    a, _ = _agent(client, PlanWorker([]), tmp_path, config=_cfg(tmp_path), browser=lane)
+    answer, note = asyncio.run(a.run_in_browser("turn on the weekly email digest under Notifications and save"))
+    assert answer == "" and "nothing left to do" in note
+
+
+def test_a_question_about_the_open_page_is_read_when_there_is_nothing_to_navigate(tmp_path: Path) -> None:
+    # table_read: the towns page is open and has no controls; the planner rightly plans no steps.
+    from test_computer_agent import _message, _response
+
+    client = FakeClient([_plan_response(NOTHING_LEFT), _response("r1", _message("Riverton has 48,213 people."))])
+    lane = PageLane([], [[]], page={"title": "Towns", "url": "https://data.example.test/towns", "text": "Riverton 48,213"})
+
+    async def at_towns() -> dict[str, Any]:
+        lane.outlines += 1
+        return {"app": "browser", "lines": [], "title": "Towns", "url": "https://data.example.test/towns"}
+
+    lane.outline = at_towns
+    a, _ = _agent(client, PlanWorker([]), tmp_path, config=_cfg(tmp_path), browser=lane)
+    answer, _ = asyncio.run(a.run_in_browser("What is the population of Riverton in the table on https://data.example.test/towns?"))
+    assert answer == "Riverton has 48,213 people." and lane.opened == [] and lane.runs == []   # not re-opened

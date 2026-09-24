@@ -150,7 +150,7 @@ def _say(plan: Plan, ledger: Sequence[Entry]) -> str:
 def run_plan(plan: Plan, *, senses: Any, effectors: Any, asker: Optional[Callable[..., StepAnswer]],
              open_app: Callable[[str], str], open_url: Callable[[str], str], frontmost_app: Callable[[], str],
              start: int = 0, approved: Optional[Mapping[int, str]] = None, decide: str = "jev",
-             dry_run: bool = False, planned_for: str = "", last_checkpoint_completes: bool = False,
+             dry_run: bool = False, planned_for: str = "",
              step_gates: StepGates = JEV_STEP_GATES, clock: Callable[[], float] = time.perf_counter) -> PlanResult:
     """Walk `plan.steps[start:]`. `approved` maps a 0-based step index the human has said yes to onto what
     they were asked about (PlanResult.confirm): for a sensitive control that is its label, which the lane
@@ -158,12 +158,7 @@ def run_plan(plan: Plan, *, senses: Any, effectors: Any, asker: Optional[Callabl
 
     `planned_for` is the app whose window the planner was shown. Planning takes seconds and the human keeps
     using the Mac meanwhile (live, 2026-09-21: Finder was in front by the time the plan arrived), so when a
-    plan opens no app of its own, that app is brought back to the front before the first step.
-
-    `last_checkpoint_completes`: a checkpoint with nothing after it ("check the result") runs the plan's end
-    checks instead of handing back. The browser lane sets it: there the page is read, or re-planned, by the
-    caller anyway, and a finished booking was handed off only because a checkpoint closed its plan
-    (tools/browser_model_eval.py, 2026-09-24, reservation_form, gpt-6-astra)."""
+    plan opens no app of its own, that app is brought back to the front before the first step."""
     t_start = clock()
     out = PlanResult("none", next_index=start)
     ok = {int(i): str(label) for i, label in (approved or {}).items()}
@@ -195,8 +190,6 @@ def run_plan(plan: Plan, *, senses: Any, effectors: Any, asker: Optional[Callabl
         if clock() - t_start > MAX_WALL_SECS:
             return stop("partial", i, "out_of_time")
         if step.kind == "checkpoint":
-            if last_checkpoint_completes and all(s.kind == "checkpoint" for s in plan.steps[i:]):
-                break
             return stop("checkpoint", i + 1, "the planner asked to look again here")
         if step.consequential and i not in ok:
             return stop("needs_human", i, "the plan marked this step consequential", step.describe())

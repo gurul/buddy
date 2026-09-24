@@ -762,8 +762,7 @@ class BrowserLane:
 
         result = run_plan(plan, senses=p, effectors=p, asker=self._step_asker, open_app=open_app,
                           open_url=lambda url: p.open_url(self._plain_http.get(url, url)), frontmost_app=lambda: "browser", start=start, approved=ok,
-                          decide="jev" if self._step_asker is not None else "keyword", planned_for="browser",
-                          last_checkpoint_completes=True)
+                          decide="jev" if self._step_asker is not None else "keyword", planned_for="browser")
         return result.to_dict()
 
     async def run_plan(self, plan_dict: dict[str, Any], goal: str, start: int = 0,

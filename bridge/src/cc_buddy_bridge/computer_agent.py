@@ -622,6 +622,33 @@ class Classified:
     phases: list[str] = field(default_factory=list)   # the `phase` of each assistant message, "" when absent
 
 
+def _same_page(a: str, b: str) -> bool:
+    """Two URLs for the same page: host (without www.) and path (without a trailing slash) and query."""
+    pa, pb = urlsplit(a), urlsplit(b)
+    host = lambda p: (p.hostname or "").removeprefix("www.")  # noqa: E731
+    return bool(host(pa)) and host(pa) == host(pb) and pa.path.rstrip("/") == pb.path.rstrip("/") and pa.query == pb.query
+
+
+def _nothing_left(raw: Any) -> bool:
+    """A browser re-plan that answers with no steps and without declining: the planner saw nothing left to do.
+    parse_plan rejects it (a plan the executor could run needs steps), so the lane decides what it means."""
+    return isinstance(raw, dict) and raw.get("needs_eyes") is not True and raw.get("steps") == []
+
+
+def _closing_say(plan: Any, entries: list[dict[str, Any]]) -> str:
+    """What the executor would have said had a plan's closing checkpoint been its end: its final_say when every
+    applied step was confirmed, the executor's own "couldn't confirm" wording otherwise, "" when nothing ran.
+    Measured on tools/browser_model_eval.py (2026-09-24, reservation_form, gpt-6-astra): a booking made and
+    confirmed was handed off only because a checkpoint closed the plan."""
+    from .plan_executor import Entry, _say
+
+    ledger = [Entry(int(e.get("index") or 0), str(e.get("step") or ""), str(e.get("effect") or "refused"))
+              for e in entries if e.get("effect") != "refused"]
+    if not ledger or any(e.effect == "suspected_noop" for e in ledger):
+        return ""
+    return _say(plan, ledger)
+
+
 def classify_response(response: dict[str, Any]) -> Classified:
     """Validate every output item before running any of the model's code."""
     if response.get("status") != "completed" or response.get("error"):
@@ -1226,6 +1253,7 @@ class ComputerAgent:
         approved: dict[str, str] = {}
         asked = 0
         again = ""
+        closing = ""                                 # what the last plan would have said, had its checkpoint been its end
         result: dict[str, Any] = {}
         for attempt in range(1 + (MAX_BROWSER_REPLANS if browser else 0)):
             if attempt:
@@ -1240,13 +1268,25 @@ class ComputerAgent:
             try:
                 response = await self._interruptible(self._create(req, 0))
                 self._meter(response)
-                plan = pc.parse_plan(json.loads(classify_response(response).text), goal)
+                raw = json.loads(classify_response(response).text)
+                plan = None if browser and (reads or attempt or done) and _nothing_left(raw) else pc.parse_plan(raw, goal)
             except (Cancelled, FailSafe):
                 raise
             except Exception as e:  # noqa: BLE001 — no plan is "the planner does it turn by turn", never a failed task
                 self._log({"turn": 0, "plan": {"error": f"{type(e).__name__}: {e}"[:200], "attempt": attempt,
                                                "secs": round(self._clock() - t0, 2)}})
                 return "", self._handoff_note(done, again or "no plan")
+            if plan is None:
+                # Browser: the planner looked at the page (a question's, or one steps were already applied to)
+                # and saw nothing left to do.
+                self._log({"turn": 0, "plan": {"steps": [], "nothing_left": True, "attempt": attempt,
+                                               "secs": round(self._clock() - t0, 2)}})
+                if reads:
+                    said = await self._read_answer(goal, worker)
+                    return (said, "") if said else ("", self._handoff_note(done, "the page now open did not show the answer"))
+                if closing:
+                    return closing, ""
+                return "", self._handoff_note(done, "the planner saw nothing left to do")
             plan_dict = {**pc.plan_to_dict(plan), "app": str(outline.get("app") or "")}
             self._log({"turn": 0, "plan": {**plan_dict, "secs": round(self._clock() - t0, 2), "attempt": attempt,
                                            "outline_lines": len(outline.get("lines") or [])}})
@@ -1254,9 +1294,11 @@ class ComputerAgent:
                 return "", self._handoff_note(done, again or "the planner needs to see the page")
             approved = {}
             start = 0
+            ran: list[dict[str, Any]] = []                # this plan's ledger, across the human's yeses
             for _ in range(MAX_PLAN_CONFIRMS + 1):
                 result = await self._interruptible(worker.run_plan(plan_dict, goal, start=start, approved=approved))
                 self._log({"turn": 0, "ledger": result})
+                ran += list(result.get("ledger") or [])
                 for entry in result.get("ledger") or []:
                     if entry.get("effect") != "refused":
                         self._acted = True
@@ -1296,11 +1338,13 @@ class ComputerAgent:
                 return str(result["sentence"]), ""
             if browser and status == "checkpoint":
                 again = "the plan stopped at a checkpoint to look at the new page"
+                closing = _closing_say(plan, ran) if ran_all else ""
                 continue
             break
         else:                                        # the re-plan budget ran out
             return "", self._handoff_note(done, again)
         return "", self._handoff_note(done, str(result.get("reason") or result.get("status") or ""))
+
 
     async def _open_named_page(self, goal: str, worker: Any, outline: dict[str, Any], done: list[str]) -> dict[str, Any]:
         """A blank page and a URL in the request: open it, then plan against the site. Measured on
@@ -1311,6 +1355,8 @@ class ComputerAgent:
         if not m:
             return outline
         url = m.group(0).rstrip(".!?:")
+        if _same_page(url, str(outline.get("url") or "")):
+            return outline                           # already open: a page with no controls (a table) stays as it is
         try:
             said = await self._interruptible(worker.open_url(url))
             again = await self._interruptible(worker.outline())
