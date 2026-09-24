@@ -623,8 +623,10 @@ class Transcripts:
         return f"(about {bucket} earlier lines today: memory_search finds them)"
 
     def day_text(self, day: str, max_chars: int = DAY_TEXT_CHARS) -> str:
-        """One whole day for the nightly dream: 'HH:MM spoken|texted|sent Owner/buddy[ (tool)]: text', say, tool and
-        image lines, oldest first, each whole. Over budget, the NEWEST lines are kept under a
+        """One whole day for the nightly dream: 'YYYY-MM-DD HH:MM spoken|texted|sent Owner/buddy[ (tool)]: text', say,
+        tool and image lines, oldest first, each whole. The date is the line's own calendar date: a line at 00:08
+        stays in the day before (the day runs 04:00 to 04:00) but says the date it was said, so the dream's
+        journal never files it under the wrong date (days/2026-09-23.md did, for 2026-09-24 00:08). Over budget, the NEWEST lines are kept under a
         '(N earlier lines omitted)' header. '' for a day with nothing said."""
         rows = []
         for ln in self.lines(day):
@@ -632,7 +634,7 @@ class Transcripts:
                 continue
             at = _parse_ts(ln["ts"])
             mode = _mode(ln["ch"])
-            rows.append(f"{at:%H:%M} {mode} {speaker(ln)}: {_flat(ln['text'])}")
+            rows.append(f"{at:%Y-%m-%d %H:%M} {mode} {speaker(ln)}: {_flat(ln['text'])}")
         if not rows or max_chars <= 0:
             return ""
         size = sum(len(r) + 1 for r in rows) - 1

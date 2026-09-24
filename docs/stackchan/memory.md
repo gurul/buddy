@@ -41,7 +41,7 @@ updated". So:
 │   ├── profile.md                            0600   the one-pager every conversation starts with
 │   ├── starred.md                            0600   what the owner said to remember, one dated line each
 │   ├── <id>.md                               0600   one typed record per thing
-│   ├── days/<YYYY-MM-DD>.md                  0600   the dream journal: what happened, learned, still open, corrected
+│   ├── days/<YYYY-MM-DD>.md                  0600   the dream journal: what happened, learned, still open, plans, corrected
 │   └── .dreamt                               0600   the days already dreamt, one per line
 ├── mem0/                                     0700   INDEX: search by meaning, rebuilt from transcripts (mem0_memory.py)
 │   ├── qdrant/  history.db  home/            0700 / 0600
@@ -55,7 +55,12 @@ opened `0600` and `fchmod`ed again. The mem0 folder is re-tightened every time i
 opens, because mem0 creates files of its own.
 
 **A day starts at 04:00, not midnight.** A conversation at 01:00 belongs to the
-evening it continued, in the transcripts, in a star's date and in the dream.
+evening it continued, in the transcripts, in a star's date and in the dream. It
+keeps its real date all the same: the dream reads each line as `YYYY-MM-DD HH:MM`,
+so the journal of 2026-09-23 lists an event of 00:08 the next morning as
+2026-09-24 00:08. (Until 2026-09-24 the lines carried only `HH:MM` under
+"Everything said on <day>", and `days/2026-09-23.md` filed exactly that event
+under the wrong date.)
 
 **The words never reach a git object, a cloud folder or a backup.** The transcripts
 refuse (one WARNING naming the rule, then nothing is written) a folder that is
@@ -162,7 +167,11 @@ wake**, so a week away does not become one burst of model calls.
    profile, the owner's stars and the whole day's transcript (at most 100,000
    characters), and returns the records that change (whole), the profile as it
    should read now, and the day's journal. Where the day contradicts a record, the
-   record gets a dated correction and the journal says so. Owner hand edits survive,
+   record gets a dated correction and the journal says so. The journal's **Plans**
+   keep when a plan happens apart from when it was said, one line each:
+   `Dentist (when 2026-09-30 10:00; said 2026-09-23)`, or `when: no date yet`.
+   "Tomorrow" and "Friday" are read from the date of the line that said them.
+   Owner hand edits survive,
    because the current files are always its input. One commit, `dream: <day>`.
 2. `records.consolidate` — **one** model call over every record merges the same
    thing filed under two ids and dates a fact a newer one replaced. Skipped, with a
