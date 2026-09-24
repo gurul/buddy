@@ -1,5 +1,7 @@
 <p align="center">
-  <img src="docs/assets/buddy-sidekick.png" alt="buddy, your desktop sidekick: a cut-paper illustration of the buddy robot saying Hey there!" width="100%">
+  <a href="https://youtu.be/6NOxdY_jqN4"><img src="docs/assets/buddy-launch-poster.jpg" alt="Watch the buddy launch film on YouTube (93 seconds)" width="80%"></a>
+  <br>
+  <a href="https://youtu.be/6NOxdY_jqN4"><b>▶ Watch the launch film on YouTube</b></a> · 93 s · <a href="docs/launch-video/remotion/README.md">how it was made</a>
 </p>
 
 # buddy
@@ -12,12 +14,6 @@ how it feels. Away from the desk, you can text it.
 The robot is an **M5StackChan K151 (CoreS3 / ESP32-S3)** running custom Arduino
 firmware, connected over USB serial to a Python daemon on the Mac. A native macOS app
 and desktop widget show its diary, memories and lessons.
-
-<p align="center">
-  <a href="docs/assets/buddy-launch.mp4"><img src="docs/assets/buddy-launch-poster.jpg" alt="Watch the buddy launch film (93 seconds)" width="80%"></a>
-  <br>
-  <a href="docs/assets/buddy-launch.mp4"><b>▶ Watch the launch film</b></a> · 93 s · <a href="docs/launch-video/remotion/README.md">how it was made</a>
-</p>
 
 **Contents:** [What buddy does](#what-buddy-does) ·
 [Get started](#get-started) · [How it works](#how-it-works) ·
