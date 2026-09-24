@@ -258,7 +258,7 @@ def test_today_block_keeps_the_newest_lines_within_budget(tmp_path: Path) -> Non
     block = t.today_block(4000)
     assert 0 < len(block) <= 4000
     rows = block.splitlines()
-    assert rows[0].startswith("(about ") and rows[0].endswith("earlier lines today: transcript_search finds them)")
+    assert rows[0].startswith("(about ") and rows[0].endswith("earlier lines today: memory_search finds them)")
     assert "line 299" in rows[-1]                                           # the newest line is kept
     kept = [int(r.split("line ")[1][:3]) for r in rows[1:]]
     assert kept == list(range(kept[0], 300))                                # a contiguous newest run

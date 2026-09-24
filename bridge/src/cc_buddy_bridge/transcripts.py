@@ -606,7 +606,7 @@ class Transcripts:
     @staticmethod
     def _header(dropped: int) -> str:
         bucket = max(HEADER_BUCKET, -(-dropped // HEADER_BUCKET) * HEADER_BUCKET)
-        return f"(about {bucket} earlier lines today: transcript_search finds them)"
+        return f"(about {bucket} earlier lines today: memory_search finds them)"
 
     def day_text(self, day: str, max_chars: int = DAY_TEXT_CHARS) -> str:
         """One whole day for the nightly dream: 'HH:MM spoken|texted Owner/buddy[ (tool)]: text', say, tool and
