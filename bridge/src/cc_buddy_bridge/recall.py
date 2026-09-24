@@ -93,6 +93,23 @@ class RecallConfig:
     def sessions_dir(self) -> Path:
         return self.store / "sessions"
 
+    # The simplified memory (owner, 2026-09-23): three stores and an archive under one root.
+    @property
+    def transcripts_dir(self) -> Path:
+        return self.store / "transcripts"
+
+    @property
+    def records_dir(self) -> Path:
+        return self.store / "records"
+
+    @property
+    def mem0_dir(self) -> Path:
+        return self.store / "mem0"
+
+    @property
+    def archive_dir(self) -> Path:
+        return self.store / "archive"
+
 
 def configured(environ: Any = None) -> RecallConfig:
     env = os.environ if environ is None else environ
