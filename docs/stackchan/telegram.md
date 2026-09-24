@@ -662,6 +662,32 @@ store inside some other git repository is never committed to at all. The debrief
 installer's `*` `.gitignore` stays; buddy adds with `--force` in its own
 repository only.
 
+### Memory by meaning: mem0, self-hosted
+
+Keyword search misses a question asked in other words than the note used ("where
+does my sister live" against "Ana moved to Lisbon"). With `CC_BUDDY_MEM0=1`
+(records on too), `mem0_memory.py` runs mem0's open-source library on this Mac
+and `memory_search` returns its hits as `recalled` beside the record lines.
+
+- **Fed only the distilled session notes**, never the text brain: the first run
+  reads every note already on disk, then new ones every five minutes. The model
+  in a conversation still cannot write memory.
+- **Stored locally:** Qdrant on disk and a SQLite history under
+  `~/.config/cc-buddy-bridge/mem0`, outside any git repository. The two model
+  calls (fact extraction with `gpt-5.4-nano`, embeddings with
+  `text-embedding-3-small`) go to OpenAI.
+- **Telemetry off:** mem0 ships PostHog telemetry, on by default and read at
+  import. buddy sets `MEM0_TELEMETRY=False` and `MEM0_DIR` (so nothing lands in
+  `~/.mem0`) before the first import, and refuses mem0 if telemetry still reads on.
+- Install with `pip install -e ".[mem0]"` (mem0ai 2.2). Hits scoring under 0.25
+  are dropped as guesses.
+
+| Variable | Default | What it does |
+|---|---|---|
+| `CC_BUDDY_MEM0` | `0` | The switch, beside `CC_BUDDY_RECORDS=1`. |
+| `CC_BUDDY_MEM0_MODEL` | `gpt-5.4-nano` | The extracting model. |
+| `CC_BUDDY_MEM0_HOME` | `~/.config/cc-buddy-bridge/mem0` | Where the vector store and history live. |
+
 Off, nothing changes: no records directory, no git repository, the text brain
 gets the one-clause brief only. On, the store becomes a git repository (`git`
 must be installed; without it records are still written, without history).

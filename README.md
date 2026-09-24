@@ -369,6 +369,7 @@ Every message is shaped for the phone by `telegram_format.py`.
 | `codex on` / `codex <folder>` | Starts a new Codex chat in a saved folder, with approvals relayed to Telegram. Each turn shows one progress message with a Stop button. `stop` interrupts, `codex off` returns to buddy, `buddy:` addresses buddy directly. |
 | `new claude` | Opens a coding session in Warp from a few short texts. |
 | Records (`CC_BUDDY_RECORDS=1`) | Typed, git-tracked markdown records and a profile, written only by a nightly reconcile (`records.py`) that also reads what you said to remember. Telegram and voice both read the profile. |
+| mem0 (`CC_BUDDY_MEM0=1`) | Self-hosted mem0 beside the records: a local meaning search over the session notes that `memory_search` also returns (`mem0_memory.py`). |
 | Composio (`CC_BUDDY_COMPOSIO=1`) | Your apps by API (`composio_tools.py`): Gmail read-only, calendar writable, Drive and the rest asked first. |
 | Second brain (`CC_BUDDY_SECOND_BRAIN=1`) | Texts become notes in a local markdown vault Obsidian opens (`second_brain.py`). |
 

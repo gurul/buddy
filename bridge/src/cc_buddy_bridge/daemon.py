@@ -13,7 +13,7 @@ from typing import TYPE_CHECKING, Any, Optional
 if TYPE_CHECKING:
     from .key_tap import KeyTapper
 
-from . import claude_live, photos, voice_agent
+from . import claude_live, mem0_memory, photos, voice_agent
 from . import follow as follow_mod
 from . import recall as recall_mod
 from . import records as records_mod
@@ -383,6 +383,11 @@ class Daemon:
         self._reconciler = records_mod.make_reconciler(records_mod.configured(), self._recall_cfg)
         if self._reconciler is not None:
             tasks.append(asyncio.create_task(self._reconciler.loop(self._shutdown), name="records-reconcile"))
+        # mem0 (mem0_memory.py), CC_BUDDY_MEM0=1: reads each session note into a local meaning search that
+        # memory_search consults beside the records. Only with records on: it is reached through them.
+        owner_memory = mem0_memory.shared(self._recall_cfg) if records_mod.configured().enabled else None
+        if owner_memory is not None:
+            tasks.append(asyncio.create_task(owner_memory.loop(self._shutdown), name="mem0-ingest"))
         if not self._explore_cfg.enabled:
             log.info("explore: buddy explores only when asked (`cc-buddy-bridge explore`, \"go explore\", a text); "
                      "CC_BUDDY_EXPLORE=1 turns the idle start on")
@@ -1081,7 +1086,8 @@ class Daemon:
             # Live sessions only: one whose terminal died without a SessionEnd is dropped (claude_live).
             # Awaited by the inlet: the ps/lsof probe runs on a worker thread, never on this loop.
             claude_sessions=lambda: claude_live.picker_sessions_off_loop(self.state),
-            records=records_mod.RecordsReader(self._recall_cfg) if records_mod.configured().enabled else None)
+            records=records_mod.RecordsReader(self._recall_cfg, mem0_memory.shared(self._recall_cfg))
+            if records_mod.configured().enabled else None)
 
     def _make_agent(self, on_event: Any, ask_user: Any) -> Any:
         """Codex computer use, behind the launch reflex (app_reflex.py): "open Spotify" is `open -a`,

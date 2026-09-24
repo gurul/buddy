@@ -77,8 +77,10 @@ MEMORY_TOOLS: list[dict[str, Any]] = [
     {
         "type": "function", "name": "memory_search", "strict": True,
         "description": "Search what you know about your owner: a keyword search over your memory records "
-                       "(preferences, people, projects, places). Returns matching lines with their record id "
-                       "and date. Use it before answering anything about their life, taste or plans.",
+                       "(preferences, people, projects, places), and, where it is on, a search by meaning "
+                       "over everything said in past conversations. Returns matching record lines with their "
+                       "id and date, and recalled memories. Use it before answering anything about their "
+                       "life, taste or plans, and before saying you do not know.",
         "parameters": {"type": "object", "additionalProperties": False, "required": ["query"],
                        "properties": {"query": {"type": "string",
                                                 "description": "A few keywords, the way the owner would say it."}}},
@@ -252,15 +254,22 @@ def profile(cfg: RecallConfig) -> str:
 class RecordsReader:
     """What the text brain is lent: read-only, re-read from disk per call (the owner may have edited)."""
 
-    def __init__(self, cfg: RecallConfig) -> None:
+    def __init__(self, cfg: RecallConfig, recall: Any = None) -> None:
         self.cfg = cfg
+        self.recall = recall            # mem0_memory.OwnerMemory, or None: the meaning search beside the keywords
 
     def profile(self) -> str:
         return profile(self.cfg)
 
     def search(self, query: str) -> dict[str, Any]:
         hits = search(load_records(self.cfg), query)
-        return {"ok": True, "hits": hits} if hits else {"ok": True, "hits": [], "note": "nothing matched"}
+        recalled = self.recall.search(query) if self.recall is not None else []
+        out: dict[str, Any] = {"ok": True, "hits": hits}
+        if recalled:
+            out["recalled"] = recalled   # from past conversations, by meaning (mem0); no record id
+        if not hits and not recalled:
+            out["note"] = "nothing matched"
+        return out
 
     def get(self, rid: str) -> dict[str, Any]:
         text = get(load_records(self.cfg), rid)

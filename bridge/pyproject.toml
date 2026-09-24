@@ -77,6 +77,10 @@ dev = ["pytest>=8.0", "ruff>=0.6"]
 # per PyPI, 2026-09-21, Python >=3.10. Imported lazily; the daemon runs without it. Install with
 # `pip install -e ".[browser]"` then `python -m playwright install chromium` (~95 MB).
 browser = ["playwright>=1.63,<2"]
+# Memory by meaning (mem0_memory.py): mem0's open-source library, self-hosted (local Qdrant on disk + a SQLite
+# history), OpenAI for extraction and embeddings. 2.2.0 current per PyPI, 2026-09-23, Apache-2.0, Python >=3.10.
+# Its PostHog telemetry is forced off before import. Imported lazily; `pip install -e ".[mem0]"`.
+mem0 = ["mem0ai>=2.2,<3"]
 # The computer-use fast lane (fast_lane.py, decider.py): laya-mlx runs the Laya
 # typed-decision checkpoint natively on Apple silicon (MLX). 0.1.0 current per
 # PyPI, mlx 0.32.2, 2026-09-21. Apple silicon only; imported lazily by the
