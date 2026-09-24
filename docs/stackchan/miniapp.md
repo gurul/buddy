@@ -1,11 +1,13 @@
-# buddy's Mini App: your apps, and a chat with Claude
+# buddy's Mini App: your apps
 
 Ask buddy for an app, like "make me a habit tracker", and it builds one: a
 small, real app that opens inside Telegram and keeps its data on your Mac.
 Before you see it, buddy uses it on a phone-sized screen and fixes what broke.
 You can change, undo, rename or delete an app from the chat or from the Apps
-tab. The same Mini App has a chat with Claude, where answers stream in full and
-are never cut at Telegram's 4096 characters.
+screen.
+
+The Mini App had a Claude chat tab as well. It was removed on 2026-09-24 so the
+Mini App is only your apps.
 
 Code:
 - `bridge/src/cc_buddy_bridge/miniapp.py`: the server, sign-in check, spend
@@ -65,8 +67,9 @@ On the Apps tab the progress line shows the stage in words, with a clock:
 "Thinking it through…", "Writing it… 12k" (characters so far), "Testing it on
 a phone…", "Fixing 2 problems…". When it is done, the line says "Ready: ‹app›.
 Tested on a phone.", or names the first thing that may still not work. A clean
-app opens by itself when you are still on the Apps tab and not reading a chat
-answer; otherwise an **Open ‹app›** button waits under the line, with **Undo
+app opens by itself when you are still on the page and not in the middle of
+something else (a change picked for another app, or words typed for the next
+build); otherwise an **Open ‹app›** button waits under the line, with **Undo
 this change** beside it when a change may have broken something. What you
 typed for another app while this one was building stays in the box.
 
@@ -194,10 +197,9 @@ Then add these to `~/.config/cc-buddy-bridge/env` and restart the daemon:
 |---|---|---|
 | `CC_BUDDY_MINIAPP` | `0` | `1` turns it on. It also needs the Telegram door and `ANTHROPIC_API_KEY`. |
 | `ANTHROPIC_API_KEY` | none | Your Claude API key. It stays on the Mac and never reaches the phone. |
-| `CC_BUDDY_MINIAPP_MODEL` | `claude-opus-5-5` | The Claude model, for both chat and building. |
-| `CC_BUDDY_MINIAPP_EFFORT` | `medium` | Chat effort, `low` to `max`. Higher means deeper, slower and costlier answers. |
+| `CC_BUDDY_MINIAPP_MODEL` | `claude-opus-5-5` | The Claude model for building. |
 | `CC_BUDDY_MINIAPP_MAKE_EFFORT` | `high` | Effort when building or changing an app. |
-| `CC_BUDDY_MINIAPP_DAILY_USD` | none | Unset or `0`: no cap, spend is only tracked. A number above 0 is a daily cap for chat and building together. |
+| `CC_BUDDY_MINIAPP_DAILY_USD` | none | Unset or `0`: no cap, spend is only tracked. A number above 0 is a daily cap on building. |
 | `CC_BUDDY_TIMEZONE`, `CC_BUDDY_LOCATION` | the Mac's time zone; none | Used in each build's context (dates, units, currency). |
 | `CC_BUDDY_CLOUDFLARED` | found on `PATH` | The path to `cloudflared`. |
 
@@ -220,8 +222,8 @@ your own domain, or Tailscale Funnel.
 
 ## Who can use it
 
-Only the numeric ids in `CC_BUDDY_TELEGRAM_OWNER`. Every API call (chat,
-build, list, load, save, delete, rename, undo) must carry `initData` that
+Only the numeric ids in `CC_BUDDY_TELEGRAM_OWNER`. Every API call (build,
+list, load, save, delete, rename, undo) must carry `initData` that
 Telegram signed for this bot:
 
 - **The signature:** the HMAC-SHA256 has to verify with the bot token
@@ -271,8 +273,8 @@ the highest price, so it is never under-counted.
 
 Every day's total is kept in `~/.config/cc-buddy-bridge/miniapp-spend.json`
 (the last 400 days), so a restart loses nothing. The header shows
-"$X.XX spent today". With `CC_BUDDY_MINIAPP_DAILY_USD` set above 0, chat and
-building stop for the day once that total is reached, and the header shows
+"$X.XX spent today". With `CC_BUDDY_MINIAPP_DAILY_USD` set above 0, building
+stops for the day once that total is reached, and the header shows
 "$X.XX of $Y.YY spent today".
 
 A line in the chat marks each of $5, $20, $50, $100, $200, $500 and $1000
@@ -284,13 +286,11 @@ The build instructions are cached: a change made within 5 minutes of another
 build reads about 7,700 tokens from cache instead of paying for them again.
 
 Measured on 2026-09-24:
-- A short chat answer took 1.9 s and cost about $0.0008.
 - A build or change cost $0.41 to $0.66 (the table above).
 
 ## What leaves the Mac
 
-- **To Anthropic:** your questions and the conversation so far, what you ask
-  to be built, and, when you change an app, its current file, what you asked
+- **To Anthropic:** what you ask to be built, and, when you change an app, its current file, what you asked
   of it before, and a shortened sample of its saved data. When a build is
   repaired, the problems the phone check found go too. All of it goes over the
   Claude API with your key.
@@ -314,8 +314,7 @@ rewritten to `bot<token>` by the process-wide scrubber (`hide_token`).
 
 ## Limits
 
-- **One build at a time:** you get one build at a time, and one chat answer at
-  a time. A chat answer can stream while an app is being built.
+- **One build at a time:** a second build waits until the first is done.
 - **Closing the page doesn't stop a build:** it finishes, is saved, shows up
   in Your apps, and its result comes to the chat.
 - **Old buttons expire:** the address changes on every restart. The pinned
@@ -325,7 +324,6 @@ rewritten to `bot<token>` by the process-wide scrubber (`hide_token`).
   opening it again from buddy's list gives it a new one.
 - **Stopping the daemon** cuts a build that is still running; the stop waits
   at most 2 seconds for open connections.
-- **Text only in chat:** no images or files yet.
 - **Apps can't reach outside services:** an app can't call other APIs or send
   notifications. It works with what you enter and what it saves.
 - **Undo is one step at a time,** and at most 10 earlier versions are kept.

@@ -122,7 +122,7 @@ STOP_WORDS = ("stop", "/stop", "cancel", "/cancel")
 # The Mini App's way in from the chat (miniapp.py): an Open button, answered by code like the stealth words, relay
 # or not (owner, 2026-09-24: the menu button stays the / commands, "i want both").
 APPS_WORDS = ("/apps", "apps", "my apps", "open apps", "open buddy")
-APPS_TEXT = "Your apps, and a chat with Claude:"
+APPS_TEXT = "Your apps:"
 APPS_OFF_LINE = "The apps aren't running right now (CC_BUDDY_MINIAPP, or the tunnel is still starting)."
 STEALTH_ON = ("stealth mode", "stealth", "stealth on", "go stealth", "/stealth", "play dead", "act asleep")
 STEALTH_OFF = ("stealth off", "wake up", "/wake", "stop stealth", "end stealth", "you can wake up")
@@ -197,7 +197,7 @@ FATAL_CODES = (401, 404, 409)       # bad token, malformed token, another poller
 # accepted by _dispatch exactly as typed from the menu (tests hold it), so the menu never offers a dead word
 # (owner, 2026-09-23).
 BOT_COMMANDS: tuple[tuple[str, str], ...] = (
-    ("apps", "Your apps, and a chat with Claude"),
+    ("apps", "Your apps, and build a new one"),
     ("claude_on", "Join a running Claude Code session"),
     ("claude_off", "Stop relaying Claude Code"),
     ("new_claude", "Open a new Claude Code session"),

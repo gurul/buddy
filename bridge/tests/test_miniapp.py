@@ -1,4 +1,4 @@
-"""miniapp: buddy's Telegram Mini App — who may ask, what it costs, the streamed answer, the apps routes (build,
+"""miniapp: buddy's Telegram Mini App — who may ask, what it costs, the apps routes (build,
 delete, rename, undo), the wiring to the app maker, and the home page itself."""
 
 from __future__ import annotations
@@ -13,13 +13,11 @@ import pytest
 
 from cc_buddy_bridge import miniapp
 from cc_buddy_bridge.miniapp import (
-    Answer,
     MiniApp,
     MiniAppConfig,
     MiniAppServer,
     SpendLedger,
     check_init_data,
-    clean_history,
     cost_usd,
     sign_init_data,
 )
@@ -137,46 +135,16 @@ def test_the_ledger_keeps_only_the_newest_days(tmp_path: Path, monkeypatch) -> N
     assert sorted(SpendLedger(path).days()) == ["2026-09-03", "2026-09-04", "2026-09-05"]
 
 
-# ---- the conversation the page sends -------------------------------------------------------------
-
-def test_history_is_cleaned_to_alternating_turns_ending_on_the_user() -> None:
-    raw = [{"role": "assistant", "content": "hi"}, {"role": "user", "content": "a"},
-           {"role": "user", "content": "b"}, {"role": "assistant", "content": "c"}, {"role": "user", "content": "d"}]
-    assert clean_history(raw) == [{"role": "user", "content": "a\n\nb"}, {"role": "assistant", "content": "c"},
-                                  {"role": "user", "content": "d"}]
-
-
-@pytest.mark.parametrize("raw", [None, [], [{"role": "assistant", "content": "x"}],
-                                 [{"role": "system", "content": "x"}], [{"role": "user", "content": 3}]])
-def test_bad_history_is_refused(raw) -> None:
-    assert clean_history(raw) is None
-
-
 # ---- the server ---------------------------------------------------------------------------------
-
-def fake_stream(pieces=("Hello", " there"), fail: Exception | None = None, usage=None):
-    calls: list[list[dict]] = []
-
-    async def stream(history, answer: Answer):
-        calls.append(history)
-        for p in pieces:
-            yield p
-        if fail is not None:
-            raise fail
-        answer.usage = usage or {"input_tokens": 1000, "output_tokens": 500}
-        answer.stop_reason = "end_turn"
-
-    return stream, calls
-
 
 def events(body: str) -> list[dict]:
     return [json.loads(chunk[6:]) for chunk in body.split("\n\n") if chunk.startswith("data: ")]
 
 
-def run_server(tmp_path: Path, stream, cap: float = 0.0):
+def run_server(tmp_path: Path, cap: float = 0.0):
     cfg = MiniAppConfig(enabled=True, token=TOKEN, owner_ids=OWNERS, daily_usd=cap,
                         ledger_path=tmp_path / "spend.json")
-    return MiniAppServer(cfg, stream, SpendLedger(cfg.ledger_path, cap), page=b"<html>PAGE</html>")
+    return MiniAppServer(cfg, SpendLedger(cfg.ledger_path, cap), page=b"<html>PAGE</html>")
 
 
 async def post(port: int, path: str, body: dict) -> httpx.Response:
@@ -186,7 +154,7 @@ async def post(port: int, path: str, body: dict) -> httpx.Response:
 
 def test_the_page_is_served_and_unknown_paths_are_not(tmp_path: Path) -> None:
     async def go():
-        srv = run_server(tmp_path, fake_stream()[0])
+        srv = run_server(tmp_path)
         port = await srv.start()
         try:
             async with httpx.AsyncClient(base_url=f"http://127.0.0.1:{port}") as c:
@@ -199,98 +167,27 @@ def test_the_page_is_served_and_unknown_paths_are_not(tmp_path: Path) -> None:
     assert page.status_code == 200 and b"PAGE" in page.content and missing.status_code == 404
 
 
-def test_an_owner_question_streams_the_answer_and_is_billed(tmp_path: Path) -> None:
-    stream, calls = fake_stream()
-
+def test_anyone_else_gets_nothing_and_the_chat_route_is_gone(tmp_path: Path) -> None:
     async def go():
-        srv = run_server(tmp_path, stream)
+        srv = run_server(tmp_path)
         port = await srv.start()
         try:
-            r = await post(port, "/api/chat", {"initData": signed(),
-                                               "messages": [{"role": "user", "content": "hi"}]})
-            return r, srv.ledger.spent()
+            refused = [await post(port, "/api/me", {"initData": d})
+                       for d in ("", signed(999), signed().replace("AAH", "AAB"))]
+            chat = await post(port, "/api/chat", {"initData": signed(), "messages": [{"role": "user", "content": "hi"}]})
+            return refused, chat
         finally:
             await srv.close()
 
-    r, spent = asyncio.run(go())
-    assert r.status_code == 200 and r.headers["content-type"].startswith("text/event-stream")
-    evs = events(r.text)
-    assert "".join(e.get("t", "") for e in evs) == "Hello there" and evs[-1]["done"] is True
-    assert calls == [[{"role": "user", "content": "hi"}]]
-    assert spent == pytest.approx(cost_usd("claude-opus-5-5", {"input_tokens": 1000, "output_tokens": 500}))
-
-
-def test_anyone_else_gets_nothing_and_claude_is_never_called(tmp_path: Path) -> None:
-    stream, calls = fake_stream()
-
-    async def go():
-        srv = run_server(tmp_path, stream)
-        port = await srv.start()
-        try:
-            msgs = [{"role": "user", "content": "hi"}]
-            return [await post(port, "/api/chat", {"initData": d, "messages": msgs})
-                    for d in ("", signed(999), signed().replace("AAH", "AAB"))]
-        finally:
-            await srv.close()
-
-    assert [r.status_code for r in asyncio.run(go())] == [403, 403, 403] and calls == []
-
-
-def test_at_a_cap_the_owner_set_claude_is_not_called(tmp_path: Path) -> None:
-    stream, calls = fake_stream()
-
-    async def go():
-        srv = run_server(tmp_path, stream, cap=0.01)
-        srv.ledger.add(0.02)
-        port = await srv.start()
-        try:
-            return await post(port, "/api/chat", {"initData": signed(),
-                                                  "messages": [{"role": "user", "content": "hi"}]})
-        finally:
-            await srv.close()
-
-    r = asyncio.run(go())
-    assert r.status_code == 429 and "budget" in r.json()["error"] and calls == []
-
-
-def test_a_claude_failure_becomes_a_readable_line(tmp_path: Path) -> None:
-    stream, _ = fake_stream(pieces=("Part",), fail=RuntimeError("boom"))
-
-    async def go():
-        srv = run_server(tmp_path, stream)
-        port = await srv.start()
-        try:
-            return await post(port, "/api/chat", {"initData": signed(),
-                                                  "messages": [{"role": "user", "content": "hi"}]})
-        finally:
-            await srv.close()
-
-    evs = events(asyncio.run(go()).text)
-    assert evs[0] == {"t": "Part"} and evs[-1]["error"] and not any(e.get("done") for e in evs)
-
-
-def test_without_a_cap_any_spend_still_gets_an_answer(tmp_path: Path) -> None:
-    stream, calls = fake_stream()
-
-    async def go():
-        srv = run_server(tmp_path, stream)
-        srv.ledger.add(500.0)
-        port = await srv.start()
-        try:
-            return await post(port, "/api/chat", {"initData": signed(),
-                                                  "messages": [{"role": "user", "content": "hi"}]})
-        finally:
-            await srv.close()
-
-    evs = events(asyncio.run(go()).text)
-    assert len(calls) == 1 and evs[-1]["done"] is True and evs[-1]["cap"] is None
-    assert evs[-1]["spent_today"] > 500.0
+    refused, chat = asyncio.run(go())
+    assert [r.status_code for r in refused] == [403, 403, 403]
+    assert chat.status_code == 404                     # the Claude chat was removed (owner, 2026-09-24)
 
 
 @pytest.mark.parametrize("cap, want", [(0.0, None), (2.0, 2.0)])
 def test_me_reports_todays_spend_and_the_cap_if_any(tmp_path: Path, cap: float, want) -> None:
     async def go():
-        srv = run_server(tmp_path, fake_stream()[0], cap=cap)
+        srv = run_server(tmp_path, cap=cap)
         srv.ledger.add(0.5)
         port = await srv.start()
         try:
@@ -345,7 +242,7 @@ def run_app(tmp_path: Path, bot: FakeBot):
 
     async def go():
         cfg = MiniAppConfig(enabled=True, token=TOKEN, owner_ids=OWNERS, ledger_path=tmp_path / "s.json")
-        app = MiniApp(cfg, stream_fn=fake_stream()[0], tunnel_factory=factory, bot=bot,
+        app = MiniApp(cfg, tunnel_factory=factory, bot=bot,
                       pins_path=tmp_path / "pins.json", apps_root=tmp_path / "apps")
         task = asyncio.create_task(app.run())
         for _ in range(200):
@@ -403,7 +300,7 @@ def test_off_unless_asked_and_fully_configured() -> None:
     assert miniapp.configured(base).enabled is False
     assert miniapp.configured({**base, "CC_BUDDY_MINIAPP": "1"}).enabled is False          # no API key
     cfg = miniapp.configured({**base, "CC_BUDDY_MINIAPP": "1", "ANTHROPIC_API_KEY": "k"})
-    assert cfg.enabled and cfg.model == "claude-opus-5-5" and cfg.effort == "medium" and cfg.owner_ids == OWNERS
+    assert cfg.enabled and cfg.model == "claude-opus-5-5" and cfg.make_effort == "high" and cfg.owner_ids == OWNERS
     assert TOKEN not in repr(cfg)
 
 
@@ -467,7 +364,7 @@ def apps_server(tmp_path: Path, claude=None, check=None, cap: float = 0.0):
     """A MiniApp (so the real wiring: AppStore, AppMaker, ledger) with a fake Claude and a fake phone check."""
     cfg = MiniAppConfig(enabled=True, token=TOKEN, owner_ids=OWNERS, daily_usd=cap,
                         ledger_path=tmp_path / "spend.json")
-    app = MiniApp(cfg, stream_fn=fake_stream()[0], tunnel_factory=lambda: None, bot=FakeBot(),
+    app = MiniApp(cfg, tunnel_factory=lambda: None, bot=FakeBot(),
                   pins_path=tmp_path / "pins.json", apps_root=tmp_path / "apps",
                   generate=claude or SlowClaude(page_doc("v1")), check=check or PhoneCheck(),
                   context=lambda: "Today is Thursday.")
@@ -550,21 +447,19 @@ def test_a_build_is_refused_only_at_a_cap_the_owner_set(tmp_path: Path) -> None:
     assert events(with_server(free, lambda port: post(port, "/api/make", ask)).text)[-1]["done"] is True
 
 
-def test_the_chat_still_answers_while_an_app_is_being_built(tmp_path: Path) -> None:
+def test_one_build_at_a_time_per_owner(tmp_path: Path) -> None:
     gate = asyncio.Event()
     app = apps_server(tmp_path, SlowClaude(page_doc("v1"), gate=gate))
 
     async def body(port):
         build = asyncio.create_task(post(port, "/api/make", {"initData": signed(), "request": "a habit tracker"}))
         await asyncio.sleep(0.2)
-        chat = await post(port, "/api/chat", {"initData": signed(), "messages": [{"role": "user", "content": "hi"}]})
         second = await post(port, "/api/make", {"initData": signed(), "request": "another"})
         gate.set()
-        return chat, second, await build
+        return second, await build
 
-    chat, second, build = with_server(app, body)
-    assert events(chat.text)[-1]["done"] is True
-    assert second.status_code == 409                                          # one build at a time per owner
+    second, build = with_server(app, body)
+    assert second.status_code == 409
     assert events(build.text)[-1]["done"] is True
 
 
@@ -702,7 +597,7 @@ def test_the_home_pages_script_parses(tmp_path: Path) -> None:
 def test_app_names_and_descriptions_only_reach_the_page_as_text() -> None:
     # They come from pages Claude wrote. The only innerHTML left is the chat's own Markdown renderer.
     script = page_script()
-    apps_part = script[script.index("// ---- apps ----"):script.index('$("new").onclick')]
+    apps_part = script[script.index("// ---- apps ----"):script.rindex("})();")]
     assert "innerHTML" not in apps_part and "insertAdjacentHTML" not in apps_part
     assert "textContent" in apps_part
 
@@ -968,8 +863,7 @@ def test_an_app_token_reaches_its_own_data_and_nothing_else(tmp_path: Path) -> N
         for name, path, extra in [("other_load", "/api/apps/reading-list/load", {}),
                                   ("other_save", "/api/apps/reading-list/save", {"data": 1}),
                                   ("list", "/api/apps", {}), ("make", "/api/make", {"request": "x"}),
-                                  ("delete", mine + "delete", {}), ("chat", "/api/chat",
-                                                                     {"messages": [{"role": "user", "content": "x"}]})]:
+                                  ("delete", mine + "delete", {})]:
             out[name] = await raw(port, "POST", path, {"t": t, **extra})
         # the owner's initData from a sandboxed page (Origin: null) or another site opens nothing either
         out["null_origin"] = await raw(port, "POST", "/api/apps", {"initData": signed()}, {"Origin": "null"})
@@ -984,7 +878,7 @@ def test_an_app_token_reaches_its_own_data_and_nothing_else(tmp_path: Path) -> N
     assert out["save"].json()["ok"] and out["load"].json() == {"data": {"v": 1}}
     assert out["load"].headers["access-control-allow-origin"] == "*"
     assert out["preflight"].status_code == 204
-    for key in ("other_load", "other_save", "list", "make", "delete", "chat", "null_origin", "other_site"):
+    for key in ("other_load", "other_save", "list", "make", "delete", "null_origin", "other_site"):
         assert out[key].status_code == 403, key
     assert out["home"].status_code == 200
     assert app.store.load_data("reading-list") == {"v": 1, "books": ["private"]}
@@ -1189,7 +1083,6 @@ def test_a_change_picked_during_a_build_keeps_its_words_and_target(tmp_path: Pat
         await page.click("button[aria-label='More for Reading List']")
         await page.click("#sheet-actions button[data-act=change]")
         await page.fill("#want", "add a dark mode")
-        await page.evaluate("document.getElementById('tab-chat').click()")      # and reads the chat meanwhile
         gate.set()
         await page.wait_for_function("document.getElementById('make-status').textContent.startsWith('Ready')")
         await page.wait_for_timeout(1500)
@@ -1201,7 +1094,7 @@ def test_a_change_picked_during_a_build_keeps_its_words_and_target(tmp_path: Pat
     out, errors = browse(tmp_path, script, claude=SlowClaude(page_doc("v1"), gate=gate))
     assert errors == []
     assert out["want"] == "add a dark mode" and out["editingShown"] and out["editing"] == "Changing Reading List"
-    assert "/apps/" not in out["url"] and out["open"] == ["Open Habit Tracker"]    # no jump out of the chat
+    assert "/apps/" not in out["url"] and out["open"] == ["Open Habit Tracker"]    # no jump away mid-change
 
 
 def test_a_build_with_problems_names_the_first_one_and_does_not_jump_into_the_app(tmp_path: Path) -> None:
@@ -1291,15 +1184,3 @@ def test_changing_an_app_deleted_meanwhile_stops_changing_it(tmp_path: Path) -> 
                    "button": "Build it", "want": "add streaks"}
 
 
-def test_the_selected_tab_is_filled_so_it_shows_on_a_black_theme(tmp_path: Path) -> None:
-    async def script(page, app):
-        return await page.evaluate("""() => { const s = document.documentElement.style;
-            s.setProperty('--tg-theme-bg-color', '#000000'); s.setProperty('--tg-theme-secondary-bg-color', '#1c1c1d');
-            s.setProperty('--tg-theme-button-color', '#3e88f7'); s.setProperty('--tg-theme-button-text-color', '#ffffff');
-            const on = getComputedStyle(document.getElementById('tab-apps')),
-                  off = getComputedStyle(document.getElementById('tab-chat'));
-            return { on: on.backgroundColor, off: off.backgroundColor, onWeight: on.fontWeight, offWeight: off.fontWeight }; }""")
-
-    out, _ = browse(tmp_path, script, color_scheme="dark")
-    assert out["on"] == "rgb(62, 136, 247)" and out["off"] in ("rgba(0, 0, 0, 0)", "transparent")
-    assert int(out["onWeight"]) > int(out["offWeight"])

@@ -632,7 +632,7 @@ not end-to-end encrypted). Each turn is one or more Responses API calls with
 reasoning are sent back each round instead of a `previous_response_id`, and
 Responses API conversation state is not stored. This is not a guarantee of zero
 data retention under the provider's other policies. A texted task sends screenshots to
-the planner exactly as a spoken one does. The Ask Claude Mini App has its own path: questions go
+the planner exactly as a spoken one does. The apps Mini App has its own path: build requests go
 to Anthropic, and traffic passes through a Cloudflare tunnel
 ([the Mini App](miniapp.md#what-leaves-the-mac)).
 

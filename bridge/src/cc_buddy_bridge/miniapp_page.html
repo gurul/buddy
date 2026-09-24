@@ -33,24 +33,10 @@
   body { display: flex; flex-direction: column; }
   header { display: flex; align-items: center; justify-content: space-between; gap: 8px;
     padding: 10px 16px; border-bottom: 1px solid var(--code); }
-  header .who { font-weight: 600; }
+  header .who { font-weight: 600; font-size: 17px; margin: 0; }
   header .spent { color: var(--hint); font-size: 13px; font-variant-numeric: tabular-nums; text-align: right; }
   header button { background: none; border: 0; color: var(--link); font: inherit; padding: 6px 0; }
-  main { flex: 1; overflow-y: auto; padding: 12px 16px 4px; -webkit-overflow-scrolling: touch; }
   .empty { color: var(--hint); text-align: center; margin-top: 30vh; }
-  .msg { margin: 0 0 14px; overflow-wrap: anywhere; }
-  .msg.user { margin-left: 18%; background: var(--accent); color: var(--accent-text);
-    padding: 8px 12px; border-radius: 16px 16px 4px 16px; white-space: pre-wrap; }
-  .msg.assistant p { margin: 0 0 10px; }
-  .msg.assistant h1, .msg.assistant h2, .msg.assistant h3 { font-size: 17px; margin: 14px 0 6px; }
-  .msg.assistant ul, .msg.assistant ol { margin: 0 0 10px; padding-left: 22px; }
-  .msg.assistant code { background: var(--code); padding: 1px 5px; border-radius: 5px;
-    font: 14px ui-monospace, "SF Mono", Menlo, monospace; }
-  .msg.assistant pre { background: var(--code); padding: 10px 12px; border-radius: 10px; overflow-x: auto; margin: 0 0 10px; }
-  .msg.assistant pre code { background: none; padding: 0; }
-  .msg.assistant a { color: var(--link); }
-  .msg .note, .msg.error { color: var(--hint); font-size: 14px; }
-  .typing { color: var(--hint); }
   form { display: flex; gap: 8px; align-items: flex-end; padding: 8px 12px calc(8px + env(safe-area-inset-bottom));
     border-top: 1px solid var(--code); background: var(--bg); }
   textarea { flex: 1; resize: none; max-height: 40vh; border: 1px solid var(--code); border-radius: 18px;
@@ -60,13 +46,6 @@
     font: 600 15px system-ui, sans-serif; padding: 10px 16px; min-height: 40px; }
   form button:focus-visible, header button:focus-visible { outline: 2px solid var(--link); outline-offset: 2px; }
   form button:disabled { opacity: 0.5; }
-  .tabs { display: flex; gap: 4px; background: var(--bubble); border-radius: 10px; padding: 3px; }
-  .tabs button { border: 0; background: none; color: var(--text); font: 500 14px system-ui, sans-serif;
-    padding: 7px 14px; border-radius: 8px; min-height: 34px; }
-  /* the selected tab is filled with the button color: it stands out on Telegram's black night theme too,
-     where a background one shade off the track and a dark shadow do not */
-  .tabs button[aria-selected="true"] { background: var(--accent); color: var(--accent-text); font-weight: 700; }
-  .tabs button:focus-visible { outline: 2px solid var(--link); outline-offset: 1px; }
   [hidden] { display: none !important; }
   #apps { flex: 1; overflow-y: auto; padding: 16px; }
   .make { background: var(--bubble); border-radius: 16px; padding: 14px; margin-bottom: 18px; }
@@ -146,14 +125,10 @@
 </head>
 <body>
 <header>
-  <div class="tabs" role="tablist">
-    <button type="button" role="tab" id="tab-apps" aria-selected="true">Apps</button>
-    <button type="button" role="tab" id="tab-chat" aria-selected="false">Chat</button>
-  </div>
+  <h1 class="who">Your apps</h1>
   <div class="spent" id="spent" role="status" aria-live="polite"></div>
-  <button type="button" id="new" hidden>New chat</button>
 </header>
-<section id="apps" role="tabpanel" aria-labelledby="tab-apps">
+<section id="apps">
   <div class="make" id="make-card">
     <label for="want" id="want-label">What should I build?</label>
     <div class="editing" id="editing" hidden><span id="editing-text"></span>
@@ -193,87 +168,23 @@
     <button type="button" class="cancel" id="sheet-cancel">Cancel</button>
   </div>
 </dialog>
-<main id="log" hidden aria-live="polite"><div class="empty" id="empty">Ask anything. Answers stream in full.</div></main>
-<form id="form" hidden>
-  <textarea id="q" rows="1" placeholder="Message Claude" aria-label="Message Claude"></textarea>
-  <button id="send" type="submit">Send</button>
-</form>
 <script>
 (() => {
   const tg = window.Telegram && window.Telegram.WebApp;
   const initData = tg ? tg.initData : "";
   if (tg) { tg.ready(); tg.expand(); }
   const $ = (id) => document.getElementById(id);
-  const log = $("log"), q = $("q"), send = $("send"), spent = $("spent");
+  const spent = $("spent");
   const can = (v) => !!(tg && tg.isVersionAtLeast && tg.isVersionAtLeast(v));
-  const KEY = "buddy-claude-history";
-  let history = [];
-  try { history = JSON.parse(localStorage.getItem(KEY) || "[]"); } catch (e) { history = []; }
-  const save = () => { try { localStorage.setItem(KEY, JSON.stringify(history.slice(-80))); } catch (e) {} };
-
-  const esc = (s) => s.replace(/[&<>"']/g, (c) => ({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[c]));
-  function inline(s) {
-    return esc(s)
-      .replace(/`([^`]+)`/g, "<code>$1</code>")
-      .replace(/\*\*([^*]+)\*\*/g, "<strong>$1</strong>")
-      .replace(/(^|[^*])\*([^*\s][^*]*)\*/g, "$1<em>$2</em>")
-      .replace(/\[([^\]]+)\]\((https?:\/\/[^)\s]+)\)/g, '<a href="$2" target="_blank" rel="noopener">$1</a>');
-  }
-  function md(src) {
-    const out = [], lines = src.split("\n");
-    let i = 0, para = [];
-    const flush = () => { if (para.length) { out.push("<p>" + para.map(inline).join("<br>") + "</p>"); para = []; } };
-    while (i < lines.length) {
-      const ln = lines[i];
-      if (/^```/.test(ln)) {
-        flush(); const code = []; i++;
-        while (i < lines.length && !/^```/.test(lines[i])) code.push(lines[i++]);
-        i++; out.push("<pre><code>" + esc(code.join("\n")) + "</code></pre>"); continue;
-      }
-      const h = ln.match(/^(#{1,3})\s+(.*)/);
-      if (h) { flush(); out.push(`<h${h[1].length}>${inline(h[2])}</h${h[1].length}>`); i++; continue; }
-      if (/^\s*([-*]|\d+\.)\s+/.test(ln)) {
-        flush(); const ordered = /^\s*\d+\./.test(ln), items = [];
-        while (i < lines.length && /^\s*([-*]|\d+\.)\s+/.test(lines[i])) items.push(lines[i++].replace(/^\s*([-*]|\d+\.)\s+/, ""));
-        const t = ordered ? "ol" : "ul"; out.push(`<${t}>` + items.map((x) => "<li>" + inline(x) + "</li>").join("") + `</${t}>`); continue;
-      }
-      if (!ln.trim()) { flush(); i++; continue; }
-      para.push(ln); i++;
-    }
-    flush(); return out.join("");
-  }
-
-  function bubble(role, text) {
-    $("empty") && $("empty").remove();
-    const el = document.createElement("div");
-    el.className = "msg " + role;
-    if (role === "assistant") el.innerHTML = md(text); else el.textContent = text;
-    log.appendChild(el); return el;
-  }
-  const bottom = () => { log.scrollTop = log.scrollHeight; };
-  // What today has cost (chat and building together). Spend is tracked, not capped, unless a cap was set.
+  // What today's building has cost. Spend is tracked, not capped, unless a cap was set.
   function showSpent(d) {
     if (!d || typeof d.spent_today !== "number") return;
     spent.textContent = "$" + d.spent_today.toFixed(2) + (typeof d.cap === "number" ? " of $" + d.cap.toFixed(2) : "") + " spent today";
   }
-  history.forEach((t) => bubble(t.role, t.content)); bottom();
 
-  if (!initData) { spent.textContent = "Open this from buddy's pinned message in Telegram."; send.disabled = true; $("make").disabled = true; }
+  if (!initData) { spent.textContent = "Open this from buddy's pinned message in Telegram."; $("make").disabled = true; }
   else fetch("api/me", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ initData }) })
     .then((r) => r.json()).then((j) => { if (j.error) spent.textContent = j.error; else showSpent(j); }).catch(() => {});
-
-  // ---- tabs ----
-  const views = { apps: [$("apps")], chat: [log, $("form"), $("new")] };
-  function show(which) {
-    ["apps", "chat"].forEach((v) => { const on = v === which;
-      $("tab-" + v).setAttribute("aria-selected", String(on)); views[v].forEach((el) => { el.hidden = !on; }); });
-    try { localStorage.setItem("buddy-tab", which); } catch (e) {}
-    if (which === "chat") bottom();
-  }
-  $("tab-apps").onclick = () => show("apps");
-  $("tab-chat").onclick = () => show("chat");
-  let startTab = "apps"; try { startTab = localStorage.getItem("buddy-tab") || "apps"; } catch (e) {}
-  show(startTab === "chat" ? "chat" : "apps");
 
   // ---- apps ----
   // App titles and descriptions come from pages Claude wrote, so they only ever reach the page as textContent.
@@ -560,9 +471,11 @@
         if (editing === target && want.value.trim() === text) { want.value = ""; if (target) stopEditing(); }
         haptic(got.problems ? "warning" : "success");
         await loadApps();
-        // Straight into the app only when it is clean and the owner is still here, on this tab, not reading an
-        // answer; otherwise the Open button waits.
-        const here = () => !$("apps").hidden && !send.disabled && !sheet.open && document.visibilityState === "visible";
+        // Straight into the app only when it is clean and the owner is still here and not in the middle of
+        // something else (a change picked for another app, words typed for the next build); otherwise the Open
+        // button waits, so nothing they typed is lost.
+        const here = () => !!initData && !sheet.open && document.visibilityState === "visible"
+          && !editing && !want.value.trim();
         if (!got.problems && here()) setTimeout(() => { if (here()) openApp(got.url); else showResult(got); }, 1200);
         else showResult(got);
       } else if (failed) {
@@ -586,46 +499,6 @@
   });
   window.addEventListener("pageshow", (e) => { if (e.persisted) loadApps(); });
 
-  $("new").onclick = () => { history = []; save(); log.innerHTML = '<div class="empty" id="empty">New chat.</div>'; q.focus(); };
-  q.addEventListener("input", () => { q.style.height = "auto"; q.style.height = q.scrollHeight + "px"; });
-  q.addEventListener("keydown", (e) => { if (e.key === "Enter" && !e.shiftKey && !("ontouchstart" in window)) { e.preventDefault(); $("form").requestSubmit(); } });
-
-  $("form").onsubmit = async (e) => {
-    e.preventDefault();
-    const text = q.value.trim(); if (!text || send.disabled) return;
-    q.value = ""; q.style.height = "auto"; send.disabled = true;
-    history.push({ role: "user", content: text }); save(); bubble("user", text);
-    const el = bubble("assistant", ""); el.innerHTML = '<span class="typing">Thinking…</span>'; bottom();
-    let answer = "";
-    try {
-      const r = await fetch("api/chat", { method: "POST", headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ initData, messages: history }) });
-      if (!r.ok || !r.body) {
-        let msg = "Something went wrong."; try { msg = (await r.json()).error || msg; } catch (x) {}
-        el.className = "msg error"; el.textContent = msg; return;
-      }
-      const reader = r.body.getReader(), dec = new TextDecoder(); let buf = "";
-      for (;;) {
-        const { value, done } = await reader.read(); if (done) break;
-        buf += dec.decode(value, { stream: true });
-        let cut;
-        while ((cut = buf.indexOf("\n\n")) >= 0) {
-          const ev = buf.slice(0, cut); buf = buf.slice(cut + 2);
-          if (!ev.startsWith("data: ")) continue;
-          const d = JSON.parse(ev.slice(6));
-          if (d.t) { answer += d.t; el.innerHTML = md(answer); bottom(); }
-          if (d.error) { el.insertAdjacentHTML("beforeend", '<div class="note">' + esc(d.error) + "</div>"); }
-          if (d.done) { showSpent(d); if (d.note) el.insertAdjacentHTML("beforeend", '<div class="note">' + esc(d.note) + "</div>"); }
-        }
-      }
-    } catch (x) {
-      el.insertAdjacentHTML("beforeend", '<div class="note">The connection dropped.</div>');
-    } finally {
-      if (answer) { history.push({ role: "assistant", content: answer }); save(); }
-      else if (!el.textContent.trim() || el.querySelector(".typing")) { el.className = "msg error"; el.textContent = el.textContent.replace("Thinking…", "") || "No answer."; }
-      send.disabled = false; bottom();
-    }
-  };
 })();
 </script>
 </body>

@@ -588,11 +588,7 @@ def test_claude_generate_streams_stages_and_caches_the_prefix() -> None:
 def server_for(tmp_path: Path, generate=None):
     cfg = MiniAppConfig(enabled=True, token=TOKEN, owner_ids=frozenset({OWNER}), ledger_path=tmp_path / "spend.json")
     maker, ledger, store = maker_for(tmp_path, generate or Script(fenced(DOC)))
-
-    async def no_chat(history, answer):
-        yield ""
-
-    return MiniAppServer(cfg, no_chat, ledger, page=b"home", store=store, maker=maker), store
+    return MiniAppServer(cfg, ledger, page=b"home", store=store, maker=maker), store
 
 
 async def call(port: int, method: str, path: str, body: dict | None = None) -> httpx.Response:

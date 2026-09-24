@@ -1,9 +1,9 @@
-"""buddy's Telegram Mini App: the apps buddy makes, and a chat with Claude, opened from the chat.
+"""buddy's Telegram Mini App: the apps buddy makes, opened from the chat.
 
-Owner, 2026-09-24: "I don't want rest in terminal", then "Miniapp", "opus 5.5 please", then "mini apps are to
-replace websites, like i want to build a habit tracker, it should do it". A chat message caps at 4096 characters;
-a Mini App is a web page Telegram opens over the chat. Its home has two tabs: **Apps** (what buddy built, and
-"What should I build?", apps_maker.py) and **Chat** (Claude, streamed, never cut).
+Owner, 2026-09-24: "mini apps are to replace websites, like i want to build a habit tracker, it should do it". A
+Mini App is a web page Telegram opens over the chat. Its home lists what buddy built and asks "What should I
+build?" (apps_maker.py). It had a Claude chat tab too, removed the same day ("why does chat still exist in
+apps"): the apps are the point.
 
 * **Served by the daemon** on 127.0.0.1 only. Telegram needs a public HTTPS address, so a Cloudflare quick tunnel
   (``cloudflared tunnel --url``: no account, no domain) fronts it. Its address changes each start.
@@ -20,9 +20,9 @@ a Mini App is a web page Telegram opens over the chat. Its home has two tabs: **
   addresses only. The page itself needs the token too: without one, ``/apps/<slug>/`` sends the phone to the
   home page (``/?open=<slug>``), which opens the app with a fresh token when Telegram signed the visit.
 * **Claude** is ``claude-opus-5-5`` (``CC_BUDDY_MINIAPP_MODEL``) through the Anthropic SDK with the owner's
-  ``ANTHROPIC_API_KEY``. Adaptive thinking is always on for this model; effort (``CC_BUDDY_MINIAPP_EFFORT``,
-  default medium for chat; ``CC_BUDDY_MINIAPP_MAKE_EFFORT``, default high for building) is the depth control.
-* **Spend is tracked, not capped.** Owner, 2026-09-24: "no claude limit, just track spend". Each answer's and each
+  ``ANTHROPIC_API_KEY``. Adaptive thinking is always on for this model; effort
+  (``CC_BUDDY_MINIAPP_MAKE_EFFORT``, default high) is the depth control.
+* **Spend is tracked, not capped.** Owner, 2026-09-24: "no claude limit, just track spend". Each
   build's cost is computed from its usage at the model's list price and added to a per-day ledger; the page shows
   what today has cost, and a line in the chat marks each of ``SPEND_ALERTS_USD`` the day crosses (tracking, not
   a limit). ``CC_BUDDY_MINIAPP_DAILY_USD`` set above 0 turns that total into a daily cap again.
@@ -48,16 +48,14 @@ import shutil
 import time
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, AsyncIterator, Awaitable, Callable, Optional
+from typing import Any, Awaitable, Callable, Optional
 from urllib.parse import parse_qsl
 
 log = logging.getLogger(__name__)
 
 DEFAULT_MODEL = "claude-opus-5-5"
-DEFAULT_EFFORT = "medium"
 EFFORTS = ("low", "medium", "high", "xhigh", "max")
-DEFAULT_MAKE_EFFORT = "high"          # building an app is real work: more thought than a chat answer
-MAX_TOKENS = 32000                    # one answer's ceiling; streaming, so no HTTP timeout concern
+DEFAULT_MAKE_EFFORT = "high"          # building an app is real work: think it through
 # $ per million tokens, from the Claude API model table (cached 2026-06-24): claude-opus-5-5 input 4, output 20,
 # cache reads 0.20; a 5-minute cache write is 1.25x input. A model not listed costs as the most expensive
 # listed one, so an unknown model is never under-counted.
@@ -67,8 +65,6 @@ PRICES: dict[str, dict[str, float]] = {
 _WORST = {"in": 10.0, "out": 50.0, "cache_read": 1.0, "cache_write": 12.5, "cache_write_1h": 20.0}
 INIT_DATA_MAX_AGE_SECS = 24 * 3600    # a Mini App left open all day still works; an old leaked string does not
 MAX_BODY_BYTES = 2_000_000
-MAX_TURNS = 60                         # the newest turns of the page's history
-MAX_HISTORY_CHARS = 400_000
 APP_ROUTE_RE = re.compile(r"^/apps/([a-z0-9][a-z0-9-]{0,47})/(index\.html)?$")
 API_APP_RE = re.compile(r"^/api/apps/([a-z0-9][a-z0-9-]{0,47})/(load|save|delete|rename|revert|restore)$")
 APP_TOKEN_SECS = 24 * 3600            # an app left open all day still saves; as long as initData lives
@@ -89,11 +85,6 @@ TUNNEL_URL_RE = re.compile(r"https://[a-z0-9-]+\.trycloudflare\.com")
 TUNNEL_START_SECS = 45.0
 TUNNEL_RETRY_SECS = 10.0
 PAGE_PATH = Path(__file__).with_name("miniapp_page.html")
-SYSTEM_PROMPT = (
-    "You are Claude, answering the owner of buddy (their personal desk assistant) inside a Telegram Mini App "
-    "on their phone. Answers render as Markdown: headings, lists, bold, inline code and fenced code blocks. "
-    "Write for a phone screen: lead with the answer, keep paragraphs short, and use a list or a table only "
-    "when the content is a list or a table.")
 CAP_LINE = "Today's Claude budget is used up (${cap:.2f}). It resets at midnight."
 LEDGER_DAYS = 400                      # how many days of spend the ledger keeps
 CORS = {"Access-Control-Allow-Origin": "*"}            # an app page's load and save come from an opaque origin
@@ -108,7 +99,6 @@ class MiniAppConfig:
     token: str = ""
     owner_ids: frozenset[int] = frozenset()
     model: str = DEFAULT_MODEL
-    effort: str = DEFAULT_EFFORT
     daily_usd: float = 0.0            # 0: no cap, spend is only tracked
     make_effort: str = DEFAULT_MAKE_EFFORT
     ledger_path: Path = field(default_factory=lambda: Path.home() / ".config" / "cc-buddy-bridge" /
@@ -116,7 +106,7 @@ class MiniAppConfig:
 
     def __repr__(self) -> str:       # never the token
         return (f"MiniAppConfig(enabled={self.enabled}, owners={len(self.owner_ids)}, model={self.model!r}, "
-                f"effort={self.effort!r}, daily_usd={self.daily_usd})")
+                f"make_effort={self.make_effort!r}, daily_usd={self.daily_usd})")
 
 
 def configured(environ: Any = None) -> MiniAppConfig:
@@ -132,10 +122,6 @@ def configured(environ: Any = None) -> MiniAppConfig:
         missing = [n for n, ok in (("the Telegram door", tg.enabled), ("ANTHROPIC_API_KEY", key)) if not ok]
         log.warning("miniapp: asked for (CC_BUDDY_MINIAPP=1) but off: %s not set", " and ".join(missing))
         return MiniAppConfig()
-    effort = (env.get("CC_BUDDY_MINIAPP_EFFORT") or DEFAULT_EFFORT).strip().lower()
-    if effort not in EFFORTS:
-        log.warning("miniapp: CC_BUDDY_MINIAPP_EFFORT=%r is not an effort; using %s", effort, DEFAULT_EFFORT)
-        effort = DEFAULT_EFFORT
     try:
         cap = float(env.get("CC_BUDDY_MINIAPP_DAILY_USD") or 0)
     except ValueError:
@@ -145,7 +131,7 @@ def configured(environ: Any = None) -> MiniAppConfig:
     if make_effort not in EFFORTS:
         make_effort = DEFAULT_MAKE_EFFORT
     return MiniAppConfig(enabled=True, token=tg.token, owner_ids=tg.owner_ids,
-                         model=(env.get("CC_BUDDY_MINIAPP_MODEL") or DEFAULT_MODEL).strip(), effort=effort,
+                         model=(env.get("CC_BUDDY_MINIAPP_MODEL") or DEFAULT_MODEL).strip(),
                          daily_usd=max(0.0, cap), make_effort=make_effort)
 
 
@@ -301,63 +287,6 @@ class SpendLedger:
         return keep[today]
 
 
-# ---- the conversation the page sends --------------------------------------------------------------
-
-def clean_history(raw: Any) -> Optional[list[dict[str, str]]]:
-    """The page's turns as Messages API input: alternating user/assistant text, ending on the user, the
-    newest MAX_TURNS within MAX_HISTORY_CHARS. None when the shape is wrong."""
-    if not isinstance(raw, list) or not raw:
-        return None
-    turns: list[dict[str, str]] = []
-    for t in raw:
-        if not isinstance(t, dict) or t.get("role") not in ("user", "assistant") or not isinstance(t.get("content"), str):
-            return None
-        text = t["content"].strip()
-        if not text:
-            continue
-        if turns and turns[-1]["role"] == t["role"]:
-            turns[-1]["content"] += "\n\n" + text      # two in a row (a stopped answer): merge, keep alternation
-        else:
-            turns.append({"role": t["role"], "content": text})
-    if not turns or turns[-1]["role"] != "user":
-        return None
-    turns = turns[-MAX_TURNS:]
-    while sum(len(t["content"]) for t in turns) > MAX_HISTORY_CHARS and len(turns) > 1:
-        turns = turns[1:]
-    while turns and turns[0]["role"] != "user":
-        turns = turns[1:]
-    return turns or None
-
-
-# ---- Claude -------------------------------------------------------------------------------------
-
-@dataclass
-class Answer:
-    usage: Any = None
-    stop_reason: str = ""
-
-
-StreamFn = Callable[[list[dict[str, str]], Answer], AsyncIterator[str]]
-
-
-def claude_stream(model: str, effort: str, client: Any = None) -> StreamFn:
-    """Text pieces of Claude's answer as they arrive; the final usage and stop reason land in ``answer``."""
-    import anthropic
-
-    api = client or anthropic.AsyncAnthropic()
-
-    async def stream(history: list[dict[str, str]], answer: Answer) -> AsyncIterator[str]:
-        async with api.messages.stream(model=model, max_tokens=MAX_TOKENS, system=SYSTEM_PROMPT,
-                                       messages=history, thinking={"type": "adaptive"},
-                                       output_config={"effort": effort}) as s:
-            async for text in s.text_stream:
-                yield text
-            final = await s.get_final_message()
-        answer.usage, answer.stop_reason = final.usage, str(final.stop_reason or "")
-
-    return stream
-
-
 def _error_line(e: Exception) -> str:
     try:
         import anthropic
@@ -377,15 +306,14 @@ def _error_line(e: Exception) -> str:
 # ---- the HTTP server (127.0.0.1; the tunnel is its only public door) ------------------------------
 
 class MiniAppServer:
-    def __init__(self, cfg: MiniAppConfig, stream_fn: StreamFn, ledger: SpendLedger,
+    def __init__(self, cfg: MiniAppConfig, ledger: SpendLedger,
                  page: Optional[bytes] = None, store: Any = None, maker: Any = None,
                  changing: Optional[set[str]] = None,
                  notify: Optional[Callable[[int, dict[str, Any]], Awaitable[Any]]] = None) -> None:
-        self.cfg, self._stream, self.ledger = cfg, stream_fn, ledger
+        self.cfg, self.ledger = cfg, ledger
         self._page = page
         self.store, self.maker = store, maker             # apps_maker.AppStore / AppMaker; None: no apps
-        self._chatting: set[int] = set()                  # one answer at a time per owner
-        self._building: set[int] = set()                  # one build at a time per owner, beside the chat
+        self._building: set[int] = set()                  # one build at a time per owner
         # The apps being changed right now, by slug. MiniApp shares this set with the chat door
         # (apps_maker.ChatMaker.building), so neither door deletes, renames or undoes an app under a build.
         self.changing: set[str] = changing if changing is not None else set()
@@ -477,7 +405,7 @@ class MiniAppServer:
                                                                      "Access-Control-Allow-Headers": "content-type",
                                                                      "Access-Control-Max-Age": "600"})
             return
-        known = path in ("/api/chat", "/api/me", "/api/apps", "/api/make") or api_app is not None
+        known = path in ("/api/me", "/api/apps", "/api/make") or api_app is not None
         if method != "POST" or not known:
             await self._send(writer, 404, b"not found", "text/plain")
             return
@@ -516,22 +444,6 @@ class MiniAppServer:
         if path == "/api/apps" or api_app is not None or path == "/api/make":
             await self._apps_api(writer, path, api_app, body, user)
             return
-        history = clean_history(body.get("messages"))
-        if history is None:
-            await self._json(writer, 400, {"error": "That conversation could not be read."})
-            return
-        if self.ledger.over():
-            await self._json(writer, 429, {"error": CAP_LINE.format(cap=self.ledger.cap)})
-            return
-        if user in self._chatting:
-            await self._json(writer, 409, {"error": "Still answering the last question."})
-            return
-        self._chatting.add(user)
-        try:
-            await self._answer(writer, history)
-        finally:
-            self._chatting.discard(user)
-
     async def _app_page(self, writer: asyncio.StreamWriter, slug: str, query: str, headers: dict[str, str]) -> None:
         """One app's page, for its app token only, served sandboxed (APP_CSP). Without a valid token (an Open
         button from before tokens, a link someone saw) the answer is the same for every slug, so it says
@@ -728,35 +640,6 @@ class MiniAppServer:
             with contextlib.suppress(Exception):
                 await self.notify(user, out)
 
-    async def _answer(self, writer: asyncio.StreamWriter, history: list[dict[str, str]]) -> None:
-        writer.write(b"HTTP/1.1 200 OK\r\nContent-Type: text/event-stream; charset=utf-8\r\n"
-                     b"Cache-Control: no-store\r\nX-Accel-Buffering: no\r\nConnection: close\r\n\r\n")
-        await writer.drain()
-
-        async def event(obj: dict[str, Any]) -> None:
-            writer.write(b"data: " + json.dumps(obj).encode() + b"\n\n")
-            await writer.drain()
-
-        answer = Answer()
-        t0 = time.perf_counter()
-        try:
-            async for piece in self._stream(history, answer):
-                await event({"t": piece})
-        except (ConnectionError, asyncio.CancelledError):
-            raise                                        # the phone went away: the stream stops with it
-        except Exception as e:  # noqa: BLE001 — every failure becomes a readable line on the phone
-            log.warning("miniapp: the answer failed (%s)", type(e).__name__)
-            await event({"error": _error_line(e)})
-            return
-        finally:
-            if answer.usage is not None:
-                usd = cost_usd(self.cfg.model, answer.usage)
-                total = self.ledger.add(usd)
-                log.info("miniapp: answered in %.1f s, $%.4f (today $%.4f)", time.perf_counter() - t0, usd, total)
-        note = ("Claude declined to answer that." if answer.stop_reason == "refusal"
-                else "The answer hit its length limit." if answer.stop_reason == "max_tokens" else "")
-        await event({"done": True, "note": note, **self.spend()})
-
     async def _send(self, writer: asyncio.StreamWriter, status: int, body: bytes, ctype: str,
                     extra: Optional[dict[str, str]] = None) -> None:
         reason = {200: "OK", 204: "No Content", 302: "Found", 400: "Bad Request", 403: "Forbidden",
@@ -838,7 +721,7 @@ class QuickTunnel:
 # address changes every start, so the pinned message's button is edited to the new one each time.
 
 Bot = Callable[[str, dict], Awaitable[Any]]
-PIN_TEXT = "buddy: your apps and a chat with Claude."
+PIN_TEXT = "buddy: your apps."
 PIN_OFFLINE_TEXT = "buddy's apps are offline (the Mac is asleep or restarting). This button comes back by itself."
 OPEN_TEXT = "Open buddy"
 
@@ -922,8 +805,7 @@ class MiniApp:
     ``context`` the owner-context line each build prompt carries (apps_maker.owner_context: date, time zone,
     units). ``changing`` is the set of app slugs being changed right now, shared with the chat door."""
 
-    def __init__(self, cfg: MiniAppConfig, *, stream_fn: Optional[StreamFn] = None,
-                 tunnel_factory: Optional[Callable[[], Any]] = None,
+    def __init__(self, cfg: MiniAppConfig, *, tunnel_factory: Optional[Callable[[], Any]] = None,
                  bot: Optional[Bot] = None, pins_path: Optional[Path] = None,
                  generate: Any = None, apps_root: Optional[Path] = None,
                  check: Any = _DEFAULT, context: Optional[Callable[[], str]] = None) -> None:
@@ -938,7 +820,7 @@ class MiniApp:
             context=context or apps_maker.owner_context,
             check=app_check.check_app if check is _DEFAULT else check)
         self.changing: set[str] = set()
-        self.server = MiniAppServer(cfg, stream_fn or claude_stream(cfg.model, cfg.effort), self.ledger,
+        self.server = MiniAppServer(cfg, self.ledger,
                                     store=self.store, maker=self.maker, changing=self.changing,
                                     notify=self._build_result)
         binary = cloudflared_bin()
@@ -997,7 +879,7 @@ class MiniApp:
             log.warning("miniapp: cloudflared is not installed (brew install cloudflared); the Mini App is off")
             return
         port = await self.server.start()
-        log.info("miniapp: serving on 127.0.0.1:%d (%s, effort %s; %s)", port, self.cfg.model, self.cfg.effort,
+        log.info("miniapp: serving on 127.0.0.1:%d (%s, build effort %s; %s)", port, self.cfg.model, self.cfg.make_effort,
                  f"a ${self.ledger.cap:.2f} daily cap" if self.ledger.cap else "spend tracked, no cap")
         tunnel = None
         try:
