@@ -98,7 +98,6 @@ static uint32_t glideStart = 0, glideMs = 0;
 static bool     gliding = false;
 static uint32_t lastStreamMs = 0;
 static float    sentYaw = 1e9f, sentPitch = 1e9f;
-static bool     driftOn = false;               // micro-drift while awake
 
 static float easeInOutCubic(float t) {
   return t < 0.5f ? 4.0f * t * t * t : 1.0f - powf(-2.0f * t + 2.0f, 3.0f) / 2.0f;
@@ -130,7 +129,7 @@ int  bodyCmdPitchTenths() { return (int)lroundf(cmdPitch * 10.0f); }
 static bool exploring = false;   // host drives the head; sleep pose not applied
 static void onEnterSilent(PersonaState s, uint32_t now);
 
-// Advance the glide, add the idle micro-drift, stream to the BSP at 25 Hz.
+// Advance the glide and stream it to the BSP at 25 Hz.
 static void stepTween(uint32_t now) {
   float y = cmdYaw, p = cmdPitch;
   // A host motion owns the pose while it runs: it replaces the glide rather
@@ -159,14 +158,9 @@ static void stepTween(uint32_t now) {
     p = fromPitch + (curPitch - fromPitch) * e;
     cmdYaw = y; cmdPitch = p;
   }
-  // Perlin-ish micro-drift: two sines at unrelated periods (5.3 s / 4.1 s),
-  // ±1.5 deg yaw, ±1 deg pitch. Only while awake and not gliding, so the
-  // head never looks parked but a sleeping pet stays still (torque releases).
-  if (driftOn && !gliding && !oscOn) {
-    float ty = (float)now / 1000.0f;
-    y += 1.5f * sinf(ty * (6.2832f / 5.3f)) * 0.7f + 1.5f * sinf(ty * (6.2832f / 7.9f)) * 0.3f;
-    p += 1.0f * sinf(ty * (6.2832f / 4.1f) + 1.0f);
-  }
+  // No idle micro-drift: a head streamed tiny targets forever never rests,
+  // so the servos hold torque and whine (owner bench 2026-09-23). At rest the
+  // BSP's auto torque release lets them go quiet.
   if (now - lastStreamMs < 40) return;                // 25 Hz max
   float step = fmaxf(fabsf(y - sentYaw), fabsf(p - sentPitch));
   if (step < 0.05f) return;                           // nothing new: let torque release
@@ -176,7 +170,7 @@ static void stepTween(uint32_t now) {
   if (speed > 600) speed = 600;
   sentYaw = y; sentPitch = p;
   float cy = fminf(fmaxf(y, (float)-YAW_MAX), (float)YAW_MAX);
-  float cp = fminf(fmaxf(p, (float)PITCH_MIN), (float)PITCH_MAX);   // drift can never leave 5..85
+  float cp = fminf(fmaxf(p, (float)PITCH_MIN), (float)PITCH_MAX);   // the pose can never leave 5..85
   M5StackChan.Motion.move((int)lroundf(cy * 10.0f), (int)lroundf(cp * 10.0f), speed);   // 0.1 deg units
 }
 
@@ -721,7 +715,6 @@ static void updateInner(PersonaState active, bool needsAttention, uint32_t now);
 void bodyUpdate(PersonaState active, bool needsAttention, uint32_t now) {
   if (halNoiseMotorsOff()) return;
   updateInner(active, needsAttention, now);
-  driftOn = active != P_SLEEP;
   stepTween(now);                           // every loop, regardless of the early returns above
 }
 
