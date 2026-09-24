@@ -3022,6 +3022,10 @@ class TelegramInlet:
         board = _Keyboard(chat_id, ANSWER, list(choices), future=future) if choices else None
         # Waiting on the owner is not working: no "typing…" under the question. It comes back with the answer,
         # except a reason that ended while the question waited (_stop_typing drops it from the paused set).
+        # Only the outermost question in a chat owns the paused set: a question asked under another one adds
+        # to it and resumes nothing, so no "typing…" shows under the outer question still waiting (review,
+        # 2026-09-23).
+        owner = chat_id not in self._paused_typing
         paused = self._paused_typing.setdefault(chat_id, {})
         paused.update(self._end_typing(chat_id))
         line = UNANSWERED_LINE
@@ -3061,10 +3065,11 @@ class TelegramInlet:
                 self._retire(board)
                 if not self._stopping:                     # a restart's buttons answer "expired" anyway
                     self._spawn(self._settle_prompt(board, question, line, title, None), "telegram-edit")
-            if self._paused_typing.get(chat_id) is paused:
-                del self._paused_typing[chat_id]
-            for reason, ticks in paused.items():
-                self._keep_typing(chat_id, reason, ticks * TYPING_EVERY_SECS)
+            if owner:
+                if self._paused_typing.get(chat_id) is paused:
+                    del self._paused_typing[chat_id]
+                for reason, ticks in paused.items():
+                    self._keep_typing(chat_id, reason, ticks * TYPING_EVERY_SECS)
 
     async def _send_screen(self, chat_id: int, caption: str, *, agent: Any = None) -> dict[str, Any]:
         agent = agent or (self._codex if self._codex_chat == chat_id else self._agent)

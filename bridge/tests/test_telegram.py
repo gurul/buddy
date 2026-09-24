@@ -3778,6 +3778,32 @@ def test_a_relay_typing_that_ended_while_a_question_waited_does_not_come_back_af
     asyncio.run(go())
 
 
+def test_a_question_asked_under_another_resumes_no_typing_and_the_outer_answer_resumes_only_live_reasons() -> None:
+    """Review finding: nested questions in one chat shared one paused set, and answering the inner one put
+    back every reason, the outer question's too, so "typing…" showed under a question still waiting."""
+    async def go() -> None:
+        api, typed = FakeApi(), []
+        rig = _typing_relay_rig(api, typed)
+        rig.inlet._keep_typing(OWNER, "task", 60)
+        outer = asyncio.ensure_future(rig.inlet._ask_user("Which account?", OWNER))
+        await jobs(rig)
+        rig.inlet._keep_typing(OWNER, "turn", 60)
+        inner = asyncio.ensure_future(rig.inlet._ask_user("Which folder?", OWNER))
+        await jobs(rig)
+        assert OWNER not in rig.inlet._typing
+        await dispatch(rig, "docs", update_id=3)
+        assert await inner == "docs"
+        assert OWNER not in rig.inlet._typing                         # the outer question still waits
+        rig.inlet._stop_typing(OWNER, "task")                         # the task ended while it waited
+        await dispatch(rig, "work", update_id=4)
+        assert await outer == "work"
+        assert set(rig.inlet._typing.get(OWNER, {})) == {"turn"}      # the ended reason does not come back
+        assert OWNER not in rig.inlet._paused_typing
+        await rig.inlet._shutdown()
+
+    asyncio.run(go())
+
+
 def test_a_stop_from_a_session_buddy_does_not_know_leaves_the_joined_sessions_bubble() -> None:
     """Review finding: the daemon passes no folder for a Stop hook whose session is not in its state, and
     that ended the picked session's "Thinking…" early."""
