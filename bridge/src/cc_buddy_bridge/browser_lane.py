@@ -178,6 +178,20 @@ def configured(environ: Any = None) -> BrowserLaneConfig:
 # primary account.
 ACCOUNTS_URL = "https://accounts.google.com/ListAccounts?gpsia=1&source=ChromiumBrowser&json=standard"
 EMAIL = re.compile(r"[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}")
+# The whole lookup, every profile at once, gets this long. Production, 2026-09-23/24: one request after another
+# at 8 s each cost 7 s and 19 s before a task began, and identified nothing; the one quick run took 1.4 s.
+PROFILE_LOOKUP_BUDGET_SECS = 3.0
+CHROME_UA = ("Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) "
+             "Chrome/140.0.0.0 Safari/537.36")
+
+
+def fetch_accounts(url: str, cookie_header: str, timeout: float) -> str:
+    """Google's account list, asked with one profile's cookies. Runs on a lookup thread, never the lane's."""
+    import urllib.request
+
+    req = urllib.request.Request(url, headers={"Cookie": cookie_header, "User-Agent": CHROME_UA})
+    with urllib.request.urlopen(req, timeout=timeout) as r:     # noqa: S310 — a fixed https URL
+        return r.read().decode("utf-8", errors="replace")
 
 
 def accounts_in(body: str) -> list[str]:
@@ -433,6 +447,9 @@ class BrowserLane:
         self._page: Optional[_Page] = None
         self._plain_http: dict[str, str] = {}          # tests only: an https URL the plan contract insists on → a loopback http one
         self._browser: Any = None                         # attach mode: the owner's Chrome, connected over CDP
+        self._profile_map: Optional[dict[str, Any]] = None  # attach mode: {account: context}, per connection
+        self._fetch_accounts: Callable[[str, str, float], str] = fetch_accounts   # tests swap the HTTP call
+        self.plans_started = 0                            # chrome_lane.py: a plan executing here is progress
 
     # -- the thread --
     async def _run(self, fn: Callable[..., Any], *args: Any) -> Any:
@@ -492,21 +509,48 @@ class BrowserLane:
         return self._page
 
     def _profiles(self) -> dict[str, Any]:
-        """{primary account email: its Chrome context} for every profile with an open window. Cached per
-        connection; nothing is opened on screen."""
-        if getattr(self, "_profile_map", None) is not None:
+        """{primary account email: its Chrome context} for every profile with an open window. Nothing is opened
+        on screen. Cached for the connection's life (``_close`` forgets it).
+
+        Every profile is asked at once, within PROFILE_LOOKUP_BUDGET_SECS in total. Playwright's sync objects
+        belong to the lane's thread, so each context's cookies for Google's account list are read here (a local
+        CDP call), and the requests themselves run on short-lived threads with plain HTTP. A profile that has
+        not answered within the budget is simply not addressable by name."""
+        if self._profile_map is not None:
             return self._profile_map
-        found: dict[str, Any] = {}
-        for ctx in list(self._browser.contexts):
+        t0 = time.perf_counter()
+        contexts = list(self._browser.contexts)
+        jobs: list[tuple[Any, str]] = []
+        for ctx in contexts:
             try:
-                reply = ctx.request.get(ACCOUNTS_URL, timeout=8000)
-                accounts = accounts_in(reply.text())
+                cookies = ctx.cookies([ACCOUNTS_URL])
             except Exception:  # noqa: BLE001 — a profile that cannot say is simply not addressable by name
-                accounts = []
+                continue
+            header = "; ".join(f"{c['name']}={c['value']}" for c in cookies or [] if c.get("name"))
+            if header:
+                jobs.append((ctx, header))
+        fetch = self._fetch_accounts
+        replies: dict[int, str] = {}
+        if jobs:
+            pool = concurrent.futures.ThreadPoolExecutor(max_workers=len(jobs), thread_name_prefix="chrome-profiles")
+            futures = {pool.submit(fetch, ACCOUNTS_URL, header, PROFILE_LOOKUP_BUDGET_SECS): i
+                       for i, (_, header) in enumerate(jobs)}
+            done, _ = concurrent.futures.wait(futures, timeout=PROFILE_LOOKUP_BUDGET_SECS)
+            pool.shutdown(wait=False, cancel_futures=True)     # a straggler finishes on its own and is dropped
+            for f in done:
+                try:
+                    replies[futures[f]] = f.result()
+                except Exception:  # noqa: BLE001
+                    pass
+        found: dict[str, Any] = {}
+        for i, (ctx, _) in enumerate(jobs):
+            accounts = accounts_in(replies.get(i, ""))
             if accounts and accounts[0] not in found:
                 found[accounts[0]] = ctx
         self._profile_map = found
-        log.info("browser lane: Chrome profiles open: %s", ", ".join(found) or "none identified")
+        log.info("browser lane: Chrome profiles open: %s (%d contexts, %d with Google cookies, %d answered, %.1f s)",
+                 ", ".join(found) or "none identified", len(contexts), len(jobs), len(replies),
+                 time.perf_counter() - t0)
         return found
 
     def _pick_profile(self, wanted: str) -> Any:
@@ -521,9 +565,12 @@ class BrowserLane:
         p = self._ensure()
         if self._browser is None:
             return ""
+        contexts = list(self._browser.contexts)
+        if len(contexts) <= 1:
+            return ""                                      # one profile: there is nothing to choose, nothing to ask
         profiles = self._profiles()
         email = profile_for(request, profiles, self.config.chrome_profile)
-        target = profiles.get(email) or self._browser.contexts[0]
+        target = profiles.get(email) or contexts[0]
         if target is not self._context:
             try:
                 p.page.close()
@@ -630,6 +677,7 @@ class BrowserLane:
 
     async def run_plan(self, plan_dict: dict[str, Any], goal: str, start: int = 0,
                        approved: Optional[Mapping[str, str]] = None) -> dict[str, Any]:
+        self.plans_started += 1
         return await self._run(self._run_plan, plan_dict, goal, start, dict(approved or {}))
 
     def _page_text(self, limit: int = 12000) -> dict[str, Any]:

@@ -270,3 +270,42 @@ def test_an_enumeration_error_falls_back_to_the_glob(monkeypatch: pytest.MonkeyP
         raise OSError("IOKit")
     monkeypatch.setattr(list_ports, "comports", boom)
     assert serial_transport._resolve_port("/dev/cu.usbmodem*") == BOARD.device
+
+
+def test_port_enumeration_never_blocks_the_event_loop(fast_watchdog: None, monkeypatch: pytest.MonkeyPatch) -> None:
+    """With the board off the bus, ``list_ports.comports()`` took 2-3 s on the daemon's own asyncio loop
+    (1,543+ stall reports, 2026-09-23/24, last stack serial_transport.py:128) and froze every other door,
+    Telegram included. The enumeration runs off the loop: it never runs on the loop's thread, and a slow
+    enumerator does not hold back a concurrent loop task."""
+    import threading
+    import time as _time
+
+    from serial.tools import list_ports
+
+    monkeypatch.setattr(serial_transport.glob, "glob", lambda pattern: [CAMERA.device, DOCK.device])
+    threads: list[threading.Thread] = []
+
+    def slow_comports() -> list[_Port]:
+        threads.append(threading.current_thread())
+        _time.sleep(0.2)
+        return [CAMERA, DOCK]                        # the board is off the bus: run() keeps waiting
+    monkeypatch.setattr(list_ports, "comports", slow_comports)
+
+    async def main() -> tuple[float, threading.Thread]:
+        loop_thread = threading.current_thread()
+        bs = BuddySerial(on_message=_noop, port="/dev/cu.usbmodem*")
+        runner = asyncio.create_task(bs.run())
+        worst, last = 0.0, _time.perf_counter()
+        for _ in range(40):                          # a concurrent loop task ticking every 10 ms
+            await asyncio.sleep(0.01)
+            now = _time.perf_counter()
+            worst, last = max(worst, now - last), now
+        await bs.stop()
+        runner.cancel()
+        await asyncio.gather(runner, return_exceptions=True)
+        return worst, loop_thread
+
+    worst, loop_thread = _run(main())
+    assert threads, "the enumerator was never called"
+    assert all(t is not loop_thread for t in threads), "comports() ran on the event loop's thread"
+    assert worst < 0.15, f"a loop task was held back {worst:.2f} s by the port enumeration"

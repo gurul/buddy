@@ -262,7 +262,12 @@ own profile.
     reconnects and asks again.
 - **Which profile.** buddy identifies each open Chrome profile by its
   signed-in Google account. It asks Google's account list with that
-  profile's cookies (`context.request`), so no tab opens. A task that names
+  profile's cookies, so no tab opens. Every profile is asked **at once**,
+  within 3 s in total (`PROFILE_LOOKUP_BUDGET_SECS`), and the answer is kept
+  for the life of the connection. With only one profile open there is
+  nothing to choose, so nothing is asked. (Before 2026-09-24 the profiles
+  were asked one after another with 8 s each: 7 s and 19 s before a task
+  began, and no account identified.) A task that names
   an account works in that profile, by the address, its name before the @, or
   its domain word: "my work inbox" goes to owner@work.example, "canvas on my
   school account" to student@school.example, "gmail" to owner@gmail.com. `CC_BUDDY_CHROME_PROFILE` sets the default. A
@@ -270,7 +275,25 @@ own profile.
   a window gets a plain "open a window in that profile".
 - **Which tasks.** A web goal (`browser_lane.is_web_goal`: a URL, a site
   name, the browser) tries your Chrome first. Everything else, including
-  anything the lane can't finish, goes to Codex. A question ("how many
+  anything the lane can't finish, goes to Codex.
+- **"Open it" after a link.** A task's goal is the owner's words for that
+  one request, so a link sent in an earlier message was not in it
+  (2026-09-24: a Google Maps link, then "Use Google search to open it up").
+  `app_reflex.with_referenced_links` adds the links from the owner's last 4
+  messages (newest first, at most 3) when the goal refers back ("open it",
+  "that link") and has no link of its own. **Not wired yet:** the Telegram
+  door has to pass its recent owner messages to it when it starts a task
+  (`telegram.py` `_start_task`); until then only the log line is live. Every
+  task logs the goal's shape, never its words:
+  `app-reflex: chrome-lane gets a goal of 7 words, 1 link(s) (maps.app.goo.gl), refers back`.
+- **Nothing done in 15 s → Codex** (`chrome_lane.NOTHING_DONE_BUDGET_SECS`).
+  If no plan is executing and no step has been reported 15 s after the task
+  started (still connecting, still waiting on Chrome's Allow, a slow plan
+  call), the lane stops and Codex takes the whole task. A plan that has
+  started is never cut off. Why 15 s: on 2026-09-23/24, once connected, the
+  lane reached its first step or gave up in 4–6 s; the runs that did
+  nothing still spent 11.3 s and 25.6 s before handing on, and one waited
+  36 s on Allow until you pressed Stop. A question ("how many
   unread…") is planned as navigation, then answered from the page's visible
   text, read once it stops loading. A redirect to a sign-in page is reported
   as "you're not signed in".
