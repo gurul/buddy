@@ -674,10 +674,15 @@ def run_delegate(objective: str, *, senses: Any, effectors: Any, decider: Any, t
         # least as well as anything offered is what the human meant: confirm it, never a look-alike
         # ("delete the event" must not click "Add Event"). Only an offered option that matches
         # strictly better goes on to the pick.
+        # An offered control whose label IS the objective (the plan copied it from the outline) is what was
+        # meant, however many words a withheld one shares: "Your message" is the field, not "Send message"
+        # (browser_model_eval contact_form, 2026-09-24). The withheld control stays withheld either way.
         token_set = set(tokens)
         offered_best = max((_overlap(it.candidate, token_set) for it in items if it.candidate is not None),
                            default=0)
-        if blocked and _overlap(blocked[0], token_set) >= offered_best:
+        named = any(it.candidate is not None and " ".join(it.candidate.label.split()).casefold() == objective.casefold()
+                    for it in items)
+        if blocked and not named and _overlap(blocked[0], token_set) >= offered_best:
             return run.confirm(blocked[0].label, "click")
         if not items:
             return run.escalate("no_candidate")

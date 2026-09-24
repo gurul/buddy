@@ -226,8 +226,9 @@ def test_among_several_fields_jev_picks_or_nothing_is_typed() -> None:
     eff = Effectors()
     assert go(p, Senses([form]), eff, Desk(front="Safari"), asker=asker_saying("City")).status == "complete"
     assert eff.typed == [("City", "Lisbon")]
-    unsure = Effectors()
-    r = go(p, Senses([form]), unsure, Desk(front="Safari"), asker=asker_saying("City", p=0.5))
+    unsure = Effectors()                                   # a step that names no field: Jev's pick alone, under the cut-offs
+    vague = plan({"kind": "type", "target": "the place field", "text": "Lisbon"}, request="put Lisbon as the city")
+    r = go(vague, Senses([form]), unsure, Desk(front="Safari"), asker=asker_saying("City", p=0.5))
     assert r.status == "none" and r.reason == "ambiguous_field" and unsure.typed == []
 
 
@@ -261,3 +262,56 @@ def test_the_app_the_plan_was_written_for_is_brought_back_before_the_first_step(
     still = Desk(front="Calendar")
     go(p, Senses([calendar(), calendar(True)], changed=[True]), Effectors(), still, decide="keyword", planned_for="Calendar")
     assert still.opened == []                              # already in front: nothing is opened
+
+
+# ---- a form of several fields (browser_model_eval contact_form, 2026-09-24) ----------------------------------
+
+
+def _contact_form(focused: str = "") -> Any:
+    web = {"app": "browser", "actions": ("AXPress", "AXFocus")}   # a page's field is clickable too (browser_lane)
+    fields = (cand("1", "text field", "Full name", **web), cand("2", "text field", "Email address", **web),
+              cand("3", "text field", "Your message", **web))
+    return snap(*fields, cand("4", "button", "Send message", app="browser"), app="browser", bundle="buddy.browser",
+                title="Contact us", focused=next((c for c in fields if c.label == focused), None))
+
+
+def test_the_field_the_step_names_is_typed_into_when_jev_agrees_even_below_its_cut_offs() -> None:
+    # The eval's failure: three labelled fields, Jev's top pick right but under the step cut-offs -> ambiguous_field.
+    p = plan({"kind": "type", "target": "the focused Email address text field", "text": "ada@example.com"},
+             request="fill in the email ada@example.com")
+    eff = Effectors()
+    r = go(p, Senses([_contact_form()]), eff, Desk(front="browser"), asker=asker_saying("Email address", p=0.4))
+    assert r.status == "complete" and eff.typed == [("Email address", "ada@example.com")], r.to_dict()
+    assert r.ledger[0].how == "code+jev"
+
+
+def test_jev_still_refuses_a_named_field_it_reads_as_another() -> None:
+    p = plan({"kind": "type", "target": "the Email address field", "text": "ada@example.com"},
+             request="fill in the email ada@example.com")
+    eff = Effectors()
+    r = go(p, Senses([_contact_form()]), eff, Desk(front="browser"), asker=asker_saying("Full name", p=0.4))
+    assert r.status == "none" and r.reason == "ambiguous_field" and eff.typed == [], r.to_dict()
+    risky = Effectors()
+    r = go(p, Senses([_contact_form()]), risky, Desk(front="browser"), asker=asker_saying("Email address", risky=0.9))
+    assert r.status == "needs_human" and risky.typed == []
+
+
+def test_right_after_clicking_a_field_the_focused_field_is_the_proposal() -> None:
+    p = plan({"kind": "click", "target": "the message box", "label_hint": "Your message"},
+             {"kind": "type", "target": "the text area", "text": "Please call me back"},
+             request="write Please call me back in the message")
+    eff = Effectors()
+    senses = Senses([_contact_form(), _contact_form("Your message"), _contact_form("Your message")], changed=[True])
+    r = go(p, senses, eff, Desk(front="browser"), asker=asker_saying("Your message", p=0.4))
+    assert r.status == "complete" and eff.clicks == ["Your message"], r.to_dict()
+    assert eff.typed == [("Your message", "Please call me back")]
+
+
+def test_the_longest_label_wins_and_a_repeated_label_names_nothing() -> None:
+    from cc_buddy_bridge.plan_executor import _named_field
+
+    pool = [cand("1", "text field", "Name"), cand("2", "text field", "Name for the booking")]
+    step = pc.parse_step({"kind": "type", "target": "the Name for the booking field", "text": "x"}, 1, "x")
+    assert _named_field(step, pool).id == "2"
+    twins = [cand("1", "text field", "Name"), cand("2", "text field", "Name")]
+    assert _named_field(pc.parse_step({"kind": "type", "target": "the name field", "text": "x"}, 1, "x"), twins) is None

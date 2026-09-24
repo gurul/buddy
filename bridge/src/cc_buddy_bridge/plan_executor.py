@@ -9,8 +9,9 @@ Per step:
                         the outline (the keyword gate usually decides it, Jev only has to agree), then the
                         description. Every gate of the lane applies — sensitive labels, dialogs, System
                         Settings values, the hit-test, the frontmost pid.
-  type                  the field is the only editable one, or Jev's pick among them under the same cut-offs;
-                        then the lane's focus_and_type, which pastes only when the focus really is that field
+  type                  the field is the only editable one; or the one the step names (or the plan just clicked)
+                        with Jev agreeing; or Jev's pick among them under the same cut-offs. Then the lane's
+                        focus_and_type, which pastes only when the focus really is that field
   press_key             one key. Return submits only a search the human dictated; anything else asks first.
   checkpoint            stop and hand back: the planner said it could not see past this point
 
@@ -32,6 +33,7 @@ not a suspected no-op, every `expect` that was given held, and the plan's `succe
 
 from __future__ import annotations
 
+import re
 import time
 from dataclasses import dataclass, field
 from typing import Any, Callable, Mapping, Optional, Sequence
@@ -250,7 +252,10 @@ def run_plan(plan: Plan, *, senses: Any, effectors: Any, asker: Optional[Callabl
             app = (frontmost_app() or "").casefold()
             if step.text_source == "composed" and app in SHELL_APPS and i not in ok:
                 return stop("needs_human", i, "composed text into a shell", f'type "{step.text}" into {app}')
-            field_c, how, why = _pick_field(step, senses, asker, step_gates, clock)
+            prev = out.ledger[-1] if out.ledger else None
+            after_click = (prev is not None and prev.index == i and prev.effect != "refused"
+                           and plan.steps[i - 1].kind == "click")
+            field_c, how, why = _pick_field(step, senses, asker, step_gates, clock, after_click=after_click)
             if field_c is None:
                 entry.note = why
                 out.ledger.append(entry)
@@ -310,11 +315,40 @@ def run_plan(plan: Plan, *, senses: Any, effectors: Any, asker: Optional[Callabl
     return stop("complete", len(plan.steps))
 
 
+def _norm(s: str) -> str:
+    return " ".join(str(s or "").split()).casefold()
+
+
+def _named_field(step: PlanStep, pool: Sequence[Any]) -> Optional[Any]:
+    """The one field the step names, or None. A label equal to the step's label_hint, else the longest field
+    label that appears as whole words in the hint or the target ("the focused Full name text field" names
+    "Full name"; "the Name for the booking field" names that one, not a field called "Name"). Two fields with
+    the winning label name nothing."""
+    hint = _norm(step.label_hint)
+    if hint:
+        exact = [c for c in pool if _norm(c.label) == hint]
+        if len(exact) == 1:
+            return exact[0]
+    said = f"{hint} {_norm(step.target)}"
+    hits = [c for c in pool if _norm(c.label) and re.search(
+        r"(?<![a-z0-9])" + re.escape(_norm(c.label)) + r"(?![a-z0-9])", said)]
+    if not hits:
+        return None
+    longest = max(len(_norm(c.label)) for c in hits)
+    best = [c for c in hits if len(_norm(c.label)) == longest]
+    return best[0] if len(best) == 1 else None
+
+
 def _pick_field(step: PlanStep, senses: Any, asker: Optional[Callable[..., StepAnswer]], gates: StepGates,
-                clock: Callable[[], float]) -> tuple[Any, str, str]:
-    """(the editable candidate to type into, who picked it, "" | why not). A lone field is code's pick;
-    among several, Jev's under the step cut-offs — the wording was measured on pressable controls, not
-    fields, so a pick that does not clear them types nothing."""
+                clock: Callable[[], float], after_click: bool = False) -> tuple[Any, str, str]:
+    """(the editable candidate to type into, who picked it, "" | why not). A lone field is code's pick.
+    Among several, code PROPOSES the field the step names (its label, _named_field) or, right after the plan
+    clicked a field, the focused one; Jev is asked as on a click and can REFUSE: the proposal is typed into
+    when Jev's top field is the same one. Without a proposal it is Jev's pick under the step cut-offs — the
+    wording was measured on pressable controls, not fields, so a pick that does not clear them types nothing.
+    Eval 2026-09-24 (tools/browser_model_eval.py, contact_form): Jev alone never cleared the cut-offs among
+    three labelled fields, even right after the plan had clicked the field, so every model's form fill
+    stopped at ambiguous_field."""
     try:
         snap = senses.snapshot()
     except Exception as e:  # noqa: BLE001
@@ -326,11 +360,21 @@ def _pick_field(step: PlanStep, senses: Any, asker: Optional[Callable[..., StepA
         return None, "", "no_field"
     if len(pool) == 1:
         return pool[0], "code", ""
+    proposal = _named_field(step, pool)
+    focused = snap.focused
+    if proposal is None and after_click and focused is not None:
+        proposal = next((c for c in pool if c.id == focused.id), None)
     if asker is None:
-        return None, "", "ambiguous_field"
+        return (proposal, "code", "") if proposal is not None else (None, "", "ambiguous_field")
     by_key = {str(n): c for n, c in enumerate(pool, start=1)}
     answer = asker(f"type into {step.target}", app=snap.app, context=jev_context(snap),
                    options={k: render_option(c) for k, c in by_key.items()}, recent=())
+    if answer.error or not answer.target:
+        return None, "jev", "ambiguous_field"
+    if answer.risky >= gates.risky_max:
+        return None, "jev", "risky"
+    if proposal is not None and by_key.get(answer.target) is proposal:
+        return proposal, "code+jev", ""
     pick = gates.decide(answer)
     if pick == "confirm":
         return None, "jev", "risky"
