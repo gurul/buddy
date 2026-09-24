@@ -1148,11 +1148,16 @@ def test_the_claude_relay_is_off_until_said_and_forwards_only_while_on() -> None
         assert api.titled[-1][0] == telegram.CLAUDE_ON_TITLE
         await inlet.relay_text("  I fixed\n the bug. " + "x" * 3000, "/Users/g/repo")
         await settle()
-        # Claude's words under a "Claude" title with the repo under it; its line breaks kept; a message over
-        # the cap is cut at a line or a space and says the rest is on the Mac
+        # Claude's words under a "Claude" title with the repo under it; its line breaks kept; a long reply
+        # arrives whole, never "the rest is in the terminal" (owner, 2026-09-24)
         title, subtitle, body = api.titled[-1]
         assert (title, subtitle) == (telegram.CLAUDE_TITLE, "repo")
-        assert body.startswith("I fixed\n the bug. xxx") and body.endswith("…\n\n" + telegram.RELAY_CUT_LINE)
+        assert body == "I fixed\n the bug. " + "x" * 3000
+        # only a runaway past the cap is cut at a line or a space, and says the rest is on the Mac
+        await inlet.relay_text("  I fixed\n the bug. " + "x " * telegram.MAX_RELAY_CHARS, "/Users/g/repo")
+        await settle()
+        body = api.titled[-1][2]
+        assert body.startswith("I fixed\n the bug. x x") and body.endswith("…\n\n" + telegram.RELAY_CUT_LINE)
         assert len(body) <= telegram.MAX_RELAY_CHARS + len(telegram.RELAY_CUT_LINE) + 4
         # the terminal's gray lines, a tool call and its result tail, never leave the Mac (owner, 2026-09-21):
         # only what it prints in white does, plus a question for the owner

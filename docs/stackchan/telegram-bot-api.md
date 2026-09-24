@@ -273,8 +273,8 @@ arrives.
 - `editMessageText` takes `rich_message` too.
 
 For buddy: **only `typing`, sent once per buddy turn.** Nothing streams. The
-Claude relay batches lines for 1.2 s and sends whole messages, cut at 1500
-characters. `sendMessageDraft` would show Claude's reply as it is written, then
+Claude relay batches lines for 1.2 s and sends whole messages, split at 4096
+characters (cut only past 16000). `sendMessageDraft` would show Claude's reply as it is written, then
 leave one final message. Rich Markdown could carry Claude's GFM almost as
 written.
 
@@ -483,7 +483,8 @@ What the relay does now (`telegram.py` and `daemon.py`):
   which raises the session's terminal, waits 0.3 s, and sends the text as
   **System Events keystrokes plus Return**. Success gets a 👍 reaction.
 - `_on_assistant_text` (the JSONL tailer) calls `relay_text`. It drops text from
-  sessions other than the pinned one, cuts at 1500 characters, and queues it.
+  sessions other than the pinned one, cuts only past 16000 characters (a
+  runaway), and queues it; `_say` splits it into 4096-character messages.
   `relay_line` and `_flush_relay` batch 1.2 s of lines into one message.
 - `relay_tool_call` forwards only `AskUserQuestion`, with "Reply with the
   option's number."
@@ -520,8 +521,9 @@ What the relay does now (`telegram.py` and `daemon.py`):
    say the dialog on the Mac decides, and its buttons go.
 6. **Silent drops.** Text from a session other than the pinned one is dropped
    with no sign on the phone.
-7. **Long replies are cut.** Anything past 1500 characters becomes "the rest is
-   in the terminal".
+7. **Long replies are cut.** Anything past 1500 characters became "the rest is
+   in the terminal". *Fixed 2026-09-24:* the cap is 16000, and a long reply
+   arrives whole, split into 4096-character messages.
 8. **No sign of work.** During a relayed turn there is no typing indicator.
    The 👍 means "typed", not "Claude is on it" or "Claude is done".
    *Fixed 2026-09-23:* "typing…" is repeated from the typed line until Claude

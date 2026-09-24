@@ -178,7 +178,8 @@ CLAUDE_WAITS_TITLE = "Claude is waiting on you"
 CLAUDE_PERMISSION_TITLE = "Claude asks to run {tool}"
 RELAY_CUT_LINE = "_the rest is in the terminal_"
 DEFAULT_PERMISSION_TIMEOUT_SECS = 240.0    # the hook blocks 320 s at most; a silence defers, it never denies
-MAX_RELAY_CHARS = 1500
+MAX_RELAY_CHARS = 16000     # whole replies reach the phone, split into 4096-char messages by _say; the cap only
+                            # stops a runaway (owner, 2026-09-24: "I don't want rest in terminal")
 ASKED_RECENTLY_SECS = 20.0         # "Claude is waiting on you" right after the question itself is an echo
 RELAY_BATCH_SECS = 1.2                     # relay lines are batched this long into one message (Telegram: ~1 msg/s)
 STEALTH_ON_LINE = "Stealth mode: I'll act asleep at the desk until you say wake up."
