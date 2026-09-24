@@ -1,8 +1,9 @@
 # slither.io: a real-time eval of the local decider
 
 Not a product feature. `bridge/tools/slither_eval.py` measures how the local
-typed-decision model (laya-mlx, the checkpoint the computer-use fast lane uses)
-holds up at twenty decisions a second on a live game against other people. The
+typed-decision model (laya-mlx, the checkpoint the eye expressions use; the
+computer-use fast lane used it until 2026-09-24) holds up at twenty decisions a
+second on a live game against other people. The
 pattern is the sampling-rollout one from drone racing: **code samples candidate
 actions, rolls each forward, scores risk and gain; the model picks among the
 survivors; a deterministic shield executes only safe picks.** Kills are the

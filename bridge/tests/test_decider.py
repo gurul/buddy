@@ -1,19 +1,16 @@
 """decider.py against a scripted predict: the one-question contract, every answer
 rejection rule, the head-budget trim, the three prompt styles, the overflow flag,
-the noul shadow judge, the load() failure lines and the predict lock."""
+the noul shadow judge, the available flag and the predict lock."""
 
 from __future__ import annotations
 
 import math
-import sys
 import threading
-from pathlib import Path
 
 import pytest
 
 from cc_buddy_bridge import decider as dm
 from cc_buddy_bridge.decider import (
-    DEFAULT_MODEL_PATH,
     RESERVED,
     STYLES,
     Choice,
@@ -268,33 +265,9 @@ def test_judge_error_paths_never_raise() -> None:
         assert j.p_true == 0.0 and j.error
 
 
-# ---- load() failure lines ----------------------------------------------------------------
+# ---- the available flag ------------------------------------------------------------------
 
-def test_load_missing_directory_is_one_line_without_importing_laya(monkeypatch, tmp_path: Path) -> None:
-    monkeypatch.setitem(sys.modules, "laya_mlx", None)      # importing it would raise ImportError
-    with pytest.raises(RuntimeError) as e:
-        Decider.load(str(tmp_path / "nope"))
-    assert "not found" in str(e.value) and "\n" not in str(e.value)
-    (tmp_path / "model.safetensors").write_bytes(b"")
-    with pytest.raises(RuntimeError) as e:
-        Decider.load(str(tmp_path))
-    assert "incomplete" in str(e.value) and "rl_agent_config.json" in str(e.value)
-
-
-def test_load_import_failure_names_the_extra(monkeypatch, tmp_path: Path) -> None:
-    for name in dm.CHECKPOINT_FILES:
-        f = tmp_path / name
-        f.parent.mkdir(parents=True, exist_ok=True)
-        f.write_bytes(b"")
-    monkeypatch.setitem(sys.modules, "laya_mlx", None)
-    with pytest.raises(RuntimeError) as e:
-        Decider.load(str(tmp_path))
-    assert str(e.value).startswith("laya_mlx is not importable") and "[fast]" in str(e.value)
-    assert "\n" not in str(e.value)
-
-
-def test_default_model_path_and_available_flag() -> None:
-    assert DEFAULT_MODEL_PATH.startswith("~/.config/cc-buddy-bridge/models/")
+def test_a_bare_decider_is_not_available_until_a_loader_warms_it() -> None:
     d, _ = _decider()
     assert d.available is False and d.load_ms == 0.0 and d.warm_ms == 0.0
 

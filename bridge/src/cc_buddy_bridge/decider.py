@@ -1,58 +1,48 @@
-"""The typed-decision model behind the fast lane: laya-mlx wrapped as ONE `choice` question.
+"""A typed-decision model behind the fast lane's `model` mode, asked as ONE `choice` question.
 
-`Decider.choose()` asks the model exactly one thing — which of these options advances
-the objective now — and hands back a `Choice` that the lane gates on `p_top` and
-`margin` (from the probabilities), never on laya's `confidence` (a normalized entropy
-that is not comparable across option counts and never reached 0.5 on a real menu:
-0.46 at k=5 with p_top 0.73, 0.10-0.27 at k=8-18). Every judgement that matters —
-done, risk, repeat, dialog — is a code oracle in fast_lane.py; the model only ranks.
+`Decider(predict)` wraps any callable with the System One signature — `predict(state,
+questions) -> {"answers": {qid: {...}}, "usage": {...}}` — and `choose()` asks it exactly
+one thing: which of these options advances the objective now. It hands back a `Choice`
+that the lane gates on `p_top` and `margin` (from the probabilities), never on the answer's
+`confidence` (a normalized entropy, not comparable across option counts). Every judgement
+that matters — done, risk, repeat, dialog — is a code oracle in fast_lane.py; the model
+only ranks.
 
-The checkpoint (laya-multilingual-mlx, FP16, config max_len 1024 / head_max_len 256,
-trained with max_prefixes 6) has a head budget the wrapper respects BEFORE predict:
-laya caps every option at 48 tokens and, once the options overflow head_max_len - 16,
-silently cuts all of them to (head_max_len - 16) / n tokens. `choose` therefore trims
-the last non-reserved option until the head fits and counts what it dropped in
-`dropped_for_budget`; a state that fills the sequence (usage.input_tokens == max_len)
-is flagged `overflow`. The reserved options "reobserve" and "abstain" are never
-dropped — the caller adds them, the gate keys on them.
+The one backend the worker loads is TypeSafe's hosted Jev (jev.load builds a Decider over
+jev.make_predict). The seam was written first for a local encoder with a 256-token decision
+head, which is why the wrapper still respects a head budget BEFORE predict: every option
+costs at most 48 tokens, and `choose` trims the last non-reserved option until the head
+fits, counting what it dropped in `dropped_for_budget`; a state that fills the sequence
+(usage.input_tokens == max_len) is flagged `overflow`. jev.py sets both budgets past any
+real menu, so for Jev the trim never drops an option. The reserved options "reobserve" and
+"abstain" are never dropped — the caller adds them, the gate keys on them.
 
-Measured on this Mac (2026-09-21, `load` then `choose` with the real checkpoint): load
-395-465 ms (import + Agent(compile=True)), the warm-up predict 1.5 s in a cold process
-(compile + Metal kernels; 29 ms once the Metal cache is warm), then p50 11.6 / p95 13.5 ms
-on the same 12-option shape and p50 14.3 / p95 45 / max 112 ms across 20 new shapes. Only
-`load` imports laya_mlx; `Decider(predict)` takes any callable with laya's predict
-signature, so the tests run without mlx.
+How an option is worded decides more than the style (select fixtures, 73 cases,
+2026-09-21): "click radio button: Week" with the full context lines scored top-1 0.315;
+`render_option` — "Week (radio button)", "Month (radio button, selected)" — with a
+"title: …" context scored 0.603. The lane, the planner's outline and the evals all render
+through `render_option`.
 
-How an option is worded decides more than the style (select fixtures, 73 cases, real
-model, 2026-09-21): "click radio button: Week" with the full context lines scored top-1
-0.315; `render_option` — "Week (radio button)", "Month (radio button, selected)" — with a
-"title: …" context scored 0.603. The lane and the eval both render through
-`render_option` so the eval measures the shipped wording.
-
-`judge()` asks ONE `noul` question and is shadow-only (the local verifier is logged
-beside the planner's verdict, never trusted). The agent is not documented thread-safe:
-a lock serializes every predict, because the worker loads on a thread and serves on
-another.
+`judge()` asks ONE `noul` question for the shadow verifier (desktop_helpers.local_verify),
+which is logged beside the planner's verdict and never trusted, and which never hands a
+hosted decider the screen's text. A lock serializes every predict, because the worker
+loads on one thread and serves on another.
 """
 
 from __future__ import annotations
 
 import math
-import os
 import re
 import threading
 import time
 from dataclasses import dataclass, field
 from typing import Any, Callable, Mapping, Optional, Sequence
 
-DEFAULT_MODEL_PATH = "~/.config/cc-buddy-bridge/models/laya-multilingual-mlx"
 STYLES = ("jev", "compact", "hinted")
 RESERVED = ("reobserve", "abstain")
 QUESTION_ID = "pick"
-OPTION_TOKEN_CAP = 48          # laya build_prefix: [MASK] + at most 48 option tokens
-HEAD_RESERVE = 16              # laya cuts every option once the options leave under 16 head tokens
-CHECKPOINT_FILES = ("model.safetensors", "rl_agent_config.json", "encoder/config.json",
-                    "tokenizer/tokenizer.json")
+OPTION_TOKEN_CAP = 48          # a marker token + at most 48 option tokens per option in the head
+HEAD_RESERVE = 16              # head tokens kept free past the options, or every option gets cut
 TIE_TOLERANCE = 1e-4
 STOP_WORDS = frozenset({"the", "and", "for", "with", "into", "onto", "from", "this", "that", "please",
                         "now", "then", "one", "all", "any", "its", "your", "our"})
@@ -61,7 +51,7 @@ INSTRUCTIONS = {
     "compact": "which one action advances the goal now? reobserve if the screen is changing; abstain if none does",
     "hinted": "which one action advances the goal now? reobserve if the screen is changing; abstain if none does",
 }
-# The warm-up menu: 12 options and a ~250-token state, the shape a real step takes.
+# The warm-up menu (jev.load): 12 options and a ~250-token state, the shape a real step takes.
 WARMUP_OBJECTIVE = "switch to week view"
 WARMUP_OPTIONS = {str(i + 1): f"click {role}: {label}" for i, (role, label) in enumerate((
     ("radio button", "Day"), ("radio button", "Week"), ("radio button", "Month"), ("radio button", "Year"),
@@ -81,7 +71,7 @@ class Choice:
     id: str
     p_top: float = 0.0
     margin: float = 0.0
-    confidence: float = 0.0            # laya's normalized entropy — LOGGING ONLY
+    confidence: float = 0.0            # the model's normalized entropy — LOGGING ONLY
     probabilities: dict[str, float] = field(default_factory=dict)
     ms: float = 0.0
     input_tokens: int = 0
@@ -137,7 +127,7 @@ def render_instructions(style: str, objective: str, options: Mapping[str, str]) 
 
 
 def render_question(style: str, objective: str, options: Mapping[str, str]) -> dict[str, Any]:
-    """The laya question dict for `choose`, so the eval can print exactly what the model was asked."""
+    """The question dict for `choose`, so the eval can print exactly what the model was asked."""
     return {"type": "choice", "instructions": render_instructions(style, objective, options),
             "criteria": dict(options)}
 
@@ -149,13 +139,13 @@ def word_count(text: str) -> int:
 
 def instruction_tokens(style: str, objective: str = "", options: Optional[Mapping[str, str]] = None,
                        tokenize: Optional[Callable[[str], int]] = None) -> int:
-    """Tokens laya spends on the head before the options: "choice question: <instructions>"."""
+    """Tokens the head spends before the options: "choice question: <instructions>"."""
     count = tokenize or word_count
     return count("choice question: " + render_instructions(style, objective, options or {}))
 
 
 def option_tokens(text: str, tokenize: Optional[Callable[[str], int]] = None) -> int:
-    """Tokens one option costs in laya's head: the [MASK] marker plus at most 48 text tokens."""
+    """Tokens one option costs in the head: a marker token plus at most 48 text tokens."""
     count = tokenize or word_count
     return 1 + min(OPTION_TOKEN_CAP, count(" " + text))
 
@@ -165,8 +155,8 @@ def trim_options(options: Mapping[str, str], budget: int,
     """Drop the LAST non-reserved options until the rendered options fit `budget` tokens.
 
     Options arrive in rank order, so the least likely go first. The reserved two are
-    never dropped, and at least one real option always stays (laya then cuts token
-    lengths itself; the caller sees the count in dropped_for_budget). Returns
+    never dropped, and at least one real option always stays (the caller sees the count
+    in dropped_for_budget). Returns
     (kept options in their original order, dropped count).
     """
     kept = dict(options)
@@ -191,7 +181,9 @@ def _finite_unit(value: Any) -> Optional[float]:
 
 
 class Decider:
-    """laya behind an injectable `predict(state, questions) -> result dict`."""
+    """A typed-decision model behind an injectable `predict(state, questions) -> result dict`.
+
+    `available` turns True once a warm-up answer came back (jev.load sets it)."""
 
     def __init__(
         self,
@@ -211,48 +203,10 @@ class Decider:
         self.head_max_len = int(head_max_len)
         self._clock = clock
         self.style = style
-        self.available = False          # True only after load()'s warm-up
+        self.available = False          # True only after a loader's warm-up (jev.load)
         self.load_ms = 0.0
         self.warm_ms = 0.0
         self._lock = threading.Lock()
-
-    # -- loading the real model --
-    @classmethod
-    def load(cls, model_path: str = DEFAULT_MODEL_PATH, *, style: str = "compact") -> "Decider":
-        """Import laya_mlx, build the Agent, warm it up once. Raises RuntimeError with one line."""
-        t0 = time.perf_counter()
-        path = os.path.expanduser(model_path)
-        if not os.path.isdir(path):
-            raise RuntimeError(f"laya checkpoint directory not found: {path}")
-        missing = [name for name in CHECKPOINT_FILES if not os.path.isfile(os.path.join(path, name))]
-        if missing:
-            raise RuntimeError(f"laya checkpoint at {path} is incomplete: missing {', '.join(missing)}")
-        try:
-            import laya_mlx
-        except Exception as e:  # noqa: BLE001 — any import failure (mlx, tokenizers, numpy) is one reason
-            raise RuntimeError(f"laya_mlx is not importable ({type(e).__name__}: {e}); "
-                               "install the bridge's [fast] extra") from None
-        try:
-            agent = laya_mlx.Agent(path, dtype="float16", device="gpu", batch_size=1, compile=True,
-                                   cache_prompts=False)
-        except Exception as e:  # noqa: BLE001 — a bad checkpoint, a missing Metal device: one line each
-            raise RuntimeError(f"laya checkpoint failed to load from {path}: {type(e).__name__}: {e}") from None
-        tok = agent.tok
-
-        def tokenize(text: str) -> int:
-            return len(tok(text, add_special_tokens=False)["input_ids"])
-
-        cfg = getattr(agent, "cfg", {}) or {}
-        decider = cls(agent.predict, tokenize=tokenize, max_len=int(cfg.get("max_len", 512)),
-                      head_max_len=int(cfg.get("head_max_len", 192)), style=style)
-        decider.load_ms = (time.perf_counter() - t0) * 1000.0
-        t1 = time.perf_counter()
-        warm = decider.choose(WARMUP_OBJECTIVE, app="Calendar", context=WARMUP_CONTEXT, options=WARMUP_OPTIONS)
-        decider.warm_ms = (time.perf_counter() - t1) * 1000.0
-        if warm.error:
-            raise RuntimeError(f"laya warm-up predict failed: {warm.error}")
-        decider.available = True
-        return decider
 
     # -- the one question --
     def choose(self, objective: str, *, app: str, context: str, options: Mapping[str, str],

@@ -215,7 +215,7 @@ def test_the_routing_doc_states_the_shipped_defaults_and_names_every_knob() -> N
     assert row("CC_BUDDY_ROUTER_MODEL") == tr.ROUTER_MODEL_DEFAULT
     assert row("CC_BUDDY_HEAD_MODEL") == "off" and "already done" in text
     assert row("CC_BUDDY_LANE_FIRST") == ("1" if LANE_FIRST_DEFAULT else "0")
-    assert row("CC_BUDDY_FAST_LANE_DECIDE") == DEFAULT_DECIDE and row("CC_BUDDY_DECIDER") == "laya"
+    assert row("CC_BUDDY_FAST_LANE_DECIDE") == DEFAULT_DECIDE and row("CC_BUDDY_DECIDER") == "unset"
     for phrase in ("absolute noul gate", "laya ranks", "Jev judges", "holdout 3", "thin but real", "typed_ask.py",
                    "tools/route_eval.py", "tools/head_eval.py", "unsafe"):
         assert phrase in text, phrase

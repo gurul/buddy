@@ -6,8 +6,8 @@
     .venv/bin/python tools/jev_step_eval.py --fixtures tests/fixtures/ax --replay a.json    # rescore, no network
     .venv/bin/python tools/jev_step_eval.py --fixtures tests/fixtures/ax --check-default    # the ship decision
 
-tools/fastlane_eval.py measured laya and the keyword gate on these fixtures and never Jev, so until this
-tool there was no number anywhere for Jev picking a native control. It asks typed_ask.ask_jev_step — the
+tools/fastlane_eval.py measured laya (the lane's local model until 2026-09-24) and the keyword gate on
+these fixtures and never Jev, so until this tool there was no number anywhere for Jev picking a native control. It asks typed_ask.ask_jev_step — the
 target choice over the lane's own menu plus an explicit "none", and the absolute nouls beside it, in one
 request — for every case, fits the cut-offs on `select` with zero wrong presses allowed, and scores
 `holdout` three ways: the keyword gate alone (today's click path), Jev alone, and the gate first with Jev

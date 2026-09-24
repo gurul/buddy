@@ -312,7 +312,7 @@ Buddy uses a fresh lookup for current time instead of reusing its start time.
 | `CC_BUDDY_AGENT_VERIFY` | on | check a final answer against a fresh screenshot before it is spoken, on any task that clicked, typed or pressed keys; `0` turns it off |
 | `CC_BUDDY_AGENT_VERIFY_REASONING` | `low` | reasoning effort for that check |
 | `CC_BUDDY_AGENT_RUNS_DIR` | `~/.config/cc-buddy-bridge/agent-runs` | one JSONL action log per task: goal, every code block, text results, questions, answers, final line — never the screenshots |
-| `CC_BUDDY_FAST_LANE` | `0` | the fast lane: `delegate` in the planner's helpers and the local decider in the worker; the default is the holdout eval's decision (see [The fast lane](#the-fast-lane-local-decider-under-the-planner)) |
+| `CC_BUDDY_FAST_LANE` | `0` | the fast lane: `delegate` in the planner's helpers; the default is the holdout eval's decision (see [The fast lane](#the-fast-lane-clicks-under-the-planner)) |
 | `CC_BUDDY_REFLEXES` | `1` | before the planner: launch an installed app or open a web search in code, about 2 s instead of 9–32 s; the default is `tools/route_eval.py`'s decision on an unseen holdout ([routing.md](routing.md)) |
 | `CC_BUDDY_ROUTER_MODEL` | `off` | `jev`: ask Jev, in its own idiom, about a request the rules did not recognise; it may only add a bare launch. The request's words leave the Mac ([routing.md](routing.md#ask-each-one-in-its-own-idiom)) |
 | `CC_BUDDY_LANE_FIRST` | `1` | the router: before the planner's first turn, the lane tries to finish a request whose every word one labelled control accounts for; the default is the router eval's decision (see [Lane first](#lane-first-the-router-before-the-planner)) |
@@ -320,10 +320,9 @@ Buddy uses a fresh lookup for current time instead of reusing its start time.
 | `CC_BUDDY_VOICE_GATE` | `off` | `shadow` or `on`: only the person who said the wake word reaches the model ([below](#the-voice-gate-only-the-person-who-woke-buddy)). `shadow` judges and logs every decision and changes no audio. Needs `~/.config/cc-buddy-bridge/models/nemo_en_titanet_small.onnx` (40 MB); without it buddy hears as it always has |
 | `CC_BUDDY_VOICE_GATE_MODEL` | that path | another sherpa-onnx speaker-embedding model |
 | `CC_BUDDY_PLAN_EXEC` | `0` | `1`: plan once, execute with no planner turn between steps ([routing.md](routing.md#plan-once-execute-with-jev)) |
-| `CC_BUDDY_DECIDER` | `laya` | the decider behind `model`: `laya` (local, nothing leaves the Mac) or `jev` (TypeSafe's hosted model, `jev.py`; it is sent the window title and the menu's labels, and is never loaded in `keyword` mode) |
-| `CC_BUDDY_FAST_LANE_STYLE` | `hinted` | how the lane words its question to the local model: `jev`, `compact` or `hinted` (the eval's winner) |
-| `CC_BUDDY_LAYA_MODEL` | `~/.config/cc-buddy-bridge/models/laya-multilingual-mlx` | the Laya MLX checkpoint directory the worker loads |
-| `CC_BUDDY_LOCAL_VERIFY` | `shadow` | the worker's local verdict on a final answer, logged beside the model's (`shadow`) or skipped (`off`); never acted on |
+| `CC_BUDDY_DECIDER` | `unset` | the decider behind `model`: `jev` is the only value (TypeSafe's hosted model, `jev.py`; it is sent the window title and the menu's labels, and is never loaded in `keyword` mode). Unset, `model` mode stays off. The local Laya decider was removed from the lane on 2026-09-24 |
+| `CC_BUDDY_FAST_LANE_STYLE` | `jev` | how `model` mode words its question to the decider: `jev` (the style Jev scored best with), `compact` or `hinted` |
+| `CC_BUDDY_LOCAL_VERIFY` | `shadow` | the worker's local verdict on a final answer, logged beside the model's (`shadow`) or skipped (`off`); never acted on. It needs a local decider, and none is loaded since the Laya click lane was removed, so today it logs an error |
 
 ## What buddy remembers of talking with you
 
@@ -419,16 +418,18 @@ anything that links to it. From the shell, `cc-buddy-bridge take-notes list`.
 | `CC_BUDDY_NOTES_KEEP_TRANSCRIPT` | on | `0` writes the summary only |
 | `CC_BUDDY_NOTES_MODEL_STT` | `gpt-4o-mini-transcribe` | the transcription model |
 
-## The fast lane (local decider under the planner)
+## The fast lane (clicks under the planner)
 
 `gpt-6-astra` plans; it does not need to spend a 3.5 s turn (logged median, p90 6 s) on
 "click Week, then click Today". The fast lane is a helper the planner can call from
 `exec_py` — `delegate(objective, …)` — that runs a narrow series of clicks on labelled
-controls inside the frontmost app, decided locally in milliseconds. The division of labour
+controls inside the frontmost app, in well under a second a step. The division of labour
 is fixed: **code owns the menu** (the Accessibility tree of the focused window, filtered
-and ranked in `ax_candidates.py`), **the local model picks** (`decider.py`: the Laya
-typed-decision checkpoint on MLX, one `choice` question per step), **the planner plans**
-and speaks the final sentence. Every judgement that could cost you something is a code
+and ranked in `ax_candidates.py`), **the keyword gate picks** (code; in `model` mode a
+typed-decision model picks where the gate cannot — `decider.py` over hosted Jev, one
+`choice` question per step; in `jev` mode Jev can refuse the gate's pick), **the planner
+plans** and speaks the final sentence. Until 2026-09-24 the model was a local Laya
+checkpoint on MLX; it lost to the keyword gate (below) and was removed from the lane. Every judgement that could cost you something is a code
 oracle in `fast_lane.py`, never the model's: the lane can only *add* stops to the
 planner's `ask_user` contract.
 
@@ -593,13 +594,15 @@ mentions `delegate` when the lane is on, so a planner without the helper never r
 - **Accurate OCR for clicks.** `click_text` polls accurate OCR directly. Fast OCR can
   miss a label that `screen_text` already read; previously that meant a three-second
   timeout and another model turn. `wait_for` retains its fast polling path.
-- **A shadow verifier.** The worker's `verify` operation asks the local model one yes/no
+- **A shadow verifier.** The worker's `verify` operation asks a local model one yes/no
   question — does the screen (frontmost app, title, fast OCR) show what the final message
   claims? — and the agent runs it concurrently with the model's own check, then logs
   `{p_true, summary, ms}` beside `{valid, guidance}` under `verify.local`. It is **never
   acted on**: `CC_BUDDY_LOCAL_VERIFY=shadow` (default) logs it, `off` skips it, and an
   `on` that short-circuits the model needs ≥ 50 logged pairs to calibrate against first
-  (deferred). A hung verify times out after 5 s and never restarts the worker.
+  (deferred). A hung verify times out after 5 s and never restarts the worker. It only ever
+  ran on the local Laya checkpoint; since that left the lane (2026-09-24) no local decider is
+  loaded, it answers an error, and a hosted decider is never handed the screen's text.
 
 ### The eval, and why it ships off
 
@@ -616,12 +619,15 @@ format and the capture recipe are in `bridge/tests/fixtures/ax/README.md`;
 ```bash
 cd bridge
 .venv/bin/python tools/fastlane_eval.py --fixtures tests/fixtures/ax --min-select 30 --min-holdout 40 \
-    --min-apps 5 --min-no-overlap 12 --min-distractor 6      # every style over both sets, real model
+    --min-apps 5 --min-no-overlap 12 --min-distractor 6      # every style over both sets, the real decider
 .venv/bin/python tools/fastlane_eval.py --fixtures tests/fixtures/ax --check-default   # the ship decision
 ```
 
-Real model, 2026-09-21 (Laya multilingual, FP16 on MLX; load ~400 ms, first decision 1.5 s
-cold or 30 ms with a warm Metal cache, then 8–14 ms a decision, ~1 GiB resident in the worker):
+The real decider the eval loads is the one `model` mode loads: hosted Jev (`jev.load`, a network
+call per case; `--fake-predictor` runs offline). The numbers below are the run of 2026-09-21, when
+the lane's model was the local Laya checkpoint (FP16 on MLX; load ~400 ms, first decision 1.5 s
+cold or 30 ms with a warm Metal cache, then 8–14 ms a decision, ~1 GiB resident in the worker).
+Jev on the same fixtures, in `jev` mode, is in [routing.md](routing.md#plan-once-execute-with-jev):
 
 | Decision path | select top-1 | holdout top-1 | holdout gated top-1 / coverage |
 |---|---|---|---|
@@ -645,7 +651,7 @@ picks 29.7 % (n = 37), model picks above the thresholds 26.7 % (n = 15); no app 
 class reaches 80 % for the model (best: shared-word cases 40 %, n = 10; Safari and Calendar
 0 %). At +3.5 s a right click and −4.55 s a wrong one that is about **+2.6 s per
 keyword-decided step and −2.5 s per model-decided step**, which is why `keyword` is the
-default decide mode and Laya is out of the click path. The keyword gate itself is 93–95 %
+default decide mode and why Laya was later removed from the lane altogether. The keyword gate itself is 93–95 %
 when the goal shares a word with the label and no wrong control shares more, and 0 % on the
 distractor cases — the router's cover rule is what removes those.
 
@@ -659,19 +665,12 @@ fixtures and the gates need no change.
 
 ### Install
 
-The daemon runs without any of this. On Apple silicon:
-
-```bash
-cd bridge && .venv/bin/pip install -e ".[fast]"      # laya-mlx 0.1.0 + mlx (PyPI, 2026-09-21)
-cp -R /path/to/laya-multilingual-mlx ~/.config/cc-buddy-bridge/models/laya-multilingual-mlx
-CC_BUDDY_FAST_LANE=1 .venv/bin/cc-buddy-bridge daemon
-```
-
-`cc-buddy-bridge update` installs the `[fast]` extra automatically on Apple silicon. The
-desktop worker loads the checkpoint in a daemon thread at start (its ready line says
-`fast_lane: loading`, later replies `ready (load … warm …)` or `failed: …`) and `delegate`
-answers `unavailable` until it is ready; the checkpoint must be a real directory under
-`~/.config` (`CC_BUDDY_LAYA_MODEL` moves it). Live checks: `tools/fastlane_eval.py
+Nothing to install: the keyword gate is code, and `CC_BUDDY_FAST_LANE=1` turns the helper on
+(its ready line says `fast_lane: ready (keyword gate)`). For `model` mode, set
+`CC_BUDDY_FAST_LANE_DECIDE=model`, `CC_BUDDY_DECIDER=jev` and a Jev route (`TYPESAFE_API_KEY`,
+or `CC_BUDDY_JEV_ROUTE=openrouter` with `OPENROUTER_API_KEY`): the desktop worker loads the
+decider in a daemon thread at start (`fast_lane: loading`, later replies `ready (load … warm …)`
+or `failed: …`) and `delegate` answers `unavailable` until it is ready. Live checks: `tools/fastlane_eval.py
 --live-snapshot Calendar` (a real walk: 124 nodes, 59 pressable, 0.08–0.17 s here; System
 Settings 195 nodes 0.18 s; Safari on Wikipedia 3632 nodes 0.4–0.9 s once the page has
 settled) and `--live-delegate Calendar "switch to week view" --done-when Week`.
@@ -742,8 +741,9 @@ Responses backend is billed separately, as are `gpt-6-astra` task tokens: one
 screenshot is a few thousand input tokens, a typical 6-step task well under a dollar.
 A web search is billed per call on top of the backend's tokens, and a `think_hard` is
 one high-effort `gpt-6-astra` call (cents, not dollars) — every call sets `store=False`.
-A fast-lane decision is a local model call: it costs nothing per call (8–14 ms of GPU time
-on this Mac), which is why the lane exists.
+A fast-lane step decided by the keyword gate is code: it costs nothing and takes well under a
+millisecond, which is why the lane exists. In `model` or `jev` mode a step is one Jev request
+($0.042 per M input tokens, about 240 ms).
 
 ## Why these parts (research, 2026-09-06)
 

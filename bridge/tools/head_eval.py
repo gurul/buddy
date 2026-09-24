@@ -103,10 +103,9 @@ def raw_predict(name: str):
         import os
 
         import laya_mlx
+        from laya_decider import model_path
 
-        from cc_buddy_bridge.decider import DEFAULT_MODEL_PATH
-
-        agent = laya_mlx.Agent(os.path.expanduser(DEFAULT_MODEL_PATH), dtype="float16", device="gpu", batch_size=16,
+        agent = laya_mlx.Agent(os.path.expanduser(model_path()), dtype="float16", device="gpu", batch_size=16,
                                compile=True, cache_prompts=False)
         agent.predict({"owner said": "look left"}, {"q": {"type": "choice", "instructions": "which way?",
                                                            "criteria": {"left": "left", "right": "right"}}})   # warm
@@ -120,14 +119,14 @@ def raw_predict(name: str):
 
 
 def load_uniform(name: str) -> Callable[[str], tuple[str, float, float]]:
-    """The contrast arm: both models asked the same 16-option question through the lane's Decider."""
+    """The contrast arm: both models asked the same 16-option question through decider.Decider."""
     from cc_buddy_bridge.envfile import load_env_file
 
     load_env_file()
     if name == "laya":
-        from cc_buddy_bridge.decider import DEFAULT_MODEL_PATH, Decider
+        import laya_decider
 
-        decider = Decider.load(DEFAULT_MODEL_PATH, style="compact")
+        decider = laya_decider.load(style="compact")
     else:
         from cc_buddy_bridge import jev
 

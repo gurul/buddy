@@ -160,14 +160,14 @@ def print_summary(title: str, s: dict[str, Any]) -> None:
 
 
 def load_model(name: str) -> Callable[[str], tuple[str, float]]:
-    """A `choose(goal) -> (key, p_top)` over MODEL_OPTIONS, from the lane's own Decider wrapper."""
+    """A `choose(goal) -> (key, p_top)` over MODEL_OPTIONS, through decider.Decider."""
     from cc_buddy_bridge.envfile import load_env_file
 
     load_env_file()
     if name == "laya":
-        from cc_buddy_bridge.decider import DEFAULT_MODEL_PATH, Decider
+        import laya_decider
 
-        decider = Decider.load(DEFAULT_MODEL_PATH, style="compact")
+        decider = laya_decider.load(style="compact")
     elif name == "jev":
         from cc_buddy_bridge import jev
 
@@ -197,9 +197,9 @@ def native_jev(tuning: dict[str, Any], seen: list[dict[str, Any]], holdout: Opti
 
     load_env_file()
     if model_name == "laya":
-        from cc_buddy_bridge.decider import DEFAULT_MODEL_PATH, Decider
+        import laya_decider
 
-        predict = Decider.load(DEFAULT_MODEL_PATH, style="compact")._predict
+        predict = laya_decider.load(style="compact")._predict
         asker = ta.ask_laya_request
     else:
         from cc_buddy_bridge import jev

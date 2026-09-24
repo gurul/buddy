@@ -403,7 +403,7 @@ class Helpers:
     ) -> None:
         self.gui = pyautogui
         self.fast_lane = fast_lane
-        self.decider = decider                      # the local typed-decision model (decider.Decider), or None
+        self.decider = decider                      # `model` mode's decider (decider.Decider over jev.py), or None
         self._menu_bar_points = menu_bar_points
         self._capture_fn = capture
         self._ocr = ocr

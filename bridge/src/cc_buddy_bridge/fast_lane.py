@@ -1,16 +1,16 @@
-"""The fast lane: a narrow run of clicks on labelled controls, decided locally.
+"""The fast lane: a narrow run of clicks on labelled controls, decided without the planner.
 
 `run_delegate(objective, ...)` is what the `delegate` helper calls from exec_py. Per
 step it takes an accessibility snapshot (ax_candidates), builds a bounded menu in
-code, asks the local typed-decision model (decider) which option advances the
-objective, gates the answer in code, acts through injected effectors, settles, and
+code, picks the option that advances the objective (the keyword gate in code, or a
+typed-decision model — see `decide` below), gates the answer in code, acts through injected effectors, settles, and
 checks `done_when`. The model only ranks: every judgement that can cost the human
 something — sensitive labels, dialogs, System Settings values, return into a message,
 a hit-test miss, a focus change, a repeat, a stall — is a code oracle here, and the
 lane can only ADD stops to the planner's ask_user contract, never remove one.
 
-Measured cost floor of a step on this Mac (PLAN §0): AX snapshot 0.04-0.43 s, decide
-8-45 ms warm, hit-test ≤ 24 ms, settle 0.33-1.0 s — against a replaced planner turn of
+Measured cost floor of a step on this Mac (PLAN §0): AX snapshot 0.04-0.43 s, a keyword
+decide well under a millisecond (a hosted Jev answer ~240 ms p50), hit-test ≤ 24 ms, settle 0.33-1.0 s — against a replaced planner turn of
 3.56 s API + 1.3 s exec. The honest promise is fewer failed-click recovery turns first.
 
 The decide step is two oracles in order. First the keyword gate (`keyword_pick`): when
@@ -19,9 +19,8 @@ ax_candidates.objective_tokens) and that count is above zero, it is the pick and
 model is not asked — on the select fixtures this code-only rule is 0.90 precise at 0.66
 coverage, better than the model on its own. Otherwise the model ranks the menu, with each
 click option worded by decider.render_option ("Week (radio button)") and a context of the
-window title (and the focused control): 0.603 top-1 on select against 0.315 for the older
-"click radio button: Week" wording with the full context lines; the two together score
-0.712. Every gate after the pick (sensitive, dialog, System Settings, return, repeat,
+window title (and the focused control): the wording and the context the select fixtures
+scored best (decider.py has the numbers). Every gate after the pick (sensitive, dialog, System Settings, return, repeat,
 hit-test) applies to a keyword pick exactly as to a model pick; Step.via says which one
 decided.
 
@@ -58,7 +57,8 @@ confirm guarantees the blocked action did not run; unavailable guarantees zero i
 
 Who decides is `decide` (DECIDE_MODES, default "keyword"): the keyword gate alone, where a tie
 escalates `ambiguous_target` and zero shared words escalates `no_match`, and no model is loaded
-or asked; or "model", the gate first and the model on the rest. Keyword mode clicks only: a
+or asked; "model", the gate first and the decider (decider.Decider over hosted Jev, jev.py) on
+the rest; or "jev", the gate proposes and Jev's step asker can refuse (run_delegate). Keyword mode clicks only: a
 call with `text` or `key` answers unavailable, because the gate has never been measured on
 which field to type into.
 
@@ -96,20 +96,16 @@ from .typed_ask import JEV_STEP_GATES, StepAnswer, StepGates
 
 # The shipped default for CC_BUDDY_FAST_LANE. The holdout eval (tools/fastlane_eval.py
 # --check-default, gate G6) decides it: enabled only if gated top-1 ≥ 0.80, coverage ≥ 0.70,
-# real ≥ keyword + 0.10 on overlap:false cases and the cost-weighted score > 0.
-# Holdout, 82 cases, at these thresholds (2026-09-21): gated top-1 72.3%, coverage 79.3%,
-# overlap:false real 26.3% vs keyword 47.4%, cost-weighted +0.61 s/case — two of the four
-# conditions fail, so the lane ships off. The keyword gate alone decided 54.9% of holdout at
-# 88.9%; the model alone got 25.7% of the rest.
+# real ≥ keyword + 0.10 on overlap:false cases and the cost-weighted score > 0. The last run
+# (holdout, 82 cases, 2026-09-21) was of a local checkpoint since removed from the lane: gated
+# top-1 72.3%, coverage 79.3% — two of the four conditions failed, so the lane ships off. The
+# keyword gate alone decided 54.9% of holdout at 88.9%.
 FAST_LANE_DEFAULT: bool = False
 # Who decides a step. "keyword": the keyword gate alone — a tie or zero shared words escalates,
-# the local model is never asked and need not be loaded. "model": the gate first, the model on
-# the rest (the path the numbers above measured). Sliced by decision path on holdout
-# (2026-09-21, tools/fastlane_eval.py --results-out): keyword picks 88.9% right (n=45), model
-# picks 29.7% (n=37), model picks above the thresholds 26.7% (n=15), no app or case class at or
-# above 80%. At +3.5 s a right click and −4.55 s a wrong one that is about +2.6 s per
-# keyword-decided step and −2.5 s per model-decided step, so the model is out of the click path
-# until a checkpoint beats the gate where it abstains.
+# no model is asked or loaded. "model": the gate first, the decider on the rest (CC_BUDDY_DECIDER=jev;
+# desktop_worker.start_fast_lane). "jev": the gate proposes and Jev's step asker can refuse. Sliced by
+# decision path on holdout (2026-09-21): keyword picks 88.9% right (n=45) against 29.7% for the model
+# picks of that run, so the default keeps any model out of the click path.
 DECIDE_MODES = ("keyword", "model", "jev")
 DEFAULT_DECIDE = "keyword"
 # The shipped default for CC_BUDDY_LANE_FIRST (lane_router.py: the lane runs before the planner's
@@ -125,9 +121,9 @@ DEFAULT_DECIDE = "keyword"
 LANE_FIRST_DEFAULT: bool = True
 MAX_SCRIPT_STEPS = 6
 # "jev" mode's menu. Jev reads 255 options, and on select the right control is on a 25-menu in 60 of 69
-# cases against 58 on the 10-menu the local model needed (tools/jev_step_eval.py, 2026-09-21).
+# cases against 58 on the 10-menu `model` mode offers (tools/jev_step_eval.py, 2026-09-21).
 JEV_MAX_OPTIONS = 27               # 25 real options + the two reserved
-DEFAULT_STYLE = "hinted"           # the eval's winner on select (cost-weighted +1.41 vs compact +1.37)
+DEFAULT_STYLE = "jev"              # how `model` mode words its question: the style Jev scored best with (jev.py)
 SYSTEM_SETTINGS_BUNDLE = "com.apple.systempreferences"
 SYSTEM_SETTINGS_NAV_ROLES = frozenset({"row", "cell", "tab", "link"})
 # In System Settings every `button` looks alike to the Accessibility tree: "Dark" (a value) and
@@ -155,8 +151,8 @@ STATUSES = ("done", "stopped", "escalate", "confirm", "unavailable")
 @dataclass(frozen=True)
 class Thresholds:
     # p_min / margin_min are the eval's (tools/fastlane_eval.py, 2026-09-21, select fixtures, 73
-    # cases): the highest grid pair with coverage ≥ 0.70 on select — 0.60 / 0.15 covered 79.5% at
-    # 81.0% gated top-1 there. They gate model picks only; a keyword-gate pick carries p_top 1.0.
+    # cases, measured on the local checkpoint the lane used then): the highest grid pair with
+    # coverage ≥ 0.70 on select — 0.60 / 0.15 covered 79.5% at 81.0% gated top-1 there. They gate model picks only; a keyword-gate pick carries p_top 1.0.
     # The gate escalates ambiguous_target below them.
     p_min: float = 0.60
     margin_min: float = 0.15
@@ -617,7 +613,7 @@ def run_delegate(objective: str, *, senses: Any, effectors: Any, decider: Any, t
     if decide not in DECIDE_MODES:
         return run.finish("unavailable", format_line("unavailable", reason=f"decide must be one of {DECIDE_MODES}"))
     if decide == "model" and (decider is None or not getattr(decider, "available", False)):
-        return run.finish("unavailable", format_line("unavailable", reason="the local decider is not loaded"))
+        return run.finish("unavailable", format_line("unavailable", reason="the decider is not loaded"))
     if decide == "jev" and asker is None:
         return run.finish("unavailable", format_line("unavailable", reason="jev is not configured"))
     if decide in ("keyword", "jev") and (text is not None or key is not None):

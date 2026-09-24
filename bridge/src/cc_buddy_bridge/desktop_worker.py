@@ -21,8 +21,9 @@ desktop_helpers.py — open_app, open_url, frontmost, screen_text, find_text,
 click_text, wait_for, wait_settled, type_text, zoom, observe — which sense
 the screen locally (CG capture, Vision OCR, AX) and log one sentence each.
 With CC_BUDDY_FAST_LANE on (default: fast_lane.FAST_LANE_DEFAULT) it also
-carries `delegate`, and `start_fast_lane` loads the local decider in a daemon
-thread; the ready line and every reply say where that stands ("fast_lane").
+carries `delegate`; in the lane's `model` mode `start_fast_lane` loads the hosted
+decider (jev.py) in a daemon thread. The ready line and every reply say where
+that stands ("fast_lane").
 
 Auto-screenshot rule: when a call clicked, typed or pressed keys (any
 PyAutoGUI input function, type_text, click_text), raised, or produced no
@@ -202,19 +203,18 @@ def execute(code: str, namespace: dict[str, Any], helpers: Any = None) -> dict[s
     return result
 
 
-def fast_lane_config(env: Any) -> tuple[bool, str, str]:
-    """(enabled, model path, style) from CC_BUDDY_FAST_LANE / CC_BUDDY_LAYA_MODEL / CC_BUDDY_FAST_LANE_STYLE.
+def fast_lane_config(env: Any) -> tuple[bool, str]:
+    """(enabled, style) from CC_BUDDY_FAST_LANE / CC_BUDDY_FAST_LANE_STYLE.
     The default for the switch is fast_lane.FAST_LANE_DEFAULT, which the holdout eval sets."""
-    from .decider import DEFAULT_MODEL_PATH, STYLES
+    from .decider import STYLES
     from .fast_lane import DEFAULT_STYLE, FAST_LANE_DEFAULT
 
     raw = (env.get("CC_BUDDY_FAST_LANE") or "").strip().lower()
     enabled = FAST_LANE_DEFAULT if not raw else raw not in ("0", "false", "no", "off")
-    model = os.path.expanduser((env.get("CC_BUDDY_LAYA_MODEL") or DEFAULT_MODEL_PATH).strip() or DEFAULT_MODEL_PATH)
     style = (env.get("CC_BUDDY_FAST_LANE_STYLE") or "").strip().lower()
     if style not in STYLES:
-        style = DEFAULT_STYLE                  # the eval's winner (fast_lane.py), "hinted" as of 2026-09-21
-    return enabled, model, style
+        style = DEFAULT_STYLE                  # "jev": the style Jev scored best with on select (jev.py)
+    return enabled, style
 
 
 def lane_modes(env: Any) -> tuple[str, bool]:
@@ -230,38 +230,36 @@ def lane_modes(env: Any) -> tuple[str, bool]:
     return decide, first
 
 
-DECIDER_BACKENDS = ("laya", "jev")
+DECIDER_BACKENDS = ("jev",)
 
 
 def decider_backend(env: Any) -> str:
-    """Who answers the lane's one `choice` question: CC_BUDDY_DECIDER, "laya" by default.
+    """Who answers the lane's one `choice` question in `model` mode: CC_BUDDY_DECIDER, unset by default.
 
-    "laya" is the local checkpoint (11.6 ms p50, nothing leaves the Mac). "jev" is
-    TypeSafe's hosted System One model over the same predict seam (jev.py): a network
-    call, and the state it sends carries the focused window's title and visible text.
-    An unknown value falls back to "laya" rather than turning the lane off.
+    "jev" is TypeSafe's hosted System One model over decider.Decider's predict seam (jev.py): a
+    network call, and the state it sends carries the focused window's title and visible text, so
+    it runs only when the owner names it. Unset or any other value is "" — no decider, and
+    `model` mode stays off rather than sending anything anywhere.
     """
     name = (env.get("CC_BUDDY_DECIDER") or "").strip().lower()
-    return name if name in DECIDER_BACKENDS else "laya"
+    return name if name in DECIDER_BACKENDS else ""
 
 
 def start_fast_lane(helpers: Any, env: Any, loader: Any = None, thread: bool = True) -> str:
-    """Turn the lane on for `helpers` and load the decider off the critical path.
+    """Turn the lane on for `helpers`, and in `model` mode load the decider off the critical path.
 
-    Returns the status the ready line carries: "loading" (a daemon thread is running
-    `loader(model, style)`, 0.4 s load + 1.5 s cold warm-up measured 2026-09-21), or
+    Returns the status the ready line carries: "ready (keyword gate)" (no model is needed),
+    "loading" (a daemon thread is running `loader(style)`, jev.load by default), or
     "off (<reason>)". Later replies carry `helpers.fast_lane_status`: "ready (load … warm …)"
     or "failed: <one line>" — the delegate helper answers `unavailable` until ready.
     """
-    enabled, model, style = fast_lane_config(env)
+    enabled, style = fast_lane_config(env)
     decide, first = lane_modes(env)
     backend = decider_backend(env)
-    if backend == "jev" and not (env.get("CC_BUDDY_FAST_LANE_STYLE") or "").strip():
-        style = "jev"                          # the style Jev scored best with on select (jev.py)
     helpers.lane_decide = decide
-    # A hosted decider sees what it is sent. It may answer the lane's one choice question; it never
-    # gets the shadow verifier's state (up to 40 OCR lines of the whole screen) for a log-only value.
-    helpers.decider_remote = backend != "laya"
+    # Every decider the worker can load is hosted (jev.py). It may answer the lane's one choice question;
+    # it never gets the shadow verifier's state (up to 40 OCR lines of the whole screen) for a log-only value.
+    helpers.decider_remote = True
     helpers.lane_first_on = bool(first) and sys.platform == "darwin"
     router = "; router on" if helpers.lane_first_on else ""
     if not enabled:
@@ -270,42 +268,33 @@ def start_fast_lane(helpers: Any, env: Any, loader: Any = None, thread: bool = T
     if sys.platform != "darwin":
         helpers.fast_lane_status = f"off (not macOS: {sys.platform})"
         return helpers.fast_lane_status
-    if decide == "keyword":
-        # The keyword gate is code: the lane is ready now. A checkpoint, when there is one, still
-        # loads below for the shadow verifier; without one the lane works and the shadow says so.
+    if decide == "keyword" or (decide == "jev" and not backend):
+        # The keyword gate is code, and in "jev" mode the step asker (start_jev_asker) decides: neither
+        # needs a decider, so the lane is ready now and nothing is loaded.
         helpers.fast_lane = True
-        helpers.fast_lane_status = "ready (keyword gate)" + router
-        if backend != "laya" or not os.path.isdir(model):
-            return helpers.fast_lane_status    # no model in the click path: a remote one is not loaded at all
-    elif backend == "laya" and not os.path.isdir(model):
-        helpers.fast_lane_status = f"off (no checkpoint at {model})" + router
+        helpers.fast_lane_status = ("ready (keyword gate)" if decide == "keyword"
+                                    else "ready (jev step asker; no decider)") + router
         return helpers.fast_lane_status
-    else:
-        helpers.fast_lane = True
-        helpers.fast_lane_status = "loading"
+    if not backend:
+        helpers.fast_lane_status = "off (model mode needs CC_BUDDY_DECIDER=jev)" + router
+        return helpers.fast_lane_status
+    helpers.fast_lane = True
+    helpers.fast_lane_status = "loading"
 
     def load() -> None:
         try:
             if loader is not None:
-                decider = loader(model, style)
-            elif backend == "jev":
+                decider = loader(style)
+            else:
                 from . import jev
 
                 decider = jev.load(env=env, style=style)
-            else:
-                from .decider import Decider
-
-                decider = Decider.load(model, style=style)
             helpers.decider = decider
             loaded = (f"load {getattr(decider, 'load_ms', 0):.0f} ms, "
                       f"warm {getattr(decider, 'warm_ms', 0):.0f} ms, style {style}")
-            helpers.fast_lane_status = (f"ready (keyword gate; model for the shadow: {loaded})" if decide == "keyword"
-                                        else f"ready ({loaded})") + router
+            helpers.fast_lane_status = f"ready ({loaded})" + router
         except Exception as e:  # noqa: BLE001 — the lane stays unavailable; the model keeps its ordinary helpers
-            if decide == "keyword":               # the gate never needed the model
-                helpers.fast_lane_status = f"ready (keyword gate; no model: {type(e).__name__})"[:200] + router
-            else:
-                helpers.fast_lane_status = f"failed: {type(e).__name__}: {e}"[:200]
+            helpers.fast_lane_status = f"failed: {type(e).__name__}: {e}"[:200]
 
     if thread:
         threading.Thread(target=load, name="fast-lane-loader", daemon=True).start()

@@ -69,14 +69,18 @@ python3.12 -m venv .venv
 
 **Windows users:** Replace `.venv/bin/` with `.venv\Scripts\` in the commands above.
 
-**Optional, Apple silicon only — the computer-use fast lane.** `.venv/bin/pip install -e ".[fast]"`
-adds `laya-mlx`, then copy the Laya checkpoint to `~/.config/cc-buddy-bridge/models/laya-multilingual-mlx`
-and start the daemon with `CC_BUDDY_FAST_LANE=1` (it ships off; the daemon runs without any of this).
-The lane's **router** needs none of that and ships on (`CC_BUDDY_LANE_FIRST`, `lane_router.py`): a request
+**Optional — the computer-use fast lane.** Start the daemon with `CC_BUDDY_FAST_LANE=1` (it ships off)
+and the planner gets `delegate`, keyword-decided clicks on labelled controls; nothing to install. Its
+`model` mode asks hosted Jev (`CC_BUDDY_DECIDER=jev`); the local Laya decider it once used was removed.
+The lane's **router** ships on (`CC_BUDDY_LANE_FIRST`, `lane_router.py`): a request
 one labelled control fully accounts for ("switch to week view") is clicked before the planner's first turn,
-in about a second instead of thirteen.
-`cc-buddy-bridge update` installs the `[fast]` extra automatically on Apple silicon. Details and the
-measured numbers: [docs/stackchan/voice.md](../docs/stackchan/voice.md#the-fast-lane-local-decider-under-the-planner).
+in about a second instead of thirteen. Details and the
+measured numbers: [docs/stackchan/voice.md](../docs/stackchan/voice.md#the-fast-lane-clicks-under-the-planner).
+
+**Optional, Apple silicon only — the robot's live eye expressions.** `.venv/bin/pip install -e ".[laya]"`
+adds `laya-mlx` for the local Laya checkpoint at `~/.config/cc-buddy-bridge/models/laya-multilingual-mlx`
+([laya-expressions](../docs/stackchan/laya-expressions/README.md)). `cc-buddy-bridge update` installs the
+`[laya]` extra automatically on Apple silicon.
 
 Then start any `claude` session. The daemon scans for a BLE device advertising
 a name starting with `Claude`, connects, and begins pushing state.

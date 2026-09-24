@@ -386,48 +386,47 @@ def test_start_fast_lane_loads_in_a_thread_and_reports_status() -> None:
     assert dw.start_fast_lane(h, off) == "off (CC_BUDDY_FAST_LANE)" and not h.fast_lane
     h.install(ns)
     assert "delegate" not in ns
-    # the model path needs its checkpoint; the keyword path (the default) does not
-    env = {"CC_BUDDY_FAST_LANE": "1", "CC_BUDDY_LAYA_MODEL": "/nonexistent/model", "CC_BUDDY_FAST_LANE_DECIDE": "model",
-           "CC_BUDDY_LANE_FIRST": "0"}
-    assert dw.start_fast_lane(h, env).startswith("off (no checkpoint at /nonexistent/model)")
+    # model mode needs a decider the owner named; the keyword path (the default) needs none
+    env = {"CC_BUDDY_FAST_LANE": "1", "CC_BUDDY_FAST_LANE_DECIDE": "model", "CC_BUDDY_LANE_FIRST": "0"}
+    assert dw.start_fast_lane(h, env) == "off (model mode needs CC_BUDDY_DECIDER=jev)" and not h.fast_lane
     hk, nsk, _ck, _sk = _bench([_still()])
-    keyword_env = {"CC_BUDDY_FAST_LANE": "1", "CC_BUDDY_LAYA_MODEL": "/nonexistent/model", "CC_BUDDY_LANE_FIRST": "0"}
+    keyword_env = {"CC_BUDDY_FAST_LANE": "1", "CC_BUDDY_LANE_FIRST": "0"}
     assert dw.start_fast_lane(hk, keyword_env) == "ready (keyword gate)" and hk.fast_lane and hk.decider is None
     assert hk.lane_decide == "keyword" and hk.lane_first_on is False
-    calls: list[tuple] = []
+    # jev mode with no decider named: the step asker decides, so the lane is ready and nothing is loaded
+    hj, _nsj, _cj, _sj = _bench([_still()])
+    jev_env = {"CC_BUDDY_FAST_LANE": "1", "CC_BUDDY_FAST_LANE_DECIDE": "jev", "CC_BUDDY_LANE_FIRST": "0"}
+    assert dw.start_fast_lane(hj, jev_env) == "ready (jev step asker; no decider)" and hj.fast_lane
+    assert hj.decider is None and hj.lane_decide == "jev"
+    calls: list[str] = []
 
-    def loader(model: str, style: str):
-        calls.append((model, style))
+    def loader(style: str):
+        calls.append(style)
         return SimpleNamespace(available=True, load_ms=400.0, warm_ms=1500.0, judge=lambda *a, **k: None)
-    import os
-    env = {"CC_BUDDY_FAST_LANE": "1", "CC_BUDDY_LAYA_MODEL": os.getcwd(), "CC_BUDDY_FAST_LANE_STYLE": "hinted",
+    env = {"CC_BUDDY_FAST_LANE": "1", "CC_BUDDY_DECIDER": "jev", "CC_BUDDY_FAST_LANE_STYLE": "hinted",
            "CC_BUDDY_FAST_LANE_DECIDE": "model", "CC_BUDDY_LANE_FIRST": "0"}
     status = dw.start_fast_lane(h, env, loader=loader, thread=False)
     assert status.startswith("ready (load 400 ms, warm 1500 ms, style hinted)") and h.fast_lane and h.decider is not None
-    assert calls == [(os.getcwd(), "hinted")]
+    assert calls == ["hinted"]
     h.install(ns)
     assert callable(ns["delegate"])
     r = dw.execute("x = screen_text()", ns, h)
     assert r["fast_lane"].startswith("ready (") and "timing" in r
     # a failing loader is a status line, never an exception, and the reply says so
 
-    def broken(model: str, style: str):
-        raise RuntimeError("no metal device")
+    def broken(style: str):
+        raise RuntimeError("HTTP 503 from the decider")
     h2, ns2, _c2, _s2 = _bench([_still()])
-    assert dw.start_fast_lane(h2, env, loader=broken, thread=False) == "failed: RuntimeError: no metal device"
+    assert dw.start_fast_lane(h2, env, loader=broken, thread=False) == "failed: RuntimeError: HTTP 503 from the decider"
     h2.install(ns2)
-    assert dw.execute("pass", ns2, h2)["fast_lane"] == "failed: RuntimeError: no metal device"
+    assert dw.execute("pass", ns2, h2)["fast_lane"] == "failed: RuntimeError: HTTP 503 from the decider"
 
 
 def test_fast_lane_config_defaults_follow_the_eval_decision() -> None:
-    import os
-
-    from cc_buddy_bridge.decider import DEFAULT_MODEL_PATH
     from cc_buddy_bridge.fast_lane import DEFAULT_STYLE, FAST_LANE_DEFAULT
-    enabled, model, style = dw.fast_lane_config({})
-    assert enabled is FAST_LANE_DEFAULT and model == os.path.expanduser(DEFAULT_MODEL_PATH) and style == DEFAULT_STYLE
-    assert dw.fast_lane_config({"CC_BUDDY_FAST_LANE": "yes", "CC_BUDDY_FAST_LANE_STYLE": "turbo"})[::2] == (True, DEFAULT_STYLE)
-    assert dw.fast_lane_config({"CC_BUDDY_FAST_LANE_STYLE": "jev"})[2] == "jev"
+    assert dw.fast_lane_config({}) == (FAST_LANE_DEFAULT, DEFAULT_STYLE) and DEFAULT_STYLE == "jev"
+    assert dw.fast_lane_config({"CC_BUDDY_FAST_LANE": "yes", "CC_BUDDY_FAST_LANE_STYLE": "turbo"}) == (True, DEFAULT_STYLE)
+    assert dw.fast_lane_config({"CC_BUDDY_FAST_LANE_STYLE": "compact"})[1] == "compact"
 
 
 # ---- the lane_first operation (GATES.md G7) -------------------------------------------------
@@ -511,15 +510,15 @@ def test_decider_backend_selects_jev_only_on_the_model_path(monkeypatch) -> None
         return SimpleNamespace(available=True, load_ms=1.0, warm_ms=250.0)
 
     monkeypatch.setattr(jev, "load", fake_load)
-    assert dw.decider_backend({}) == "laya" and dw.decider_backend({"CC_BUDDY_DECIDER": "JEV"}) == "jev"
-    assert dw.decider_backend({"CC_BUDDY_DECIDER": "gpt"}) == "laya"
+    assert dw.decider_backend({}) == "" and dw.decider_backend({"CC_BUDDY_DECIDER": "JEV"}) == "jev"
+    assert dw.decider_backend({"CC_BUDDY_DECIDER": "gpt"}) == ""
     base = {"CC_BUDDY_FAST_LANE": "1", "CC_BUDDY_DECIDER": "jev", "CC_BUDDY_LANE_FIRST": "0",
-            "CC_BUDDY_LAYA_MODEL": "/nonexistent/model", "CC_BUDDY_JEV_ROUTE": "openrouter"}
+            "CC_BUDDY_JEV_ROUTE": "openrouter"}
     # keyword mode: the gate decides, so a hosted model is not loaded at all — nothing leaves the Mac
     h, _ns, _c, _s = _bench([_still()])
     assert dw.start_fast_lane(h, base, thread=False) == "ready (keyword gate)"
     assert loads == [] and h.decider is None and h.decider_remote is True
-    # model mode: Jev needs no checkpoint on disk, loads through jev.load, in the style it scored best with
+    # model mode: Jev loads through jev.load, in the style it scored best with
     h2, _ns2, _c2, _s2 = _bench([_still()])
     status = dw.start_fast_lane(h2, {**base, "CC_BUDDY_FAST_LANE_DECIDE": "model"}, thread=False)
     assert status.startswith("ready (load 1 ms, warm 250 ms, style jev)") and h2.decider is not None

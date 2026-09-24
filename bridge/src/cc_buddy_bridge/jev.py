@@ -1,6 +1,6 @@
-"""TypeSafe's Jev behind the same `predict(state, questions)` seam laya sits in.
+"""TypeSafe's Jev behind decider.Decider's `predict(state, questions)` seam.
 
-`decider.Decider` was written against laya's System One signature, and Jev speaks that
+`decider.Decider` is written against the System One signature, and Jev speaks that
 signature over HTTP: `{"model", "state", "questions"}` in, `{"answers": {qid: {...}}}`
 out, each `choice` answer carrying `choice` + `probabilities` + `confidence`. That is
 the envelope `Decider._parse_choice` already parses, so this module is a transport, not
@@ -20,23 +20,22 @@ classifier, the request router, and tools/jev_step_eval.py's 155 four-question r
 with 26 options each, 234 ms p50). A different envelope would read as `error`, never a
 wrong click.
 
-WHAT THIS CHANGES ABOUT THE BUDGET: laya's head holds 256 tokens and cuts every option
-once they overflow it, so `Decider` trims the tail of the option list before predict.
-Jev takes 32k. The budgets below are set past any real AX menu, so `trim_options` never
-drops an option and `overflow` never fires — the two numbers fast_lane.py gates on stay
-about the model, not about the wrapper.
+WHAT THIS CHANGES ABOUT THE BUDGET: `Decider` trims the tail of the option list before
+predict to fit a small decision head (its default is 256 tokens). Jev takes 32k. The
+budgets below are set past any real AX menu, so `trim_options` never drops an option and
+`overflow` never fires — the two numbers fast_lane.py gates on stay about the model, not
+about the wrapper.
 
-WHAT IT COSTS: laya decides in 11.6 ms p50 on this Mac. Jev is a network call; TypeSafe
-publish 70-500 ms, this Mac measures 234 ms p50, and jev-ultrafast's 7.07 s is one whole
-11-action browser task (about 0.64 s an action), not a step. Against
-fast_lane's own cost model (+3.5 s a right click, -4.55 s a wrong one) half a second of
-latency is small and accuracy is the whole question, which is why `timeout_s` is short
-and every failure escalates to the planner rather than waiting.
+WHAT IT COSTS: Jev is a network call; TypeSafe publish 70-500 ms, this Mac measures 234 ms
+p50, and jev-ultrafast's 7.07 s is one whole 11-action browser task (about 0.64 s an
+action), not a step. Against fast_lane's own cost model (+3.5 s a right click, -4.55 s a
+wrong one) half a second of latency is small and accuracy is the whole question, which is
+why `timeout_s` is short and every failure escalates to the planner rather than waiting.
 
-WHAT IT COSTS THE OTHER WAY: laya never leaves the Mac. Jev is a third party, and the
-state carries the focused window's title and visible text. The daemon only builds that
-state during a computer-use task the user spoke, but it is a new egress and the README's
-"nothing leaves the Mac" no longer covers this lane when it is on. It is off by default.
+WHAT IT COSTS THE OTHER WAY: Jev is a third party, and the state carries the focused
+window's title and visible text. The daemon only builds that state during a computer-use
+task the user spoke, but it is a new egress and the README's "nothing leaves the Mac" no
+longer covers this lane when it is on. It is off by default.
 """
 
 from __future__ import annotations
@@ -213,8 +212,8 @@ def load(
 ) -> Decider:
     """A `Decider` backed by Jev, warmed up once so `available` means a real answer came back.
 
-    Mirrors `Decider.load`: same warm-up menu, same failure contract (RuntimeError with one
-    line), so `desktop_worker.start_fast_lane` can call either without knowing which.
+    The warm-up menu is decider.WARMUP_OPTIONS; any failure is a RuntimeError with one line,
+    which `desktop_worker.start_fast_lane` turns into the lane's "failed: …" status.
     """
     t0 = time.perf_counter()
     source = env if env is not None else os.environ

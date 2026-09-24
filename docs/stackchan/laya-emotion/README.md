@@ -153,7 +153,7 @@ the overlay and daemon integration have **not** been implemented or claimed test
 
 ## Reproduce and inspect
 
-From the repository root, using the existing bridge environment with `[fast]`:
+From the repository root, using the existing bridge environment with `[laya]`:
 
 ```sh
 # Fresh output directories prevent overwriting a sealed experiment.
