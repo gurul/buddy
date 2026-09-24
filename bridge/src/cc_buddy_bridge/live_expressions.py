@@ -1,8 +1,9 @@
-"""Owner-enabled experimental Laya eye cues. One worker, one pending event, no sound or motion.
+"""Owner-enabled eye cues from conversation text. One worker, one pending event, no sound or motion.
 
-Uses the original checkpoint: the trained heads did worse on fresh scenarios.
-Top-choice selection here is an explicit experimental policy, NOT a claim that
-the research confidence gate passed. Failures emit nothing; the board expires cues.
+The eye is picked by Jev (``CC_BUDDY_EXPRESSION_BACKEND=jev``, the default since 2026-09-24) or by the
+original local Laya checkpoint (``laya``; the trained heads did worse on fresh scenarios). Top-choice
+selection here is an explicit policy, NOT a claim that a confidence gate passed. Failures emit nothing;
+the board expires cues.
 """
 
 from __future__ import annotations
@@ -16,11 +17,22 @@ import time
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
-from .eye_model import LABELS, ConversationContext, LiveEyeModel
+from .eye_model import LABELS, WARM_STATE, ConversationContext, JevEyeModel, LiveEyeModel
 
 log = logging.getLogger(__name__)
 
 DEFAULT_MODEL = Path("~/.config/cc-buddy-bridge/models/laya-multilingual-mlx").expanduser()
+BACKENDS = ("jev", "laya")
+DEFAULT_BACKEND = "jev"
+
+
+def backend_from_env(env=None) -> str:
+    """``jev`` or ``laya``; anything else (or nothing) is the default. One reader, so a typo is loud once."""
+    value = ((os.environ if env is None else env).get("CC_BUDDY_EXPRESSION_BACKEND") or "").strip().lower()
+    if value and value not in BACKENDS:
+        log.warning("expressions: CC_BUDDY_EXPRESSION_BACKEND=%r is not one of %s; using %s", value[:20], BACKENDS,
+                    DEFAULT_BACKEND)
+    return value if value in BACKENDS else DEFAULT_BACKEND
 
 
 class LiveExpressions:
@@ -45,6 +57,7 @@ class LiveExpressions:
             self.enabled = json.loads(self.path.read_text()).get("enabled") is True
         except (OSError, ValueError, AttributeError):
             pass
+        self.backend = backend_from_env()
         self.model_path = Path(os.environ.get("CC_BUDDY_EXPRESSION_MODEL", str(DEFAULT_MODEL))).expanduser()
         self.factory = model_factory or self._load
         self.model = None
@@ -61,12 +74,12 @@ class LiveExpressions:
         self.board_history = []
         self.sent = self.dropped = 0
         self.wake = asyncio.Event()
-        self.executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix="laya-expression")
+        self.executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix="expression")
         self.closed = False
 
     def _load(self):
-        model = LiveEyeModel(self.model_path)
-        model.predict("The room is quiet and nothing has changed.")
+        model = LiveEyeModel(self.model_path) if self.backend == "laya" else JevEyeModel()
+        model.predict(WARM_STATE)                          # ready means a real answer came back
         return model
 
     def _next_id(self):
@@ -124,7 +137,8 @@ class LiveExpressions:
         return {
             "enabled": self.enabled,
             "ready": self.ready,
-            "model": str(self.model_path),
+            "backend": self.backend,
+            "model": getattr(self.model, "model", "") if self.backend == "jev" else str(self.model_path),
             "policy": "experimental top choice; not calibrated",
             "error": self.error,
             "sent": self.sent,
@@ -162,7 +176,8 @@ class LiveExpressions:
                     try:
                         self.model = await loop.run_in_executor(self.executor, self.factory)
                         self.ready, self.error = True, ""
-                        log.info("expressions: local Laya ready (experimental top-choice policy)")
+                        log.info("expressions: %s ready (top-choice policy)",
+                                 "local Laya" if self.backend == "laya" else f"Jev ({getattr(self.model, 'model', '?')})")
                     except Exception as exc:  # optional worker must never crash the daemon
                         self.ready, self.error = False, f"{type(exc).__name__}: {exc}"[:180]
                         log.warning("expressions: %s", self.error)

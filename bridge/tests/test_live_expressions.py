@@ -167,3 +167,62 @@ def test_laya_keeps_original_caption_chirps(tmp_path, muted):
         assert sent[0]["chirp"] is (not muted)
 
     asyncio.run(run())
+
+
+# ---- Jev picks the eye (owner, 2026-09-24: "use jev for that too") --------------------------------------
+
+def _jev_opener(probabilities):
+    """A jev.make_predict opener that answers the eye choice with the given probabilities, no socket."""
+    import io
+    import json as _json
+    from contextlib import contextmanager
+
+    seen = []
+
+    @contextmanager
+    def opener(request, timeout=0):
+        seen.append(_json.loads(request.data))
+        top = max(probabilities, key=probabilities.get) if probabilities else ""
+        body = {"answers": {"eye": {"choice": top, "probabilities": probabilities,
+                                    "confidence": probabilities.get(top, 0.0)}}, "usage": {"input_tokens": 500}}
+        yield io.BytesIO(_json.dumps(body).encode())
+
+    return opener, seen
+
+
+def test_jev_eye_model_asks_one_choice_over_the_eleven_labels_and_answers_in_label_order():
+    from cc_buddy_bridge.eye_model import CRITERIA, JevEyeModel
+
+    opener, seen = _jev_opener({"surprised": 0.9, "curious": 0.1})       # Jev may omit the zero labels
+    model = JevEyeModel({"OPENROUTER_API_KEY": "k", "CC_BUDDY_JEV_ROUTE": "openrouter"}, opener=opener)
+    answer = model.predict("User: WHAT?! the server just went down??")
+    assert answer["label"] == "surprised" and answer["ms"] >= 0
+    assert len(answer["probabilities"]) == len(LABELS) and abs(sum(answer["probabilities"]) - 1) < 1e-9
+    assert answer["probabilities"][LABELS.index("surprised")] == pytest.approx(0.9)
+    assert LiveExpressions.label(answer) == ("surprised", pytest.approx(0.9))   # the worker accepts it as is
+    (request,) = seen
+    assert list(request["questions"]) == ["eye"] and request["questions"]["eye"]["type"] == "choice"
+    assert request["questions"]["eye"]["criteria"] == CRITERIA and request["state"].startswith("User: WHAT")
+
+
+def test_jev_eye_model_refuses_an_answer_without_probabilities_and_needs_a_key():
+    from cc_buddy_bridge.eye_model import JevEyeModel
+    from cc_buddy_bridge.jev import JevError
+
+    opener, _ = _jev_opener({})
+    model = JevEyeModel({"OPENROUTER_API_KEY": "k", "CC_BUDDY_JEV_ROUTE": "openrouter"}, opener=opener)
+    with pytest.raises(ValueError):
+        model.predict("User: hi")
+    with pytest.raises(JevError):                                       # no key: loud at construction, not per turn
+        JevEyeModel({"CC_BUDDY_JEV_ROUTE": "openrouter"}, opener=opener)
+
+
+@pytest.mark.parametrize("value,expect", [("", "jev"), ("jev", "jev"), ("laya", "laya"), (" Laya ", "laya"),
+                                          ("mlx", "jev")])
+def test_the_expression_backend_is_jev_unless_laya_is_spelled_out(value, expect, tmp_path, monkeypatch):
+    from cc_buddy_bridge.live_expressions import backend_from_env
+
+    assert backend_from_env({"CC_BUDDY_EXPRESSION_BACKEND": value}) == expect
+    monkeypatch.setenv("CC_BUDDY_EXPRESSION_BACKEND", value)
+    service = LiveExpressions(lambda cmd: None, path=tmp_path / "settings.json", model_factory=Model)
+    assert service.backend == expect and service.status()["backend"] == expect
