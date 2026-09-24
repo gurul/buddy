@@ -1,78 +1,97 @@
 """Records: what buddy knows about its owner, as files the owner can read and edit.
 
-recall.py answers "when did we last talk and what about" in one clause, which is
-right for a wake-word conversation. A text chat is different: the owner is not in
-the room, the questions run longer, and "what was the name of that restaurant"
-needs a lookup rather than a greeting. This is that layer. It follows the shape of
-the memory Instinct (the iMessage assistant) was found to use — reverse-engineered
-by Dhravya Shah, 2026-09-20 — because that shape has one property the owner cares
-about: **the agent never writes its own memory.**
+Memory is three stores (owner, 2026-09-23: "simplify the memory system — too many stores"): the
+transcripts (every word, transcripts.py), mem0 (meaning search, mem0_memory.py) and these records, the
+truth. The shape follows the memory Instinct (the iMessage assistant) was found to use — reverse-engineered
+by Dhravya Shah, 2026-09-20 — because it has one property the owner cares about: **the brains read; they
+never write.**
 
-    <debrief>/records/<id>.md      one typed record per thing: a preference, a person,
-                                   a project, a place. Frontmatter: id, type, aliases.
-                                   Body: dated facts, and [[id]] links to other records.
-    <debrief>/records/profile.md   the one-pager every text turn starts with: life
-                                   context, how much to ask before acting, how to talk,
-                                   and an index of the records with their aliases.
-    git                            the whole debrief store is a repository; every
-                                   reconcile is one commit, so an old fact is in history
-                                   and a wrong edit is one revert away.
+    <memory>/records/                its own git repository, sealed to this computer
+        <id>.md                      one typed record per thing: a preference, a person, a project, a place.
+                                     Frontmatter: id, type, aliases. Body: dated facts, [[id]] links.
+        profile.md                   the one-pager every conversation starts with: life context, how much
+                                     to ask before acting, how to talk, and an index of the records.
+        starred.md                   what the owner said to remember, in their words, one dated line each.
+        days/<day>.md                the dream journal: what happened, what buddy learned, what is still
+                                     open, what it corrected.
 
-Three rules, all code:
+Who writes, and nothing else does:
 
-1. **The agent reads; it never writes.** The text brain gets ``memory_search`` and
-   ``memory_get`` — a keyword search over ids, aliases and fact lines, no vectors —
-   and nothing else. What it learns in a chat reaches the records only through the
-   nightly reconcile, from the distilled session notes chat_memory.py already
-   writes. A robot promoting its own conclusions mid-conversation is exactly the
-   laundering the layered store exists to prevent.
-2. **Reconcile once a day, from the day's notes, into full records.** The model is
-   shown the current records and the day's notes and returns the records that
-   change, whole: it can shorten, merge, turn examples into traits, and replace a
-   wrong fact with a dated correction. Owner edits survive because the current
-   file is always the input. Nothing is deleted from history: git keeps it.
-3. **Aliases are the index.** Search is grep, so every record carries the words the
-   owner might use for it. The profile lists them, so the agent knows what it can
-   look up before it looks.
+1. **"Remember that"** (voice, Telegram, the notes widget) → ``star`` appends one line to starred.md. The
+   owner's voice is the human promoting a claim, so it counts on the next message: ``profile`` puts every
+   star the page has not absorbed yet on top of it, verbatim.
+2. **The nightly dream** (dream.py) → ``reconcile_day`` reads one whole day of transcript beside the
+   current records, profile and stars, and returns — in one model call — the records that change (whole),
+   the profile as it should read now, the ids the owner said to forget, and the day's journal. Where the
+   day contradicts a record, the record gets a dated correction and the journal says so. ``consolidate``
+   then merges the same thing filed under two ids and dates superseded facts. The model can shorten,
+   merge and correct; owner edits survive because the current files are always its input.
+3. **Forget** (owner-confirmed, memory.py) → ``forget_lines`` removes matching lines everywhere here, and
+   ``squash_history`` makes git forget them too.
 
-It ships OFF (``RECORDS_DEFAULT``): reconciling is one model call a day, and the
-records dir is created only once the switch is on.
+Git is how nothing is lost otherwise: every dream is one commit, so a wrong edit is one revert away. The
+repository root is the records folder itself — never the memory root, which holds the transcripts, and a
+spoken word must never reach a git object. ``seal`` locks it to this computer.
+
+Search is grep (aliases are the index; the profile lists them so a brain knows what it can look up), plus
+mem0's meaning search beside it, each hit dated so a newer fact can win a tie.
 """
 
 from __future__ import annotations
 
-import asyncio
+import contextlib
+import fcntl
 import json
 import logging
 import os
 import re
 import shutil
 import subprocess
+import tempfile
+import threading
 from dataclasses import dataclass, field
-from datetime import datetime
+from datetime import datetime, timedelta
 from pathlib import Path
-from typing import Any, Callable, Optional
+from typing import Any, Callable, Iterator, Optional
 
-from .chat_memory import stars as starred_claims
 from .recall import RecallConfig
 
 log = logging.getLogger(__name__)
 
-RECORDS_DEFAULT = False
-DEFAULT_MODEL = "gpt-5.4-nano"            # the same model chat_memory.py distils and curates with
-RECONCILE_TIMEOUT_SECS = 120.0
-TYPES = ("preference", "person", "organization", "project", "place", "routine", "conversation")
+DEFAULT_MODEL = "gpt-5.4-nano"
+RECONCILE_TIMEOUT_SECS = 180.0             # one model call; the dream runs it on a worker thread
+MAX_OUTPUT_TOKENS = 16000                  # records whole + profile + journal; 4000 truncated busy days
+TYPES = ("preference", "person", "organization", "project", "place", "routine")
 PROFILE_ID = "profile"
+STARRED_FILE = "starred.md"
+DAYS_DIR = "days"
 MAX_PROFILE_CHARS = 6000                   # ~1.5k tokens: the one-pager stays one page
-MAX_STARS = 40                             # the owner's "remember that …" lines a reconcile reads
+MAX_VOICE_PROFILE_CHARS = 3000             # the Live voice front has no tools, so no index, and less room
+MAX_STARS = 40                             # what stars() returns by default
+MAX_STARS_READ = 200                       # the stars a dream reads (the newest)
 MAX_RECORD_CHARS = 4000
+MAX_FACTS = 40
+MAX_ALIASES = 12
 MAX_HITS = 8
 MAX_HIT_CHARS = 200
-STATE_FILE = ".reconciled"                 # one day per line: what the reconciler has already read
+MAX_CONSOLIDATE_CHARS = 120_000            # above this one call cannot hold every record: skip, log once
+DAY_START_HOUR = 4                         # a star at 01:00 belongs to the evening before, as a transcript does
+FORGOTTEN = "(forgotten)"                  # what a forgotten journal title reads
+INDEX_HEADING = "## Records you can search or read by id"
+FRESH_STARS_HEADING = "## They asked you to remember (since the page below was written)"
+GIT_TIMEOUT_SECS = 30
+GC_TIMEOUT_SECS = 180
 _ID = re.compile(r"^[a-z0-9][a-z0-9-]{0,63}$")
+_DAY = re.compile(r"^\d{4}-\d{2}-\d{2}$")
+_DAY_FILE = re.compile(r"^(\d{4}-\d{2}-\d{2})\.md$")
 _LINK = re.compile(r"\[\[([a-z0-9-]+)\]\]")
 _WORD = re.compile(r"[a-z0-9]+")
+_FRONTMATTER = re.compile(r"\A---\n.*?\n---[ \t]*(?:\n|\Z)", re.S)
+_STAR_LINE = re.compile(r"^\s*[-*]\s+(?:★\s*)?(.+?)\s*$")
+_STAR_DATE = re.compile(r"^(.*?)\s*\((\d{4}-\d{2}-\d{2})\)$")
+_UPDATED = re.compile(r"^updated:\s*(\d{4}-\d{2}-\d{2})\s*$", re.M)
 
+# Kept only while telegram.py still imports it: memory.Memory.tools() is the tool set both brains get now.
 MEMORY_TOOLS: list[dict[str, Any]] = [
     {
         "type": "function", "name": "memory_search", "strict": True,
@@ -148,7 +167,8 @@ def render_record(rec: Record) -> str:
 
 
 def records_dir(cfg: RecallConfig) -> Path:
-    return cfg.store / "records"
+    """The records folder, and the root of its own git repository (never the memory root)."""
+    return cfg.records_dir
 
 
 def load_records(cfg: RecallConfig) -> dict[str, Record]:
@@ -157,7 +177,7 @@ def load_records(cfg: RecallConfig) -> dict[str, Record]:
     if not folder.is_dir():
         return out
     for path in sorted(folder.glob("*.md")):
-        if path.stem == PROFILE_ID:
+        if path.stem == PROFILE_ID or path.name == STARRED_FILE:
             continue
         try:
             rec = parse_record(path.read_text(encoding="utf-8"))
@@ -168,7 +188,141 @@ def load_records(cfg: RecallConfig) -> dict[str, Record]:
     return out
 
 
-# ---- what the agent may do: search and read ---------------------------------------------------
+def _write(path: Path, text: str) -> None:
+    """Whole-file write, atomic (a reader never sees half a record), private to this user."""
+    path.parent.mkdir(parents=True, exist_ok=True)
+    fd, tmp = tempfile.mkstemp(dir=path.parent, prefix=f".{path.name}.", suffix=".tmp")
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as fh:
+            fh.write(text)
+        os.chmod(tmp, 0o600)
+        os.replace(tmp, path)
+    except BaseException:
+        with contextlib.suppress(OSError):
+            os.unlink(tmp)
+        raise
+
+
+def _make_dir(folder: Path) -> None:
+    folder.mkdir(parents=True, exist_ok=True)
+    with contextlib.suppress(OSError):
+        os.chmod(folder, 0o700)
+
+
+# One writer at a time: the dream (a worker thread), a star (a conversation), a forget (a tool call), and
+# the CLI in another process. A thread lock inside the process, an flock on the folder across processes;
+# the flock is taken once per thread (a second descriptor in the same process would wait on the first).
+_WRITE_LOCK = threading.RLock()
+_HELD = threading.local()
+# starred.md alone has its own short lock: a star comes from a live conversation and must never wait
+# behind a dream's commit or a forget's gc. forget_lines takes it too while it rewrites starred.md.
+_STAR_LOCK = threading.Lock()
+
+
+@contextlib.contextmanager
+def _locked(folder: Path) -> Iterator[None]:
+    with _WRITE_LOCK:
+        depth = getattr(_HELD, "depth", 0)
+        fd = None
+        if depth == 0:
+            with contextlib.suppress(OSError):
+                _make_dir(folder)
+                fd = os.open(folder, os.O_RDONLY)
+                fcntl.flock(fd, fcntl.LOCK_EX)
+        _HELD.depth = depth + 1
+        try:
+            yield
+        finally:
+            _HELD.depth = depth
+            if fd is not None:
+                with contextlib.suppress(OSError):
+                    fcntl.flock(fd, fcntl.LOCK_UN)
+                os.close(fd)
+
+
+# ---- stars: the owner's "remember that" ---------------------------------------------------------
+
+_STARRED_HEAD = "# Starred\n\nWhat the owner asked buddy to remember, in their words, oldest first.\n\n"
+
+
+def _norm(text: str) -> str:
+    return " ".join(str(text or "").split()).strip(" .,;:!").casefold()
+
+
+def _star_rows(cfg: RecallConfig) -> list[tuple[str, str]]:
+    """Every star as (text, day), oldest first. An undated hand-typed line has day ""."""
+    try:
+        raw = (records_dir(cfg) / STARRED_FILE).read_text(encoding="utf-8")
+    except OSError:
+        return []
+    rows: list[tuple[str, str]] = []
+    for line in _FRONTMATTER.sub("", raw, count=1).splitlines():
+        m = _STAR_LINE.match(line)
+        if m is None:
+            continue
+        body = m.group(1)
+        d = _STAR_DATE.match(body)
+        text, day = (d.group(1).strip(), d.group(2)) if d else (body, "")
+        if text:
+            rows.append((text, day))
+    return rows
+
+
+def _star_line(text: str, day: str) -> str:
+    return f"- {text} ({day})" if day else f"- {text}"
+
+
+def star(cfg: RecallConfig, text: str, when: Optional[datetime] = None) -> Optional[str]:
+    """Keep one claim for good, because the owner said so. → the line as stored, or None.
+
+    A human promotes and an agent only proposes; the owner's voice IS the human, so "remember that" is a
+    promotion (owner, 2026-09-11). Append-only here; saying it twice (any case, any trailing punctuation)
+    returns the line already there. Dated by the memory's day, which starts at 04:00, so a star at 01:00
+    is the evening's and tonight's dream of that evening reads it. One appended line; it never waits for
+    a dream or a forget, so a conversation can call it."""
+    claim = " ".join(str(text or "").split()).strip(" .,;:").strip()
+    if claim.startswith("★"):
+        claim = claim.lstrip("★ ").strip()
+    if len(claim) < 4:
+        return None
+    claim = claim[0].upper() + claim[1:] if claim[0].islower() else claim
+    day = ((when or datetime.now()) - timedelta(hours=DAY_START_HOUR)).strftime("%Y-%m-%d")
+    folder = records_dir(cfg)
+    try:
+        with _STAR_LOCK:
+            key = _norm(claim)
+            for old_text, old_day in _star_rows(cfg):
+                if _norm(old_text) == key:
+                    return _star_line(old_text, old_day)
+            _make_dir(folder)
+            path = folder / STARRED_FILE
+            line = _star_line(claim, day)
+            fd = os.open(path, os.O_RDWR | os.O_CREAT | os.O_APPEND | os.O_NOFOLLOW | os.O_CLOEXEC, 0o600)
+            try:
+                os.fchmod(fd, 0o600)
+                size = os.fstat(fd).st_size
+                data = line + "\n"
+                if size == 0:
+                    data = _STARRED_HEAD + data
+                elif os.pread(fd, 1, size - 1) != b"\n":
+                    data = "\n" + data
+                os.write(fd, data.encode("utf-8"))
+            finally:
+                os.close(fd)
+        log.info("records: starred one line")
+        return line
+    except OSError as e:
+        log.warning("records: could not star it (%s)", type(e).__name__)
+        return None
+
+
+def stars(cfg: RecallConfig, limit: int = MAX_STARS) -> list[str]:
+    """The starred claims, text only (no date), newest last."""
+    rows = _star_rows(cfg)
+    return [text for text, _ in rows[-limit:]] if limit > 0 else []
+
+
+# ---- what the brains may do: search and read ---------------------------------------------------
 
 def _tokens(text: str) -> list[str]:
     return _WORD.findall(text.lower())
@@ -204,69 +358,118 @@ def render_index(records: dict[str, Record]) -> str:
         return ""
     rows = [f"- {rec.id} ({rec.type}): {', '.join(rec.aliases[:6])}" if rec.aliases else f"- {rec.id} ({rec.type})"
             for rec in records.values()]
-    return "Records you can search or read by id:\n" + "\n".join(rows)
+    return INDEX_HEADING + "\n" + "\n".join(rows)
 
 
-_STAR_DATE = re.compile(r"\((\d{4}-\d{2}-\d{2})\)\s*$")
-_UPDATED = re.compile(r"^updated:\s*(\d{4}-\d{2}-\d{2})\s*$", re.M)
+def _clip_lines(text: str, cap: int) -> str:
+    if len(text) <= cap:
+        return text
+    return text[:cap - 2].rsplit("\n", 1)[0] + "\n…"
 
 
-def owner_stars(cfg: RecallConfig) -> list[str]:
-    """What the owner said to remember for good ("remember that …"), their words, oldest first."""
+def _fresh_block(cfg: RecallConfig, updated: str) -> str:
+    """Stars the page has not absorbed yet (dated after its `updated:`; an undated star counts as new)."""
+    fresh = [_star_line(t, d) for t, d in _star_rows(cfg) if not d or not updated or d > updated]
+    return FRESH_STARS_HEADING + "\n" + "\n".join(fresh) if fresh else ""
+
+
+def _profile_page(cfg: RecallConfig) -> str:
     try:
-        return starred_claims(cfg, MAX_STARS)
-    except Exception:  # noqa: BLE001 - a missing or unreadable HIGHLIGHTS.md is just no stars
-        return []
-
-
-def _stars_after(stars: list[str], day: str) -> list[str]:
-    """Stars dated after `day`: the ones no reconcile has read yet. An undated star counts as new."""
-    out = []
-    for claim in stars:
-        m = _STAR_DATE.search(claim)
-        if m is None or not day or m.group(1) > day:
-            out.append(claim)
-    return out
+        return (records_dir(cfg) / f"{PROFILE_ID}.md").read_text(encoding="utf-8").strip()
+    except OSError:
+        return ""
 
 
 def profile(cfg: RecallConfig) -> str:
     """The one-pager, bounded, for the start of a turn. "" when there is none yet.
 
-    A star is the owner's own "remember that …", and it has to count on the next message, not after
-    tonight's reconcile. So stars the profile has not absorbed yet (dated after its `updated:`) go on
-    top, verbatim. With no profile yet, the stars alone are the page."""
-    path = records_dir(cfg) / f"{PROFILE_ID}.md"
-    try:
-        text = path.read_text(encoding="utf-8").strip()
-    except OSError:
-        text = ""
+    A star has to count on the next message, not after tonight's dream, so stars the page has not absorbed
+    yet go on top, verbatim. With no page yet, the stars alone are the page."""
+    text = _profile_page(cfg)
     m = _UPDATED.search(text)
-    fresh = _stars_after(owner_stars(cfg), m.group(1) if m else "")
-    if fresh:
-        block = "## They asked you to remember (since the page below was written)\n" + \
-                "\n".join(f"- {c}" for c in fresh)
+    block = _fresh_block(cfg, m.group(1) if m else "")
+    if block:
         text = block + ("\n\n" + text if text else "")
-    if len(text) > MAX_PROFILE_CHARS:
-        text = text[:MAX_PROFILE_CHARS].rsplit("\n", 1)[0] + "\n…"
-    return text
+    return _clip_lines(text, MAX_PROFILE_CHARS)
+
+
+def _drop_section(text: str, heading: str) -> str:
+    """`text` without the '## heading' section (up to the next '## ' heading or the end)."""
+    out: list[str] = []
+    skipping = False
+    for line in text.splitlines():
+        if line.startswith("## "):
+            skipping = line.strip() == heading
+        if not skipping:
+            out.append(line)
+    return "\n".join(out).strip()
+
+
+def profile_for_voice(cfg: RecallConfig) -> str:
+    """The profile for the Live voice front: no frontmatter, no record index (it has no tools to use the
+    ids with, and the index is most of the page), at most MAX_VOICE_PROFILE_CHARS."""
+    page = _profile_page(cfg)
+    m = _UPDATED.search(page)
+    block = _fresh_block(cfg, m.group(1) if m else "")
+    page = _drop_section(_FRONTMATTER.sub("", page, count=1), INDEX_HEADING)
+    text = block + ("\n\n" + page if page and block else page)
+    return _clip_lines(text.strip(), MAX_VOICE_PROFILE_CHARS)
+
+
+def _journal_title(path: Path) -> str:
+    try:
+        raw = path.read_text(encoding="utf-8")
+    except OSError:
+        return ""
+    fm = _FRONTMATTER.match(raw)
+    if fm:
+        t = re.search(r"^title:\s*(.+?)\s*$", fm.group(0), re.M)
+        if t:
+            return t.group(1)
+    h = re.search(r"^#\s+(.+?)\s*$", raw, re.M)
+    return h.group(1) if h else ""
+
+
+def latest_day(cfg: RecallConfig) -> Optional[tuple[str, str]]:
+    """(day, title) of the newest dream journal, or None when there is none."""
+    folder = records_dir(cfg) / DAYS_DIR
+    try:
+        days = sorted(m.group(1) for m in (_DAY_FILE.match(n) for n in os.listdir(folder)) if m)
+    except OSError:
+        return None
+    if not days:
+        return None
+    return days[-1], _journal_title(folder / f"{days[-1]}.md")
+
+
+def _recalled_line(hit: dict[str, Any]) -> str:
+    day, channel = str(hit.get("day") or ""), str(hit.get("channel") or "")
+    stamp = ", ".join(x for x in (day, channel) if x)
+    return f"({stamp}) {hit.get('text', '')}" if stamp else str(hit.get("text", ""))
 
 
 class RecordsReader:
-    """What the text brain is lent: read-only, re-read from disk per call (the owner may have edited)."""
+    """Read-only, re-read from disk per call (the owner may have edited). `recall` is the mem0 index
+    (mem0_memory.OwnerMemory) or None."""
 
     def __init__(self, cfg: RecallConfig, recall: Any = None) -> None:
         self.cfg = cfg
-        self.recall = recall            # mem0_memory.OwnerMemory, or None: the meaning search beside the keywords
+        self.recall = recall
 
     def profile(self) -> str:
         return profile(self.cfg)
 
     def search(self, query: str) -> dict[str, Any]:
         hits = search(load_records(self.cfg), query)
-        recalled = self.recall.search(query) if self.recall is not None else []
+        recalled: list[str] = []
+        if self.recall is not None:
+            try:
+                recalled = [_recalled_line(h) for h in self.recall.search(query) if isinstance(h, dict)]
+            except Exception as e:  # noqa: BLE001 - the meaning search failing is just no meaning hits
+                log.warning("records: meaning search failed (%s)", type(e).__name__)
         out: dict[str, Any] = {"ok": True, "hits": hits}
         if recalled:
-            out["recalled"] = recalled   # from past conversations, by meaning (mem0); no record id
+            out["recalled"] = recalled   # "(day, channel) fact": dated, so the newer one wins a tie
         if not hits and not recalled:
             out["note"] = "nothing matched"
         return out
@@ -276,34 +479,49 @@ class RecordsReader:
         return {"ok": True, "record": text} if text else {"ok": False, "reason": f"no record {rid!r}"}
 
 
-# ---- git: history is how nothing is lost -------------------------------------------------------
+# ---- git: history is how nothing is lost ---------------------------------------------------------
 
-def _git(cwd: Path, *args: str) -> subprocess.CompletedProcess:
-    return subprocess.run(["git", "-C", str(cwd), *args], capture_output=True, text=True, timeout=30)
+# A commit never asks for a signature or an identity: this repository belongs to buddy, on this machine.
+_COMMIT_CFG = ("-c", "user.name=buddy", "-c", "user.email=buddy@localhost", "-c", "commit.gpgsign=false")
 
 
-def ensure_repo(store: Path) -> bool:
-    """The debrief store as a git repository. False (with one log line) when git is not there."""
+def _git(cwd: Path, *args: str, timeout: float = GIT_TIMEOUT_SECS) -> subprocess.CompletedProcess:
+    env = {k: v for k, v in os.environ.items() if not k.startswith("GIT_")}   # never another repo's GIT_DIR
+    return subprocess.run(["git", "-C", str(cwd), *args], capture_output=True, text=True, timeout=timeout,
+                          env=env)
+
+
+def _own_repo(repo: Path) -> bool:
+    """Whether `repo` is the root of its own git repository (not a folder inside some other one)."""
+    top = _git(repo, "rev-parse", "--show-toplevel")
+    return top.returncode == 0 and Path(top.stdout.strip()).resolve() == repo.resolve()
+
+
+def ensure_repo(repo: Path) -> bool:
+    """`repo` as a sealed git repository of its own. False (with one log line) when git is not there, or
+    when `repo` sits inside another repository: forcing an add there would put the owner's memory in it."""
     if shutil.which("git") is None:
         log.warning("records: git is not installed — records will be kept, but without history")
         return False
     try:
-        top = _git(store, "rev-parse", "--show-toplevel")
+        _make_dir(repo)
+        top = _git(repo, "rev-parse", "--show-toplevel")
         if top.returncode == 0:
-            if Path(top.stdout.strip()).resolve() == store.resolve():
-                seal(store)                   # an existing store repository gets the same lock, every start
-            return True
-        r = _git(store, "init", "-q")
-        if r.returncode != 0:
-            log.warning("records: git init failed: %s", r.stderr.strip())
+            if Path(top.stdout.strip()).resolve() == repo.resolve():
+                seal(repo)                    # an existing repository gets the same lock, every start
+                return True
+            log.warning("records: %s is inside another git repository — kept without history", repo)
             return False
-        # A repository nobody has to configure: commits are buddy's, on this machine only.
-        _git(store, "config", "user.name", "buddy")
-        _git(store, "config", "user.email", "buddy@localhost")
-        seal(store)
+        r = _git(repo, "init", "-q")
+        if r.returncode != 0:
+            log.warning("records: git init failed (exit %d)", r.returncode)
+            return False
+        _git(repo, "config", "user.name", "buddy")
+        _git(repo, "config", "user.email", "buddy@localhost")
+        seal(repo)
         return True
     except (OSError, subprocess.SubprocessError) as e:
-        log.warning("records: git unavailable (%s)", e)
+        log.warning("records: git unavailable (%s)", type(e).__name__)
         return False
 
 
@@ -318,94 +536,185 @@ exit 1
 """
 
 
-def seal(store: Path) -> None:
-    """Lock the store's repository to this computer: no remote, no push, ever.
+def seal(repo: Path) -> None:
+    """Lock the repository to this computer: no remote, no push, ever.
 
-    The owner's memory is private (owner instruction, 2026-09-23: "nothing should leak out ever"). The
-    history exists so a bad reconcile is one revert away, not so it can go anywhere. So on every start any
-    remote is removed, every push URL is rewritten to one that cannot resolve, and a pre-push hook refuses
-    — three independent locks, so none of them failing alone lets it out."""
-    for name in _git(store, "remote").stdout.split():
-        _git(store, "remote", "remove", name)
-        log.warning("records: removed git remote %r from the memory store — it stays on this computer", name)
+    The owner's memory is private (owner, 2026-09-23: "nothing should leak out ever"). The history exists
+    so a bad dream is one revert away, not so it can go anywhere. So on every start any remote is removed,
+    every push URL is rewritten to one that cannot resolve, and a pre-push hook refuses — three independent
+    locks, so none of them failing alone lets it out."""
+    for name in _git(repo, "remote").stdout.split():
+        _git(repo, "remote", "remove", name)
+        log.warning("records: removed a git remote from the memory store — it stays on this computer")
     for prefix in _PUSH_PREFIXES:
-        _git(store, "config", "--replace-all", f"url.{_NO_PUSH_URL}.pushInsteadOf", prefix, f"^{re.escape(prefix)}$")
-    hooks = store / ".git" / "hooks"
+        _git(repo, "config", "--replace-all", f"url.{_NO_PUSH_URL}.pushInsteadOf", prefix, f"^{re.escape(prefix)}$")
+    hooks = repo / ".git" / "hooks"
     hooks.mkdir(parents=True, exist_ok=True)
     (hooks / "pre-push").write_text(_PRE_PUSH, encoding="utf-8")
     (hooks / "pre-push").chmod(0o755)
-    _git(store, "config", "core.hooksPath", str(hooks))   # a global hooksPath must not bypass it
+    _git(repo, "config", "core.hooksPath", str(hooks))   # a global hooksPath must not bypass it
 
 
-def commit(store: Path, message: str) -> Optional[str]:
-    """Commit everything under the store. The short hash, or None when there was nothing or git failed."""
+def commit(repo: Path, message: str) -> Optional[str]:
+    """Commit everything under `repo`. The short hash, or None when there was nothing or git failed.
+
+    Forced (an ignore file must not quietly cost the history), and so only in the folder's own repository."""
     try:
-        top = _git(store, "rev-parse", "--show-toplevel")
-        if top.returncode != 0:
+        if not _own_repo(repo):
             return None
-        # Forced, because the debrief installer drops a `*` .gitignore in the store (it keeps memory out of a
-        # project's PRs), which made every add stage nothing and every reconcile go without history. Only in
-        # the store's own repository: were the store inside some other repository, forcing would put the
-        # owner's memory in it, so then nothing is committed at all.
-        if Path(top.stdout.strip()).resolve() != store.resolve():
-            log.warning("records: %s is inside another git repository — not committing to it", store)
+        _git(repo, "add", "-A", "--force", ".")
+        if _git(repo, "diff", "--cached", "--quiet").returncode == 0:
             return None
-        _git(store, "add", "-A", "--force", ".")
-        if _git(store, "diff", "--cached", "--quiet").returncode == 0:
-            return None
-        r = _git(store, "commit", "-q", "-m", message)
+        r = _git(repo, *_COMMIT_CFG, "commit", "-q", "--no-verify", "-m", message)
         if r.returncode != 0:
-            log.warning("records: commit failed: %s", r.stderr.strip())
+            log.warning("records: commit failed (exit %d)", r.returncode)
             return None
-        return _git(store, "rev-parse", "--short", "HEAD").stdout.strip() or None
+        return _git(repo, "rev-parse", "--short", "HEAD").stdout.strip() or None
     except (OSError, subprocess.SubprocessError) as e:
-        log.warning("records: commit failed (%s)", e)
+        log.warning("records: commit failed (%s)", type(e).__name__)
         return None
 
 
-# ---- the reconcile: the only writer -------------------------------------------------------------
+def squash_history(repo: Path) -> bool:
+    """Make git forget: the current tree becomes the only commit, and every older object is pruned.
+
+    A forget has to reach history too, or the forgotten line is one `git log -p` away. Everything under
+    the tree is committed first, the branch is pointed at one parentless commit of it, every other ref and
+    every reflog entry goes, and gc prunes what nothing reaches any more. False when `repo` is not the root
+    of its own repository (never someone else's) or git failed."""
+    try:
+        if shutil.which("git") is None or not _own_repo(repo):
+            return False
+        with _locked(repo):
+            _git(repo, "add", "-A", "--force", ".")
+            if _git(repo, "rev-parse", "--verify", "-q", "HEAD").returncode != 0:
+                if _git(repo, "diff", "--cached", "--quiet").returncode == 0:
+                    return True                               # no history at all: nothing to forget
+                if _git(repo, *_COMMIT_CFG, "commit", "-q", "--no-verify", "-m", "memory").returncode != 0:
+                    return False
+            tree = _git(repo, "write-tree")
+            if tree.returncode != 0:
+                return False
+            new = _git(repo, *_COMMIT_CFG, "commit-tree", tree.stdout.strip(), "-m",
+                       "memory (history squashed by a forget)")
+            if new.returncode != 0:
+                return False
+            branch = _git(repo, "symbolic-ref", "-q", "HEAD").stdout.strip() or "refs/heads/main"
+            if _git(repo, "update-ref", branch, new.stdout.strip()).returncode != 0:
+                return False
+            if _git(repo, "symbolic-ref", "HEAD", branch).returncode != 0:
+                return False
+            _git(repo, "reset", "-q")                          # the index matches the new commit
+            for ref in _git(repo, "for-each-ref", "--format=%(refname)").stdout.split():
+                if ref != branch:
+                    _git(repo, "update-ref", "-d", ref)
+            for leftover in ("ORIG_HEAD", "FETCH_HEAD", "MERGE_HEAD"):
+                with contextlib.suppress(OSError):
+                    (repo / ".git" / leftover).unlink()
+            _git(repo, "reflog", "expire", "--expire=now", "--expire-unreachable=now", "--all")
+            gc = _git(repo, "-c", "gc.reflogExpire=now", "-c", "gc.reflogExpireUnreachable=now",
+                      "gc", "-q", "--prune=now", timeout=GC_TIMEOUT_SECS)
+            return gc.returncode == 0
+    except (OSError, subprocess.SubprocessError) as e:
+        log.warning("records: could not squash the history (%s)", type(e).__name__)
+        return False
+
+
+def _as_found(repo: Path, git: bool, what: str) -> None:
+    """Whatever is on disk now — the owner's hand edits and new stars included — goes into history first,
+    as its own commit, so the dream's commit is exactly what the model changed and reverts cleanly."""
+    if git:
+        commit(repo, f"as found before {what}")
+
+
+# ---- the dream: the only automatic writer ----------------------------------------------------------
 
 RECONCILE_PROMPT = """You are buddy, a small desk robot, keeping the records of what you know about your owner.
-You are shown the records as they are now and your notes from one day of conversations. Return the records
-that should change, whole, and the profile as it should read now.
+Tonight you read one whole day of what was said between you, on voice and by text, beside the records as
+they are now, the profile page, and what the owner asked you to remember. Return the records that should
+change, whole; the profile as it should read now; the ids of records the owner asked you to forget; and your
+journal of the day.
 
 Records are facts about durable things: a preference, a person, an organization, a project, a place, a
 routine. One record per thing, id in lowercase-with-hyphens, with aliases: every word the owner might use
 for it. Each fact is one line, stated as fact, with its date: "Loves pasta (said 2026-09-15)." Link related
 records with [[id]] inside a fact. Keep records short: merge examples into traits, drop incidental detail,
-move what belongs to a project into that project's record. Never delete a fact silently — when a fact is
-wrong now, replace it with the correction and its date: "Now prefers the 9 am slot (changed 2026-09-20;
-was 8 am)." Anything the owner said to forget is removed, and that is the only removal. Only what the owner
-said is a fact about them; what the notes say buddy did is not. Return only records that change or are new.
+move what belongs to a project into that project's record. What happened once belongs in the journal, not
+in a record. Only what the owner said is a fact about them; what buddy said or did is not, and neither is a
+request to operate the robot or its tools. Return only records that change or are new.
 
-The profile is the one page you read before every conversation. Three short sections, plain prose or a few
-bullets each: "Life context" (their name first, when you know it, then who they are, what is going on, the people and projects that matter now),
-"Acting on their behalf" (what they want done without asking and what needs a yes first, from what they
-have said), "How they like to talk" (tone, length, what annoys them). Dates where they matter. Nothing
-that is not in the records or the notes.
+Corrections: when the day contradicts a record, never delete the old fact silently. Replace it with the
+correction and its date, "Now prefers the 9 am slot (changed 2026-09-20; was 8 am).", and add one line
+saying what changed to the journal's corrections. Anything the owner said to forget is removed: list the
+record's id under forget, or return the record without that fact. That is the only removal.
 
-You may also be shown what the owner said to remember for good, in their words, each with its date. Those
-are the most reliable facts you have: fold every real fact about them (their name, the people and things
-they care about) into the records and the profile, and keep it there. A line that is not a fact about
-them — a stray question, a half sentence the microphone caught — you leave out."""
+The profile is the page you read before every conversation. Three short sections, plain prose or a few
+bullets each: "Life context" (their name first, when you know it, then who they are, what is going on, the
+people and projects that matter now), "Acting on their behalf" (what they want done without asking and what
+needs a yes first), "How they like to talk" (tone, length, what annoys them). Dates where they matter.
+Nothing that is not in the records, the stars or the day.
+
+What the owner asked you to remember is in their words, each with its date. Those are the most reliable
+facts you have: fold every real fact about them into the records and the profile, and keep it there. A line
+that is not a fact about them — a stray question, a half sentence the microphone caught — you leave out.
+
+The journal: a title of a few words for the day; what happened (one line per conversation or event, with
+its time); what you learned about the owner; what is still open (a question left unanswered, a promise
+buddy made, a plan with no date yet); and the corrections. Short lines. An empty list when there is
+nothing."""
+
+CONSOLIDATE_PROMPT = """You are buddy, a small desk robot, tidying the records of what you know about your owner.
+You are shown every record and the profile page. Return only what should change:
+
+- The same thing filed under two ids (a person, a place or a project under two names): keep one id, return
+  it whole with the aliases of both and every fact of both, and list the other id under merged with the id
+  it went into. Never lose a fact in a merge.
+- Two facts that contradict each other: keep the newest dated fact as it is, and rewrite the older one as
+  "(until YYYY-MM-DD) <the older fact>", dated by when the newer one was said.
+- A fact repeated in one record: keep one copy.
+
+Records you do not change are not returned. Change nothing else: the wording is the owner's as much as
+yours, and they may have edited it by hand."""
 
 _LIST = {"type": "array", "items": {"type": "string"}}
+_RECORD = {"type": "object", "additionalProperties": False,
+           "required": ["id", "type", "aliases", "facts"],
+           "properties": {"id": {"type": "string"}, "type": {"type": "string", "enum": list(TYPES)},
+                          "aliases": _LIST, "facts": _LIST}}
 RECONCILE_SCHEMA = {
     "type": "object", "additionalProperties": False,
-    "required": ["records", "forget", "profile"],
+    "required": ["records", "forget", "profile", "journal"],
     "properties": {
-        "records": {"type": "array", "items": {
-            "type": "object", "additionalProperties": False,
-            "required": ["id", "type", "aliases", "facts"],
-            "properties": {"id": {"type": "string"}, "type": {"type": "string", "enum": list(TYPES)},
-                           "aliases": _LIST, "facts": _LIST}}},
+        "records": {"type": "array", "items": _RECORD},
         "forget": {"type": "array", "items": {"type": "string"},
                    "description": "ids of records the owner asked to forget entirely"},
         "profile": {"type": "object", "additionalProperties": False,
                     "required": ["life_context", "acting", "talking"],
                     "properties": {"life_context": _LIST, "acting": _LIST, "talking": _LIST}},
+        "journal": {"type": "object", "additionalProperties": False,
+                    "required": ["title", "happened", "learned", "open", "corrections"],
+                    "properties": {"title": {"type": "string"}, "happened": _LIST, "learned": _LIST,
+                                   "open": _LIST, "corrections": _LIST}},
     },
 }
+CONSOLIDATE_SCHEMA = {
+    "type": "object", "additionalProperties": False,
+    "required": ["records", "merged"],
+    "properties": {
+        "records": {"type": "array", "items": _RECORD},
+        "merged": {"type": "array", "items": {
+            "type": "object", "additionalProperties": False, "required": ["id", "into"],
+            "properties": {"id": {"type": "string"}, "into": {"type": "string"}}}},
+    },
+}
+
+
+@dataclass(frozen=True)
+class DayChange:
+    changed: int          # existing records rewritten or forgotten
+    created: int          # records new tonight
+    corrections: int      # dated corrections the journal lists
+    journal: Path         # days/<day>.md
 
 
 def render_profile(prof: dict[str, Any], records: dict[str, Record], day: str) -> str:
@@ -415,190 +724,357 @@ def render_profile(prof: dict[str, Any], records: dict[str, Record], day: str) -
 
     parts = [f"---\nid: {PROFILE_ID}\nupdated: {day}\n---",
              "# What buddy knows about its owner",
-             f"Reconciled from conversations up to {day}. A fact may be a day or two behind.",
+             f"Dreamt from conversations up to {day}. What was said since is in today's transcript.",
              section("Life context", "life_context"),
              section("Acting on their behalf", "acting"),
              section("How they like to talk", "talking")]
     index = render_index(records)
     if index:
-        parts.append("## " + index.replace(":\n", "\n", 1))
+        parts.append(index)
     return "\n\n".join(parts) + "\n"
 
 
-def day_notes(cfg: RecallConfig, day: str) -> str:
-    """Everything chat_memory.py wrote for one day: the day file and the session notes under it."""
-    parts: list[str] = []
-    for path in sorted(cfg.store.glob(f"{day}-*.md")):
-        try:
-            parts.append(f"--- day: {path.name}\n{path.read_text(encoding='utf-8')}")
-        except OSError:
-            continue
-    for path in sorted((cfg.sessions_dir / day).glob("*.md")) if (cfg.sessions_dir / day).is_dir() else []:
-        try:
-            parts.append(f"--- note: {path.name}\n{path.read_text(encoding='utf-8')}")
-        except OSError:
-            continue
-    return "\n\n".join(parts)
+def _reindex_profile(cfg: RecallConfig) -> None:
+    """Rewrite only the profile's record index, from the records as they are now."""
+    path = records_dir(cfg) / f"{PROFILE_ID}.md"
+    page = _profile_page(cfg)
+    if not page:
+        return
+    body = _drop_section(page, INDEX_HEADING)
+    index = render_index(load_records(cfg))
+    _write(path, body + ("\n\n" + index if index else "") + "\n")
 
 
-def reconciled_days(cfg: RecallConfig) -> set[str]:
-    try:
-        return {ln.strip() for ln in (records_dir(cfg) / STATE_FILE).read_text().splitlines() if ln.strip()}
-    except OSError:
-        return set()
+def render_journal(journal: dict[str, Any], day: str) -> str:
+    def items(key: str) -> list[str]:
+        return [" ".join(str(x).split()) for x in (journal.get(key) or []) if str(x).strip()]
+
+    title = " ".join(str(journal.get("title") or "").split()) or day
+    parts = [f"---\nday: {day}\ntitle: {title}\n---", f"# {title}"]
+    for heading, key in (("What happened", "happened"), ("What buddy learned", "learned"),
+                         ("Still open", "open"), ("Corrections", "corrections")):
+        rows = items(key)
+        parts.append(f"## {heading}\n" + ("\n".join(f"- {r}" for r in rows) if rows else "- (nothing)"))
+    return "\n\n".join(parts) + "\n"
 
 
-def due_days(cfg: RecallConfig, now: datetime) -> list[str]:
-    """Days with a curated day file (chat_memory's pass has run) that the records have not read yet.
-    Today is never due: its day file does not exist until tomorrow."""
-    today = now.strftime("%Y-%m-%d")
-    done = reconciled_days(cfg)
-    days = sorted({p.name[:10] for p in cfg.store.glob("????-??-??-*.md")})
-    return [d for d in days if d != today and d not in done]
+def _record_from(raw: Any, day: str) -> Optional[Record]:
+    if not isinstance(raw, dict):
+        return None
+    rid = str(raw.get("id") or "").strip().lower()
+    if not _ID.match(rid) or rid == PROFILE_ID or rid == Path(STARRED_FILE).stem:
+        return None
+    facts = [" ".join(str(f).split()) for f in (raw.get("facts") or []) if str(f).strip()]
+    if not facts:
+        return None
+    rtype = str(raw.get("type") or "")
+    return Record(id=rid, type=rtype if rtype in TYPES else "preference",
+                  aliases=[str(a).strip() for a in (raw.get("aliases") or []) if str(a).strip()][:MAX_ALIASES],
+                  facts=facts[:MAX_FACTS], updated=day)
 
 
-def apply(cfg: RecallConfig, result: dict[str, Any], day: str) -> tuple[int, int]:
-    """Write the reconcile result: changed records, forgotten records, the profile, the state line.
-    → (records written, records forgotten). Malformed entries are skipped, never fatal."""
+def _same(a: Optional[Record], b: Record) -> bool:
+    return a is not None and (a.type, a.aliases, a.facts) == (b.type, b.aliases, b.facts)
+
+
+def apply_day(cfg: RecallConfig, result: dict[str, Any], day: str) -> DayChange:
+    """Write one dream: changed records, forgotten records, the profile, the journal. Malformed entries
+    are skipped, never fatal; nothing is written outside the records folder."""
     folder = records_dir(cfg)
-    folder.mkdir(parents=True, exist_ok=True)
-    written = forgotten = 0
+    _make_dir(folder)
+    before = load_records(cfg)
+    changed = created = 0
     for raw in result.get("records") or []:
-        if not isinstance(raw, dict):
+        rec = _record_from(raw, day)
+        if rec is None or _same(before.get(rec.id), rec):
             continue
-        rid = str(raw.get("id") or "").strip().lower()
-        if not _ID.match(rid) or rid == PROFILE_ID:
-            continue
-        facts = [str(f).strip() for f in (raw.get("facts") or []) if str(f).strip()]
-        if not facts:
-            continue
-        rec = Record(id=rid, type=str(raw.get("type") or "preference") if raw.get("type") in TYPES else "preference",
-                     aliases=[str(a).strip() for a in (raw.get("aliases") or []) if str(a).strip()][:12],
-                     facts=facts[:40], updated=day)
-        (folder / f"{rid}.md").write_text(render_record(rec), encoding="utf-8")
-        written += 1
+        _write(folder / f"{rec.id}.md", render_record(rec))
+        if rec.id in before:
+            changed += 1
+        else:
+            created += 1
     for rid in result.get("forget") or []:
         rid = str(rid).strip().lower()
         path = folder / f"{rid}.md"
-        if _ID.match(rid) and rid != PROFILE_ID and path.exists():
-            path.unlink()                     # gone from the working tree; git history still has it
-            forgotten += 1
+        if _ID.match(rid) and rid != PROFILE_ID and rid in before and path.exists():
+            path.unlink()                     # gone from the working tree; git history keeps it until a forget
+            changed += 1
     prof = result.get("profile") if isinstance(result.get("profile"), dict) else {}
-    (folder / f"{PROFILE_ID}.md").write_text(render_profile(prof, load_records(cfg), day), encoding="utf-8")
-    with (folder / STATE_FILE).open("a", encoding="utf-8") as fh:
-        fh.write(day + "\n")
-    return written, forgotten
+    _write(folder / f"{PROFILE_ID}.md", render_profile(prof, load_records(cfg), day))
+    journal = result.get("journal") if isinstance(result.get("journal"), dict) else {}
+    journal_path = folder / DAYS_DIR / f"{day}.md"
+    _write(journal_path, render_journal(journal, day))
+    corrections = sum(1 for c in journal.get("corrections") or [] if str(c).strip())
+    return DayChange(changed=changed, created=created, corrections=corrections, journal=journal_path)
 
 
-class Reconciler:
-    """The nightly pass. `client` has one method, ``reconcile(body) -> json text`` (chat_memory's client
-    shape); the daemon gives it the real one, tests a fake."""
+def _call(client: Any, method: str, body: str) -> Optional[dict[str, Any]]:
+    try:
+        result = json.loads(getattr(client, method)(body))
+        if not isinstance(result, dict):
+            raise ValueError("not an object")
+        return result
+    except Exception as e:  # noqa: BLE001 - a failed call is a night without a dream, never a crash
+        log.warning("records: the %s call failed (%s)", method, type(e).__name__)
+        return None
 
-    def __init__(self, cfg: RecallConfig, client: Any, wall: Callable[[], datetime] = datetime.now) -> None:
-        self.cfg = cfg
-        self.client = client
-        self.wall = wall
-        self.git = ensure_repo(cfg.store) if cfg.store.is_dir() else False
 
-    async def reconcile_day(self, day: str) -> Optional[str]:
-        """One day's notes into the records. The commit hash, "" when written without git, None on failure."""
-        notes = day_notes(self.cfg, day)
-        if not notes.strip():
-            return None
-        current = load_records(self.cfg)
-        body = "## Records now\n\n" + ("\n\n".join(render_record(r) for r in current.values()) or "(none yet)")
-        stars = owner_stars(self.cfg)
-        if stars:
-            body += "\n\n## What the owner said to remember for good\n\n" + "\n".join(f"- {c}" for c in stars)
-        body += f"\n\n## Notes from {day}\n\n{notes}"
-        try:
-            raw = await asyncio.wait_for(asyncio.to_thread(self.client.reconcile, body), timeout=RECONCILE_TIMEOUT_SECS)
-            result = json.loads(raw)
-            if not isinstance(result, dict):
-                raise ValueError("not an object")
-        except (asyncio.TimeoutError, ValueError, Exception) as e:  # noqa: BLE001
-            log.warning("records: could not reconcile %s (%s: %s)", day, type(e).__name__, e)
-            return None
-        if not self.git and self.cfg.store.is_dir():
-            self.git = ensure_repo(self.cfg.store)
-        if self.git:
-            # Whatever is on disk now — the owner's hand edits included — goes into history first, as its
-            # own commit, so the reconcile's diff is exactly what the model changed.
-            commit(self.cfg.store, f"records: as found before reconciling {day}")
-        try:
-            written, forgotten = apply(self.cfg, result, day)
-        except OSError as e:
-            log.warning("records: could not write the records: %s", e)
-            return None
-        sha = commit(self.cfg.store, f"records: reconcile {day} ({written} changed, {forgotten} forgotten)") \
-            if self.git else None
-        log.info("records: %s → %d record(s) changed, %d forgotten, profile rewritten%s", day, written, forgotten,
-                 f", commit {sha}" if sha else "")
-        return sha or ""
+def _render_all(records: dict[str, Record]) -> str:
+    return "\n\n".join(render_record(r) for r in records.values())
 
-    async def loop(self, shutdown: "asyncio.Event", interval_secs: float = 1800.0) -> None:
-        """Like chat_memory.curate_loop: every half hour, any due day. Runs after the curate pass has had
-        its turn, since a day is due only once its day file exists."""
-        while not shutdown.is_set():
+
+def reconcile_day(cfg: RecallConfig, client: Any, day: str, day_text: str) -> Optional[DayChange]:
+    """One day of transcript into the records, the profile and the day's journal, in ONE model call.
+
+    `client` has ``reconcile(body) -> JSON text`` (OpenAIReconcileClient, or a fake). Blocking: the dream
+    runs it on a worker thread. → the change, or None when the day is empty, the day is not a date or the
+    call failed — and then nothing is written. One commit "dream: <day>" (after an as-found commit of
+    whatever the owner changed by hand)."""
+    if not _DAY.match(day or "") or not (day_text or "").strip():
+        return None
+    folder = records_dir(cfg)
+    with _locked(folder):
+        git = ensure_repo(folder)
+        _as_found(folder, git, f"dream: {day}")
+        current = load_records(cfg)
+        page = _profile_page(cfg)
+        star_rows = _star_rows(cfg)[-MAX_STARS_READ:]
+    body = "## Records now\n\n" + (_render_all(current) or "(none yet)")
+    body += "\n\n## The profile page now\n\n" + (page or "(none yet)")
+    if star_rows:
+        body += "\n\n## What the owner said to remember for good\n\n" + \
+                "\n".join(_star_line(t, d) for t, d in star_rows)
+    body += f"\n\n## Everything said on {day}\n\n{day_text}"
+    result = _call(client, "reconcile", body)
+    if result is None:
+        return None
+    try:
+        with _locked(folder):
+            change = apply_day(cfg, result, day)
+            sha = commit(folder, f"dream: {day}") if git else None
+    except OSError as e:
+        log.warning("records: could not write the dream of a day (%s)", type(e).__name__)
+        return None
+    log.info("records: dreamt %s — %d changed, %d new, %d corrected%s", day, change.changed, change.created,
+             change.corrections, f", commit {sha}" if sha else "")
+    return change
+
+
+def _rewrite_links(facts: list[str], renames: dict[str, str], own: str) -> list[str]:
+    def swap(m: re.Match) -> str:
+        target = renames.get(m.group(1), m.group(1))
+        return target if target == own else f"[[{target}]]"      # a record never links to itself
+
+    return [_LINK.sub(swap, fact) for fact in facts]
+
+
+def consolidate(cfg: RecallConfig, client: Any) -> tuple[int, int]:
+    """One model call over every record and the profile: merge the same thing filed under two ids, date
+    superseded facts "(until …)". → (records changed, records removed). (0, 0) and no commit when nothing
+    changed, when the call failed, or when the records are over MAX_CONSOLIDATE_CHARS (logged once).
+
+    `client` has ``consolidate(body) -> JSON text``. The model returns the merged record whole and says
+    which id went into which; the code, not the model, rewrites every [[old]] link to [[new]] and joins the
+    aliases, so a merge can never strand a link or drop a name."""
+    folder = records_dir(cfg)
+    with _locked(folder):
+        current = load_records(cfg)
+        page = _profile_page(cfg)
+    if len(current) < 2 and not any(len(r.facts) > 1 for r in current.values()):
+        return 0, 0
+    rendered = _render_all(current)
+    if len(rendered) > MAX_CONSOLIDATE_CHARS:
+        log.warning("records: %d chars of records is over one call's room — not consolidated tonight",
+                    len(rendered))
+        return 0, 0
+    result = _call(client, "consolidate", "## Records\n\n" + rendered + "\n\n## The profile page\n\n" +
+                   (page or "(none yet)"))
+    if result is None:
+        return 0, 0
+    day = datetime.now().strftime("%Y-%m-%d")
+    try:
+        with _locked(folder):
+            latest = load_records(cfg)       # a star or an edit may have landed during the call
+            renames: dict[str, str] = {}
+            for m in result.get("merged") or []:
+                if not isinstance(m, dict):
+                    continue
+                old, into = str(m.get("id") or "").strip().lower(), str(m.get("into") or "").strip().lower()
+                if old != into and old in latest and _ID.match(into) and into != PROFILE_ID:
+                    renames[old] = into
+            returned = {r.id: r for r in (_record_from(raw, day) for raw in result.get("records") or []) if r}
+            for old, into in list(renames.items()):
+                target = returned.get(into) or latest.get(into)
+                if target is None or into in renames:       # merged into nothing, or into a merged id: skip
+                    del renames[old]
+                    continue
+                if into not in returned:
+                    returned[into] = Record(target.id, target.type, list(target.aliases), list(target.facts), day)
+                merged = returned[into]
+                for alias in [old, *latest[old].aliases]:
+                    if alias.lower() not in {a.lower() for a in merged.aliases} and alias != into:
+                        merged.aliases.append(alias)
+                merged.aliases = merged.aliases[:MAX_ALIASES * 2]
+            changed = removed = 0
+            for rid in renames:
+                (folder / f"{rid}.md").unlink(missing_ok=True)
+                removed += 1
+            for rid, rec in latest.items():                 # links into a merged id now point at its new home
+                if rid in renames or rid in returned:
+                    continue
+                facts = _rewrite_links(rec.facts, renames, rid)
+                if facts != rec.facts:
+                    returned[rid] = Record(rec.id, rec.type, rec.aliases, facts, day)
+            for rid, rec in returned.items():
+                if rid in renames:
+                    continue
+                rec.facts = _rewrite_links(rec.facts, renames, rid)
+                if _same(latest.get(rid), rec):
+                    continue
+                _write(folder / f"{rid}.md", render_record(rec))
+                changed += 1
+            if changed or removed:
+                _reindex_profile(cfg)
+                if ensure_repo(folder):
+                    commit(folder, "dream: consolidate")
+    except OSError as e:
+        log.warning("records: could not write the consolidation (%s)", type(e).__name__)
+        return 0, 0
+    if changed or removed:
+        log.info("records: consolidated — %d changed, %d merged away", changed, removed)
+    return changed, removed
+
+
+# ---- forget: owner-confirmed, every line, every file ---------------------------------------------
+
+def _forget_head(head: str, match: Callable[[str], bool], record: bool) -> tuple[int, Optional[str]]:
+    """Frontmatter keeps its lines (a file must still parse), but not what it says of a forgotten thing:
+    a matching alias is dropped from the list, a matching title reads FORGOTTEN, and a record whose own id
+    matches is about that thing and goes whole (None). → (values removed, new head or None)."""
+    out, removed = [], 0
+    for line in head.split("\n"):
+        key, sep, value = line.partition(":")
+        key = key.strip().lower()
+        if not sep or not line.strip() or not match(line):
+            out.append(line)
+        elif key == "id" and record:
+            return removed + 1, None
+        elif key == "aliases":
+            items = [a.strip() for a in value.strip().strip("[]").split(",") if a.strip()]
+            kept = [a for a in items if not match(a.strip("\"'"))]
+            removed += len(items) - len(kept)
+            out.append(f"aliases: [{', '.join(kept)}]")
+        elif key == "title":
+            removed += 1
+            out.append(f"title: {FORGOTTEN}")
+        else:
+            out.append(line)
+    return removed, "\n".join(out)
+
+
+def _forget_in(path: Path, match: Callable[[str], bool], record: bool) -> tuple[int, Optional[str]]:
+    """(lines removed, new text or None when the file should go)."""
+    raw = path.read_text(encoding="utf-8")
+    fm = _FRONTMATTER.match(raw)
+    head, body = (raw[:fm.end()], raw[fm.end():]) if fm else ("", raw)
+    removed, new_head = _forget_head(head, match, record) if head else (0, "")
+    kept = []
+    for line in body.split("\n"):
+        if line.strip() and match(line):
+            removed += 1
+        else:
+            kept.append(line)
+    if new_head is None:
+        return removed + sum(1 for ln in kept if ln.strip()), None
+    if not removed:
+        return 0, raw
+    if record and not any(re.match(r"^\s*[-*]\s+\S", ln) for ln in kept):
+        return removed, None                      # a record with no fact left is only a name: it goes
+    return removed, new_head + "\n".join(kept)
+
+
+def forget_lines(cfg: RecallConfig, match: Callable[[str], bool], dry_run: bool = False) -> int:
+    """Remove every line `match` accepts from the records, the profile, starred.md and the journals.
+    → how many lines. Frontmatter lines stay (the files must still parse) but lose what matched: an alias,
+    a journal title. A record whose id matches, or that is left with no fact, is removed whole. One commit
+    "forget: N lines" (squash_history is the caller's next step, so git forgets too)."""
+    folder = records_dir(cfg)
+    if not folder.is_dir():
+        return 0
+    total = 0
+    with _locked(folder):
+        paths = sorted(folder.glob("*.md")) + sorted((folder / DAYS_DIR).glob("*.md"))
+        for path in paths:
+            is_record = path.parent == folder and path.stem != PROFILE_ID and path.name != STARRED_FILE
             try:
-                await asyncio.wait_for(shutdown.wait(), timeout=interval_secs)
-                return
-            except asyncio.TimeoutError:
-                pass
-            for day in due_days(self.cfg, self.wall()):
-                if shutdown.is_set():
-                    return
-                await self.reconcile_day(day)
-                await asyncio.sleep(1.0)
+                n, text = _forget_in(path, match, is_record)
+            except (OSError, UnicodeDecodeError):
+                continue
+            if not n:
+                continue
+            total += n
+            if dry_run:
+                continue
+            try:
+                if text is None:
+                    path.unlink()
+                elif path.name == STARRED_FILE:
+                    with _STAR_LOCK:                  # a star that landed since the read is kept
+                        _, text2 = _forget_in(path, match, False)
+                        if text2 is not None:
+                            _write(path, text2)
+                else:
+                    _write(path, text)
+            except OSError as e:
+                log.warning("records: could not forget in one file (%s)", type(e).__name__)
+        if total and not dry_run:
+            if ensure_repo(folder):
+                commit(folder, f"forget: {total} lines")
+    return total
 
+
+# ---- the dream's model client ----------------------------------------------------------------------
 
 class OpenAIReconcileClient:
-    def __init__(self, model: str, api_key: Optional[str] = None) -> None:
+    """The dream's two calls, each one strict-JSON Responses call. store=False: the day's words are not
+    kept on the provider's side (owner, 2026-09-23: "nothing should leak out ever")."""
+
+    def __init__(self, model: str = DEFAULT_MODEL, api_key: Optional[str] = None) -> None:
         import openai
 
         self.model = model
-        self._client = openai.OpenAI(api_key=api_key) if api_key else openai.OpenAI()
+        kw: dict[str, Any] = {"timeout": RECONCILE_TIMEOUT_SECS}
+        if api_key:
+            kw["api_key"] = api_key
+        self._client = openai.OpenAI(**kw)
 
-    def reconcile(self, body: str) -> str:
+    def _call(self, instructions: str, body: str, name: str, schema: dict[str, Any]) -> str:
         resp = self._client.responses.create(
-            model=self.model, instructions=RECONCILE_PROMPT, input=body,
-            text={"format": {"type": "json_schema", "name": "reconcile", "strict": True, "schema": RECONCILE_SCHEMA}},
-            max_output_tokens=4000, reasoning={"effort": "low"}, store=False)
+            model=self.model, instructions=instructions, input=body,
+            text={"format": {"type": "json_schema", "name": name, "strict": True, "schema": schema}},
+            max_output_tokens=MAX_OUTPUT_TOKENS, reasoning={"effort": "low"}, store=False)
         text = (resp.output_text or "").strip()
         if not text:
             raise RuntimeError("empty reply")
         return text
 
+    def reconcile(self, body: str) -> str:
+        return self._call(RECONCILE_PROMPT, body, "dream_day", RECONCILE_SCHEMA)
 
-@dataclass(frozen=True)
-class RecordsConfig:
-    enabled: bool = RECORDS_DEFAULT
-    model: str = DEFAULT_MODEL
+    def consolidate(self, body: str) -> str:
+        return self._call(CONSOLIDATE_PROMPT, body, "dream_consolidate", CONSOLIDATE_SCHEMA)
 
 
-def configured(environ: Any = None) -> RecordsConfig:
-    """``CC_BUDDY_RECORDS=1`` turns the layer on; ``CC_BUDDY_RECORDS_MODEL`` picks the reconciling model."""
+def make_client(environ: Any = None, model: str = DEFAULT_MODEL) -> Optional[OpenAIReconcileClient]:
+    """The dream's real client, or None (with one log line) when there is no key or no SDK."""
     env = os.environ if environ is None else environ
-    switch = (env.get("CC_BUDDY_RECORDS") or ("1" if RECORDS_DEFAULT else "0")).strip().lower()
-    model = (env.get("CC_BUDDY_RECORDS_MODEL") or DEFAULT_MODEL).strip() or DEFAULT_MODEL
-    return RecordsConfig(enabled=switch in ("1", "true", "yes", "on"), model=model)
-
-
-def make_reconciler(config: RecordsConfig, cfg: RecallConfig, environ: Any = None) -> Optional[Reconciler]:
-    """The real reconciler, or None (with one log line) when it cannot run."""
-    env = os.environ if environ is None else environ
-    if not config.enabled:
-        return None
     key = (env.get("OPENAI_API_KEY") or "").strip()
     if not key:
-        log.warning("records: OPENAI_API_KEY not set — records are read but never reconciled")
+        log.warning("records: OPENAI_API_KEY not set — the records are read but never dreamt")
         return None
     try:
-        client = OpenAIReconcileClient(config.model, api_key=key)
+        return OpenAIReconcileClient(model, api_key=key)
     except ImportError as e:
-        log.warning("records: openai SDK not importable (%s) — records are read but never reconciled", e)
+        log.warning("records: openai SDK not importable (%s) — the records are read but never dreamt",
+                    type(e).__name__)
         return None
-    cfg.store.mkdir(parents=True, exist_ok=True)
-    records_dir(cfg).mkdir(parents=True, exist_ok=True)
-    log.info("records: on — %s reconciles each day's notes into %s", config.model, records_dir(cfg))
-    return Reconciler(cfg, client)
