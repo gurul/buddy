@@ -86,6 +86,13 @@ WEB_WORDS = re.compile(
 
 # What the page's JavaScript is asked for: every visible interactive element, with its accessible name,
 # role, state and box. One evaluate, ~1 ms on a busy page; no screenshots, no OCR.
+# Controls above or below the viewport are collected too, after every on-screen one (the cap cuts them
+# first): a plan names "the Compare all plans button at the bottom", and the effectors scroll a control into
+# view before they touch it. Only on-screen controls were collected before, and the plan vocabulary has no
+# scroll, so a control below the fold could never be reached (browser_model_eval below_the_fold, 2026-09-24:
+# 0 of 15 runs across five models). Off to the side (carousels, off-canvas menus) is still left out.
+# Every earlier data-buddy-id is cleared first, so a control that is no longer collected can never answer
+# to an id that now belongs to another.
 _COLLECT_JS = """() => {
   const sel = 'a[href],button,input,textarea,select,summary,[role=button],[role=link],[role=tab],[role=menuitem],' +
               '[role=checkbox],[role=radio],[role=textbox],[role=combobox],[role=option],[role=switch],' +
@@ -110,11 +117,15 @@ _COLLECT_JS = """() => {
     if (own) return own;
     const img = e.querySelector('img[alt],svg[aria-label],[aria-label]');
     return img ? (img.getAttribute('alt') || img.getAttribute('aria-label') || '').trim() : ''; };
+  for (const e of document.querySelectorAll('[data-buddy-id]')) e.removeAttribute('data-buddy-id');
   const out = []; const H = window.innerHeight, W = window.innerWidth; let i = 0;
+  const onscreen = [], offscreen = [];
   for (const e of document.querySelectorAll(sel)) {
     const r = e.getBoundingClientRect();
-    if (r.width < 2 || r.height < 2 || r.bottom < 0 || r.top > H || r.right < 0 || r.left > W) continue;
+    if (r.width < 2 || r.height < 2 || r.right < 0 || r.left > W) continue;
     const cs = getComputedStyle(e); if (cs.visibility === 'hidden' || cs.display === 'none' || cs.opacity === '0') continue;
+    ((r.bottom < 0 || r.top > H) ? offscreen : onscreen).push([e, r]); }
+  for (const [e, r] of onscreen.concat(offscreen)) {
     const role = roleOf(e); const name = nameOf(e).replace(/\\s+/g, ' ').slice(0, 120);
     let value = '';
     if (role === 'checkbox' || role === 'switch' || role === 'menuitemcheckbox') value = (e.checked || e.getAttribute('aria-checked') === 'true') ? 'checked' : 'unchecked';
@@ -126,7 +137,7 @@ _COLLECT_JS = """() => {
     out.push({id: String(i++), role, name, value, x: Math.round(r.left), y: Math.round(r.top), w: Math.round(r.width),
               h: Math.round(r.height), enabled: !(e.disabled || e.getAttribute('aria-disabled') === 'true'),
               secure: role === 'password', editable, dialog: !!e.closest('dialog,[role=dialog],[role=alertdialog]'),
-              focused: document.activeElement === e});
+              focused: document.activeElement === e, offscreen: r.bottom < 0 || r.top > H});
     if (out.length >= %d) break; }
   const dlg = document.querySelector('dialog[open],[role=dialog],[role=alertdialog]');
   const focused = document.activeElement;
@@ -401,6 +412,7 @@ class _Page:
         try:
             if loc.count() == 0:
                 return f"refused: {c.label!r} is no longer on the page"
+            loc.scroll_into_view_if_needed(timeout=SNAPSHOT_TIMEOUT_MS)      # a field below the fold
             loc.click(timeout=SNAPSHOT_TIMEOUT_MS)
             focused = self.page.evaluate("() => document.activeElement && document.activeElement.getAttribute('data-buddy-id')")
             if str(focused) != c.id:

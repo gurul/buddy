@@ -232,3 +232,47 @@ def test_a_sensitive_control_stops_the_plan_for_the_human_and_a_yes_lets_it_thro
     assert first["status"] == "needs_human" and first["confirm"].casefold() == "place order"
     assert not any(e["effect"] == "confirmed" and "Order" in e["step"] for e in first["ledger"])
     assert second["status"] == "complete" and second["sentence"] == "Ordered."
+
+
+# ---- what the eval's fixture pages taught (tools/browser_model_eval.py, 2026-09-24) -----------------------
+
+def _serve(tmp_path: Path, name: str, html: str):
+    import functools
+    import http.server
+    import threading
+
+    (tmp_path / name).write_text(html)
+    handler = functools.partial(http.server.SimpleHTTPRequestHandler, directory=str(tmp_path))
+    srv = http.server.ThreadingHTTPServer(("127.0.0.1", 0), handler)
+    srv.RequestHandlerClass.log_message = lambda *a, **k: None
+    threading.Thread(target=srv.serve_forever, daemon=True).start()
+    return srv, f"http://127.0.0.1:{srv.server_address[1]}/{name}"
+
+
+BELOW_THE_FOLD = """<!doctype html><html><head><title>Pricing</title></head><body>
+<nav><a href="#top">Home</a></nav><h1>Pricing</h1><div style="height:3000px">Features and more features.</div>
+<button onclick="document.getElementById('out').textContent='Starter $5, Team $15'">Compare all plans</button>
+<p id="out"></p></body></html>"""
+
+
+@live
+def test_a_control_below_the_fold_is_collected_and_scrolled_to_before_the_click(tmp_path: Path) -> None:
+    srv, url = _serve(tmp_path, "pricing.html", BELOW_THE_FOLD)
+    lane = lane_for(tmp_path)
+    plan = {"steps": [{"kind": "click", "target": "the Compare all plans button", "label_hint": "Compare all plans",
+                       "expect": {"kind": "text_visible", "value": "Starter $5"}}],
+            "final_say": "Compared.", "success": None}
+
+    async def go() -> tuple[dict[str, Any], dict[str, Any]]:
+        await lane.open_url(url)
+        outline = await lane.outline()
+        result = await lane.run_plan(plan, "click the Compare all plans button at the bottom")
+        await lane.close()
+        return outline, result
+
+    try:
+        outline, result = asyncio.run(go())
+    finally:
+        srv.shutdown()
+    assert "button: Compare all plans" in outline["lines"]              # the planner can see it
+    assert result["status"] == "complete" and result["ledger"][0]["effect"] == "confirmed", result
