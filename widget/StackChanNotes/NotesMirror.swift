@@ -115,12 +115,15 @@ final class NotesMirror {
             dirSource = makeSource(for: notesDir, mask: [.write, .rename, .delete, .attrib, .link])
             if dirSource != nil { log.debug("dir watcher armed") }
         }
-        // buddy's spoken memory lives in its own store, so a new conversation
-        // shows up here rather than in the notes directory.
+        // buddy's spoken memory lives in its memory folder, so a new dream journal
+        // shows up here rather than in the notes directory. The deepest folder that
+        // exists is watched; an appended star changes no directory, so the 30 s
+        // timer is what picks that up.
         if storeSource == nil {
-            let store = NoteStore.defaultDebriefDir()
-            let sessions = store.appendingPathComponent("sessions", isDirectory: true)
-            let target = FileManager.default.fileExists(atPath: sessions.path) ? sessions : store
+            let store = NoteStore.defaultMemoryDir()
+            let fm = FileManager.default
+            let target = [NoteStore.journalDir(store: store), NoteStore.recordsDir(store: store)]
+                .first { fm.fileExists(atPath: $0.path) } ?? store
             storeSource = makeSource(for: target, mask: [.write, .rename, .delete, .attrib, .link])
             if storeSource != nil { log.debug("store watcher armed on \(target.lastPathComponent, privacy: .public)") }
         }

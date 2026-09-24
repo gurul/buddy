@@ -10,6 +10,10 @@
 //   photos/YYYY-MM-DD/HHMMSS-<id>.jpg  the pictures buddy kept of views it
 //                   found cool (bridge/src/cc_buddy_bridge/photos.py); a record
 //                   references one by a path relative to the notes directory
+// and, under its memory folder `~/.config/cc-buddy-bridge/memory/` (records.py):
+//   records/starred.md       `- claim (YYYY-MM-DD)`: what the owner said to remember
+//   records/days/<day>.md    the dream journal, one page per day buddy talked
+//   transcripts/meetings/<day>/*.md  recordings of the room buddy was asked to take
 // The (unsandboxed) helper mirrors all of it into `notes.json` inside the App
 // Group container — and copies the referenced photos in beside it, because the
 // (sandboxed) widget can read nothing but that container.
@@ -144,15 +148,18 @@ struct Reflection: Codable, Hashable, Identifiable, Sendable {
     var id: String { date }
 }
 
-/// One conversation buddy had with its owner, as buddy wrote it down afterwards.
+/// One day of talking with its owner, as buddy wrote it down in its dream journal.
 ///
-/// The spoken half of buddy's memory lives in its own claude-debrief store
-/// (`~/.config/cc-buddy-bridge/debrief`), written by the daemon's chat_memory.py.
-/// It is kept apart from `Note`, which is what buddy SAW: what the owner said is
-/// quotable, what a camera suggested is not.
+/// The spoken half of buddy's memory lives under its memory folder
+/// (`~/.config/cc-buddy-bridge/memory`): the nightly dream (dream.py) writes one
+/// journal page per day buddy talked, `records/days/<day>.md`. It is kept apart
+/// from `Note`, which is what buddy SAW: what the owner said is quotable, what a
+/// camera suggested is not.
 struct Conversation: Codable, Hashable, Identifiable, Sendable {
     let date: String          // yyyy-MM-dd
-    let time: String          // HH:mm
+    /// A journal is one page for the whole day, written the night after, so it
+    /// has no clock time: always `NoteStore.noTime`.
+    let time: String
     let title: String
     /// Debts of buddy's own, verbatim: "buddy owes an answer about the servo".
     var owes: [String] = []
@@ -192,7 +199,7 @@ struct NotesSnapshot: Codable, Sendable {
     var highlights: [String] = []
     /// Conversations, newest first. What buddy heard.
     var conversations: [Conversation] = []
-    /// Claims the owner promoted out loud with "remember that", oldest first.
+    /// Claims the owner promoted with "remember that" (`records/starred.md`), oldest first.
     var spokenStars: [String] = []
     /// Recordings of the room, newest first.
     var roomNotes: [RoomNote] = []
@@ -524,71 +531,89 @@ enum NoteStore {
         try body.write(to: url, atomically: true, encoding: .utf8)
     }
 
-    // MARK: - The spoken half: buddy's own debrief store
+    // MARK: - The spoken half: buddy's memory folder
 
-    /// Where buddy keeps what was SAID. Its own claude-debrief store, written by
-    /// the daemon's chat_memory.py, separate from the notes directory.
-    static func defaultDebriefDir() -> URL {
-        if let override = ProcessInfo.processInfo.environment["CC_BUDDY_DEBRIEF_DIR"], !override.isEmpty {
+    /// Where buddy keeps what was SAID: its memory folder, separate from the notes
+    /// directory. `CC_BUDDY_MEMORY_DIR` overrides it, as it does for the daemon
+    /// (notes_widget.py `memory_dir`). Only ever read from here: the daemon's
+    /// one-time move of the old store skips a target that already exists, so a
+    /// folder made by the widget would strand the owner's records.
+    static func defaultMemoryDir() -> URL {
+        if let override = ProcessInfo.processInfo.environment["CC_BUDDY_MEMORY_DIR"], !override.isEmpty {
             return URL(fileURLWithPath: (override as NSString).expandingTildeInPath, isDirectory: true)
         }
         return FileManager.default.homeDirectoryForCurrentUser
-            .appendingPathComponent(".config/cc-buddy-bridge/debrief", isDirectory: true)
+            .appendingPathComponent(".config/cc-buddy-bridge/memory", isDirectory: true)
     }
 
-    /// One conversation note: its title and any debt of buddy's own.
-    static func parseConversation(_ body: String, date: String, time: String) -> Conversation? {
+    /// `<memory>/records`: the records, `starred.md` and the dream journal.
+    static func recordsDir(store: URL) -> URL { store.appendingPathComponent("records", isDirectory: true) }
+
+    /// `<memory>/records/days`: one journal page per day buddy talked, written the night after.
+    static func journalDir(store: URL) -> URL {
+        recordsDir(store: store).appendingPathComponent("days", isDirectory: true)
+    }
+
+    /// What a journal line shows where a diary line shows its clock time.
+    static let noTime = "--:--"
+    /// What forget leaves in a journal in place of a line. Never shown.
+    static let forgotten = "(forgotten)"
+
+    /// One journal page as the lines worth showing: its title (what the day was
+    /// about) and at most two debts of buddy's own, because a debt is the thing
+    /// buddy has not done yet. A line forget redacted is dropped. Mirrors
+    /// notes_widget.py `parse_conversation`.
+    static func parseConversation(_ body: String, date: String) -> Conversation? {
         var title = ""
         var owes: [String] = []
-        for raw in body.split(separator: "\n", omittingEmptySubsequences: true) {
+        for raw in body.split(whereSeparator: \.isNewline) {
             let line = raw.trimmingCharacters(in: .whitespaces)
             if title.isEmpty, line.hasPrefix("# ") {
                 title = String(line.dropFirst(2)).trimmingCharacters(in: .whitespaces)
             } else if line.hasPrefix("- ") {
-                let item = String(line.dropFirst(2)).trimmingCharacters(in: .whitespaces)
-                if item.lowercased().hasPrefix("buddy owes") { owes.append(item) }
-            }
-        }
-        guard !title.isEmpty || !owes.isEmpty else { return nil }
-        return Conversation(date: date, time: time, title: title.isEmpty ? "A conversation" : title, owes: owes)
-    }
-
-    /// Conversations, newest first, across every day in the store.
-    static func readConversations(store: URL, limit: Int = 60) -> [Conversation] {
-        let fm = FileManager.default
-        let sessions = store.appendingPathComponent("sessions", isDirectory: true)
-        let days = ((try? fm.contentsOfDirectory(at: sessions, includingPropertiesForKeys: nil)) ?? [])
-            .filter { $0.hasDirectoryPath }
-            .sorted { $0.lastPathComponent > $1.lastPathComponent }
-        var out: [Conversation] = []
-        for day in days {
-            let date = day.lastPathComponent
-            let files = ((try? fm.contentsOfDirectory(at: day, includingPropertiesForKeys: nil)) ?? [])
-                .filter { $0.pathExtension == "md" }
-                .sorted { $0.lastPathComponent > $1.lastPathComponent }
-            for file in files {
-                guard let body = try? String(contentsOf: file, encoding: .utf8) else { continue }
-                let stem = file.deletingPathExtension().lastPathComponent
-                let digits = stem.prefix(4)
-                let time = digits.count == 4 && digits.allSatisfy(\.isNumber)
-                    ? "\(digits.prefix(2)):\(digits.suffix(2))" : "--:--"
-                if let c = parseConversation(body, date: date, time: String(time)) {
-                    out.append(c)
-                    if out.count >= limit { return out }
+                let item = String(line.dropFirst(2))
+                if item.lowercased().hasPrefix("buddy owes") {
+                    owes.append(item.trimmingCharacters(in: .whitespaces))
                 }
             }
+        }
+        if title.contains(forgotten) { title = "" }
+        owes = owes.prefix(2).filter { !$0.contains(forgotten) }
+        guard !title.isEmpty || !owes.isEmpty else { return nil }
+        return Conversation(date: date, time: noTime, title: title.isEmpty ? "A conversation" : title, owes: owes)
+    }
+
+    /// What was said, from the dream journals of today and yesterday (calendar
+    /// days, local time), newest day first. The same two pages the daemon's
+    /// desktop widget shows (notes_widget.py `collect_conversations`).
+    static func readConversations(store: URL, today: Date = .now) -> [Conversation] {
+        let cal = Calendar.current
+        let f = DateFormatter()
+        f.locale = Locale(identifier: "en_US_POSIX")
+        f.calendar = cal
+        f.timeZone = .current
+        f.dateFormat = "yyyy-MM-dd"
+        let days = [today, cal.date(byAdding: .day, value: -1, to: today)].compactMap { $0 }
+        var out: [Conversation] = []
+        for day in days {
+            let date = f.string(from: day)
+            let file = journalDir(store: store).appendingPathComponent("\(date).md", isDirectory: false)
+            guard let body = try? String(contentsOf: file, encoding: .utf8),
+                  let c = parseConversation(body, date: date) else { continue }
+            out.append(c)
         }
         return out
     }
 
-    /// Recordings of the room, newest first, read from `<store>/notes/<day>/`.
+    /// Recordings of the room, newest first, read from `<memory>/transcripts/meetings/<day>/`
+    /// (notes.py `notes_dir`: meeting notes live beside the transcripts).
     ///
     /// Only the head of each file is parsed: these carry a whole transcript, and
     /// the widget lists them rather than showing them. The file itself is what
     /// the owner opens or exports.
     static func readRoomNotes(store: URL, limit: Int = 40) -> [RoomNote] {
         let fm = FileManager.default
-        let root = store.appendingPathComponent("notes", isDirectory: true)
+        let root = store.appendingPathComponent("transcripts/meetings", isDirectory: true)
         let days = ((try? fm.contentsOfDirectory(at: root, includingPropertiesForKeys: nil)) ?? [])
             .filter { $0.hasDirectoryPath }
             .sorted { $0.lastPathComponent > $1.lastPathComponent }
@@ -626,34 +651,36 @@ enum NoteStore {
         return out
     }
 
-    /// Claims the owner promoted by voice, read ONLY from the section buddy writes.
-    ///
-    /// A fresh `era-debrief install` seeds HIGHLIGHTS.md with a worked example
-    /// carrying ★ lines of its own, about somebody else's outage. Scanning the
-    /// whole file put one of those on the desktop as buddy's memory of its owner
-    /// (2026-09-11). Reading only buddy's own section makes that impossible.
-    static func readSpokenStars(store: URL) -> [String] {
-        guard let body = try? String(contentsOf: store.appendingPathComponent("HIGHLIGHTS.md",
-                                                                              isDirectory: false),
-                                     encoding: .utf8) else { return [] }
+    /// `- claim (YYYY-MM-DD)` lines, an optional ★ after the bullet (records.py `_STAR_LINE`).
+    private static let starLine = try! NSRegularExpression(pattern: #"^\s*[-*]\s+(?:★\s*)?(.+?)\s*$"#)
+    /// The trailing ` (YYYY-MM-DD)` a star is dated with (records.py `_STAR_DATE`).
+    private static let starDate = try! NSRegularExpression(pattern: #"^(.*?)\s*\((\d{4}-\d{2}-\d{2})\)$"#)
+    /// A leading YAML frontmatter block, which is never a star (records.py `_FRONTMATTER`).
+    private static let frontmatter = try! NSRegularExpression(pattern: #"\A---\n.*?\n---[ \t]*(?:\n|\z)"#,
+                                                              options: [.dotMatchesLineSeparators])
+
+    /// What the owner asked buddy to remember, from `<memory>/records/starred.md`:
+    /// text only, the date dropped, oldest first, the newest `limit` of them.
+    /// Mirrors records.py `stars` (and its default limit), so the owner sees the
+    /// same claims buddy starts every conversation with.
+    static func readSpokenStars(store: URL, limit: Int = 40) -> [String] {
+        let url = recordsDir(store: store).appendingPathComponent("starred.md", isDirectory: false)
+        guard limit > 0, let raw = try? String(contentsOf: url, encoding: .utf8) else { return [] }
+        let body = frontmatter.stringByReplacingMatches(in: raw, range: NSRange(raw.startIndex..., in: raw),
+                                                        withTemplate: "")
         var out: [String] = []
-        var inside = false
-        for raw in body.split(separator: "\n", omittingEmptySubsequences: false) {
-            let line = raw.trimmingCharacters(in: .whitespaces)
-            if line.hasPrefix("#") {
-                let heading = line.drop(while: { $0 == "#" }).trimmingCharacters(in: .whitespaces).lowercased()
-                inside = heading.hasPrefix("from talking")
-                continue
+        for sub in body.split(whereSeparator: \.isNewline) {
+            let line = String(sub)
+            guard let m = starLine.firstMatch(in: line, range: NSRange(line.startIndex..., in: line)),
+                  let r = Range(m.range(at: 1), in: line) else { continue }
+            var claim = String(line[r])
+            if let d = starDate.firstMatch(in: claim, range: NSRange(claim.startIndex..., in: claim)),
+               let t = Range(d.range(at: 1), in: claim) {
+                claim = claim[t].trimmingCharacters(in: .whitespaces)
             }
-            guard inside else { continue }
-            var claim = line
-            if claim.hasPrefix("-") { claim.removeFirst(); claim = claim.trimmingCharacters(in: .whitespaces) }
-            guard claim.hasPrefix("★") else { continue }
-            claim.removeFirst()
-            claim = claim.trimmingCharacters(in: .whitespaces)
-            if !claim.isEmpty, !claim.contains("*(example)*") { out.append(claim) }
+            if !claim.isEmpty { out.append(claim) }
         }
-        return out
+        return Array(out.suffix(limit))
     }
 
     /// Reads the daemon's notes directory: diary lines (newest first), memory records
@@ -698,12 +725,12 @@ enum NoteStore {
         let profile = (try? String(contentsOf: profileURL, encoding: .utf8)) ?? ""
         let highlights = readHighlights(notesDir: notesDir)
 
-        let debrief = store ?? defaultDebriefDir()
+        let memoryDir = store ?? defaultMemoryDir()
         let snap = NotesSnapshot(updatedAt: .now, notesDir: notesDir.path, notes: notes, thoughts: thoughts,
                                  profile: profile, reflections: reflections, highlights: highlights,
-                                 conversations: readConversations(store: debrief),
-                                 spokenStars: readSpokenStars(store: debrief),
-                                 roomNotes: readRoomNotes(store: debrief))
+                                 conversations: readConversations(store: memoryDir),
+                                 spokenStars: readSpokenStars(store: memoryDir),
+                                 roomNotes: readRoomNotes(store: memoryDir))
         return (snap, files.first)
     }
 }
