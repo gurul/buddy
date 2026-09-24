@@ -4034,3 +4034,108 @@ def test_a_step_during_the_first_send_waits_out_its_second_before_the_edit() -> 
         await rig.inlet._shutdown()
 
     asyncio.run(go())
+
+
+# ---- review fixes: receipts, labels and the chat's record (2026-09-23) ----------------------------------
+
+def test_a_delivered_image_whose_thumbs_up_fails_does_not_keep_its_eyes() -> None:
+    """Review finding: the 👀 ("on its way") stayed on a delivered image when the 👍 could not be set."""
+    from cc_buddy_bridge import telegram_images as media
+
+    class NoThumbs(FakeApi):
+        async def react(self, chat_id: int, message_id: int, emoji: str) -> None:
+            if emoji == telegram.DELIVERED_REACTION:
+                raise BotApiError(400, "Bad Request: REACTION_INVALID")
+            await super().react(chat_id, message_id, emoji)
+
+        async def receive_image(self, item: Any) -> Any:
+            return media.ReceivedImage(b"\xff\xd8\xff\xd9", "image/jpeg", "photo.jpg")
+
+    async def go(tmp: Path) -> None:
+        api, typed = NoThumbs(), []
+        rig = relay_rig(api, typed)
+        with pytest.MonkeyPatch.context() as mp:
+            mp.setattr(media, "save", lambda image: tmp / "photo.jpg")
+            await rig.inlet._image(telegram.Inbound(OWNER, OWNER, "look", media.Attachment("f"), message_id=5), "claude", 0)
+        assert typed and [e for _, _, e in api.reactions] == [telegram.SEEN_REACTION, ""]
+        assert api.sent[-1] == (OWNER, "Typed.")                      # the line stands for the 👍
+        await rig.inlet._shutdown()
+
+    import tempfile
+    with tempfile.TemporaryDirectory() as tmp:
+        asyncio.run(go(Path(tmp)))
+
+
+def test_a_round_that_stars_a_fact_and_keeps_a_note_says_where_the_note_went(tmp_path: Path) -> None:
+    """Review finding: one reaction per message, so the 🏆 hid the ✍ and where the capture went."""
+    from cc_buddy_bridge import second_brain
+
+    vault = second_brain.VaultConfig(enabled=True, root=tmp_path / "vault")
+    both = {"id": "resp", "output": [
+        {"type": "function_call", "name": "capture_note", "call_id": "a",
+         "arguments": json.dumps({"text": "buy milk", "kind": "todo"})},
+        {"type": "function_call", "name": "remember", "call_id": "b",
+         "arguments": json.dumps({"claim": "I like ramen"})}]}
+    api = FakeApi()
+    rig = Rig(api, FakeCreate(both), vault=vault, on_star=lambda c: "kept")
+    asyncio.run(rig.inlet._turn(telegram.Inbound(OWNER, OWNER, "todo: buy milk, and remember I like ramen",
+                                                 message_id=4)))
+    assert api.reactions == [(OWNER, 4, telegram.STAR_REACTION)]
+    assert len(api.sent) == 1 and api.sent[0][1].startswith("Added to the todo list (")
+    assert len(rig.create.requests) == 1
+
+
+def test_the_remember_guidance_says_the_reaction_is_the_confirmation() -> None:
+    text = " ".join(telegram.INSTRUCTIONS.split())
+    assert "For remember, write nothing alongside the call" in text
+
+
+def test_a_reply_link_refused_for_another_reason_is_not_resent_whole() -> None:
+    """Review finding: any error on a message with a reply link resent it whole; after a 429 on a later
+    piece the first pieces arrived twice. Only a 400 (the link or box refused) is resent plain."""
+    class Busy(FakeApi):
+        def __init__(self) -> None:
+            super().__init__()
+            self.attempts = 0
+
+        async def send_message(self, *a: Any, **kw: Any) -> None:
+            self.attempts += 1
+            raise BotApiError(429, "Too Many Requests: retry after 3")
+
+    api = Busy()
+    rig = Rig(api, FakeCreate())
+    asyncio.run(rig.inlet._say(OWNER, "the result", reply_to=7))
+    assert api.attempts == 1
+    api = FakeApi()
+    api.refuse_links = True                                           # the control: a refused link still goes plain
+    rig = Rig(api, FakeCreate())
+    asyncio.run(rig.inlet._say(OWNER, "the result", reply_to=7))
+    assert api.sent == [(OWNER, "the result")]
+
+
+def test_two_codex_folders_with_one_name_get_buttons_that_can_be_told_apart() -> None:
+    async def go() -> None:
+        codex, api = FakeCodex(), FakeApi()
+        home = Path.home()
+        folders = [home / "work" / "buddy", home / "personal" / "buddy", Path("/projects/status")]
+        rig = Rig(api, FakeCreate(), codex=codex, codex_folders=lambda: folders)
+        await dispatch(rig, "codex on")
+        assert api.buttons[-1] == ["~/work/buddy", "~/personal/buddy", "status"]
+        await tap(rig, api.key("status")[1], api.keyboards[-1][0])     # a folder, not the "status" verb
+        assert codex.selected == [Path("/projects/status")]
+        await rig.inlet._shutdown()
+
+    asyncio.run(go())
+
+
+def test_a_tapped_question_option_is_kept_in_the_chats_record() -> None:
+    async def go() -> None:
+        api, typed = FakeApi(), []
+        rig = relay_rig(api, typed)
+        rig.inlet.relay_tool_call("AskUserQuestion", "Which one? (1. era-maker / 2. buddy)")
+        await jobs(rig)
+        await tap(rig, api.key("2. buddy")[1], api.keyboards[-1][0])
+        assert typed == ["2"] and rig.inlet.turns[-1] == ("user", "2. buddy")
+        await rig.inlet._shutdown()
+
+    asyncio.run(go())

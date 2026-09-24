@@ -273,7 +273,8 @@ You are also the robot on the desk, and a text is the same as a word said to it:
 see" is look, "find my mug" is find, "look around" is look_around, "start taking notes" / "stop taking
 notes" is take_notes, "go explore" is go_explore, "mute" / "unmute" is set_sound, "remember that …" is
 remember. Do these at once, with the tool, and answer in a few words; never say you cannot when the tool is
-there. When a robot tool answers with a reason it could not, tell the owner that reason.
+there. For remember, write nothing alongside the call: a reaction on their message is the confirmation, and
+the chat says it was starred if that reaction fails. When a robot tool answers with a reason it could not, tell the owner that reason.
 
 Starting a coding session in one of the owner's project folders ("open era maker in work", "start claude on
 buddy") is start_coding_session, not start_task. Its question or its result reaches this chat by itself.
@@ -1070,6 +1071,16 @@ def _same_folder(a: str, b: str) -> bool:
         return a == b
 
 
+def _folder_label(entry: str) -> str:
+    """A Codex folder menu entry as a button label: a bare name as it is, a full path (two folders share
+    the name) with ~ for the home folder and, when still too long, its end kept, where the names differ."""
+    if "/" not in entry:
+        return entry
+    home = str(Path.home())
+    label = "~" + entry[len(home):] if entry.startswith(home + "/") else entry
+    return label if len(label) <= MAX_BUTTON_CHARS else "…" + label[-(MAX_BUTTON_CHARS - 1):]
+
+
 Create = Callable[[dict[str, Any]], Awaitable[dict[str, Any]]]
 
 # What a keyboard's tap does. ANSWER resolves the question waiting on it, exactly as a typed answer would;
@@ -1291,6 +1302,9 @@ class TelegramInlet:
         self._picker_board: Optional[_Keyboard] = None        # the latest picker (claude on, new claude, codex)
         self._stopped_from_chat = False
         self._stopping = False                            # _shutdown has begun: no new edit jobs are started
+        # Owner messages wearing buddy's 👀 (an image on its way): a 👍 that then cannot be set takes it off,
+        # so the message never keeps saying "on its way" after it arrived (review, 2026-09-23).
+        self._seen_marks: set[int] = set()
         self._jobs: set[asyncio.Task] = set()
         self._dropped_ids: set[int] = set()
         self.stopped_reason: Optional[str] = None
@@ -1762,12 +1776,15 @@ class TelegramInlet:
         delivered; when it is not delivered, the 👀 comes off again and the line saying why stays."""
         relayed = target in ("claude", "codex")
         seen = relayed and await self._receipt(inbound.chat_id, inbound.message_id, SEEN_REACTION)
+        if seen:
+            self._seen_marks.add(inbound.message_id)
         delivered = False
         try:
             delivered = await self._relay_image(inbound, target, epoch, claude_epoch)
         finally:
-            if seen and not delivered:
+            if seen and not delivered and inbound.message_id in self._seen_marks:
                 await self._unreact(inbound.chat_id, inbound.message_id)
+            self._seen_marks.discard(inbound.message_id)
 
     async def _unreact(self, chat_id: int, message_id: int) -> None:
         """Take the bot's reaction off a message (a 👀 whose image never arrived). Best effort, never raises."""
@@ -1829,7 +1846,10 @@ class TelegramInlet:
                 await self.api.send_message(chat_id, text, title=title, subtitle=subtitle, **extra)
             return
         except BotApiError as e:
-            if not extra:
+            if not extra or e.code != 400:
+                # Only Telegram refusing the link or the box (a 400) is worth a plain resend. A 429, a 5xx or a
+                # network failure may come after earlier pieces of a long message went out, and a resend
+                # would send them twice (review, 2026-09-23).
                 log.warning("telegram: could not send (%s)", e)
                 return
             log.warning("telegram: could not send with a reply link or reply box (%s); sending it plain", e)
@@ -1929,6 +1949,7 @@ class TelegramInlet:
         self._spawn(self._answer_tap(tap, ("Typed " + choice.value) if board.kind == TYPE else choice.label,
                                      drop=True), "telegram-tap")
         if board.kind == TYPE:
+            self._note("user", choice.label)               # as a typed reply is: the chat's record keeps the choice
             self._spawn(self._type_to_claude(tap.chat_id, choice.value, tapped=True), "telegram-claude")
         elif board.kind == STOP:
             if board.on_stop is not None:
@@ -2193,10 +2214,12 @@ class TelegramInlet:
                     if not menu:
                         await self._say(chat_id, "No accessible saved folders.")
                         return
-                    # Each folder a button whose tap sends "codex <folder>", as typing it would. A name two
-                    # folders share is listed by its full path, and the button sends the path.
+                    # Each folder a button whose tap sends "codex use <folder>", as typing it would. A name two
+                    # folders share is listed by its full path, and that path is the button's label too, so the
+                    # two buttons can be told apart; "use" keeps a folder named "status" or "off" a folder
+                    # (review, 2026-09-23).
                     entries = menu.split("\n")
-                    await self._offer_picker(chat_id, menu, [Choice(Path(e).name or e, "codex " + e) for e in entries])
+                    await self._offer_picker(chat_id, menu, [Choice(_folder_label(e), "codex use " + e) for e in entries])
                     return
                 folder = codex_chat.select_folder(folders, selection)
                 self._codex_title = folder.name
@@ -2488,12 +2511,18 @@ class TelegramInlet:
             if not message_id:
                 raise BotApiError(0, "no message id")
             await self.api.react(chat_id, message_id, emoji)
+            if emoji != SEEN_REACTION:
+                self._seen_marks.discard(message_id)       # the 👀 was replaced
             return True
         except asyncio.CancelledError:
             raise
         except Exception as e:  # noqa: BLE001 — a receipt that fails must never cost the message or the loop
             log.warning("telegram: could not react (%s)%s", e if isinstance(e, BotApiError) else type(e).__name__,
                         "; said it instead" if fallback else "")
+        if message_id in self._seen_marks and emoji != SEEN_REACTION:
+            # The 👍 did not replace the 👀: take the 👀 off, so the message does not still say "on its way".
+            self._seen_marks.discard(message_id)
+            await self._unreact(chat_id, message_id)
         if fallback:
             await self._say(chat_id, fallback)
         return False
@@ -2776,7 +2805,13 @@ class TelegramInlet:
                 reacted = await self._receipt(chat_id, self._turn_request, emoji)
                 if reacted and not text:
                     self._note("buddy", f"({line})")          # the history still says what was kept
-                return text or ("" if reacted else line), round_no
+                if not reacted:
+                    return text or line, round_no
+                # One reaction per message: in a round that starred a fact and kept a note, the 🏆 wins, and
+                # where the note went (inbox, todo list, journal) is said in words, not lost (review, 2026-09-23).
+                others = [receipt_line(c["name"], r) for c, r in zip(calls, results, strict=True)
+                          if RECEIPT_TOOLS[c["name"]] != emoji]
+                return "\n".join(x for x in (text, *others) if x), round_no
         return text or "I got tangled up in that one. Ask me again?", MAX_TOOL_ROUNDS
 
     # -- tools --

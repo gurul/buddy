@@ -86,7 +86,8 @@ its temporary files. `buddy: <caption>` addresses Buddy instead.
 A relayed image gets a 👀 reaction when it arrives and a 👍 in its place once it
 reached Claude or Codex (owner, 2026-09-23). If it is not delivered, the 👀 comes
 off and a line says why. If reactions fail, the image still goes, and the usual
-line (`Typed.`) says so.
+line (`Typed.`) says so; a 👀 whose 👍 could not be set is taken off, so it
+never still says "on its way".
 
 Without a relay, image bytes go directly to Buddy's configured OpenAI model as
 an `input_image` data URL. The Telegram download URL/token never goes to the
@@ -422,8 +423,11 @@ Flip it to `ask` if two seconds a command is a price you will pay.
 - **Receipts are reactions.** Where buddy used to answer with a one-line
   acknowledgement, it now reacts to your message (owner, 2026-09-23): ✍ for a
   note saved to the second brain, 🏆 for a fact starred with "remember that …",
-  👍 for a line typed into Claude or a message that steers a running Codex
-  turn. A turn that only saved or starred makes no second model call. If the
+  👍 for a line typed into Claude, a message that steers a running Codex
+  turn, or one that starts a Codex turn (its progress message says "Sent to
+  Codex." as well). A turn that only saved or starred makes no second model call.
+  A message holds one reaction, so a turn that both starred a fact and saved a
+  note gets the 🏆 and says where the note went in words. If the
   reaction fails, the line it stands for is sent instead ("Saved to …",
   "Starred for good.", `Typed.`, "Sent to Codex."). Anything that carries
   information is still a message.
@@ -439,7 +443,8 @@ Flip it to `ask` if two seconds a command is a price you will pay.
   enter or leave it.
 - **`codex on` / `codex off`** — `codex on` sends only the names of accessible
   local folders saved in Codex, with debrief folders hidden, and a button for
-  each: a tap is the same as typing `codex <folder>`. Duplicate names show full paths. No task titles,
+  each: a tap is the same as typing `codex use <folder>`. Duplicate names show full paths, on the
+  buttons too (`~/work/buddy`, `~/personal/buddy`). No task titles,
   numbers, IDs or old prompts appear. `codex buddy` or `codex use buddy` starts a
   **fresh chat** in that folder. Each folder selection creates a new conversation.
   Full folder paths also work; unknown or inaccessible folders cannot start a chat.
