@@ -390,6 +390,10 @@ class Daemon:
         # The "Ask Claude" Mini App (miniapp.py): the owner's menu button opens a Claude chat inside Telegram,
         # served here through a Cloudflare quick tunnel. Off unless CC_BUDDY_MINIAPP=1.
         Daemon._start_miniapp(self, tasks)
+        # The providers' own spend figures (spend_sync.py): OpenRouter always, OpenAI and Anthropic with an admin
+        # key; at start and hourly, on a worker thread. The Spending view shows them beside buddy's own meter.
+        from . import spend_sync
+        tasks.append(asyncio.create_task(spend_sync.loop(self._shutdown), name="spend-sync"))
         # The nightly dream (dream.py): the one automatic writer of the records and the mem0 index. It
         # watches the shutdown event itself and is drained, not cancelled, at the end: a night half written
         # is worse than a restart a few seconds late.

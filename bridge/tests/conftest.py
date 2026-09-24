@@ -19,3 +19,15 @@ def pytest_collection_modifyitems(config: pytest.Config, items: list[pytest.Item
     for item in items:
         if "live" in item.keywords:
             item.add_marker(skip)
+
+
+@pytest.fixture(autouse=True)
+def _spend_ledger_in_tmp(tmp_path_factory: pytest.TempPathFactory):
+    """Every test's spend lines (spend.py) go to a temporary folder, never the owner's real ledger: the wiring
+    records from code paths many tests drive with fakes."""
+    from cc_buddy_bridge import spend
+
+    folder = tmp_path_factory.mktemp("spend")
+    spend.set_dir(folder)
+    yield folder
+    spend.set_dir(None)
