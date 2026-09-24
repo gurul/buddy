@@ -315,3 +315,26 @@ def test_the_longest_label_wins_and_a_repeated_label_names_nothing() -> None:
     assert _named_field(step, pool).id == "2"
     twins = [cand("1", "text field", "Name"), cand("2", "text field", "Name")]
     assert _named_field(pc.parse_step({"kind": "type", "target": "the name field", "text": "x"}, 1, "x"), twins) is None
+
+
+class ConsentEffectors(Effectors):
+    """A browser page's effectors: they can dismiss a cookie notice, and say what they pressed."""
+
+    def __init__(self, said: str = "dismissed the cookie notice with 'Reject all'") -> None:
+        super().__init__()
+        self.said, self.cleared = said, 0
+
+    def clear_consent(self) -> str:
+        self.cleared += 1
+        return self.said
+
+
+def test_a_cookie_notice_is_dismissed_before_a_click_and_is_in_the_ledger() -> None:
+    eff = ConsentEffectors()
+    p = plan({"kind": "click", "target": "week", "label_hint": "Week"})
+    r = go(p, Senses([calendar(), calendar(True)], changed=[True]), eff, decide="keyword")
+    assert r.status == "complete" and eff.cleared == 1 and eff.clicks == ["Week"], r.to_dict()
+    assert [(e.step, e.effect, e.how) for e in r.ledger][0] == ("dismiss the cookie notice", "confirmed", "code")
+    quiet = ConsentEffectors(said="")                       # nothing to dismiss: nothing in the ledger
+    r = go(p, Senses([calendar(), calendar(True)], changed=[True]), quiet, decide="keyword")
+    assert [e.step for e in r.ledger] == ["click week"]

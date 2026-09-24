@@ -15,6 +15,9 @@ Per step:
   press_key             one key. Return submits only a search the human dictated; anything else asks first.
   checkpoint            stop and hand back: the planner said it could not see past this point
 
+Before a click or a type, effectors that know how (the browser page) dismiss a cookie/consent notice with a
+button that refuses or closes; the sensitive table keeps any "accept"/"agree" button out of reach.
+
 What happened to a step is one word from a closed set (cua's action-result contract, trycua/cua, MIT):
 confirmed (a readback saw it), unverifiable (input was applied, nothing could be read back),
 suspected_noop (input was applied and the screen did not change), refused (no input was applied).
@@ -163,6 +166,7 @@ def run_plan(plan: Plan, *, senses: Any, effectors: Any, asker: Optional[Callabl
         decide = "keyword"                                   # no hosted model configured: the gate alone decides
         out.log_lines.append("plan: jev is not configured; the keyword gate decides alone")
     typed: Optional[tuple[bool, str, str]] = None            # (into a search field, text_source, text) of the last type
+    clicked = False                                          # the step before this one was a click that applied
     first = plan.steps[start] if start < len(plan.steps) else None
     if (planned_for and not dry_run and first is not None and first.kind not in ("open_app", "open_url")
             and planned_for.casefold() != (frontmost_app() or "").casefold()):
@@ -190,6 +194,8 @@ def run_plan(plan: Plan, *, senses: Any, effectors: Any, asker: Optional[Callabl
         if step.consequential and i not in ok:
             return stop("needs_human", i, "the plan marked this step consequential", step.describe())
 
+        if step.kind in ("click", "type") and not dry_run:
+            _clear_consent(effectors, i, out)
         entry = Entry(i + 1, step.describe(), "refused")
         if dry_run and step.kind != "click":
             entry.note = "dry_run"
@@ -252,10 +258,7 @@ def run_plan(plan: Plan, *, senses: Any, effectors: Any, asker: Optional[Callabl
             app = (frontmost_app() or "").casefold()
             if step.text_source == "composed" and app in SHELL_APPS and i not in ok:
                 return stop("needs_human", i, "composed text into a shell", f'type "{step.text}" into {app}')
-            prev = out.ledger[-1] if out.ledger else None
-            after_click = (prev is not None and prev.index == i and prev.effect != "refused"
-                           and plan.steps[i - 1].kind == "click")
-            field_c, how, why = _pick_field(step, senses, asker, step_gates, clock, after_click=after_click)
+            field_c, how, why = _pick_field(step, senses, asker, step_gates, clock, after_click=clicked)
             if field_c is None:
                 entry.note = why
                 out.ledger.append(entry)
@@ -298,6 +301,7 @@ def run_plan(plan: Plan, *, senses: Any, effectors: Any, asker: Optional[Callabl
         entry.ms = (clock() - t0) * 1000.0
         out.ledger.append(entry)
         out.log_lines.append(f"plan step {i + 1}: {entry.step} -> {entry.effect}" + (f" ({entry.how})" if entry.how else ""))
+        clicked = step.kind == "click" and entry.effect != "refused"
         if held is False:
             return stop("partial", i + 1, f'expected {step.expect.kind} "{step.expect.value}" and did not see it')
         if entry.effect == "suspected_noop":
@@ -313,6 +317,24 @@ def run_plan(plan: Plan, *, senses: Any, effectors: Any, asker: Optional[Callabl
             e.effect = "confirmed"
     out.sentence = _say(plan, out.ledger)
     return stop("complete", len(plan.steps))
+
+
+def _clear_consent(effectors: Any, i: int, out: PlanResult) -> None:
+    """Before a click or a type: an effector that can dismiss a cookie/consent notice (browser_lane's page,
+    CONSENT_TEXT) does, with a button that refuses or closes, never one that agrees. What it pressed goes in
+    the ledger like any applied input. Effectors without the ability (the Mac's) are left alone."""
+    clear = getattr(effectors, "clear_consent", None)
+    if not callable(clear):
+        return
+    try:
+        said = str(clear() or "")
+    except Exception as e:  # noqa: BLE001 — the step's own dialog gate decides what happens next
+        said = f"refused: {type(e).__name__}"
+    if not said:
+        return
+    out.log_lines.append(f"plan step {i + 1}: {said}")
+    if not said.startswith("refused"):
+        out.ledger.append(Entry(i + 1, "dismiss the cookie notice", "confirmed", how="code", note=said))
 
 
 def _norm(s: str) -> str:

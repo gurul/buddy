@@ -276,3 +276,75 @@ def test_a_control_below_the_fold_is_collected_and_scrolled_to_before_the_click(
         srv.shutdown()
     assert "button: Compare all plans" in outline["lines"]              # the planner can see it
     assert result["status"] == "complete" and result["ledger"][0]["effect"] == "confirmed", result
+
+
+def _recipes(buttons: str) -> str:
+    return ("""<!doctype html><html><head><title>Recipes</title></head><body><h1>Recipes</h1>
+<ul><li><a href="#apple" onclick="document.title='Apple Crumble'">Apple Crumble</a></li>
+<li><a href="#lemon" onclick="document.title='Lemon Tart'">Lemon Tart</a></li></ul>
+<div role="dialog" style="display:none">A hidden dialog is not an open one.</div>
+<div id="cookie" role="dialog" aria-label="Cookie consent" style="position:fixed;inset:0;background:rgba(0,0,0,.5)">
+<div style="background:#fff;padding:24px"><p>We use cookies to improve your experience.</p>""" + buttons
+            + "</div></div></body></html>")
+
+
+REJECT = ("<button onclick=\"document.getElementById('cookie').remove(); window.choice='reject'\">Reject non-essential cookies</button>"
+          "<button onclick=\"document.getElementById('cookie').remove(); window.choice='accept'\">Accept all cookies</button>")
+ACCEPT_ONLY = "<button onclick=\"document.getElementById('cookie').remove(); window.choice='accept'\">Accept all cookies</button>"
+
+
+def test_a_consent_notice_is_dismissed_only_by_refusing_or_closing() -> None:
+    names = lambda *xs: [{"id": str(i), "name": x} for i, x in enumerate(xs)]  # noqa: E731
+    assert bl.consent_choice(names("Accept all cookies", "Reject non-essential cookies"))["name"].startswith("Reject")
+    assert bl.consent_choice(names("Agree", "Necessary only"))["name"] == "Necessary only"
+    assert bl.consent_choice(names("OK", "Close"))["name"] == "Close"
+    for agreeing in (names("Accept all cookies"), names("I agree", "OK"), names("Accept necessary cookies"), names()):
+        assert bl.consent_choice(agreeing) is None, agreeing
+    assert bl.CONSENT_TEXT.search("We use cookies to improve your experience.")
+    assert not bl.CONSENT_TEXT.search("Delete this event?")
+
+
+@live
+def test_a_cookie_notice_over_the_page_is_refused_before_the_plan_clicks(tmp_path: Path) -> None:
+    srv, url = _serve(tmp_path, "recipes.html", _recipes(REJECT))
+    lane = lane_for(tmp_path)
+    plan = {"steps": [{"kind": "click", "target": "the Lemon Tart link", "label_hint": "Lemon Tart",
+                       "expect": {"kind": "title_contains", "value": "Lemon Tart"}}],
+            "final_say": "Opened.", "success": None}
+
+    async def go() -> tuple[dict[str, Any], dict[str, Any], Any]:
+        await lane.open_url(url)
+        result = await lane.run_plan(plan, "open the Lemon Tart recipe")
+        outline = await lane.outline()
+        choice = await lane._run(lambda: lane._ensure().page.evaluate("() => window.choice"))
+        await lane.close()
+        return outline, result, choice
+
+    try:
+        outline, result, choice = asyncio.run(go())
+    finally:
+        srv.shutdown()
+    assert result["status"] == "complete", result
+    assert result["ledger"][0]["step"] == "dismiss the cookie notice" and choice == "reject"
+    assert "link: Lemon Tart" in outline["lines"]
+
+
+@live
+def test_a_notice_that_only_offers_to_accept_stays_up_and_stops_the_plan(tmp_path: Path) -> None:
+    srv, url = _serve(tmp_path, "recipes.html", _recipes(ACCEPT_ONLY))
+    lane = lane_for(tmp_path)
+    plan = {"steps": [{"kind": "click", "target": "the Lemon Tart link", "label_hint": "Lemon Tart"}],
+            "final_say": "Opened.", "success": None}
+
+    async def go() -> tuple[dict[str, Any], Any]:
+        await lane.open_url(url)
+        result = await lane.run_plan(plan, "open the Lemon Tart recipe")
+        choice = await lane._run(lambda: lane._ensure().page.evaluate("() => window.choice || ''"))
+        await lane.close()
+        return result, choice
+
+    try:
+        result, choice = asyncio.run(go())
+    finally:
+        srv.shutdown()
+    assert result["status"] == "none" and result["reason"] == "dialog_open" and choice == "", result

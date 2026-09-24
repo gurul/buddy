@@ -139,13 +139,53 @@ _COLLECT_JS = """() => {
               secure: role === 'password', editable, dialog: !!e.closest('dialog,[role=dialog],[role=alertdialog]'),
               focused: document.activeElement === e, offscreen: r.bottom < 0 || r.top > H});
     if (out.length >= %d) break; }
-  const dlg = document.querySelector('dialog[open],[role=dialog],[role=alertdialog]');
+  const dlg = Array.from(document.querySelectorAll('dialog[open],[role=dialog],[role=alertdialog]')).find(d => {
+    const r = d.getBoundingClientRect(); const cs = getComputedStyle(d);
+    return r.width >= 2 && r.height >= 2 && cs.visibility !== 'hidden' && cs.display !== 'none'; });
   const focused = document.activeElement;
   return {elements: out, title: document.title, url: location.href,
           dialog: dlg ? (dlg.innerText || '').trim().slice(0, 80) : '',
           focused_id: focused && focused.getAttribute ? focused.getAttribute('data-buddy-id') : null,
           text_hash: (document.body ? document.body.innerText : '').length + ':' + document.body?.innerText?.slice(0, 4000)}; }
 """ % MAX_CANDIDATES
+
+# A cookie or consent notice covering the page. Sites put it in a dialog, which the lane (rightly) never
+# operates, so every click stopped at dialog_open and no plan dismissed it first (browser_model_eval
+# cookie_banner, 2026-09-24: 0 of 15 runs across five models). Code dismisses it before a click or a type:
+# only a notice whose text is about cookies or consent, and only with a button that REFUSES or closes —
+# never one that agrees. A label the sensitive table knows ("Accept all", "Agree", "OK") is never pressed
+# here; a notice that offers nothing else stays up, and the step stops at dialog_open as before.
+CONSENT_TEXT = re.compile(r"\b(cookies?|consent|gdpr|tracking technologies|privacy (settings|preferences|choices))\b", re.I)
+CONSENT_REFUSE = re.compile(r"\b(reject|refuse|deny|necessary|essential|required only|only required|no,? thanks)\b", re.I)
+CONSENT_CLOSE = re.compile(r"^\s*(close|dismiss|not now|×|✕|x)\s*$", re.I)
+_CONSENT_JS = r"""(pattern) => {
+  const re = new RegExp(pattern, 'i');
+  const vis = (e) => { const r = e.getBoundingClientRect(); if (r.width < 2 || r.height < 2) return false;
+    const cs = getComputedStyle(e); return cs.visibility !== 'hidden' && cs.display !== 'none' && cs.opacity !== '0'; };
+  const boxes = Array.from(document.querySelectorAll('dialog[open],[role=dialog],[role=alertdialog],[aria-modal=true],' +
+    '[id*=cookie i],[class*=cookie i],[id*=consent i],[class*=consent i]')).filter(vis);
+  for (const b of boxes) {
+    const text = (b.innerText || '').trim();
+    if (!re.test(text)) continue;
+    const btns = Array.from(b.querySelectorAll('button,[role=button],input[type=button],input[type=submit]')).filter(vis);
+    for (const e of document.querySelectorAll('[data-buddy-consent]')) e.removeAttribute('data-buddy-consent');
+    btns.forEach((e, i) => e.setAttribute('data-buddy-consent', String(i)));
+    return {text: text.replace(/\s+/g, ' ').slice(0, 200), buttons: btns.map((e, i) => ({id: String(i),
+      name: (e.getAttribute('aria-label') || e.innerText || e.value || e.title || '').trim().replace(/\s+/g, ' ').slice(0, 80)}))};
+  }
+  return null; }"""
+
+
+def consent_choice(buttons: list[Mapping[str, Any]]) -> Optional[Mapping[str, Any]]:
+    """The button that dismisses a consent notice without agreeing to anything, or None: a refusal first
+    ("Reject non-essential cookies", "Necessary only"), else a plain close. A sensitive label never."""
+    for rx in (CONSENT_REFUSE, CONSENT_CLOSE):
+        for b in buttons:
+            name = str(b.get("name") or "")
+            if name and rx.search(name) and not is_sensitive(name):
+                return b
+    return None
+
 
 ROLE_WORDS = {"link": "link", "button": "button", "checkbox": "checkbox", "radio": "radio button",
               "searchbox": "search field", "textbox": "text field", "password": "secure text field",
@@ -422,6 +462,26 @@ class _Page:
             return f"refused: could not type into {c.label!r} ({type(e).__name__})"
         return f"typed {len(text)} characters into {c.role} {c.label!r}"
 
+    def clear_consent(self) -> str:
+        """Dismiss a cookie/consent notice (CONSENT_TEXT) with a refusing or closing button. The line says what
+        was pressed, "" when there was no such notice or no safe button. Never raises."""
+        try:
+            found = self.page.evaluate(_CONSENT_JS, CONSENT_TEXT.pattern)
+        except Exception:  # noqa: BLE001 — a page mid-navigation: nothing to dismiss yet
+            return ""
+        if not isinstance(found, dict):
+            return ""
+        choice = consent_choice(list(found.get("buttons") or []))
+        if choice is None:
+            return ""
+        try:
+            loc = self.page.locator(f'[data-buddy-consent="{choice["id"]}"]').first
+            loc.click(timeout=SNAPSHOT_TIMEOUT_MS)
+        except Exception as e:  # noqa: BLE001
+            return f"refused: could not dismiss the cookie notice ({type(e).__name__})"
+        self.settle(0.3)
+        return f"dismissed the cookie notice with {choice['name']!r}"
+
     def press(self, key: str) -> str:
         name = KEYS.get(str(key).lower())
         if name is None:
@@ -661,6 +721,9 @@ class BrowserLane:
     # -- what the agent calls --
     def _outline(self) -> dict[str, Any]:
         p = self._ensure()
+        cleared = p.clear_consent()                  # the planner reads the page, not the notice over it
+        if cleared:
+            log.info("browser lane: %s", cleared)
         snap = p.snapshot()
         return {"app": "browser", "lines": outline_lines(snap), "title": snap.title,
                 "url": next((ln[5:] for ln in snap.context_lines if ln.startswith("url: ")), "")}
