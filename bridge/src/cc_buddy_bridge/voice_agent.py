@@ -259,6 +259,21 @@ back as a list, never say more than one clause about it, never ask them to confi
 having or not having memories. If none of it fits, say nothing about it at all."""
 
 
+# The records profile (records.py), when CC_BUDDY_RECORDS is on: who the owner is, what they like, how they
+# like to talk. Unlike the brief it is background, never something to bring up: it shapes the words.
+PROFILE_HEADER = """
+
+What you know about your owner, from earlier conversations. Let it shape what you say — their name, their
+taste, how they like to be talked to — without reciting it. Asked what you know about them, answer from it in
+a sentence or two:"""
+
+
+def profile_block(profile: str) -> str:
+    """The profile paragraph for the session prompt, or "" when there is none."""
+    text = (profile or "").strip()
+    return PROFILE_HEADER + "\n" + text if text else ""
+
+
 def memory_block(memory: str) -> str:
     """The memory paragraph for the session prompt, or "" when there is none."""
     text = (memory or "").strip()
@@ -404,7 +419,7 @@ def configured(environ: Any = None) -> VoiceConfig:
 
 
 def session_config(config: VoiceConfig, memory: str = "",
-                   think_aloud: Optional[dict[str, Any]] = None) -> dict[str, Any]:
+                   think_aloud: Optional[dict[str, Any]] = None, profile: str = "") -> dict[str, Any]:
     """The `session.start` payload (Live API, openai 3.13).
 
     There is no `output_modalities` and no turn-detection block: gpt-live-1 is
@@ -420,7 +435,7 @@ def session_config(config: VoiceConfig, memory: str = "",
     context = system_context.context()
     return {
         "model": config.model,
-        "instructions": INSTRUCTIONS + context + memory_block(memory)
+        "instructions": INSTRUCTIONS + context + memory_block(memory) + profile_block(profile)
                         + (caption_instructions(PagerConfig(read_cps=config.caption_cps))
                            if captions else "")
                         + (think_aloud_mod.voice_instructions(think_aloud) if listening else ""),
@@ -597,6 +612,7 @@ class VoiceSession:
         thinker: Optional[Callable[[str], Awaitable[dict[str, Any]]]] = None,   # think.make_thinker(...)
         on_photo: Optional[Callable[[str], Awaitable[dict[str, Any]]]] = None,   # Daemon._photo_for_owner
         memory: str = "",                                   # recall.opening_brief(...)
+        profile: str = "",                                  # records.profile(...), "" when records are off
         on_star: Optional[Callable[[str], Optional[str]]] = None,   # chat_memory.star(...)
         learning: Optional[Callable[..., dict[str, Any]]] = None,
         think_aloud: Optional[dict[str, Any]] = None,       # the lesson, when opened for think out loud
@@ -660,6 +676,7 @@ class VoiceSession:
         self.on_state = on_state
         self.config = config or VoiceConfig()
         self.memory = memory
+        self.profile = profile
         # Both sides of the conversation, in order, held in RAM only. chat_memory.py
         # distils this into a few lines when the session closes; the words
         # themselves are never written to disk (owner choice, 2026-09-11).
@@ -718,7 +735,7 @@ class VoiceSession:
         listening = self._think_aloud is not None
         self._set("listening" if listening else "wake")
         self._started_at = self._last_activity = self._clock()
-        await self.conn.session.start(session=session_config(self.config, self.memory, self._think_aloud))
+        await self.conn.session.start(session=session_config(self.config, self.memory, self._think_aloud, self.profile))
         await self._await_started()
         self._started.set()
         # A fixed greeting needs no backend round-trip: commentary is context the
@@ -1704,6 +1721,7 @@ async def open_session(
     thinker: Optional[Callable[[str], Awaitable[dict[str, Any]]]] = None,
     on_photo: Optional[Callable[[str], Awaitable[dict[str, Any]]]] = None,
     memory: str = "",
+    profile: str = "",
     on_closed: Optional[Callable[[list[tuple[str, str]]], None]] = None,
     on_star: Optional[Callable[[str], Optional[str]]] = None,
     learning: Optional[Callable[..., dict[str, Any]]] = None,
@@ -1739,7 +1757,7 @@ async def open_session(
                                    agent_enabled=agent_enabled, on_caption=on_caption,
                                    on_explore=on_explore, scene=scene, head=head, intent=intent,
                                    on_sound=on_sound, muted=muted, thinker=thinker, on_photo=on_photo,
-                                   memory=memory, on_star=on_star, learning=learning,
+                                   memory=memory, profile=profile, on_star=on_star, learning=learning,
                                    think_aloud=think_aloud, lesson_wake=lesson_wake, on_spoken_idea=on_spoken_idea,
                                    on_think_aloud=on_think_aloud, head_pose=head_pose, gate=gate,
                                    on_expression=on_expression, mac_busy=mac_busy)

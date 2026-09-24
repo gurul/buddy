@@ -1860,3 +1860,18 @@ def test_live_expression_callback_receives_streamed_reply_and_user_turn():
         s._close_turn("user", "I found something interesting.")
         assert seen[-1] == ("user", "I found something interesting.")
     asyncio.run(run())
+
+
+def test_the_records_profile_reaches_the_voice_prompt_and_is_absent_without_one() -> None:
+    plain = session_config(VoiceConfig())
+    assert session_config(VoiceConfig(), profile="")["instructions"] == plain["instructions"]
+    page = "## Life context\n- Their name is Sam."
+    with_page = session_config(VoiceConfig(), profile=page)["instructions"]
+    from cc_buddy_bridge.voice_agent import profile_block
+    assert page in with_page and with_page.replace(profile_block(page), "") == plain["instructions"]
+    assert "without reciting it" in with_page
+    conn = FakeConnection([_tool_call("end_conversation"), None])
+    s, _, _ = _session(conn, [FakeAgent(None, None)], profile=page)
+    asyncio.run(s.run())
+    started = [kw for name, kw in conn.sent if name == "session.start"]
+    assert started and page in started[0]["session"]["instructions"]

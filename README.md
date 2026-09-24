@@ -368,7 +368,7 @@ Every message is shaped for the phone by `telegram_format.py`.
 | Buttons | Yes/no prompts (Claude permissions, app actions, Codex approvals), Claude's question options and the pickers are inline buttons. A tap does what typing would; typing still works. |
 | `codex on` / `codex <folder>` | Starts a new Codex chat in a saved folder, with approvals relayed to Telegram. Each turn shows one progress message with a Stop button. `stop` interrupts, `codex off` returns to buddy, `buddy:` addresses buddy directly. |
 | `new claude` | Opens a coding session in Warp from a few short texts. |
-| Records (`CC_BUDDY_RECORDS=1`) | Typed, git-tracked markdown records and a profile, written only by a nightly reconcile (`records.py`). |
+| Records (`CC_BUDDY_RECORDS=1`) | Typed, git-tracked markdown records and a profile, written only by a nightly reconcile (`records.py`) that also reads what you said to remember. Telegram and voice both read the profile. |
 | Composio (`CC_BUDDY_COMPOSIO=1`) | Your apps by API (`composio_tools.py`): Gmail read-only, calendar writable, Drive and the rest asked first. |
 | Second brain (`CC_BUDDY_SECOND_BRAIN=1`) | Texts become notes in a local markdown vault Obsidian opens (`second_brain.py`). |
 

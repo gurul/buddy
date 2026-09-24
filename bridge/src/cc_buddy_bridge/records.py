@@ -53,6 +53,7 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any, Callable, Optional
 
+from .chat_memory import stars as starred_claims
 from .recall import RecallConfig
 
 log = logging.getLogger(__name__)
@@ -63,6 +64,7 @@ RECONCILE_TIMEOUT_SECS = 120.0
 TYPES = ("preference", "person", "organization", "project", "place", "routine", "conversation")
 PROFILE_ID = "profile"
 MAX_PROFILE_CHARS = 6000                   # ~1.5k tokens: the one-pager stays one page
+MAX_STARS = 40                             # the owner's "remember that …" lines a reconcile reads
 MAX_RECORD_CHARS = 4000
 MAX_HITS = 8
 MAX_HIT_CHARS = 200
@@ -203,13 +205,45 @@ def render_index(records: dict[str, Record]) -> str:
     return "Records you can search or read by id:\n" + "\n".join(rows)
 
 
+_STAR_DATE = re.compile(r"\((\d{4}-\d{2}-\d{2})\)\s*$")
+_UPDATED = re.compile(r"^updated:\s*(\d{4}-\d{2}-\d{2})\s*$", re.M)
+
+
+def owner_stars(cfg: RecallConfig) -> list[str]:
+    """What the owner said to remember for good ("remember that …"), their words, oldest first."""
+    try:
+        return starred_claims(cfg, MAX_STARS)
+    except Exception:  # noqa: BLE001 - a missing or unreadable HIGHLIGHTS.md is just no stars
+        return []
+
+
+def _stars_after(stars: list[str], day: str) -> list[str]:
+    """Stars dated after `day`: the ones no reconcile has read yet. An undated star counts as new."""
+    out = []
+    for claim in stars:
+        m = _STAR_DATE.search(claim)
+        if m is None or not day or m.group(1) > day:
+            out.append(claim)
+    return out
+
+
 def profile(cfg: RecallConfig) -> str:
-    """The one-pager, bounded, for the start of a text turn. "" when there is none yet."""
+    """The one-pager, bounded, for the start of a turn. "" when there is none yet.
+
+    A star is the owner's own "remember that …", and it has to count on the next message, not after
+    tonight's reconcile. So stars the profile has not absorbed yet (dated after its `updated:`) go on
+    top, verbatim. With no profile yet, the stars alone are the page."""
     path = records_dir(cfg) / f"{PROFILE_ID}.md"
     try:
         text = path.read_text(encoding="utf-8").strip()
     except OSError:
-        return ""
+        text = ""
+    m = _UPDATED.search(text)
+    fresh = _stars_after(owner_stars(cfg), m.group(1) if m else "")
+    if fresh:
+        block = "## They asked you to remember (since the page below was written)\n" + \
+                "\n".join(f"- {c}" for c in fresh)
+        text = block + ("\n\n" + text if text else "")
     if len(text) > MAX_PROFILE_CHARS:
         text = text[:MAX_PROFILE_CHARS].rsplit("\n", 1)[0] + "\n…"
     return text
@@ -245,7 +279,10 @@ def ensure_repo(store: Path) -> bool:
         log.warning("records: git is not installed — records will be kept, but without history")
         return False
     try:
-        if _git(store, "rev-parse", "--is-inside-work-tree").returncode == 0:
+        top = _git(store, "rev-parse", "--show-toplevel")
+        if top.returncode == 0:
+            if Path(top.stdout.strip()).resolve() == store.resolve():
+                seal(store)                   # an existing store repository gets the same lock, every start
             return True
         r = _git(store, "init", "-q")
         if r.returncode != 0:
@@ -254,18 +291,57 @@ def ensure_repo(store: Path) -> bool:
         # A repository nobody has to configure: commits are buddy's, on this machine only.
         _git(store, "config", "user.name", "buddy")
         _git(store, "config", "user.email", "buddy@localhost")
+        seal(store)
         return True
     except (OSError, subprocess.SubprocessError) as e:
         log.warning("records: git unavailable (%s)", e)
         return False
 
 
+# Every URL shape git can push to, rewritten to one it cannot. A second lock beside the pre-push hook,
+# because `git push --no-verify` skips hooks but never skips pushInsteadOf.
+_PUSH_PREFIXES = ("https://", "http://", "ssh://", "git://", "git@", "file://", "/", "~", ".")
+_NO_PUSH_URL = "local-only-never-pushed:"
+_PRE_PUSH = """#!/bin/sh
+# buddy's memory lives on this computer only (records.py seal). Pushing it anywhere is refused.
+echo "buddy memory is local-only: push refused" >&2
+exit 1
+"""
+
+
+def seal(store: Path) -> None:
+    """Lock the store's repository to this computer: no remote, no push, ever.
+
+    The owner's memory is private (owner instruction, 2026-09-23: "nothing should leak out ever"). The
+    history exists so a bad reconcile is one revert away, not so it can go anywhere. So on every start any
+    remote is removed, every push URL is rewritten to one that cannot resolve, and a pre-push hook refuses
+    — three independent locks, so none of them failing alone lets it out."""
+    for name in _git(store, "remote").stdout.split():
+        _git(store, "remote", "remove", name)
+        log.warning("records: removed git remote %r from the memory store — it stays on this computer", name)
+    for prefix in _PUSH_PREFIXES:
+        _git(store, "config", "--replace-all", f"url.{_NO_PUSH_URL}.pushInsteadOf", prefix, f"^{re.escape(prefix)}$")
+    hooks = store / ".git" / "hooks"
+    hooks.mkdir(parents=True, exist_ok=True)
+    (hooks / "pre-push").write_text(_PRE_PUSH, encoding="utf-8")
+    (hooks / "pre-push").chmod(0o755)
+    _git(store, "config", "core.hooksPath", str(hooks))   # a global hooksPath must not bypass it
+
+
 def commit(store: Path, message: str) -> Optional[str]:
     """Commit everything under the store. The short hash, or None when there was nothing or git failed."""
     try:
-        if _git(store, "rev-parse", "--is-inside-work-tree").returncode != 0:
+        top = _git(store, "rev-parse", "--show-toplevel")
+        if top.returncode != 0:
             return None
-        _git(store, "add", "-A")
+        # Forced, because the debrief installer drops a `*` .gitignore in the store (it keeps memory out of a
+        # project's PRs), which made every add stage nothing and every reconcile go without history. Only in
+        # the store's own repository: were the store inside some other repository, forcing would put the
+        # owner's memory in it, so then nothing is committed at all.
+        if Path(top.stdout.strip()).resolve() != store.resolve():
+            log.warning("records: %s is inside another git repository — not committing to it", store)
+            return None
+        _git(store, "add", "-A", "--force", ".")
         if _git(store, "diff", "--cached", "--quiet").returncode == 0:
             return None
         r = _git(store, "commit", "-q", "-m", message)
@@ -294,10 +370,15 @@ was 8 am)." Anything the owner said to forget is removed, and that is the only r
 said is a fact about them; what the notes say buddy did is not. Return only records that change or are new.
 
 The profile is the one page you read before every conversation. Three short sections, plain prose or a few
-bullets each: "Life context" (who they are, what is going on, the people and projects that matter now),
+bullets each: "Life context" (their name first, when you know it, then who they are, what is going on, the people and projects that matter now),
 "Acting on their behalf" (what they want done without asking and what needs a yes first, from what they
 have said), "How they like to talk" (tone, length, what annoys them). Dates where they matter. Nothing
-that is not in the records or the notes."""
+that is not in the records or the notes.
+
+You may also be shown what the owner said to remember for good, in their words, each with its date. Those
+are the most reliable facts you have: fold every real fact about them (their name, the people and things
+they care about) into the records and the profile, and keep it there. A line that is not a fact about
+them — a stray question, a half sentence the microphone caught — you leave out."""
 
 _LIST = {"type": "array", "items": {"type": "string"}}
 RECONCILE_SCHEMA = {
@@ -417,6 +498,9 @@ class Reconciler:
             return None
         current = load_records(self.cfg)
         body = "## Records now\n\n" + ("\n\n".join(render_record(r) for r in current.values()) or "(none yet)")
+        stars = owner_stars(self.cfg)
+        if stars:
+            body += "\n\n## What the owner said to remember for good\n\n" + "\n".join(f"- {c}" for c in stars)
         body += f"\n\n## Notes from {day}\n\n{notes}"
         try:
             raw = await asyncio.wait_for(asyncio.to_thread(self.client.reconcile, body), timeout=RECONCILE_TIMEOUT_SECS)

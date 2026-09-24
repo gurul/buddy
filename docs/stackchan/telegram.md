@@ -618,13 +618,22 @@ What the text brain gets, all read-only:
 - **The profile** in its instructions, every turn: three sections (life context,
   acting on your behalf, how you like to talk) and an index of the records with
   their aliases, so it knows what it can look up before it looks. Re-read from
-  disk per turn, so a hand edit counts at once. Capped at 6,000 characters.
+  disk per turn, so a hand edit counts at once. Capped at 6,000 characters. The
+  model is told to let it shape every reply (your name, your taste, how you like
+  to be talked to), not only questions about you, and to search the records
+  before saying it does not know something about you.
+- **What you said to remember** ("remember that …", the ★ lines in
+  `HIGHLIGHTS.md`). Stars newer than the profile's `updated:` date go on top of
+  it, verbatim, so a star counts on the next message rather than after the
+  nightly reconcile. With no profile yet, the stars alone are the page.
 - **`memory_search(query)`** — the matching fact lines with their record ids.
 - **`memory_get(id)`** — one whole record.
 
 The only writer is the **nightly reconcile**: once a day's curated file exists
 (`chat_memory.py` writes it the next day), the model is shown every current
-record and that day's notes and returns the records that change, whole — it
+record, everything you said to remember (your words, authoritative; it folds
+the real facts, your name first, into the records and the profile and leaves out
+a stray line the microphone caught), and that day's notes and returns the records that change, whole — it
 merges examples into traits, drops incidental detail, adds dated corrections —
 plus the profile. Before the result is written, whatever is on disk (your hand
 edits included) is committed as its own git commit; the reconcile is a second
@@ -636,8 +645,22 @@ and a three-section profile.
 
 | Variable | Default | What it does |
 |---|---|---|
-| `CC_BUDDY_RECORDS` | `0` | The switch: reconcile each curated day into records, and give the text brain the profile and the two memory tools. |
+| `CC_BUDDY_RECORDS` | `0` | The switch: reconcile each curated day into records, give the text brain the profile and the two memory tools, and give each spoken conversation the same profile. |
 | `CC_BUDDY_RECORDS_MODEL` | `gpt-5.4-nano` | The reconciling model (one call per day, `store=False`). |
+
+**Voice gets the profile too.** When the switch is on, every spoken conversation
+opens with the same page in its instructions, as background: the voice is told to
+let it shape what it says without reciting it. The one-clause opening brief is
+unchanged. The page is read once, when the conversation starts, because the
+voice's instructions cannot change mid-session.
+
+**The history never leaves this computer.** The store's repository is buddy's
+own, separate from this project's, and on every start buddy locks it
+(`records.seal`): any remote is removed, every push URL is rewritten to one that
+cannot resolve (which `--no-verify` cannot skip), and a pre-push hook refuses. A
+store inside some other git repository is never committed to at all. The debrief
+installer's `*` `.gitignore` stays; buddy adds with `--force` in its own
+repository only.
 
 Off, nothing changes: no records directory, no git repository, the text brain
 gets the one-clause brief only. On, the store becomes a git repository (`git`

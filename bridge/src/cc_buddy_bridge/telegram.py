@@ -450,8 +450,11 @@ WANTS_SCREEN = re.compile(r"\b(screen ?shots?|screen ?grab|show me|send me (a |t
 
 PROFILE_HEADER = """
 
-What you know about your owner — reconciled from earlier conversations, read it before answering anything
-about their life, taste or plans, and search your records for anything not on this page:"""
+What you know about your owner, from earlier conversations. Let it shape every reply, not only questions
+about them: call them by name, fit their taste and how they like to be talked to, and do what they asked
+for without making them say it again. Asked what you know about them, tell them plainly from this page.
+Search your records (memory_search, then memory_get) before saying you do not know something about them,
+and never recite the page back unasked:"""
 
 
 # ---- config -----------------------------------------------------------------------------------

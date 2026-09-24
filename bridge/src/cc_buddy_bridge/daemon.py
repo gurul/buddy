@@ -919,6 +919,8 @@ class Daemon:
         memory = recall_mod.opening_brief(self._recall_cfg)
         if memory:
             log.info("recall: %s", memory)
+        # The records profile, the same page a text turn reads, when CC_BUDDY_RECORDS is on.
+        profile = records_mod.profile(self._recall_cfg) if records_mod.configured().enabled else ""
         gate = await Daemon._voice_gate_for(self, think_aloud)
         try:
             await voice_agent.open_session(mic, self._on_agent_state, self._make_agent,
@@ -928,7 +930,7 @@ class Daemon:
                                            scene=self._scene, head=self._head, intent=self._intent,
                                            on_sound=self._set_sound, muted=lambda: self._sound.muted,
                                            thinker=self._thinker, on_photo=self._photo_for_owner,
-                                           memory=memory,
+                                           memory=memory, profile=profile,
                                            on_closed=self._remember_conversation,
                                            on_star=self._star_by_voice,
                                            learning=server.app.voice if server is not None else None,

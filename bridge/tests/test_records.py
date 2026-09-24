@@ -145,7 +145,7 @@ def test_the_text_brain_gets_the_profile_and_the_two_tools_only_with_records() -
     assert plain["tools"] == telegram.TOOLS + [{"type": "web_search"}] and "memory_search" not in json.dumps(plain["tools"])
     with_profile = telegram.request(cfg, [], profile="# The owner\n- Loves pasta")
     assert with_profile["tools"] == telegram.TOOLS + MEMORY_TOOLS + [{"type": "web_search"}]
-    assert with_profile["instructions"].endswith("- Loves pasta") and "read it before answering" in with_profile["instructions"]
+    assert with_profile["instructions"].endswith("- Loves pasta") and "Let it shape every reply" in with_profile["instructions"]
     assert all(name in telegram.TOOL_NAMES for name in ("memory_search", "memory_get"))
     assert not any(t.get("name", "").startswith("memory_") and "write" in t["name"] for t in MEMORY_TOOLS)
 
@@ -249,3 +249,79 @@ def test_without_git_records_are_still_written(tmp_path: Path, monkeypatch: pyte
     assert asyncio.run(rec.reconcile_day(DAY)) == ""
     assert load_records(cfg)["dining"].facts[0].startswith("Now prefers ramen")
     assert not (cfg.store / ".git").exists()
+
+
+# ---- the owner's stars: "remember that …" counts on the next turn, and the reconcile keeps it -------------
+
+def test_the_reconcile_reads_what_the_owner_said_to_remember(tmp_path: Path) -> None:
+    from cc_buddy_bridge.chat_memory import star
+
+    cfg = cfg_at(tmp_path)
+    day_files(cfg)
+    star(cfg, "my name is Sam", when=datetime(2026, 9, 11))
+    client = FakeReconcile(result())
+    asyncio.run(Reconciler(cfg, client, wall=lambda: datetime(2026, 9, 21, 9)).reconcile_day(DAY))
+    body = client.bodies[0]
+    assert "## What the owner said to remember for good" in body and "- My name is Sam (2026-09-11)" in body
+    assert "fold every real fact about them" in records.RECONCILE_PROMPT
+
+
+def test_a_star_newer_than_the_profile_is_on_top_of_it_verbatim(tmp_path: Path) -> None:
+    from cc_buddy_bridge.chat_memory import star
+
+    cfg = cfg_at(tmp_path)
+    star(cfg, "my name is Sam", when=datetime(2026, 9, 11))
+    assert records.profile(cfg).startswith("## They asked you to remember")   # no page yet: the stars are it
+    day_files(cfg)
+    asyncio.run(Reconciler(cfg, FakeReconcile(result()), wall=lambda: datetime(2026, 9, 21, 9)).reconcile_day(DAY))
+    prof = records.profile(cfg)
+    assert "They asked you to remember" not in prof and "My name is Sam" not in prof   # the page has read it
+    star(cfg, "my sister is Ana", when=datetime(2026, 9, 22))
+    prof = RecordsReader(cfg).profile()
+    assert prof.startswith("## They asked you to remember") and "- My sister is Ana (2026-09-22)" in prof
+    assert "My name is Sam" not in prof and "## Life context" in prof
+
+
+def test_no_stars_and_no_page_is_no_profile(tmp_path: Path) -> None:
+    assert records.profile(cfg_at(tmp_path)) == ""
+
+
+def test_the_installers_ignore_everything_file_does_not_cost_the_history(tmp_path: Path) -> None:
+    cfg = cfg_at(tmp_path)
+    (cfg.store / ".gitignore").write_text("*\n", encoding="utf-8")      # what the debrief installer leaves
+    day_files(cfg)
+    sha = asyncio.run(Reconciler(cfg, FakeReconcile(result()), wall=lambda: datetime(2026, 9, 21, 9)).reconcile_day(DAY))
+    assert sha
+    tracked = subprocess.run(["git", "-C", str(cfg.store), "ls-files"], capture_output=True, text=True).stdout
+    assert "records/profile.md" in tracked and "records/dining.md" in tracked
+
+
+def test_a_store_inside_another_repository_is_never_committed_to_it(tmp_path: Path) -> None:
+    subprocess.run(["git", "init", "-q", str(tmp_path)], check=True)
+    cfg = cfg_at(tmp_path)
+    assert records.commit(cfg.store, "x") is None
+    (cfg.store / "note.md").write_text("private\n", encoding="utf-8")
+    assert records.commit(cfg.store, "x") is None
+    status = subprocess.run(["git", "-C", str(tmp_path), "log", "--oneline"], capture_output=True, text=True)
+    assert status.returncode != 0 or status.stdout == ""                  # the outer repository has no commit
+
+
+def test_the_memory_store_can_never_be_pushed_anywhere(tmp_path: Path) -> None:
+    cfg = cfg_at(tmp_path)
+    outside = tmp_path / "outside.git"
+    subprocess.run(["git", "init", "-q", "--bare", str(outside)], check=True)
+    subprocess.run(["git", "-C", str(cfg.store), "init", "-q"], check=True)
+    subprocess.run(["git", "-C", str(cfg.store), "remote", "add", "origin", str(outside)], check=True)
+    day_files(cfg)
+    assert asyncio.run(Reconciler(cfg, FakeReconcile(result()), wall=lambda: datetime(2026, 9, 21, 9)).reconcile_day(DAY))
+    git = ["git", "-C", str(cfg.store)]
+    assert subprocess.run(git + ["remote"], capture_output=True, text=True).stdout == ""   # the remote is gone
+    for extra in ([], ["--no-verify"]):                                    # a skipped hook is still refused
+        for target in (str(outside), outside.as_uri(), "https://example.invalid/x.git", "git@example.invalid:x.git"):
+            r = subprocess.run(git + ["push", *extra, target, "HEAD:refs/heads/main"], capture_output=True, text=True)
+            assert r.returncode != 0, (extra, target)
+    assert subprocess.run(["git", "-C", str(outside), "rev-parse", "--verify", "-q", "refs/heads/main"]).returncode != 0
+    records.ensure_repo(cfg.store)                                         # sealing again is harmless
+    urls = subprocess.run(git + ["config", "--get-all", "url.local-only-never-pushed:.pushInsteadOf"],
+                          capture_output=True, text=True).stdout.split()
+    assert len(urls) == len(set(urls)) == len(records._PUSH_PREFIXES)
