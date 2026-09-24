@@ -4575,3 +4575,54 @@ def test_think_hard_is_told_the_profile_and_today(tmp_path: Path) -> None:
               thinker=old_thinker)
     asyncio.run(rig.inlet._turn(_in("Should I run tomorrow?")))
     assert asked == ["run tomorrow?"]
+
+
+# ---- apps: a finished build arrives as the app's picture with its Open button ------------------------
+
+def test_a_picture_with_web_app_buttons_goes_as_one_multipart_send_photo() -> None:
+    seen: dict[str, Any] = {}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        seen["url"], seen["type"], seen["body"] = str(request.url), request.headers["content-type"], request.read()
+        return httpx.Response(200, json={"ok": True, "result": {}})
+
+    async def go() -> None:
+        api = BotApi(TOKEN, client=httpx.AsyncClient(transport=httpx.MockTransport(handler)))
+        await api.send_photo_web_apps(OWNER, b"\xff\xd8jpeg-bytes", "✅ Habit Tracker is ready.\n" + "c" * 2000,
+                                      [("Open Habit Tracker", "https://quiet-owl.trycloudflare.com/apps/habit-tracker/")])
+        await api.close()
+
+    asyncio.run(go())
+    assert seen["url"].endswith("/sendPhoto") and seen["type"].startswith("multipart/form-data")
+    body = seen["body"]
+    assert b"\xff\xd8jpeg-bytes" in body and b'filename="app.jpg"' in body
+    assert "✅ Habit Tracker is ready.".encode() in body                               # the app's icon is kept
+    assert b"c" * (telegram.MAX_CAPTION_CHARS - 26) in body and b"c" * 2000 not in body
+    markup = json.loads(re.search(rb'name="reply_markup"\r\n\r\n(.*?)\r\n--', body, re.S).group(1))
+    assert markup == {"inline_keyboard": [[{"text": "Open Habit Tracker", "web_app": {
+        "url": "https://quiet-owl.trycloudflare.com/apps/habit-tracker/"}}]]}
+
+
+def test_the_app_tools_get_the_picture_sender_as_well_as_the_button_sender() -> None:
+    class Api(FakeApi):
+        async def send_web_apps(self, chat_id: int, text: str, buttons: Any) -> None:
+            pass
+
+        async def send_photo_web_apps(self, chat_id: int, jpeg: bytes, caption: str, buttons: Any) -> None:
+            pass
+
+    class Maker:
+        def __init__(self) -> None:
+            self.calls: list[tuple] = []
+
+        async def handle(self, name, args, chat_id, send, say, send_photo=None):
+            self.calls.append((name, args, chat_id, send, send_photo))
+            return {"ok": True}
+
+    rig = Rig(Api(), FakeCreate())
+    maker = Maker()
+    rig.inlet._maker = maker
+    assert asyncio.run(rig.inlet._tool("make_app", {"request": "a habit tracker"}, OWNER)) == {"ok": True}
+    (name, args, chat_id, send, send_photo), = maker.calls
+    assert (name, chat_id) == ("make_app", OWNER)
+    assert send == rig.api.send_web_apps and send_photo == rig.api.send_photo_web_apps

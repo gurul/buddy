@@ -15,11 +15,16 @@
     --accent-text: var(--tg-theme-button-text-color, #ffffff);
     --bubble: var(--tg-theme-secondary-bg-color, #f1f1f4);
     --code: rgba(127, 127, 127, 0.14);
+    --danger: var(--tg-theme-destructive-text-color, #d93838);
+    --sheet: var(--tg-theme-secondary-bg-color, #f1f1f4);
+    color-scheme: light dark;
   }
   @media (prefers-color-scheme: dark) {
     :root:not([data-theme="light"]) {
       --bg: var(--tg-theme-bg-color, #17171b); --text: var(--tg-theme-text-color, #ececf1);
       --hint: var(--tg-theme-hint-color, #8d8d96); --bubble: var(--tg-theme-secondary-bg-color, #232329);
+      --link: var(--tg-theme-link-color, #6ea2ff); --accent: var(--tg-theme-button-color, #3e7bf0);
+      --danger: var(--tg-theme-destructive-text-color, #ff6b6b); --sheet: var(--tg-theme-secondary-bg-color, #232329);
     }
   }
   * { box-sizing: border-box; }
@@ -29,7 +34,7 @@
   header { display: flex; align-items: center; justify-content: space-between; gap: 8px;
     padding: 10px 16px; border-bottom: 1px solid var(--code); }
   header .who { font-weight: 600; }
-  header .left { color: var(--hint); font-size: 13px; }
+  header .spent { color: var(--hint); font-size: 13px; font-variant-numeric: tabular-nums; text-align: right; }
   header button { background: none; border: 0; color: var(--link); font: inherit; padding: 6px 0; }
   main { flex: 1; overflow-y: auto; padding: 12px 16px 4px; -webkit-overflow-scrolling: touch; }
   .empty { color: var(--hint); text-align: center; margin-top: 30vh; }
@@ -56,9 +61,11 @@
   form button:focus-visible, header button:focus-visible { outline: 2px solid var(--link); outline-offset: 2px; }
   form button:disabled { opacity: 0.5; }
   .tabs { display: flex; gap: 4px; background: var(--bubble); border-radius: 10px; padding: 3px; }
-  .tabs button { border: 0; background: none; color: var(--text); font: 600 14px system-ui, sans-serif;
+  .tabs button { border: 0; background: none; color: var(--text); font: 500 14px system-ui, sans-serif;
     padding: 7px 14px; border-radius: 8px; min-height: 34px; }
-  .tabs button[aria-selected="true"] { background: var(--bg); box-shadow: 0 1px 3px rgba(0,0,0,.12); }
+  /* the selected tab is filled with the button color: it stands out on Telegram's black night theme too,
+     where a background one shade off the track and a dark shadow do not */
+  .tabs button[aria-selected="true"] { background: var(--accent); color: var(--accent-text); font-weight: 700; }
   .tabs button:focus-visible { outline: 2px solid var(--link); outline-offset: 1px; }
   [hidden] { display: none !important; }
   #apps { flex: 1; overflow-y: auto; padding: 16px; }
@@ -75,16 +82,66 @@
   .ideas button { border: 1px solid var(--code); background: var(--bg); color: var(--text); border-radius: 999px;
     padding: 6px 12px; font: 14px system-ui, sans-serif; min-height: 34px; }
   h2.section { font-size: 13px; text-transform: uppercase; letter-spacing: .04em; color: var(--hint); margin: 0 0 8px; }
-  .app { display: flex; align-items: center; gap: 12px; padding: 12px; border-radius: 14px; background: var(--bubble);
-    margin-bottom: 8px; }
-  .app .icon { width: 44px; height: 44px; border-radius: 12px; background: var(--accent); color: var(--accent-text);
-    display: grid; place-items: center; font: 700 19px system-ui, sans-serif; flex: none; }
-  .app .name { font-weight: 600; }
-  .app .when { color: var(--hint); font-size: 13px; }
+  .app { display: flex; align-items: center; gap: 4px; padding: 10px 4px 10px 12px; border-radius: 14px;
+    background: var(--bubble); margin-bottom: 8px; }
+  .icon { width: 44px; height: 44px; border-radius: 12px; background: var(--bg); color: var(--text);
+    display: grid; place-items: center; font: 24px/1 system-ui, sans-serif; flex: none; }
+  .icon.letter { background: var(--accent); color: var(--accent-text); font: 700 19px system-ui, sans-serif; }
+  .app .text { display: block; min-width: 0; }
+  .app .name { display: block; font-weight: 600; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .app .desc { display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden;
+    color: var(--hint); font-size: 14px; line-height: 1.35; }
+  .app .when { display: block; color: var(--hint); font-size: 12px; margin-top: 2px; }
   .app .open { flex: 1; min-width: 0; background: none; border: 0; text-align: left; color: inherit; font: inherit;
-    display: flex; align-items: center; gap: 12px; padding: 0; min-height: 44px; }
-  .app .change { background: none; border: 0; color: var(--link); font: 15px system-ui, sans-serif; min-height: 44px; padding: 0 4px; }
+    display: flex; align-items: center; gap: 12px; padding: 0; min-height: 44px; border-radius: 10px; }
+  .app .more { flex: none; width: 44px; height: 44px; border: 0; border-radius: 22px; background: none;
+    color: var(--link); font: 700 20px/1 system-ui, sans-serif; letter-spacing: 1px; }
+  .app .open:focus-visible, .app .more:focus-visible, .editing button:focus-visible,
+  .sheet button:focus-visible, .sheet input:focus-visible { outline: 2px solid var(--link); outline-offset: 2px; }
   .none { color: var(--hint); }
+  .editing { display: flex; align-items: center; justify-content: space-between; gap: 8px; margin: -2px 0 8px;
+    font-size: 14px; color: var(--hint); }
+  .editing button { background: none; border: 0; color: var(--link); font: 15px system-ui, sans-serif;
+    min-height: 36px; padding: 0 4px; }
+  .make[aria-busy="true"] textarea { opacity: .7; }
+  .notice-row { display: flex; align-items: center; gap: 8px; margin: 0 0 10px; }
+  .notice-row:has(.notice:empty) { display: none; }
+  .notice { color: var(--hint); font-size: 14px; margin: 0; flex: 1; min-width: 0; }
+  .notice:empty { display: none; }
+  .notice-row button { background: none; border: 0; color: var(--link); font: 600 15px system-ui, sans-serif;
+    min-height: 44px; padding: 0 8px; }
+  .result { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 10px; }
+  .result .btn.plain { background: none; color: var(--link); padding: 10px 8px; }
+  .app .more:disabled { color: var(--hint); }
+  .sheet[aria-busy="true"] .actions button, .sheet[aria-busy="true"] .rename .btn { opacity: .5; }
+  .notice-row button:focus-visible, .result .btn:focus-visible { outline: 2px solid var(--link); outline-offset: 2px; }
+  .sr { position: absolute; width: 1px; height: 1px; overflow: hidden; clip: rect(0 0 0 0); white-space: nowrap; }
+  /* the "…" action sheet: a native <dialog> (focus trapped, Escape closes), laid out like a phone's sheet */
+  dialog.sheet { margin: auto auto 0; width: 100%; max-width: 520px; border: 0; padding: 0; background: transparent;
+    color: var(--text); }
+  dialog.sheet::backdrop { background: rgba(0, 0, 0, .35); }
+  .sheet .panel { background: var(--bg); border-radius: 16px 16px 0 0;
+    padding: 14px 12px calc(12px + env(safe-area-inset-bottom)); box-shadow: 0 -4px 24px rgba(0,0,0,.18); }
+  .sheet .head { display: flex; align-items: center; gap: 12px; padding: 2px 4px 12px; }
+  .sheet h2 { font-size: 17px; margin: 0; overflow-wrap: anywhere; }
+  .sheet .actions { background: var(--sheet); border-radius: 12px; overflow: hidden; }
+  .sheet .actions button { display: block; width: 100%; min-height: 50px; border: 0; background: none;
+    color: var(--link); font: 17px system-ui, sans-serif; text-align: center; }
+  .sheet .actions button + button { border-top: 1px solid var(--code); }
+  .sheet .actions button.danger { color: var(--danger); }
+  .sheet .cancel { display: block; width: 100%; min-height: 50px; margin-top: 8px; border: 0; border-radius: 12px;
+    background: var(--sheet); color: var(--link); font: 600 17px system-ui, sans-serif; }
+  .sheet .rename { background: var(--sheet); border-radius: 12px; padding: 12px; }
+  .sheet .rename label { display: block; font-weight: 600; margin-bottom: 8px; }
+  .sheet .rename input { width: 100%; min-height: 44px; border: 1px solid var(--code); border-radius: 10px;
+    padding: 8px 12px; background: var(--bg); color: var(--text); font: inherit; }
+  .sheet .rename .row { display: flex; justify-content: flex-end; margin-top: 10px; }
+  .sheet .error { color: var(--danger); font-size: 14px; margin: 8px 4px 0; }
+  .sheet .error:empty { display: none; }
+  @media (prefers-reduced-motion: no-preference) {
+    dialog.sheet[open] .panel { animation: rise .18s ease-out; }
+    @keyframes rise { from { transform: translateY(24px); opacity: .6; } to { transform: none; opacity: 1; } }
+  }
 </style>
 </head>
 <body>
@@ -93,12 +150,14 @@
     <button type="button" role="tab" id="tab-apps" aria-selected="true">Apps</button>
     <button type="button" role="tab" id="tab-chat" aria-selected="false">Chat</button>
   </div>
-  <div class="left" id="left" role="status" aria-live="polite"></div>
+  <div class="spent" id="spent" role="status" aria-live="polite"></div>
   <button type="button" id="new" hidden>New chat</button>
 </header>
 <section id="apps" role="tabpanel" aria-labelledby="tab-apps">
-  <div class="make">
+  <div class="make" id="make-card">
     <label for="want" id="want-label">What should I build?</label>
+    <div class="editing" id="editing" hidden><span id="editing-text"></span>
+      <button type="button" id="editing-cancel">Build a new one instead</button></div>
     <textarea id="want" rows="2" placeholder="A habit tracker with daily check-ins and streaks"></textarea>
     <div class="ideas" id="ideas">
       <button type="button">Habit tracker with streaks</button>
@@ -106,12 +165,34 @@
       <button type="button">Reading list</button>
       <button type="button">Expense splitter</button>
     </div>
-    <div class="row"><span id="make-status" role="status" aria-live="polite"></span>
+    <div class="row"><span id="make-status"></span>
       <button class="btn" id="make" type="button">Build it</button></div>
+    <div class="result" id="make-result" hidden></div>
+    <div class="sr" id="make-live" role="status" aria-live="polite"></div>
   </div>
-  <h2 class="section">Your apps</h2>
+  <h2 class="section" id="apps-heading" tabindex="-1">Your apps</h2>
+  <div class="notice-row"><p class="notice" id="apps-notice" role="status" aria-live="polite"></p>
+    <button type="button" id="notice-undo" hidden>Undo</button></div>
   <div id="app-list"><div class="none">Nothing yet. Describe one above.</div></div>
 </section>
+<dialog class="sheet" id="sheet" aria-labelledby="sheet-title">
+  <div class="panel">
+    <div class="head"><span class="icon" id="sheet-icon" aria-hidden="true"></span><h2 id="sheet-title"></h2></div>
+    <div class="actions" id="sheet-actions">
+      <button type="button" data-act="change">Change</button>
+      <button type="button" data-act="rename">Rename</button>
+      <button type="button" data-act="undo" id="act-undo">Undo last change</button>
+      <button type="button" data-act="delete" class="danger">Delete</button>
+    </div>
+    <form class="rename" id="sheet-rename" hidden>
+      <label for="rename-input">New name</label>
+      <input id="rename-input" maxlength="60" autocomplete="off" enterkeyhint="done">
+      <div class="row"><button class="btn" type="submit" id="rename-save">Save</button></div>
+    </form>
+    <p class="error" id="sheet-error" role="alert"></p>
+    <button type="button" class="cancel" id="sheet-cancel">Cancel</button>
+  </div>
+</dialog>
 <main id="log" hidden aria-live="polite"><div class="empty" id="empty">Ask anything. Answers stream in full.</div></main>
 <form id="form" hidden>
   <textarea id="q" rows="1" placeholder="Message Claude" aria-label="Message Claude"></textarea>
@@ -123,7 +204,8 @@
   const initData = tg ? tg.initData : "";
   if (tg) { tg.ready(); tg.expand(); }
   const $ = (id) => document.getElementById(id);
-  const log = $("log"), q = $("q"), send = $("send"), left = $("left");
+  const log = $("log"), q = $("q"), send = $("send"), spent = $("spent");
+  const can = (v) => !!(tg && tg.isVersionAtLeast && tg.isVersionAtLeast(v));
   const KEY = "buddy-claude-history";
   let history = [];
   try { history = JSON.parse(localStorage.getItem(KEY) || "[]"); } catch (e) { history = []; }
@@ -169,12 +251,16 @@
     log.appendChild(el); return el;
   }
   const bottom = () => { log.scrollTop = log.scrollHeight; };
-  const showLeft = (v) => { if (typeof v === "number") left.textContent = "$" + v.toFixed(2) + " left today"; };
+  // What today has cost (chat and building together). Spend is tracked, not capped, unless a cap was set.
+  function showSpent(d) {
+    if (!d || typeof d.spent_today !== "number") return;
+    spent.textContent = "$" + d.spent_today.toFixed(2) + (typeof d.cap === "number" ? " of $" + d.cap.toFixed(2) : "") + " spent today";
+  }
   history.forEach((t) => bubble(t.role, t.content)); bottom();
 
-  if (!initData) { left.textContent = "Open this from buddy's menu button in Telegram."; send.disabled = true; }
+  if (!initData) { spent.textContent = "Open this from buddy's pinned message in Telegram."; send.disabled = true; $("make").disabled = true; }
   else fetch("api/me", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ initData }) })
-    .then((r) => r.json()).then((j) => { if (j.error) left.textContent = j.error; else showLeft(j.left); }).catch(() => {});
+    .then((r) => r.json()).then((j) => { if (j.error) spent.textContent = j.error; else showSpent(j); }).catch(() => {});
 
   // ---- tabs ----
   const views = { apps: [$("apps")], chat: [log, $("form"), $("new")] };
@@ -190,65 +276,315 @@
   show(startTab === "chat" ? "chat" : "apps");
 
   // ---- apps ----
-  const want = $("want"), makeBtn = $("make"), makeStatus = $("make-status");
+  // App titles and descriptions come from pages Claude wrote, so they only ever reach the page as textContent.
+  const want = $("want"), makeBtn = $("make"), makeStatus = $("make-status"), makeLive = $("make-live");
+  const notice = $("apps-notice"), sheet = $("sheet"), noticeUndo = $("notice-undo"), result = $("make-result");
   let editing = null;                                   // the app being changed, or null for a new one
+  let building = false, apps = [], running = [], poll = null;
+  const opening = new URLSearchParams(location.search).get("open");   // an Open button from the chat
   const ago = (iso) => { const d = new Date(iso); return isNaN(d) ? "" : d.toLocaleDateString(undefined, { month: "short", day: "numeric" }); };
   async function post(path, body) {
-    const r = await fetch(path, { method: "POST", headers: { "Content-Type": "application/json" },
+    return fetch(path, { method: "POST", headers: { "Content-Type": "application/json" },
       body: JSON.stringify(Object.assign({ initData }, body || {})) });
-    return r;
+  }
+  async function reply(r) { let j = {}; try { j = await r.json(); } catch (e) {} return j; }
+  function el(tag, cls, text) {
+    const e = document.createElement(tag);
+    if (cls) e.className = cls;
+    if (text != null) e.textContent = text;
+    return e;
+  }
+  function iconFor(a, node) {                           // the app's emoji, else its first letter on a tile
+    const emoji = (a.icon || "").trim();
+    node.textContent = emoji || (a.title || "?").trim().charAt(0).toUpperCase() || "?";
+    node.classList.toggle("letter", !emoji);
+    return node;
+  }
+  function haptic(kind) { try { if (can("6.1")) tg.HapticFeedback.notificationOccurred(kind); } catch (e) {} }
+  // Yes/no before anything that cannot be undone from here: Telegram's popup with the action named on a red
+  // button, else Telegram's plain confirm, else the browser's.
+  function ask(text, yes) {
+    return new Promise((resolve) => {
+      if (can("6.2") && tg.showPopup) {
+        try { tg.showPopup({ message: text, buttons: [{ id: "yes", type: "destructive", text: yes }, { id: "no", type: "cancel" }] },
+          (id) => resolve(id === "yes")); return; } catch (e) {}
+      }
+      if (can("6.2") && tg.showConfirm) { try { tg.showConfirm(text, (ok) => resolve(!!ok)); return; } catch (e) {} }
+      resolve(window.confirm(text));
+    });
+  }
+  // An app opens sandboxed with its own app token (the server's "open" address), never with the owner's
+  // initData. Telegram's script in it reads its version, platform and theme from the address, as Telegram
+  // passes them to a Mini App, and the owner's first name for a greeting: nothing signed.
+  function tgHash() {
+    if (!tg) return "";
+    const p = [], put = (k, v) => p.push(k + "=" + encodeURIComponent(v));
+    const user = tg.initDataUnsafe && tg.initDataUnsafe.user;
+    if (user && user.first_name) put("tgWebAppData", "user=" + encodeURIComponent(JSON.stringify({ first_name: user.first_name })));
+    if (tg.version) put("tgWebAppVersion", tg.version);
+    if (tg.platform) put("tgWebAppPlatform", tg.platform);
+    if (tg.themeParams) put("tgWebAppThemeParams", JSON.stringify(tg.themeParams));
+    return p.length ? "#" + p.join("&") : "";
+  }
+  const openApp = (url, replace) => { const to = url.replace(/^\//, "") + tgHash(); if (replace) location.replace(to); else location.href = to; };
+
+  const changingNow = () => new Set(running.map((b) => b.app).filter(Boolean));
+  function renderApps() {
+    const list = $("app-list"); list.textContent = "";
+    if (!apps.length) { list.appendChild(el("div", "none", "Nothing yet. Describe one above.")); return; }
+    const busy = changingNow();
+    apps.forEach((a) => {
+      const row = el("div", "app");
+      const open = el("button", "open"); open.type = "button";
+      open.appendChild(iconFor(a, el("span", "icon"))).setAttribute("aria-hidden", "true");
+      const text = el("span", "text");
+      text.appendChild(el("span", "name", a.title));
+      if (a.description) text.appendChild(el("span", "desc", a.description));
+      text.appendChild(el("span", "when", busy.has(a.slug) ? "Being changed…" : "Updated " + ago(a.updated)));
+      open.appendChild(text);
+      open.onclick = () => openApp(a.open);
+      const more = el("button", "more", "…"); more.type = "button";
+      more.setAttribute("aria-label", "More for " + a.title + (busy.has(a.slug) ? " (being changed)" : ""));
+      more.setAttribute("aria-haspopup", "dialog");
+      more.disabled = busy.has(a.slug);                  // Change, Undo and Delete wait for its build
+      more.onclick = () => openSheet(a, more);
+      row.append(open, more);
+      list.appendChild(row);
+    });
   }
   async function loadApps() {
     if (!initData) return;
     try {
-      const j = await (await post("api/apps")).json();
-      const list = $("app-list"); list.innerHTML = "";
-      if (!j.apps || !j.apps.length) { list.innerHTML = '<div class="none">Nothing yet. Describe one above.</div>'; return; }
-      j.apps.forEach((a) => {
-        const row = document.createElement("div"); row.className = "app";
-        row.innerHTML = '<button class="open" type="button"><span class="icon"></span><span><div class="name"></div>' +
-          '<div class="when"></div></span></button><button class="change" type="button">Change</button>';
-        row.querySelector(".icon").textContent = (a.title || "?").trim().charAt(0).toUpperCase();
-        row.querySelector(".name").textContent = a.title;
-        row.querySelector(".when").textContent = "Updated " + ago(a.updated);
-        row.querySelector(".open").onclick = () => { location.href = "apps/" + a.slug + "/"; };
-        row.querySelector(".change").onclick = () => {
-          editing = a; $("want-label").textContent = "What should change in " + a.title + "?";
-          want.placeholder = "Add a weekly chart"; makeBtn.textContent = "Change it"; want.focus();
-        };
-        list.appendChild(row);
-      });
+      const j = await reply(await post("api/apps"));
+      if (Array.isArray(j.apps)) { apps = j.apps; running = Array.isArray(j.building) ? j.building : []; renderApps(); watchRunning(); }
     } catch (e) {}
   }
-  $("ideas").querySelectorAll("button").forEach((b) => { b.onclick = () => { want.value = b.textContent; want.focus(); }; });
-  makeBtn.onclick = async () => {
-    const text = want.value.trim(); if (!text || makeBtn.disabled || !initData) return;
-    makeBtn.disabled = true; makeStatus.textContent = editing ? "Changing it…" : "Building it… this takes about a minute.";
+  // A build this page did not start, or whose stream dropped (a locked phone): it keeps running on the Mac,
+  // and its result goes to the chat with buddy. Until it ends, the page says so and Build waits for it.
+  function watchRunning() {
+    const mine = running.find((b) => b.secs != null);
+    if (building) return;
+    if (mine) {
+      const t0 = Date.now() - mine.secs * 1000, what = mine.request ? "“" + mine.request + "”" : "a change";
+      const paint = () => { makeStatus.textContent = "Still building " + what + "… " + clock(Date.now() - t0); };
+      paint(); makeBtn.disabled = true;
+      if (!poll) poll = setInterval(() => { paint(); loadApps(); }, 4000);
+    } else if (poll) {
+      clearInterval(poll); poll = null; makeBtn.disabled = !initData;
+      makeStatus.textContent = "Finished. buddy sent the result to the chat.";
+    }
+  }
+
+  // ---- the "…" sheet: Change, Rename, Undo last change, Delete ----
+  let current = null, trigger = null;
+  function openSheet(a, from) {
+    current = a; trigger = from;
+    $("sheet-title").textContent = a.title;
+    iconFor(a, $("sheet-icon"));
+    $("act-undo").hidden = !(a.versions > 0);
+    $("sheet-actions").hidden = false; $("sheet-rename").hidden = true; $("sheet-error").textContent = "";
+    if (sheet.showModal) sheet.showModal(); else sheet.setAttribute("open", "");
+    sheet.querySelector("[data-act]").focus();
+    if (can("6.1")) { tg.BackButton.onClick(closeSheet); tg.BackButton.show(); }
+  }
+  function closeSheet() { if (sheet.open) { if (sheet.close) sheet.close(); else sheet.removeAttribute("open"); } }
+  sheet.addEventListener("close", () => {
+    if (can("6.1")) { tg.BackButton.offClick(closeSheet); tg.BackButton.hide(); }
+    // Focus goes back to the "…" that opened the sheet, or to the list when that row is gone.
+    const back = trigger && document.body.contains(trigger) && !trigger.disabled ? trigger : $("apps-heading");
+    if (sheet.dataset.keepFocus) delete sheet.dataset.keepFocus; else back.focus();
+  });
+  sheet.addEventListener("click", (e) => { if (e.target === sheet) closeSheet(); });   // a tap on the backdrop
+  $("sheet-cancel").onclick = closeSheet;
+  function sheetError(text) { $("sheet-error").textContent = text; haptic("error"); }
+  // One action at a time: while it is on its way over the tunnel the sheet's buttons wait, so a second tap
+  // cannot send a second undo (an undo is a pop; the server also refuses a stale one by its version count).
+  async function act(path, body, fail, doing) {
+    const buttons = sheet.querySelectorAll("#sheet-actions button, #rename-save");
+    buttons.forEach((b) => { b.disabled = true; }); sheet.setAttribute("aria-busy", "true");
+    $("sheet-error").textContent = doing || "";
     try {
-      const r = await post("api/make", editing ? { request: text, app: editing.slug } : { request: text });
-      if (!r.ok || !r.body) { let m = "Something went wrong."; try { m = (await r.json()).error || m; } catch (x) {} makeStatus.textContent = m; return; }
-      const reader = r.body.getReader(), dec = new TextDecoder(); let buf = "", result = null;
+      const r = await post("api/apps/" + encodeURIComponent(current.slug) + "/" + path, body);
+      const j = await reply(r);
+      if (!r.ok) { sheetError(j.error || fail); if (r.status === 409 || r.status === 404) loadApps(); return null; }
+      $("sheet-error").textContent = "";
+      return j;
+    } catch (e) { sheetError("The connection dropped. Try again."); return null; }
+    finally { buttons.forEach((b) => { b.disabled = false; }); sheet.removeAttribute("aria-busy"); }
+  }
+  let undoTimer = null;
+  function done(text, undo) {
+    closeSheet(); notice.textContent = text; haptic("success"); loadApps();
+    clearTimeout(undoTimer); noticeUndo.hidden = !undo; noticeUndo.onclick = undo || null;
+    if (undo) undoTimer = setTimeout(() => { noticeUndo.hidden = true; }, 15000);
+  }
+
+  $("sheet-actions").addEventListener("click", async (e) => {
+    const b = e.target.closest("button[data-act]"); if (!b || !current || b.disabled) return;
+    const a = current, which = b.dataset.act;
+    if (which === "change") {
+      sheet.dataset.keepFocus = "1"; closeSheet(); startEditing(a); return;
+    }
+    if (which === "rename") {
+      $("sheet-actions").hidden = true; $("sheet-rename").hidden = false;
+      const input = $("rename-input"); input.value = a.title; input.focus(); input.select(); return;
+    }
+    if (which === "undo") {
+      const older = a.undo_warning ? " Entries saved since that change may not open in the older version." : "";
+      if (!(await ask("Undo the last change to " + a.title + "? The version you have now is not kept." + older, "Undo"))) return;
+      if (await act("revert", { versions: a.versions }, "Couldn't undo that.", "Undoing…")) done(a.title + " is back to how it was before its last change.");
+      return;
+    }
+    if (which === "delete") {
+      if (!(await ask("Delete " + a.title + "? It goes to buddy's trash on the Mac, with its data, and Undo brings it back.", "Delete"))) return;
+      if (await act("delete", {}, "Couldn't delete that.", "Deleting…")) {
+        if (editing && editing.slug === a.slug) stopEditing();
+        done("Deleted " + a.title + ".", async () => {
+          noticeUndo.hidden = true;
+          try {
+            const r = await post("api/apps/" + encodeURIComponent(a.slug) + "/restore");
+            const j = await reply(r);
+            notice.textContent = r.ok ? a.title + " is back." : (j.error || "Couldn't bring it back.");
+            haptic(r.ok ? "success" : "error");
+          } catch (x) { notice.textContent = "The connection dropped. Try again."; }
+          loadApps();
+        });
+      }
+    }
+  });
+  $("sheet-rename").addEventListener("submit", async (e) => {
+    e.preventDefault();
+    const title = $("rename-input").value.trim(); if (!title || !current) return;
+    const j = await act("rename", { title }, "Couldn't rename that.", "Renaming…");
+    if (j) done("Renamed to " + j.app.title + ".");
+  });
+
+  // ---- building and changing ----
+  function startEditing(a) {
+    editing = a;
+    $("want-label").textContent = "What should change?";
+    $("editing-text").textContent = "Changing " + a.title; $("editing").hidden = false; $("ideas").hidden = true;
+    want.placeholder = "Add a weekly chart"; makeBtn.textContent = "Change it";
+    $("make-card").scrollIntoView({ block: "start" }); want.focus();
+  }
+  function stopEditing() {
+    editing = null; $("editing").hidden = true; $("ideas").hidden = false;
+    $("want-label").textContent = "What should I build?";
+    want.placeholder = "A habit tracker with daily check-ins and streaks"; makeBtn.textContent = "Build it";
+  }
+  $("editing-cancel").onclick = () => { if (!building) { stopEditing(); want.focus(); } };
+  $("ideas").querySelectorAll("button").forEach((b) => { b.onclick = () => { want.value = b.textContent; want.focus(); }; });
+
+  // A build streams apps_maker's stages: thinking, writing (characters so far), testing, fixing (how many
+  // problems the phone check found), saving. The words change at each stage; the clock runs beside them.
+  const STAGES = {
+    thinking: () => "Thinking it through…",
+    writing: (n) => "Writing it…" + (n >= 1000 ? " " + Math.round(n / 1000) + "k" : ""),
+    testing: () => "Testing it on a phone…",
+    fixing: (n) => "Fixing " + n + (n === 1 ? " problem…" : " problems…"),
+    saving: () => "Saving…",
+  };
+  const clock = (ms) => { const s = Math.floor(ms / 1000); return Math.floor(s / 60) + ":" + String(s % 60).padStart(2, "0"); };
+  // The finished build's line: plain words, the first thing that may not work named (the check's counts go to
+  // the log, not here).
+  function readyLine(r) {
+    const title = r.app.title;
+    if (!r.problems) return "Ready: " + title + (r.tested === false ? ". It could not be tested on a phone this time." : ". Tested on a phone.");
+    const n = r.problems === 1 ? "1 thing" : r.problems + " things";
+    return "Ready: " + title + ", but " + n + " may not work: " + ((r.issues && r.issues[0]) || "") ;
+  }
+  // Buttons under the line when the page does not open the app by itself: Open, and for a change that may
+  // have broken something, Undo this change.
+  function showResult(r) {
+    result.textContent = "";
+    const open = el("button", "btn", "Open " + r.app.title); open.type = "button";
+    open.onclick = () => openApp(r.url);
+    result.appendChild(open);
+    if (r.changed && r.problems && r.app.versions > 0) {
+      const undo = el("button", "btn plain", "Undo this change"); undo.type = "button";
+      undo.onclick = async () => {
+        if (!(await ask("Undo this change to " + r.app.title + "?", "Undo"))) return;
+        undo.disabled = true;
+        try {
+          const res = await post("api/apps/" + encodeURIComponent(r.app.slug) + "/revert", { versions: r.app.versions });
+          const j = await reply(res);
+          makeStatus.textContent = res.ok ? r.app.title + " is back to how it was." : (j.error || "Couldn't undo that.");
+          if (res.ok) result.hidden = true;
+        } catch (e) { makeStatus.textContent = "The connection dropped. Try again."; undo.disabled = false; }
+        loadApps();
+      };
+      result.appendChild(undo);
+    }
+    result.hidden = false;
+  }
+  makeBtn.onclick = async () => {
+    const text = want.value.trim(); if (!text || building || !initData) return;
+    const target = editing;                             // what this build is for, whatever the sheet does meanwhile
+    building = true; makeBtn.disabled = true; $("make-card").setAttribute("aria-busy", "true"); notice.textContent = "";
+    result.hidden = true;
+    const t0 = Date.now(); let words = "Starting…", spoken = "";
+    const paint = () => { makeStatus.textContent = words + " " + clock(Date.now() - t0); };
+    // The live region hears each stage once (not every character count); the visible line has the numbers.
+    const say = (w) => { words = w; paint(); const plain = w.replace(/ \d+k$/, ""); if (plain !== spoken) { spoken = plain; makeLive.textContent = plain; } };
+    const timer = setInterval(paint, 1000);
+    const finish = (text) => { clearInterval(timer); makeStatus.textContent = text; makeLive.textContent = text; };
+    say(target ? "Changing it…" : "Starting…");
+    let dropped = false;
+    try {
+      const r = await post("api/make", target ? { request: text, app: target.slug } : { request: text });
+      if (!r.ok || !r.body) {
+        const j = await reply(r);
+        if (j.gone && target) {                          // deleted meanwhile (from the chat): stop changing it
+          if (editing === target) stopEditing();
+          finish(target.title + " was deleted. Describe it again to build a new one."); loadApps();
+        } else finish(j.error || "Something went wrong.");
+        haptic("error"); return;
+      }
+      const reader = r.body.getReader(), dec = new TextDecoder(); let buf = "", got = null, failed = "";
       for (;;) {
-        const { value, done } = await reader.read(); if (done) break;
+        const { value, done: end } = await reader.read(); if (end) break;
         buf += dec.decode(value, { stream: true }); let cut;
         while ((cut = buf.indexOf("\n\n")) >= 0) {
           const ev = buf.slice(0, cut); buf = buf.slice(cut + 2);
           if (!ev.startsWith("data: ")) continue;
           const d = JSON.parse(ev.slice(6));
-          if (typeof d.p === "number") makeStatus.textContent = d.p ? "Writing it… " + Math.round(d.p / 100) / 10 + "k characters" : "Thinking it through…";
-          if (d.error) makeStatus.textContent = d.error;
-          if (d.done) { result = d; showLeft(d.left); }
+          if (d.s && STAGES[d.s]) say(STAGES[d.s](Number(d.p) || 0));
+          if (d.error) { failed = d.error; showSpent(d); }
+          if (d.done) { got = d; showSpent(d); }
         }
       }
-      if (result) {
-        makeStatus.textContent = "Ready: " + result.app.title; want.value = "";
-        editing = null; $("want-label").textContent = "What should I build?"; makeBtn.textContent = "Build it";
-        await loadApps(); setTimeout(() => { location.href = result.url.replace(/^\//, ""); }, 600);
-      }
-    } catch (e) { makeStatus.textContent = "The connection dropped. Check Your apps in a minute."; }
-    finally { makeBtn.disabled = false; }
+      if (got) {
+        finish(readyLine(got));
+        // Clear the box only when it still holds this build's words and target: a Change picked on another
+        // app while this one built keeps what was typed for it.
+        if (editing === target && want.value.trim() === text) { want.value = ""; if (target) stopEditing(); }
+        haptic(got.problems ? "warning" : "success");
+        await loadApps();
+        // Straight into the app only when it is clean and the owner is still here, on this tab, not reading an
+        // answer; otherwise the Open button waits.
+        const here = () => !$("apps").hidden && !send.disabled && !sheet.open && document.visibilityState === "visible";
+        if (!got.problems && here()) setTimeout(() => { if (here()) openApp(got.url); else showResult(got); }, 1200);
+        else showResult(got);
+      } else if (failed) {
+        finish(failed); haptic("error");
+      } else { dropped = true; }
+    } catch (e) { dropped = true; }
+    finally {
+      clearInterval(timer);
+      building = false; makeBtn.disabled = false; $("make-card").removeAttribute("aria-busy");
+    }
+    if (dropped) {
+      finish("The connection dropped. The build goes on on the Mac; its result will come to the chat with buddy.");
+      haptic("error"); loadApps();
+    }
   };
-  loadApps();
+  loadApps().then(() => {
+    if (!opening) return;
+    const a = apps.find((x) => x.slug === opening);
+    if (a) openApp(a.open, true);
+    else notice.textContent = "That app is no longer here. It may have been deleted.";
+  });
+  window.addEventListener("pageshow", (e) => { if (e.persisted) loadApps(); });
 
   $("new").onclick = () => { history = []; save(); log.innerHTML = '<div class="empty" id="empty">New chat.</div>'; q.focus(); };
   q.addEventListener("input", () => { q.style.height = "auto"; q.style.height = q.scrollHeight + "px"; });
@@ -279,7 +615,7 @@
           const d = JSON.parse(ev.slice(6));
           if (d.t) { answer += d.t; el.innerHTML = md(answer); bottom(); }
           if (d.error) { el.insertAdjacentHTML("beforeend", '<div class="note">' + esc(d.error) + "</div>"); }
-          if (d.done) { showLeft(d.left); if (d.note) el.insertAdjacentHTML("beforeend", '<div class="note">' + esc(d.note) + "</div>"); }
+          if (d.done) { showSpent(d); if (d.note) el.insertAdjacentHTML("beforeend", '<div class="note">' + esc(d.note) + "</div>"); }
         }
       }
     } catch (x) {

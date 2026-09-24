@@ -1160,6 +1160,17 @@ class BotApi:
         rows = [[{"text": label[:MAX_BUTTON_CHARS], "web_app": {"url": url}}] for label, url in buttons]
         await self._call("sendMessage", {"chat_id": chat_id, "text": text, "reply_markup": {"inline_keyboard": rows}})
 
+    async def send_photo_web_apps(self, chat_id: int, jpeg: bytes, caption: str,
+                                  buttons: Sequence[tuple[str, str]]) -> None:
+        """A picture (JPEG bytes, not a file) with inline ``web_app`` buttons under it: a finished app's
+        screenshot and its Open button (apps_maker.ChatMaker). A multipart form carries every field as text, so
+        the keyboard goes as JSON. The caption is written in code, not by a model, and leads with the app's own
+        icon, so it is sent as it is (like send_web_apps), only cut to the caption limit."""
+        rows = [[{"text": label[:MAX_BUTTON_CHARS], "web_app": {"url": url}}] for label, url in buttons]
+        await self._call("sendPhoto", {"chat_id": str(chat_id), "caption": caption[:MAX_CAPTION_CHARS],
+                                       "reply_markup": json.dumps({"inline_keyboard": rows})},
+                         files={"photo": ("app.jpg", jpeg, "image/jpeg")})
+
     async def set_commands(self, commands: Sequence[tuple[str, str]], chat_id: int) -> None:
         """The / menu for one chat only (setMyCommands with a BotCommandScopeChat scope): the owner's
         private chat shows buddy's code words, and no other chat's menu changes."""
@@ -3073,7 +3084,8 @@ class TelegramInlet:
                 return await handler(self, name, args, chat_id)
             if self._maker is not None and name in apps_maker.MAKER_TOOL_NAMES:
                 return await self._maker.handle(name, args, chat_id, self.api.send_web_apps,
-                                                lambda chat, text: self._say(chat, text))
+                                                lambda chat, text: self._say(chat, text),
+                                                self.api.send_photo_web_apps)
             if self._memory is not None and name in {t["name"] for t in self._memory_tools()}:
                 return await self._memory_tool(name, args)
             if self._apps is not None and name in self._apps.names:

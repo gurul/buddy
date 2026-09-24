@@ -1219,7 +1219,11 @@ class Daemon:
             from . import apps_maker
 
             inlet = self._telegram
-            self._telegram._maker = apps_maker.ChatMaker(self._miniapp, lambda coro, name: inlet._spawn(coro, name))
+            door = apps_maker.ChatMaker(self._miniapp, lambda coro, name: inlet._spawn(coro, name))
+            # One set of apps-being-changed for both doors, so a delete, rename or undo from either one waits
+            # for a build started from the other.
+            door.building = self._miniapp.changing
+            self._telegram._maker = door
 
     def _make_chrome_lane(self) -> Any:
         """CC_BUDDY_BROWSER_ATTACH=1: the browser lane attached to the owner's own Chrome, kept for the daemon's
