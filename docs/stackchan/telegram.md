@@ -138,9 +138,10 @@ token without an owner id is off. A door with no allowlist never opens.
 | `CC_BUDDY_TELEGRAM_ASK` | `0` | `1`: with the Claude relay on, every tool call is asked in the chat, not only the always-ask ones (never in bypass mode). |
 | `CC_BUDDY_TELEGRAM_DRAFTS` | `1` | `0`: while Claude works on a relayed line, show "typing…" instead of the "Thinking…" bubble. |
 | `CC_BUDDY_TELEGRAM_EFFORT` | `low` | Its reasoning effort (`low`, `medium`, `high`, `xhigh`, `max`). Hard questions go to `think_hard` instead. |
-| `CC_BUDDY_WEB_SEARCH` | `openai` | How every brain searches the web ([below](#web-search)): `openrouter-exa`, `openai` (the hosted tool), `off`. |
-| `CC_BUDDY_WEB_SEARCH_MODEL` | `openai/gpt-5.4-nano` | The OpenRouter model that carries the Exa results back (the cheapest with the web plugin, 2026-09-21). |
-| `CC_BUDDY_WEB_SEARCH_RESULTS` | `5` | Results per search, 1 to 10 (Exa's first price tier). |
+| `CC_BUDDY_WEB_SEARCH` | `openrouter-perplexity` with an OpenRouter key, else `openai` | How every brain searches the web ([below](#web-search)): `openrouter-perplexity`, `openrouter-exa`, `openai` (the hosted tool, on the OpenAI key), `off`. |
+| `CC_BUDDY_WEB_SEARCH_MODEL` | `google/gemini-3.1-flash-lite` | The OpenRouter model that writes the answer from the search results. An `openai/…` model is refused: OpenAI models run on the OpenAI key, not through OpenRouter. |
+| `CC_BUDDY_WEB_SEARCH_RESULTS` | `5` | Results per search, 1 to 10 (the engines' first price tier). |
+| `CC_BUDDY_WEB_SEARCH_MAX_USES` | `2` | Searches per question, 1 to 5. |
 | `CC_BUDDY_COMPOSIO` | `0` | `1`: the owner's apps through Composio ([below](#the-apps-composio)). Needs `COMPOSIO_API_KEY` in the env file. |
 | `CC_BUDDY_CODEX_BIN` | desktop app bundled Codex, then `codex` on PATH | Executable for computer-task delegation. Computer Use must be enabled in its installed plugins. |
 | `CC_BUDDY_COMPOSIO_POLICY` | `gmail=read,googlecalendar=write,googledrive=ask` | What a WRITING app call may do, per toolkit: `read` refuses it, `write` runs it, `ask` is your yes/no in the chat (the default for any toolkit not named). Reads always run. |
@@ -261,16 +262,36 @@ matches, it starts that folder.
 
 ## Web search
 
-Voice, Telegram and `think_hard` use OpenAI's built-in `web_search` tool by
-default, including when an OpenRouter key is present. This restores the GPT
-search behavior from before commit `881fa36`, at the owner's request after
-Exa could not provide a live Seattle time reading.
+Voice, Telegram and `think_hard` search with **Perplexity through OpenRouter**
+whenever `OPENROUTER_API_KEY` is set (owner, 2026-09-24). On OpenRouter's search
+benchmarks Perplexity led BrowseComp, HLE and WideSearch on quality, value and
+speed with the model held fixed; on BrowseComp (2026-08-18) Claude Opus 5 scored
+89.0% with Perplexity against 82.2% with Exa. It costs $0.005 a search against
+Exa's $0.007.
 
-`CC_BUDDY_WEB_SEARCH=openai` explicitly selects hosted GPT search; `off`
-disables search. Exa remains an opt-in through `openrouter-exa`, which also
-requires `OPENROUTER_API_KEY`. Only that mode uses the search model/results
-settings above and returns a summarized answer through a function tool.
-Restart the daemon after changing the setting so new voice sessions pick it up.
+How one search works: the brain calls the `web_search` function tool, and
+buddy makes one OpenRouter chat call carrying the `openrouter:web_search`
+server tool on Perplexity, capped at 2 searches of 5 results. A cheap
+non-OpenAI model, `google/gemini-3.1-flash-lite`, writes a short answer with
+its sources. OpenAI models are never sent through OpenRouter.
+
+The answer step is also given the local date and time. Search engines are not
+a live clock: Exa could not say the time in Seattle (2026-09-21), and neither
+could Perplexity (2026-09-24). So a clock or "today" question is answered from
+buddy's clock instead of a page.
+
+Measured 2026-09-24 through buddy's own `websearch.search`:
+
+| Question | Time | Cost |
+|---|---:|---:|
+| "What time is it in Seattle right now?" (answered from the clock, correct) | 1.5 s | $0.0002 |
+| "What time is it in Tokyo?" (converted from the clock, correct) | 4.9 s | $0.0056 |
+| "Who won the most recent Formula 1 Grand Prix?" (correct, 5 sources) | 4.2 s | $0.0058 |
+
+`CC_BUDDY_WEB_SEARCH=openai` selects OpenAI's hosted search on the OpenAI key,
+which is also the default without an OpenRouter key. `openrouter-exa` keeps Exa
+on the same server tool, and `off` disables search. Restart the daemon after
+changing the setting so new voice sessions pick it up.
 
 ## The apps: Composio
 
