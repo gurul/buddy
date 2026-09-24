@@ -318,6 +318,41 @@ def test_mirror_reconnects_after_the_stream_ends_and_stops_cleanly() -> None:
     assert count["n"] >= 2
 
 
+def test_a_quiet_stream_reconnects_and_keeps_mirroring_without_spinning() -> None:
+    # The worker sends one observation and then says nothing. A timed-out read can never be retried (Python
+    # marks the socket), and the old loop spun on it at full speed forever and never read again (2026-09-24).
+    with FakeWorker(sse_events=[_obs(1, "debrief", "one")], sse_hold=30.0) as worker:
+        bus = MemoryBus()
+        count = {"n": 0}
+        bus.subscribe("/claude/observation", lambda t, m: count.__setitem__("n", count["n"] + 1))
+        mirror = ClaudeMemMirror(bus, url=worker.url, reconnect_secs=5.0, read_timeout=0.3)
+        mirror.start()
+        assert _wait(lambda: count["n"] >= 1)
+        cpu = time.process_time()
+        time.sleep(1.0)                                   # quiet: at least two reconnects, each one mirrored
+        busy = time.process_time() - cpu
+        started = time.perf_counter()
+        mirror.stop(wait=3.0)
+        stopped_in = time.perf_counter() - started
+    assert count["n"] >= 3                                # it kept reading after the quiet spells
+    assert mirror.stats["reconnects"] == 0                # a quiet stream is not a lost one
+    assert busy < 0.5                                     # the old loop burned the whole second
+    assert stopped_in < 1.0
+
+
+def test_stop_ends_a_blocked_read_at_once() -> None:
+    with FakeWorker(sse_events=[_obs(1, "debrief", "one")], sse_hold=30.0) as worker:
+        bus = MemoryBus()
+        seen: list = []
+        bus.subscribe("/claude/observation", lambda t, m: seen.append(m))
+        mirror = ClaudeMemMirror(bus, url=worker.url)      # the real 30 s quiet window
+        mirror.start()
+        assert _wait(lambda: len(seen) == 1)
+        started = time.perf_counter()
+        mirror.stop(wait=3.0)
+        assert time.perf_counter() - started < 1.0
+
+
 def test_mirror_survives_a_dead_worker(caplog) -> None:
     caplog.set_level(logging.WARNING, logger="cc_buddy_bridge.claude_mem")
     mirror = ClaudeMemMirror(MemoryBus(), url=_closed_port_url(), reconnect_secs=0.05)

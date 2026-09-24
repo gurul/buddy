@@ -29,11 +29,13 @@ The words "ideas" and "spoken" must not appear in any payload this file builds.
 
 from __future__ import annotations
 
+import contextlib
 import json
 import logging
 import os
 import queue
 import re
+import socket
 import threading
 import time
 import urllib.error
@@ -265,11 +267,19 @@ def recall(query: str, limit: int = 5, url: Optional[str] = None, timeout: float
 
 # ---- the mirror ---------------------------------------------------------------------------
 
+# How long the stream may stay quiet before the mirror reconnects. A timed-out read can never be retried:
+# Python marks the socket "timed out" and every later read fails at once ("cannot read from timed out
+# object"). The loop used to treat that as another quiet second and retry, so after the first quiet second
+# it spun about two million times a second holding the GIL, starving the daemon's event loop (Telegram
+# replies lagged, 2026-09-24) and never reading another event. A quiet stream now means reconnect.
+IDLE_SECS = 30.0
+
+
 class ClaudeMemMirror:
     """GET /stream -> /claude/observation for every new observation from the owner's other projects."""
 
     def __init__(self, bus: Any, url: Optional[str] = None, reconnect_secs: float = 5.0,
-                 skip_project: str = "buddy", read_timeout: float = 1.0) -> None:
+                 skip_project: str = "buddy", read_timeout: float = IDLE_SECS) -> None:
         self.bus = bus
         self.url = (url or worker_url()).rstrip("/")
         self.reconnect_secs = reconnect_secs
@@ -279,6 +289,7 @@ class ClaudeMemMirror:
         self._stop = threading.Event()
         self._thread: Optional[threading.Thread] = None
         self._last_warned = float("-inf")
+        self._live: Any = None                            # the open stream, so stop() can end a blocked read
 
     def start(self) -> None:
         if self._thread is not None:
@@ -289,20 +300,25 @@ class ClaudeMemMirror:
 
     def stop(self, wait: float = 2.0) -> None:
         self._stop.set()
+        # A read blocks up to read_timeout: shut the socket down so it returns now.
+        sock = getattr(getattr(getattr(self._live, "fp", None), "raw", None), "_sock", None)
+        if sock is not None:
+            with contextlib.suppress(OSError):
+                sock.shutdown(socket.SHUT_RDWR)
         thread, self._thread = self._thread, None
         if thread is not None:
             thread.join(wait)
 
     def _run(self) -> None:
-        first = True
+        first, quiet = True, False
         while not self._stop.is_set():
-            if not first:
+            if not first and not quiet:                  # a quiet stream reconnects at once, uncounted
                 self.stats["reconnects"] += 1
                 if self._stop.wait(self.reconnect_secs):
                     return
-            first = False
+            first, quiet = False, False
             try:
-                self._read_stream()
+                quiet = self._read_stream()
             except Exception as e:  # noqa: BLE001 — reconnect, never raise
                 now = time.monotonic()
                 if now - self._last_warned >= _WARN_EVERY_SECS:
@@ -310,21 +326,23 @@ class ClaudeMemMirror:
                     log.warning("claude-mem: mirror lost %s/stream (%s: %s); retrying every %.0f s",
                                 self.url, type(e).__name__, e, self.reconnect_secs)
 
-    def _read_stream(self) -> None:
+    def _read_stream(self) -> bool:
+        """Read the stream until it ends (False) or stays quiet for read_timeout (True: reconnect at once)."""
         req = urllib.request.Request(self.url + "/stream", headers={"Accept": "text/event-stream"})
         with urllib.request.urlopen(req, timeout=self.read_timeout) as resp:
-            while not self._stop.is_set():
-                try:
-                    line = resp.readline()
-                except TimeoutError:
-                    continue                      # nothing said for a second: check the stop flag
-                except OSError as e:
-                    if "timed out" in str(e).lower():
-                        continue
-                    raise
-                if not line:
-                    return                        # the worker closed the stream: reconnect
-                self._on_line(line.decode("utf-8", "replace").rstrip("\r\n"))
+            self._live = resp
+            try:
+                while not self._stop.is_set():
+                    try:
+                        line = resp.readline()
+                    except TimeoutError:
+                        return True                   # quiet: this socket can never be read again (IDLE_SECS)
+                    if not line:
+                        return False                  # the worker closed the stream (or stop() shut it)
+                    self._on_line(line.decode("utf-8", "replace").rstrip("\r\n"))
+            finally:
+                self._live = None
+        return False
 
     def _on_line(self, line: str) -> None:
         if not line.startswith("data:"):
