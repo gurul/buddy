@@ -1184,3 +1184,43 @@ def test_changing_an_app_deleted_meanwhile_stops_changing_it(tmp_path: Path) -> 
                    "button": "Build it", "want": "add streaks"}
 
 
+
+
+def test_an_app_reports_what_it_does_on_the_phone_to_the_log(tmp_path: Path, caplog) -> None:
+    app = apps_server(tmp_path)
+    app.store.save(page_doc("v1"), "habit tracker")
+
+    async def body(port):
+        t = miniapp.app_token("habit-tracker", TOKEN)
+        mine = "/api/apps/habit-tracker/report"
+        ok = await raw(port, "POST", mine, {"t": t, "platform": "ios", "version": "9.1", "bridge": "proxy",
+                                            "main_button": 'shown "New group"',
+                                            "errors": ["TypeError: x is null\nsecond line @12"] * 7})
+        forged = await raw(port, "POST", mine, {"t": "nope", "platform": "ios"})
+        other = await raw(port, "POST", "/api/apps/reading-list/report", {"t": t, "platform": "ios"})
+        return ok, forged, other
+
+    with caplog.at_level("INFO", logger="cc_buddy_bridge.miniapp"):
+        ok, forged, other = with_server(app, body)
+    assert ok.status_code == 200 and forged.status_code == 403 and other.status_code == 403
+    lines = [r.getMessage() for r in caplog.records if "on the phone" in r.getMessage()]
+    assert len(lines) == 1 and "platform=ios" in lines[0] and "bridge=proxy" in lines[0] and "errors=7" in lines[0]
+    assert "\n" not in lines[0] and lines[0].count(" | ") == 5                       # five errors at most, one line
+
+
+def test_opening_loading_and_saving_an_app_are_logged(tmp_path: Path, caplog) -> None:
+    app = apps_server(tmp_path)
+    app.store.save(page_doc("v1"), "habit tracker")
+
+    async def body(port):
+        t = miniapp.app_token("habit-tracker", TOKEN)
+        page = await raw(port, "GET", f"/apps/habit-tracker/?t={t}")
+        await raw(port, "POST", "/api/apps/habit-tracker/save", {"t": t, "data": {"v": 1}})
+        await raw(port, "POST", "/api/apps/habit-tracker/load", {"t": t})
+        return page
+
+    with caplog.at_level("INFO", logger="cc_buddy_bridge.miniapp"):
+        page = with_server(app, body)
+    said = " / ".join(r.getMessage() for r in caplog.records)
+    assert page.status_code == 200 and "/buddy.js" in page.text
+    assert "habit-tracker opened" in said and "habit-tracker saved" in said and "habit-tracker loaded (has data)" in said

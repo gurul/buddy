@@ -1242,6 +1242,26 @@ BUDDY_JS = """(() => {
       pump();
     }),
   };
+  // What this page does on the real phone, sent once when it has settled and again after a new error (at most 3
+  // reports): the Telegram it runs in, whether Telegram's native bridge is here (without it the MainButton and
+  // BackButton do nothing), the MainButton's state, and the page's errors. The server logs it (phone_report).
+  const errors = [];
+  let reports = 0, timer = null;
+  function report() {
+    timer = null;
+    if (reports >= 3) return;
+    reports++;
+    const w = window.Telegram && window.Telegram.WebApp, mb = w && w.MainButton;
+    const bridge = window.TelegramWebviewProxy ? "proxy" : (window.external && window.external.notify) ? "external"
+      : (window.parent !== window) ? "iframe" : "none";
+    const info = { platform: w ? w.platform : "", version: w ? w.version : "", bridge,
+      main_button: mb ? (mb.isVisible ? "shown " + JSON.stringify(mb.text || "") : "hidden") : "", errors: errors.slice(-5) };
+    post("/api/apps/" + slug + "/report", body("," + JSON.stringify(info).slice(1, -1))).catch(() => {});
+  }
+  const later = (ms) => { if (!timer) timer = setTimeout(report, ms); };
+  window.addEventListener("error", (e) => { errors.push(String(e.message || e.error || "error") + (e.lineno ? " @" + e.lineno : "")); later(1000); });
+  window.addEventListener("unhandledrejection", (e) => { errors.push("promise: " + String((e.reason && e.reason.message) || e.reason)); later(1000); });
+  window.addEventListener("load", () => later(3000));
   const tg = window.Telegram && window.Telegram.WebApp, bb = tg && tg.BackButton;
   if (bb && tg.isVersionAtLeast && tg.isVersionAtLeast("6.1")) {
     const show = bb.show, on = bb.onClick, own = [];

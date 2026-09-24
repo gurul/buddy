@@ -66,7 +66,7 @@ _WORST = {"in": 10.0, "out": 50.0, "cache_read": 1.0, "cache_write": 12.5, "cach
 INIT_DATA_MAX_AGE_SECS = 24 * 3600    # a Mini App left open all day still works; an old leaked string does not
 MAX_BODY_BYTES = 2_000_000
 APP_ROUTE_RE = re.compile(r"^/apps/([a-z0-9][a-z0-9-]{0,47})/(index\.html)?$")
-API_APP_RE = re.compile(r"^/api/apps/([a-z0-9][a-z0-9-]{0,47})/(load|save|delete|rename|revert|restore)$")
+API_APP_RE = re.compile(r"^/api/apps/([a-z0-9][a-z0-9-]{0,47})/(load|save|report|delete|rename|revert|restore)$")
 APP_TOKEN_SECS = 24 * 3600            # an app left open all day still saves; as long as initData lives
 CLOSE_WAIT_SECS = 2.0                 # shutdown waits this long for open connections (a build's stream) to go
 SPEND_ALERTS_USD = (5.0, 20.0, 50.0, 100.0, 200.0, 500.0, 1000.0)
@@ -136,6 +136,21 @@ def configured(environ: Any = None) -> MiniAppConfig:
 
 
 # ---- who is asking: Telegram's signed initData ----------------------------------------------------
+
+def phone_report(body: dict[str, Any]) -> str:
+    """One log line from an app's own report (buddy.js): which Telegram it runs in, whether Telegram's native
+    bridge is there (without it the MainButton and BackButton do nothing), and the page's errors. The only way to
+    see what an app does on the real phone (owner, 2026-09-24: "the expense splitter doesn't work"). Every field
+    is cut short and stripped of line breaks: it is text the page sent."""
+    def clip(v: Any, n: int) -> str:
+        return " ".join(str(v or "").split())[:n]
+
+    errors = body.get("errors") if isinstance(body.get("errors"), list) else []
+    parts = [f"platform={clip(body.get('platform'), 16)}", f"version={clip(body.get('version'), 8)}",
+             f"bridge={clip(body.get('bridge'), 12)}", f"main_button={clip(body.get('main_button'), 40)}",
+             f"errors={len(errors)}"]
+    return ", ".join(parts) + "".join(f" | {clip(e, 240)}" for e in errors[:5])
+
 
 def check_init_data(init_data: str, token: str, owner_ids: frozenset[int], *, now: Optional[float] = None,
                     max_age: float = INIT_DATA_MAX_AGE_SECS) -> Optional[int]:
@@ -398,7 +413,7 @@ class MiniAppServer:
             await self._app_page(writer, app_route.group(1), query, headers)
             return
         api_app = API_APP_RE.match(path)
-        app_io = api_app is not None and api_app.group(2) in ("load", "save")
+        app_io = api_app is not None and api_app.group(2) in ("load", "save", "report")
         if method == "OPTIONS" and app_io:
             # A sandboxed app's buddy.js sends a CORS-simple request (no preflight), but answer one anyway.
             await self._send(writer, 204, b"", "text/plain", CORS | {"Access-Control-Allow-Methods": "POST",
@@ -453,8 +468,10 @@ class MiniAppServer:
         tok = dict(parse_qsl(query)).get("t", "")
         html = self.store.html(slug) if check_app_token(tok, slug, self.cfg.token) else None
         if html is None:
+            log.info("apps: %s asked for without a valid app token; sent to the home page", slug)
             await self._send(writer, 302, b"", "text/plain", {"Location": f"/?open={slug}"})
             return
+        log.info("apps: %s opened", slug)
         await self._send(writer, 200, serve_app_html(html).encode(), "text/html; charset=utf-8",
                          {"Content-Security-Policy": app_csp(self._origin(headers), slug),
                           "Referrer-Policy": "no-referrer", "X-Content-Type-Options": "nosniff"})
@@ -517,9 +534,16 @@ class MiniAppServer:
     def _app_io(self, slug: str, action: str, body: dict[str, Any]) -> tuple[int, dict[str, Any]]:
         assert self.store is not None
         try:
+            if action == "report":
+                log.info("apps: %s on the phone: %s", slug, phone_report(body))
+                return 200, {"ok": True}
             if action == "load":
-                return 200, {"data": self.store.load_data(slug)}
-            return 200, {"ok": True, "bytes": self.store.save_data(slug, body.get("data"))}
+                data = self.store.load_data(slug)
+                log.info("apps: %s loaded (%s)", slug, "no data yet" if data is None else "has data")
+                return 200, {"data": data}
+            size = self.store.save_data(slug, body.get("data"))
+            log.info("apps: %s saved %d bytes", slug, size)
+            return 200, {"ok": True, "bytes": size}
         except KeyError:
             return 404, {"error": "There is no such app."}
         except ValueError:
