@@ -60,6 +60,7 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any, Callable, Optional, Protocol
 
+from . import spend
 from .recall import RecallConfig
 from .transcripts import MEETINGS_SUBDIR
 
@@ -167,6 +168,17 @@ def stitch(previous: str, text: str) -> str:
     return text
 
 
+def wav_seconds(wav: bytes) -> float:
+    """How long a WAV segment plays, from its header (0.0 when it cannot be read): the fallback the spend meter
+    prices a transcription by when the reply carries no token usage."""
+    try:
+        with wave.open(io.BytesIO(wav)) as w:
+            rate = w.getframerate()
+            return w.getnframes() / rate if rate else 0.0
+    except (wave.Error, EOFError, OSError):
+        return 0.0
+
+
 class TranscribeClient(Protocol):
     def transcribe(self, wav: bytes, prompt: str) -> str: ...
     def summarize(self, transcript: str) -> str: ...
@@ -191,6 +203,7 @@ class OpenAINotesClient:
             model=self.model,
             **({"prompt": prompt} if prompt else {}),
         )
+        spend.record_transcription(spend.TRANSCRIPTION, self.model, resp, seconds=wav_seconds(wav))
         return (getattr(resp, "text", "") or "").strip()
 
     def summarize(self, transcript: str) -> str:
@@ -203,6 +216,7 @@ class OpenAINotesClient:
             max_output_tokens=2000,
             reasoning={"effort": "low"},
         )
+        spend.record_response(spend.ROOM_NOTES, resp, model=self.summary_model)
         text = (resp.output_text or "").strip()
         if not text:
             raise RuntimeError("empty summary")

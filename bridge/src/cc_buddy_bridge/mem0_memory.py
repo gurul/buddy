@@ -43,6 +43,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Callable, Optional
 
+from . import spend
 from . import transcripts as transcripts_mod
 from .recall import RecallConfig
 
@@ -148,7 +149,38 @@ def open_mem0(cfg: Mem0Config) -> Any:
 
     if telemetry.MEM0_TELEMETRY:
         raise RuntimeError("mem0 telemetry is on (mem0 was imported before buddy could turn it off)")
-    return Memory.from_config(mem0_config(cfg))
+    return meter(Memory.from_config(mem0_config(cfg)), cfg)
+
+
+def meter(memory: Any, cfg: Mem0Config) -> Any:
+    """Route mem0's two OpenAI calls through the daily spend meter (spend.py). mem0 owns its clients, so the
+    ``create`` of its fact extraction (Chat Completions, ``memory.llm.client``) and of its embeddings
+    (``memory.embedding_model.client``) is wrapped on those instances: each reply is recorded, then returned
+    unchanged. A client shaped otherwise (another mem0 version) is left as it is, with one log line: the index
+    must never break for want of a meter."""
+    def wrap(owner: Any, record: Any, what: str) -> None:
+        original = getattr(owner, "create", None)
+        if not callable(original) or getattr(original, "_buddy_metered", False):
+            log.warning("mem0: %s calls are not metered (no create to wrap)", what)
+            return
+
+        def create(*args: Any, **kwargs: Any) -> Any:
+            reply = original(*args, **kwargs)
+            record(reply, str(kwargs.get("model") or ""))
+            return reply
+
+        create._buddy_metered = True  # type: ignore[attr-defined]
+        owner.create = create
+
+    try:
+        wrap(memory.llm.client.chat.completions,
+             lambda r, m: spend.record_chat_completion(spend.MEMORY, r, model=m or cfg.model, provider="openai"),
+             "extraction")
+        wrap(memory.embedding_model.client.embeddings,
+             lambda r, m: spend.record_embedding(spend.MEMORY, m or cfg.embed_model, r), "embedding")
+    except AttributeError:
+        log.warning("mem0: its model calls are not metered (this mem0 has no client where buddy looks)")
+    return memory
 
 
 def _rows(found: Any) -> list[dict[str, Any]]:

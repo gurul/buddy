@@ -89,7 +89,7 @@ from datetime import datetime
 from typing import TYPE_CHECKING, Any, Awaitable, Callable, Optional
 
 from . import head as head_mod
-from . import system_context, websearch
+from . import spend, system_context, websearch
 from .agent_contract import AgentEvent
 from .caption_pager import CaptionPager, Event, PagerConfig, caption_instructions
 from .computer_agent import ComputerAgent
@@ -678,6 +678,11 @@ class VoiceSession:
     _opened_wall: Optional[datetime] = None
     _captured = 0
     _close_written = False
+    # The spend meter (spend.py): the Live session's billed seconds, from session.usage.updated and session.closed
+    # (cumulative, never summed), and the hosted web searches of the backend response in flight.
+    _live_secs: Optional[float] = None
+    _live_billed = False
+    _backend_searches = 0
 
     def __init__(
         self,
@@ -922,6 +927,37 @@ class VoiceSession:
                 self._set("idle")
             finally:
                 self._write_close()     # every exit path, a second hush in the drain too
+                self._bill_live()
+
+    # -- the spend meter (spend.py) --
+    def _note_live_usage(self, event: Any) -> None:
+        """Keep the Live session's cumulative audio seconds (a total, not an increment: the largest one wins)."""
+        seconds = _attr(_attr(event, "usage") or {}, "seconds")
+        if isinstance(seconds, (int, float)) and not isinstance(seconds, bool):
+            self._live_secs = max(float(seconds), self._live_secs or 0.0)
+
+    def _bill_live(self) -> None:
+        """The session's minutes, once, when it closes. Billed seconds come from the server's usage events; a
+        session that never sent one is metered by its own clock and says so in the note."""
+        if self._live_billed:
+            return
+        self._live_billed = True
+        seconds, note = self._live_secs, ""
+        if seconds is None:
+            started = getattr(self, "_started_at", None)
+            seconds = max(0.0, self._clock() - started) if isinstance(started, (int, float)) else 0.0
+            note = "clock-timed: no usage event"
+        if seconds > 0:
+            spend.record_live(spend.VOICE, self.config.model, seconds, note=note)
+
+    def _bill_backend(self, response: Any) -> None:
+        """One delegated Responses call: its usage at the backend model's rates, plus its hosted searches."""
+        searches, self._backend_searches = self._backend_searches, 0
+        body = response if isinstance(response, dict) else spend._as_dict(response)
+        if not isinstance(body.get("usage"), dict):
+            return                          # a lifecycle snapshot without usage (a failure before any tokens)
+        spend.record_response(spend.VOICE, body, model=str(body.get("model") or self.config.backend_model),
+                              searches=searches)
 
     # -- memory --
     def _wall_now(self) -> Optional[datetime]:
@@ -1290,7 +1326,10 @@ class VoiceSession:
                 self._set("thinking")
         elif t == "response.event":
             await self._backend_event(_attr(event, "event") or {})
+        elif t == "session.usage.updated":
+            self._note_live_usage(event)
         elif t == "session.closed":
+            self._note_live_usage(event)
             self._ended.set()
         elif t == "error":
             log.warning("voice: live error: %s", _attr(event, "error"))
@@ -1302,11 +1341,14 @@ class VoiceSession:
             self._response_active = True
         elif et == "response.output_item.done":
             item = _attr(ev, "item") or {}
+            if _attr(item, "type") == "web_search_call":
+                self._backend_searches += 1
             if _attr(item, "type") == "function_call":
                 await self._tool(_attr(item, "name") or "",
                                  _attr(item, "call_id") or "",
                                  _attr(item, "arguments") or "{}")
         elif et in ("response.completed", "response.failed", "response.incomplete"):
+            self._bill_backend(_attr(ev, "response"))
             self._response_active = False
             self._last_activity = self._clock()
             if self._response_wanted and not self._ended.is_set():

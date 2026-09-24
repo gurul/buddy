@@ -7,6 +7,7 @@ import re
 import urllib.error
 import urllib.request
 
+from .. import spend
 from .search import search_problems
 
 PROMPT = """You are Buddy, a patient tutor in any subject.
@@ -117,6 +118,10 @@ class LiveTutor:
         try:
             with urllib.request.urlopen(req, timeout=90) as response:
                 data = json.load(response)
+            if settings["provider"] == "openrouter":
+                spend.record_chat_completion(spend.LESSONS, data, model=settings["model"])
+            else:
+                spend.record_response(spend.LESSONS, data, model=settings["model"])
         except urllib.error.HTTPError as exc:
             advice = {401: "Check the configured API key.", 402: "Check your provider credits.",
                       403: "Check model access and provider permissions.",

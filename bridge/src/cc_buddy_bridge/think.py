@@ -34,7 +34,7 @@ import os
 from dataclasses import dataclass, field
 from typing import Any, Awaitable, Callable, Optional
 
-from . import system_context, websearch
+from . import spend, system_context, websearch
 
 log = logging.getLogger(__name__)
 
@@ -179,8 +179,10 @@ class OpenAIThinker:
         items = question_items(question)
         text = ""
         for _round in range(MAX_SEARCH_ROUNDS + 1):
-            resp = await self._create(request(self.config, items, context))
+            req = request(self.config, items, context)
+            resp = await self._create(req)
             body = resp if isinstance(resp, dict) else resp.model_dump(exclude_none=True)
+            spend.record_response(spend.THINKING, body, model=req["model"])
             calls, text, carry = parse_calls(body.get("output"))
             if not calls or _round == MAX_SEARCH_ROUNDS:
                 break

@@ -51,6 +51,7 @@ from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Any, Callable, Optional, Protocol
 
+from . import spend
 from .explore import data_url, frame_image
 from .vision import decode_frame
 
@@ -608,6 +609,7 @@ class OpenAISceneClient:
 
     def describe(self, image: bytes, mime: str, previous: Optional[str]) -> tuple[str, str]:
         resp = self._client.responses.create(**self.request(image, mime, previous))
+        spend.record_response(spend.CAMERA, resp, model=self.model)
         text = resp.output_text or ""
         if not text.strip():
             raise RuntimeError(f"empty answer (status={resp.status}, incomplete={resp.incomplete_details})")
@@ -615,6 +617,7 @@ class OpenAISceneClient:
 
     def locate(self, image: bytes, mime: str, target: str) -> dict[str, Any]:
         resp = self._client.responses.create(**self.locate_request(image, mime, target))
+        spend.record_response(spend.CAMERA, resp, model=self.model)
         text = resp.output_text or ""
         if not text.strip():
             raise RuntimeError(f"empty answer (status={resp.status}, incomplete={resp.incomplete_details})")

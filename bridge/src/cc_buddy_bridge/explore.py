@@ -58,6 +58,7 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any, Callable, Optional, Protocol, Union
 
+from . import spend
 from .vision import Frame, encode_gray_png
 
 log = logging.getLogger(__name__)
@@ -695,6 +696,7 @@ class OpenAINoteClient:
             max_output_tokens=NOTE_MAX_OUTPUT_TOKENS,
             reasoning={"effort": "minimal"},
         )
+        spend.record_response(spend.EXPLORING, resp, model=self.model)
         text = " ".join((resp.output_text or "").split())
         if not text:
             raise RuntimeError(

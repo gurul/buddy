@@ -5,6 +5,8 @@ import urllib.error
 import urllib.request
 from urllib.parse import urlsplit
 
+from .. import spend
+
 
 def search_problems(topic, level):
     key = os.environ.get("EXA_API_KEY", "").strip()
@@ -19,6 +21,11 @@ def search_problems(topic, level):
     try:
         with urllib.request.urlopen(req, timeout=15) as response:
             data = json.load(response)
+        # Exa's reply states its own price (costDollars.total); without one the call is recorded unpriced.
+        price = data.get("costDollars") if isinstance(data, dict) else None
+        cost = price.get("total") if isinstance(price, dict) else None
+        spend.record("exa", "search", spend.LESSONS, cost if isinstance(cost, (int, float)) else None,
+                     source="reported", note="" if isinstance(cost, (int, float)) else "no costDollars in the reply")
         rows = data.get("results") if isinstance(data, dict) else None
         if not isinstance(rows, list):
             raise ValueError("Invalid search response")

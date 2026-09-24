@@ -20,7 +20,7 @@ from pathlib import Path
 from typing import Any
 from urllib.parse import urlsplit
 
-from . import telegram_images
+from . import spend, telegram_images
 from .agent_contract import AgentEvent
 
 log = logging.getLogger(__name__)
@@ -51,6 +51,13 @@ or the desktop as a substitute. Do any tab preservation before this final captur
 If capture fails, say so; do not claim a picture was sent.
 """
 INSTRUCTIONS += BROWSER_INSTRUCTIONS
+# Codex runs on the owner's ChatGPT plan, not per call: the spend meter records each task with no price, so the
+# dashboard can say how many there were without inventing a figure (spend.py).
+PLAN_NOTE = 'ChatGPT plan, not per-call'
+
+
+def meter_codex(what: str) -> None:
+    spend.record('chatgpt', 'codex', spend.CODEX, None, note=f'{PLAN_NOTE} ({what})')
 
 
 class CodexUnavailable(Exception):
@@ -441,6 +448,7 @@ class CodexComputerAgent:
         self.ui_evidence = []
         self._done = asyncio.get_running_loop().create_future()
         self._emit('started', goal)
+        meter_codex('computer task')
         try:
             if self._cancelled:
                 raise asyncio.CancelledError

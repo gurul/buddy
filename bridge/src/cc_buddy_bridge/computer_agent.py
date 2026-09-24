@@ -56,7 +56,7 @@ from pathlib import Path
 from typing import Any, Awaitable, Callable, Optional
 from urllib.parse import quote_plus, urlsplit
 
-from . import browser_lane, consent, lane_router, pricing, task_router
+from . import browser_lane, consent, lane_router, pricing, spend, task_router
 from . import jev as jev_mod
 from .agent_contract import AgentEvent  # noqa: F401 — defined there, re-exported for importers of this module
 from .fast_lane import DECIDE_MODES, DEFAULT_DECIDE, FAST_LANE_DEFAULT, LANE_FIRST_DEFAULT
@@ -924,9 +924,10 @@ class ComputerAgent:
         raise Cancelled()
 
     async def _create(self, req: dict[str, Any], turn: int) -> dict[str, Any]:
-        """responses.create with one retry after 1 s on a transient API error."""
+        """responses.create with one retry after 1 s on a transient API error. Every model call of a run goes
+        through here (the loop, the plan, the checks), so this is where the daily spend meter reads it."""
         try:
-            return await self.create_response(req)
+            response = await self.create_response(req)
         except Exception as e:  # noqa: BLE001
             name = type(e).__name__
             if name not in RETRYABLE_API_ERRORS:
@@ -934,7 +935,9 @@ class ComputerAgent:
             log.warning("agent: %s on turn %d; retrying once", name, turn)
             self._log({"turn": turn, "retry": name})
             await self._sleep(1.0)
-            return await self.create_response(req)
+            response = await self.create_response(req)
+        spend.record_response(spend.TASKS, response, model=str(req.get("model") or self.config.model))
+        return response
 
     async def _loop(self, goal: str, worker: Any) -> str:
         cfg = self.config

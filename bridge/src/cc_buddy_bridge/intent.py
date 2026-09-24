@@ -29,6 +29,8 @@ import re
 import sys
 from typing import Any, Awaitable, Callable, Optional
 
+from . import spend
+
 log = logging.getLogger(__name__)
 
 LEAVE = "leave"
@@ -246,6 +248,7 @@ class OpenAIIntentClient:
 
     def classify(self, text: str) -> tuple[str, float]:
         resp = self._client.responses.create(**self.request(text))
+        spend.record_response(spend.VOICE, resp, model=self.model)
         return parse_intent(resp.output_text or "{}")
 
 

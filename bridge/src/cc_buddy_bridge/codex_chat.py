@@ -15,7 +15,13 @@ from collections.abc import Awaitable, Callable
 from pathlib import Path
 from typing import Any
 
-from .codex_computer import BROWSER_INSTRUCTIONS, ONCE_ANSWERS, CodexComputerAgent, CodexUnavailable
+from .codex_computer import (
+    BROWSER_INSTRUCTIONS,
+    ONCE_ANSWERS,
+    CodexComputerAgent,
+    CodexUnavailable,
+    meter_codex,
+)
 
 log = logging.getLogger(__name__)
 
@@ -148,6 +154,7 @@ class CodexChat(CodexComputerAgent):
             await self.close()
             raise CodexUnavailable('Codex did not confirm the message. It was not retried. '
                                    'The chat is closed; check Codex before sending the work again.') from exc
+        meter_codex('chat turn')
         self._turn_job = asyncio.create_task(self._finish_turn())
 
     async def _finish_turn(self) -> None:

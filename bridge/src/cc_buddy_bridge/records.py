@@ -54,6 +54,7 @@ from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Any, Callable, Iterator, Optional
 
+from . import spend
 from .recall import RecallConfig
 
 log = logging.getLogger(__name__)
@@ -1063,6 +1064,7 @@ class OpenAIReconcileClient:
             model=self.model, instructions=instructions, input=body,
             text={"format": {"type": "json_schema", "name": name, "strict": True, "schema": schema}},
             max_output_tokens=MAX_OUTPUT_TOKENS, reasoning={"effort": "low"}, store=False)
+        spend.record_response(spend.MEMORY, resp, model=self.model)
         text = (resp.output_text or "").strip()
         if not text:
             raise RuntimeError("empty reply")

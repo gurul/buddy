@@ -60,7 +60,7 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any, Awaitable, Callable, Optional, Protocol, Sequence
 
-from . import photos
+from . import photos, spend
 from .explore import (
     ERROR_LOG_INTERVAL_SECS,
     NOTE_TIMEOUT_SECS,
@@ -815,6 +815,7 @@ class OpenAIDiaryClient:
             max_output_tokens=THINK_MAX_OUTPUT_TOKENS,
             reasoning={"effort": "minimal"},
         )
+        spend.record_response(spend.EXPLORING, resp, model=self.model)
         text = (resp.output_text or "").strip()
         if not text:
             raise RuntimeError(f"empty answer (status={resp.status}, incomplete={resp.incomplete_details})")
@@ -832,6 +833,7 @@ class OpenAIDiaryClient:
             max_output_tokens=EXAMINE_MAX_OUTPUT_TOKENS,
             reasoning={"effort": "low"},
         )
+        spend.record_response(spend.EXPLORING, resp, model=self.model)
         text = (resp.output_text or "").strip()
         if not text:
             raise RuntimeError(f"empty answer (status={resp.status}, incomplete={resp.incomplete_details})")
@@ -846,6 +848,7 @@ class OpenAIDiaryClient:
             max_output_tokens=REFLECT_MAX_OUTPUT_TOKENS,
             reasoning={"effort": "low"},
         )
+        spend.record_response(spend.EXPLORING, resp, model=self.model)
         text = (resp.output_text or "").strip()
         if not text:
             raise RuntimeError("empty reflection")

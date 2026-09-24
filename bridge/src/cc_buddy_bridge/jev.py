@@ -50,6 +50,7 @@ import urllib.error
 import urllib.request
 from typing import Any, Callable, Mapping, Optional
 
+from . import pricing, spend
 from .decider import WARMUP_CONTEXT, WARMUP_OBJECTIVE, WARMUP_OPTIONS, Decider
 
 ROUTES = {
@@ -100,6 +101,22 @@ class Meter:
 
 
 METER = Meter()
+
+
+def meter_spend(url: str, model: str, payload: dict[str, Any]) -> None:
+    """One answered decision into the daily spend meter (spend.py): OpenRouter's own usage.cost when its reply
+    carries one, else the input tokens at Jev's rate (pricing.JEV_INPUT_PER_M; output is free). The provider is
+    the route's host, so the owner sees which bill it lands on."""
+    usage = payload.get("usage") if isinstance(payload.get("usage"), dict) else {}
+    provider = "openrouter" if "openrouter.ai" in url else "typesafe"
+    tokens = usage.get("input_tokens")
+    tokens = tokens if isinstance(tokens, int) and not isinstance(tokens, bool) else 0
+    if isinstance(usage.get("cost"), (int, float)) and not isinstance(usage.get("cost"), bool):
+        spend.record(provider, model, spend.JEV, float(usage["cost"]), tokens={"in": tokens}, source="reported")
+    elif usage:
+        spend.record(provider, model, spend.JEV, pricing.estimate_jev_cost(tokens), tokens={"in": tokens})
+    else:
+        spend.record(provider, model, spend.JEV, None, note="no usage in the reply")
 
 
 def timeout_from_env(env: Mapping[str, str]) -> float:
@@ -176,6 +193,7 @@ def make_predict(
                 METER.add({}, (time.perf_counter() - t0) * 1000.0, error=True)
                 raise JevError(f"{url} returned {type(payload).__name__}, not an object")
             METER.add(payload, (time.perf_counter() - t0) * 1000.0)
+            meter_spend(url, model, payload)
             return normalize(payload, questions)
         METER.add({}, (time.perf_counter() - t0) * 1000.0, error=True)
         raise JevError(f"{url} kept returning a retryable status")

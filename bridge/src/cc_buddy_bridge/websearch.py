@@ -27,6 +27,8 @@ from datetime import datetime
 from typing import Any, Callable, Optional
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
+from . import spend
+
 log = logging.getLogger(__name__)
 
 URL = "https://openrouter.ai/api/v1/chat/completions"
@@ -210,6 +212,12 @@ def search(query: str, config: Optional[SearchConfig] = None, *, key: str = "",
     engine = OPENROUTER_ENGINES.get(cfg.engine, "perplexity")
     measured = result["usage"].get("cost")
     result["cost_usd"] = round(measured if measured is not None else SEARCH_USD.get(engine, 0.005), 4)
+    # The daily meter takes OpenRouter's own figure only: without it the answer model's tokens are unknown, so
+    # the line is unpriced rather than the search fee alone passed off as the whole cost.
+    spend.record("openrouter", cfg.model, spend.SEARCH, measured,
+                 tokens={"in": result["usage"].get("in"), "out": result["usage"].get("out")},
+                 source="reported" if measured is not None else "priced",
+                 note="" if measured is not None else f"no usage.cost; search fee alone ~${SEARCH_USD.get(engine, 0.005)}")
     log.info("web search: %d sources in %.0f ms via %s on %s, $%.4f", len(result["sources"]), ms, cfg.model, engine,
              result["cost_usd"])
     return result

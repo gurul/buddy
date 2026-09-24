@@ -2274,3 +2274,55 @@ def test_remember_that_never_stars_buddys_own_words(tmp_path, caplog) -> None:
         await asyncio.sleep(0.02)
     asyncio.run(bare())
     assert "starred" not in caplog.text
+
+
+# ---- the spend meter (spend.py) ------------------------------------------------------------------------
+
+def test_the_live_minutes_and_each_backend_call_are_metered(_spend_ledger_in_tmp) -> None:
+    from datetime import date
+
+    from cc_buddy_bridge import spend
+
+    conn = FakeConnection([
+        {"type": "session.usage.updated", "usage": {"seconds": 30.0}},
+        _delegated(),
+        {"type": "response.event", "event": {"type": "response.output_item.done", "item": {"type": "web_search_call"}}},
+        {"type": "response.event", "event": {"type": "response.completed", "response": {
+            "model": "gpt-6-astra", "usage": {"input_tokens": 1_000_000, "output_tokens": 0}}}},
+        {"type": "session.usage.updated", "usage": {"seconds": 90.0}},    # cumulative: the largest one wins
+        {"type": "session.usage.updated", "usage": {"seconds": 60.0}},
+    ])
+    s, _states, _mic = _session(conn, [FakeAgent(None, None)])
+
+    async def go():
+        task = asyncio.create_task(s.run())
+        await asyncio.sleep(0.01)
+        conn.feed(_tool_call("end_conversation"), None)
+        await task
+    asyncio.run(go())
+    rows = spend.day_rows(date.today().isoformat(), _spend_ledger_in_tmp)
+    backend, live = rows
+    assert (backend["f"], backend["m"], backend["usd"]) == ("voice", "gpt-6-astra", pytest.approx(10.0 + 0.01))
+    assert backend["tok"]["searches"] == 1
+    assert (live["f"], live["m"], live["usd"], live["tok"]) == ("voice", "gpt-live-1", pytest.approx(0.075),
+                                                                {"secs": 90})
+
+
+def test_a_session_without_usage_events_is_metered_by_its_own_clock(_spend_ledger_in_tmp) -> None:
+    from datetime import date
+
+    from cc_buddy_bridge import spend
+
+    clock = {"now": 0.0}
+    conn = FakeConnection()
+    s, _states, _mic = _session(conn, [FakeAgent(None, None)], clock=clock)
+
+    async def go():
+        task = asyncio.create_task(s.run())
+        await asyncio.sleep(0.01)
+        clock["now"] = 120.0
+        conn.feed(_tool_call("end_conversation"), None)
+        await task
+    asyncio.run(go())
+    [row] = spend.day_rows(date.today().isoformat(), _spend_ledger_in_tmp)
+    assert row["usd"] == pytest.approx(0.10) and row["note"] == "clock-timed: no usage event"
