@@ -511,9 +511,9 @@ def ask_laya_request(predict: Predict, goal: str, apps: list[str], clock: Callab
                          risky=sum(kinds.get(k, 0.0) for k in LAYA_RISKY_KINDS), ms=(clock() - t0) * 1000.0)
 
 
-# The click path's question. Asked laya's way — one relative choice over the menu, a reserved "abstain"
-# among the options — a model can always prefer a bad control to abstaining: abstain is one more rival in
-# the same softmax. So the step is asked the way the request is: the target is a CHOICE over the controls
+# The click path's question. Asked as one relative choice over the menu with a reserved "abstain"
+# among the options (decider.Decider, the lane's `model` mode), a model can always prefer a bad
+# control to abstaining: abstain is one more rival in the same softmax. So the step is asked the way the request is: the target is a CHOICE over the controls
 # code built (rendered by decider.render_option, plus an explicit "none"), and beside it, in the same
 # request, three absolute nouls — is a control that does exactly this on the list at all, is the step's
 # result already in effect, does the step do something consequential. Code reads all four; the choice

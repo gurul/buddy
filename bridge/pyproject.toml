@@ -81,13 +81,14 @@ browser = ["playwright>=1.63,<2"]
 # history), OpenAI for extraction and embeddings. 2.2.0 current per PyPI, 2026-09-23, Apache-2.0, Python >=3.10.
 # Its PostHog telemetry is forced off before import. Imported lazily; `pip install -e ".[mem0]"`.
 mem0 = ["mem0ai>=2.2,<3"]
-# The computer-use fast lane (fast_lane.py, decider.py): laya-mlx runs the Laya
-# typed-decision checkpoint natively on Apple silicon (MLX). 0.1.0 current per
-# PyPI, mlx 0.32.2, 2026-09-21. Apple silicon only; imported lazily by the
-# desktop worker's loader thread, so the daemon runs without it. Install with
-# `pip install -e ".[fast]"` and copy the checkpoint to
-# ~/.config/cc-buddy-bridge/models/laya-multilingual-mlx (see docs/stackchan/voice.md).
-fast = ["laya-mlx>=0.1.0,<0.2; sys_platform == 'darwin' and platform_machine == 'arm64'"]
+# The local Laya model: laya-mlx runs the Laya typed-decision checkpoint natively on Apple
+# silicon (MLX) for the robot's live eye expressions (live_expressions.py, eye_model.py,
+# emotion_policy.py) and the laya arms of the routing evals (tools/head_eval.py,
+# tools/route_eval.py). 0.1.0 current per PyPI, mlx 0.32.2, 2026-09-21. Apple silicon only;
+# imported lazily, so the daemon runs without it. Install with `pip install -e ".[laya]"` and
+# copy the checkpoint to ~/.config/cc-buddy-bridge/models/laya-multilingual-mlx (see
+# docs/stackchan/laya-expressions/README.md).
+laya = ["laya-mlx>=0.1.0,<0.2; sys_platform == 'darwin' and platform_machine == 'arm64'"]
 # Composio, the text buddy's "app hands" (composio_tools.py): one session per owner, its meta tools beside
 # buddy's own in the Telegram brain. 0.22.0 current per PyPI, 2026-09-21 (composio-core is deprecated; do not
 # use it); composio-openai 0.22.0 shapes the tools for the Responses API. Imported lazily; the daemon runs

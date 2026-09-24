@@ -191,7 +191,7 @@ KEYWORD_LANE_HELPER = """  delegate(steps=["Year", "next year"], approve=None)
 """
 FAST_LANE_RULE = """
 11. delegate(objective, text=None, key=None, done_when=None, approve=None, max_steps=4) hands a narrow run of
-    clicks on labelled controls inside the frontmost app to a local decider (milliseconds a step, no vision).
+    clicks on labelled controls inside the frontmost app to the fast lane (under a second a step, no vision).
     Prefer it after open_app for menus, tabs, sidebar rows and view switches; use click_text / pyautogui for
     visual judgements, gestures or ambiguous targets. Supply text and key exactly (it cannot invent them) and
     done_when: a distinctive marker that is NOT on screen yet and appears when the objective is met; with

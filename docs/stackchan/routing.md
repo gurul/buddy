@@ -434,8 +434,8 @@ presses allowed. `tools/jev_step_eval.py`, on the Accessibility fixtures (menu o
 | Jev alone, under the fitted cut-offs | 42 | 42 | 0 | 58.3 % |
 | **the gate's pick only if Jev agrees, else Jev** (`jev` mode) | 52 | 51 | 1 | 70.8 % |
 
-Jev's raw top-1 when the right control is on the menu: 57 of 60 on select (laya: 29.7 % on the cases it was
-asked). Requests: 234 ms p50, 289 ms p90 over OpenRouter. **This is not a ship decision**: both fixture sets
+Jev's raw top-1 when the right control is on the menu: 57 of 60 on select (laya, the lane's old local model,
+removed from the click path 2026-09-24: 29.7 % on the cases it was asked). Requests: 234 ms p50, 289 ms p90 over OpenRouter. **This is not a ship decision**: both fixture sets
 had been read during the laya work, and `--check-default` refuses to enable `JEV_STEP_DEFAULT` without
 `--fresh DIR`, a set nobody has read. Until one exists both switches ship off.
 
@@ -609,7 +609,7 @@ then `report --out-dir DIR`.
 | `CC_BUDDY_FAST_LANE_DECIDE` | `keyword` | who picks a lane step under the planner: `keyword`, `model`, or `jev` (the gate proposes, Jev can refuse; the step's words and the window's control labels go to `CC_BUDDY_JEV_ROUTE`, never the title) |
 | `CC_BUDDY_PLAN_EXEC` | `0` | `1`: the planner plans once and `plan_executor.py` walks the plan with no planner turn between steps or at the end ([above](#plan-once-execute-with-jev)). Uses Jev for grounding when a route is configured, the keyword gate alone otherwise |
 | `CC_BUDDY_PLAN_EXEC_REASONING` | `low` | the plan call's reasoning effort |
-| `CC_BUDDY_DECIDER` | `laya` | the lane's model in `model` mode: `laya` or `jev` |
+| `CC_BUDDY_DECIDER` | `unset` | the lane's model in `model` mode: `jev` is the only value; unset, `model` mode stays off. laya is not in the click path any more (removed 2026-09-24); it still drives the eye expressions and is scored by the routing evals |
 | `CC_BUDDY_BROWSER_LANE` | `0` | `1`: web goals go to buddy's own Chromium through Playwright ([above](#the-browser-lane-playwright-as-the-hands-jev-as-the-judge)); Jev grounds each step when `CC_BUDDY_JEV_STEP=1` and a route is configured, the keyword gate alone otherwise |
 | `CC_BUDDY_BROWSER_PROFILE` | `~/.config/cc-buddy-bridge/browser` | the persistent Chromium profile (sign in here once) |
 | `CC_BUDDY_BROWSER_HEADLESS` | `0` | `1` hides the window (benches); you should see it |

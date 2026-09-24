@@ -14,7 +14,7 @@ your phone ── Telegram ──▶ api.telegram.org ◀── long poll (outbo
                                                                                    │ accept(): owner id, private chat,
                                                                                    │ fresh, your own words — or dropped
                                                                                    ▼
-                                                        text brain: gpt-6-astra, Responses API, store=False
+                                                        text brain: gpt-6-luna, Responses API, store=False 
                                                           tools: start_task · steer_task · stop_task · take_photo ·
                                                                  screenshot · send_file · list_files · look · look_around ·
                                                                  find · move_head · go_explore · set_sound · take_notes ·
@@ -138,7 +138,7 @@ token without an owner id is off. A door with no allowlist never opens.
 | `CC_BUDDY_TELEGRAM` | `0` | The switch. |
 | `CC_BUDDY_TELEGRAM_TOKEN` | unset | The bot token from @BotFather. Never logged. |
 | `CC_BUDDY_TELEGRAM_OWNER` | unset | Numeric user ids allowed to text buddy, comma-separated. A `@username` is ignored: it can be changed and re-registered, a number cannot. |
-| `CC_BUDDY_TELEGRAM_MODEL` | `gpt-6-astra` | The text brain. |
+| `CC_BUDDY_TELEGRAM_MODEL` | `gpt-6-luna` | The text brain. Chosen 2026-09-24 over `gpt-6-astra` for speed: a tool turn on astra took 39 s. |
 | `CC_BUDDY_TELEGRAM_ASK` | `0` | `1`: with the Claude relay on, every tool call is asked in the chat, not only the always-ask ones (never in bypass mode). |
 | `CC_BUDDY_TELEGRAM_DRAFTS` | `1` | `0`: while Claude works on a relayed line, show "typing…" instead of the "Thinking…" bubble. |
 | `CC_BUDDY_TELEGRAM_EFFORT` | `low` | Its reasoning effort (`low`, `medium`, `high`, `xhigh`, `max`). Hard questions go to `think_hard` instead. |

@@ -93,7 +93,7 @@ if TYPE_CHECKING:                     # typing only: telegram.py imports cleanly
 log = logging.getLogger(__name__)
 
 TELEGRAM_DEFAULT = False            # ships off: no evaluation of the text brain exists yet
-DEFAULT_MODEL = "gpt-6-astra"       # the voice backend's model: the same half of buddy, typed
+DEFAULT_MODEL = "gpt-6-luna"        # owner, 2026-09-24: "chat should be 6 luna" (astra answered a tool turn in 39 s)
 DEFAULT_EFFORT = "low"              # a text is a chat turn; think_hard is there for the hard ones
 EFFORTS = ("low", "medium", "high", "xhigh", "max")   # what gpt-6-astra accepts (probed 2026-09-21)
 API_ROOT = "https://api.telegram.org"

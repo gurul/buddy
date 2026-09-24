@@ -18,7 +18,7 @@ classifier is tiers, cheapest first, and each tier declines unless it is sure:
     astra    the planner        everything else: vision, reading, typing, judgement 10 s+
              (+ lane script)    and it may hand the lane exact labels in one turn
              (+ decider)        with CC_BUDDY_FAST_LANE_DECIDE=model the lane asks a
-                                typed-decision model (laya local, jev hosted) on ties
+                                typed-decision model (hosted jev, CC_BUDDY_DECIDER=jev) on ties
 
 `classify()` is pure: text in, a Plan out, no I/O — so it costs microseconds in the daemon and
 is measured offline (tools/route_eval.py) against the owner's real requests. A Plan names the
@@ -36,9 +36,10 @@ What makes a tier decline is as important as what makes it engage:
 - A search reflex needs explicit search wording and a query. "Pull up something cool" has no
   query a rule should invent; the planner picks one.
 
-Where laya and jev fit, by measurement rather than by hope (docs/stackchan/routing.md): as the
-lane's tie-breaker under the planner, and as candidates for THIS classifier's fuzzy cases —
-tools/route_eval.py scores them on the same labelled requests the rules are scored on.
+Where the typed-decision models fit, by measurement rather than by hope (docs/stackchan/routing.md):
+jev as the lane's tie-breaker under the planner, and laya and jev both as candidates for THIS
+classifier's fuzzy cases — tools/route_eval.py scores them on the same labelled requests the rules
+are scored on.
 """
 
 from __future__ import annotations

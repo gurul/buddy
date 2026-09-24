@@ -301,7 +301,7 @@ flowchart TB
 |---|---|
 | Robot firmware | Arduino C++ on ESP32-S3; M5StackChan BSP and M5Unified for hardware, RoboEyes for the face. Local state machines handle gaze, affect, conversation phases, motion and synthesised chirps. |
 | Host bridge | Python with `asyncio`; `cc-buddy-bridge` is the CLI and daemon entry point. Hooks and CLI commands use local JSON IPC; the robot link is newline-delimited JSON over USB serial. |
-| Voice and reasoning | sherpa-onnx keyword spotting with sounddevice audio input; the configured defaults are `gpt-live-1` for voice and `gpt-6-astra` for reasoning. Captions are the default output. Voice, text and deep reasoning search the web with Perplexity through OpenRouter when an OpenRouter key is set, and with OpenAI's built-in search otherwise (`websearch.py`; [web search](docs/stackchan/telegram.md#web-search)). |
+| Voice and reasoning | sherpa-onnx keyword spotting with sounddevice audio input; the configured defaults are `gpt-live-1` for voice, `gpt-6-astra` for the voice's tools and computer tasks, `gpt-6-luna` for Telegram text, and `gpt-6-sol` for deep reasoning (`think_hard`). Captions are the default output. Voice, text and deep reasoning search the web with Perplexity through OpenRouter when an OpenRouter key is set, and with OpenAI's built-in search otherwise (`websearch.py`; [web search](docs/stackchan/telegram.md#web-search)). |
 | Desktop control | The voice and text `start_task` tool delegates to Codex app-server and its installed `cua_repl.js` Computer Use plugin. Progress, explicit permissions, results, steering and cancellation return through buddy. |
 | Vision and memory | macOS Vision for face detection, host-side identity/following logic, model-assisted scene observations and reflections, plus a separate conversation memory: transcripts, records rewritten by a nightly dream, and a mem0 index. |
 | Learning | Python HTTP service on `127.0.0.1:48766`, SQLite persistence, and a React/TypeScript tldraw canvas built with Vite. Tutor responses use a validated JSON shape for problems, feedback, steps and completion state. |
@@ -349,8 +349,9 @@ See [integration evidence and limits](docs/codex-computer-use/README.md).
    desktop helpers, and catches any plan that cannot be made or finished.
 
 Tiers 1–2 are on by default in that worker. Tier 3 and the planner-delegated fast lane
-(`decider.py`, the `[fast]` extra) are **off by default**. Optional typed-decision
-backends are **local Laya via MLX** on Apple silicon and **hosted Jev**, which can also
+(`fast_lane.py`, keyword-decided; its `model` mode asks `decider.py` over hosted Jev) are
+**off by default**. The fast lane's local Laya decider was removed on 2026-09-24; Laya
+now drives only the eye expressions (the `[laya]` extra). **Hosted Jev** can also
 drive narrowly scoped launch routing and spoken head moves. Clicks use accurate OCR
 directly, and a finished screen wait is reused for the reply screenshot. The
 **browser lane** (`browser_lane.py`, off by default; `CC_BUDDY_BROWSER_LANE=0`) drives

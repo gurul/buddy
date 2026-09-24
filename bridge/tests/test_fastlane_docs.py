@@ -16,7 +16,7 @@ from cc_buddy_bridge.fast_lane import (
 
 ROOT = Path(__file__).resolve().parents[2]
 VOICE = ROOT / "docs" / "stackchan" / "voice.md"
-KNOBS = ("CC_BUDDY_FAST_LANE", "CC_BUDDY_FAST_LANE_STYLE", "CC_BUDDY_LAYA_MODEL", "CC_BUDDY_LOCAL_VERIFY",
+KNOBS = ("CC_BUDDY_FAST_LANE", "CC_BUDDY_FAST_LANE_STYLE", "CC_BUDDY_LOCAL_VERIFY",
          "CC_BUDDY_LANE_FIRST", "CC_BUDDY_FAST_LANE_DECIDE", "CC_BUDDY_DECIDER")
 
 
@@ -46,8 +46,8 @@ def test_documented_defaults_match_the_shipped_constants() -> None:
     assert _knob_row(text, "CC_BUDDY_LOCAL_VERIFY") == "shadow"
     assert _knob_row(text, "CC_BUDDY_LANE_FIRST") == ("1" if LANE_FIRST_DEFAULT else "0")
     assert _knob_row(text, "CC_BUDDY_FAST_LANE_DECIDE") == DEFAULT_DECIDE
-    assert _knob_row(text, "CC_BUDDY_DECIDER") == "laya"
-    assert "laya-multilingual-mlx" in _knob_row(text, "CC_BUDDY_LAYA_MODEL")
+    assert _knob_row(text, "CC_BUDDY_DECIDER") == "unset"
+    assert "CC_BUDDY_LAYA_MODEL" not in text           # the Laya click lane and its checkpoint knob are gone
 
 
 def test_voice_doc_describes_the_router_the_script_form_and_the_prompt_teaches_it() -> None:
@@ -72,6 +72,7 @@ def test_voice_doc_describes_the_router_the_script_form_and_the_prompt_teaches_i
 
 def test_readmes_point_at_the_lane() -> None:
     root = (ROOT / "README.md").read_text(encoding="utf-8")
-    assert "fast_lane.py" in root and "decider.py" in root and "ax_candidates.py" in root and "[fast]" in root
+    assert "fast_lane.py" in root and "decider.py" in root and "ax_candidates.py" in root and "[laya]" in root
     bridge = (ROOT / "bridge" / "README.md").read_text(encoding="utf-8")
-    assert '".[fast]"' in bridge and "CC_BUDDY_FAST_LANE" in bridge and "voice.md#the-fast-lane" in bridge
+    assert '".[laya]"' in bridge and "CC_BUDDY_FAST_LANE" in bridge and "voice.md#the-fast-lane" in bridge
+    assert "[fast]" not in root and "[fast]" not in bridge       # the extra is `laya` now (the eye expressions)

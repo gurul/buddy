@@ -280,7 +280,7 @@ def gate_pick(goal: str, options: dict[str, str], by_id: dict[str, Candidate]) -
 
 
 def make_fake_predict(strength: float = 3.0) -> Callable[[Any, dict[str, Any]], dict[str, Any]]:
-    """A laya-shaped predictor for tests and --fake-predictor: probabilities from keyword
+    """A System-One-shaped predictor for tests and --fake-predictor: probabilities from keyword
     overlap (1 + strength × shared tokens), deterministic, no model."""
 
     def predict(state: Any, questions: dict[str, Any]) -> dict[str, Any]:
@@ -589,12 +589,16 @@ def print_summary(title: str, s: dict[str, Any], out: Callable[[str], None] = pr
 
 # ---- the real decider ---------------------------------------------------------------------------
 
-def load_decider(model: Optional[str], fake: bool, style: str = "compact") -> Decider:
+def load_decider(fake: bool, style: str = "compact") -> Decider:
+    """The decider `model` mode loads (hosted Jev, jev.load: a network call per case, TYPESAFE_API_KEY or
+    CC_BUDDY_JEV_ROUTE=openrouter + OPENROUTER_API_KEY), or the keyword fake for tests."""
     if fake:
         return Decider(make_fake_predict(), style=style)
-    from cc_buddy_bridge.decider import DEFAULT_MODEL_PATH
+    from cc_buddy_bridge import jev
+    from cc_buddy_bridge.envfile import load_env_file
 
-    d = Decider.load(model or DEFAULT_MODEL_PATH, style=style)
+    load_env_file()
+    d = jev.load(style=style)
     print(f"model loaded in {d.load_ms:.0f} ms, warm-up {d.warm_ms:.0f} ms")
     return d
 
@@ -772,7 +776,7 @@ def cmd_fixtures(args: argparse.Namespace) -> int:
     if bad:
         print(f"unknown style(s) {bad}; choose from {STYLES}")
         return 2
-    decider = load_decider(args.model, args.fake_predictor)
+    decider = load_decider(args.fake_predictor)
     select_by_style: dict[str, list[CaseResult]] = {}
     holdout_by_style: dict[str, list[CaseResult]] = {}
     for style in styles:
@@ -808,7 +812,7 @@ def cmd_check_default(args: argparse.Namespace) -> int:
         print(f"DEFAULT_MISMATCH: no holdout fixtures under {root}")
         return 1
     p_min, m, style, shipped = shipped_settings()
-    decider = load_decider(args.model, args.fake_predictor, style)
+    decider = load_decider(args.fake_predictor, style)
     results = run_set(decider, sets["holdout"], style)
     ok, numbers = ship_decision(results, p_min, m)
     print(f"holdout n={numbers['n']} style={style} thresholds p_min={p_min:.2f} margin_min={m:.2f}")
@@ -1012,7 +1016,7 @@ def cmd_live_delegate(args: argparse.Namespace) -> int:
     if target.value == "selected":
         print(f"PRECONDITION_NOT_MET: {args.done_when!r} is already selected in {app}")
         return 1
-    decider = load_decider(args.model, args.fake_predictor)
+    decider = load_decider(args.fake_predictor)
     common = dict(senses=senses, decider=decider, done_when=args.done_when, max_steps=args.max_steps)
     print(f"-- dry run: {objective!r} in {app}")
     dry = LiveEffectors(pid, dry_run=True)
@@ -1253,7 +1257,6 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--min-no-overlap", type=int, default=0)
     p.add_argument("--min-distractor", type=int, default=0)
     p.add_argument("--styles", default=",".join(STYLES))
-    p.add_argument("--model", help="laya checkpoint directory (default: the bridge's)")
     p.add_argument("--fake-predictor", action="store_true", help="a keyword fake instead of the model (tests)")
     p.add_argument("--results-out", help="write every case result as JSON here")
     p.add_argument("--min-pressable", type=int, default=0)

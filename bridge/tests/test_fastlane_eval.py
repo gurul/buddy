@@ -150,7 +150,7 @@ def test_keyword_baseline_picks_overlap_ties_by_menu_order_and_abstains_on_none(
     assert fe.keyword_baseline("switch to week view", opts, by_id) == ids(snap)["Week"]
 
 
-def test_fake_predictor_is_laya_shaped_and_deterministic() -> None:
+def test_fake_predictor_is_system_one_shaped_and_deterministic() -> None:
     predict = fe.make_fake_predict()
     q = {"pick": {"type": "choice", "instructions": "x", "criteria": {"1": "click button: Today",
                                                                        "2": "click radio button: Week",

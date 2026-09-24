@@ -447,7 +447,7 @@ def test_done_via_title_only_when_it_was_absent_at_step_0() -> None:
 def test_unavailable_decider_means_zero_input() -> None:
     senses = Senses([calendar()])
     r, eff = run("switch to week view", senses, Decider(["Week"], available=False), done_when="Week")
-    assert r.status == "unavailable" and r.line == "unavailable: the local decider is not loaded"
+    assert r.status == "unavailable" and r.line == "unavailable: the decider is not loaded"
     assert eff.clicks == [] and senses.calls == 0
     r, eff = run("switch to week view", senses, None, done_when="Week")
     assert r.status == "unavailable" and eff.clicks == []

@@ -14,7 +14,7 @@ The original 322M multilingual Laya weights remain unchanged. The separate older
 
 Four early prompt formulations scored 27/36, 27/39, 24/39 and 29/39 on authored examples (retained as `context-attempt-*.json`). The final binary formulation scored **34/39**, including all three wink cases. Those cases were reused during prompt selection, so this is a development measurement, not held-out accuracy or human validation. Errors include an ordinary time question becoming curious, some factual replies becoming surprised, and some ambiguity between sadness/frustration. Current measured results and provenance are in `context-results.json`.
 
-Model: `~/.config/cc-buddy-bridge/models/laya-multilingual-mlx`. Dependencies: the bridge's `fast` extra (`laya-mlx` on Apple silicon). Override with `CC_BUDDY_EXPRESSION_MODEL`. Enabling persists in `~/.config/cc-buddy-bridge/expressions.json`; new installations default off. Model load/inference errors leave ordinary phase expressions available.
+Model: `~/.config/cc-buddy-bridge/models/laya-multilingual-mlx`. Dependencies: the bridge's `laya` extra (`laya-mlx` on Apple silicon; `cc-buddy-bridge update` installs it there). Override with `CC_BUDDY_EXPRESSION_MODEL`. Enabling persists in `~/.config/cc-buddy-bridge/expressions.json`; new installations default off. Model load/inference errors leave ordinary phase expressions available.
 
 ## Controls
 

@@ -128,6 +128,8 @@ def test_openai_responses_usage_is_priced_at_the_grounded_rates():
     # a pinned or routed id still finds its row; a similar-looking other model does not
     assert openai_rates("openai/gpt-5.4-nano") is openai_rates("gpt-5.4-nano") is not None
     assert openai_rates("gpt-6-astra-2026-08-01")["input"] == 10.0
+    assert openai_rates("gpt-6-luna") == {"input": 0.10, "cached": 0.01, "output": 0.50}     # the chat, 2026-09-24
+    assert openai_rates("gpt-6-sol") == {"input": 2.0, "cached": 0.20, "output": 10.0}       # thinking
     assert openai_rates("gpt-6-astra-pro") is None and openai_rates("gpt-5.6-luna-pro") is None
 
 

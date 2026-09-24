@@ -537,7 +537,7 @@ def test_a_text_turn_is_answered_with_the_brief_and_history() -> None:
     assert "new eyes" in note and telegram.BRIEF_RULES.strip() in note and "greeting" not in note
     assert first["store"] is False and first["include"] == ["reasoning.encrypted_content"]
     assert "previous_response_id" not in first
-    assert first["model"] == "gpt-6-astra" and first["reasoning"] == {"effort": "low"}
+    assert first["model"] == "gpt-6-luna" and first["reasoning"] == {"effort": "low"}
     assert first["tools"] == telegram.TOOLS + [{"type": "web_search"}]       # no OpenRouter key in CFG: the hosted search
     assert [i["role"] for i in first["input"]] == ["developer", "user"]
     # the second turn sees the first: the owner's words as input_text, buddy's as output_text; the note sits

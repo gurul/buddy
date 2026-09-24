@@ -38,6 +38,7 @@ from . import system_context, websearch
 
 log = logging.getLogger(__name__)
 
+DEFAULT_MODEL = "gpt-6-sol"          # owner, 2026-09-24: "thinking should be sol"; CC_BUDDY_THINK_MODEL overrides
 DEFAULT_EFFORT = "high"
 DEFAULT_TIMEOUT_SECS = 90.0
 MAX_OUTPUT_TOKENS = 1200
@@ -74,7 +75,7 @@ def configured(environ: Any = None, backend_model: str = "") -> ThinkConfig:
     """``CC_BUDDY_THINK=0`` turns it off; ``CC_BUDDY_THINK_MODEL`` / ``_EFFORT`` tune it."""
     env = os.environ if environ is None else environ
     enabled = (env.get("CC_BUDDY_THINK") or "1").strip().lower() not in ("0", "false", "no", "off")
-    model = (env.get("CC_BUDDY_THINK_MODEL") or "").strip() or backend_model
+    model = (env.get("CC_BUDDY_THINK_MODEL") or "").strip() or DEFAULT_MODEL or backend_model
     effort = (env.get("CC_BUDDY_THINK_EFFORT") or DEFAULT_EFFORT).strip().lower()
     if effort not in EFFORTS:
         log.warning("think: CC_BUDDY_THINK_EFFORT=%r is not a reasoning effort; using %s", effort, DEFAULT_EFFORT)

@@ -40,12 +40,12 @@ def package_repo_root() -> Optional[Path]:
 
 
 def install_target(platform: str = sys.platform, machine: Optional[str] = None) -> str:
-    """What `pip install -e` gets: ".[fast]" on Apple silicon (the fast lane's laya-mlx extra,
+    """What `pip install -e` gets: ".[laya]" on Apple silicon (laya-mlx for the eye expressions,
     pyproject.toml), plain "." everywhere else."""
     import platform as _platform
 
     machine = machine if machine is not None else _platform.machine()
-    return ".[fast]" if platform == "darwin" and machine == "arm64" else "."
+    return ".[laya]" if platform == "darwin" and machine == "arm64" else "."
 
 def _run(cmd: list[str], *, cwd: Optional[Path] = None) -> tuple[int, str, str]:
     """subprocess.run wrapper that returns (rc, stdout, stderr) instead of
