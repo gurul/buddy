@@ -39,6 +39,8 @@ int    halVbusMv();
 bool   halPowerClicked();
 // Backlight off + deep sleep, wake on touch.
 void   halDeepSleep();
+// Cut all power through the AXP2101 (not a sleep): the board is off until the power key or USB power.
+void   halPowerOff();
 
 // BM8563 RTC. Falls back to the system clock when the RTC is absent.
 void   halRtcGet(int* h, int* m, int* s, int* wday, int* mon, int* mday, int* year);
