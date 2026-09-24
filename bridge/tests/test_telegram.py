@@ -7,6 +7,7 @@ import json
 import logging
 import math
 import re
+from datetime import datetime, timedelta
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any, Optional
@@ -14,7 +15,7 @@ from typing import Any, Optional
 import httpx
 import pytest
 
-from cc_buddy_bridge import telegram
+from cc_buddy_bridge import second_brain, system_context, telegram
 from cc_buddy_bridge import telegram_format as fmt
 from cc_buddy_bridge.computer_agent import AgentEvent
 from cc_buddy_bridge.daemon import Daemon
@@ -37,6 +38,7 @@ from cc_buddy_bridge.telegram import (
     accept,
     configured,
 )
+from cc_buddy_bridge.transcripts import TranscriptConfig, Transcripts
 
 OWNER = 4242
 STRANGER = 666
@@ -259,11 +261,70 @@ class Rig:
         async def no_sleep(_secs: float) -> None:
             await asyncio.sleep(0)
 
-        lent: dict[str, Any] = dict(agent_factory=factory, memory=lambda: "", on_state=self.states.append,
+        lent: dict[str, Any] = dict(agent_factory=factory, brief=lambda: "", on_state=self.states.append,
                                     on_closed=self.closed.append, clock=lambda: self.now["t"], wall=lambda: NOW,
                                     sleep=no_sleep, screen=lambda: None)
         lent.update(kw)
         self.inlet = TelegramInlet(config, api, create, **lent)
+
+
+MEMORY_TOOL_SCHEMAS: list[dict[str, Any]] = [
+    {"type": "function", "name": "memory_search", "strict": True, "description": "Search memory.",
+     "parameters": {"type": "object", "additionalProperties": False, "required": ["query", "days_back"],
+                    "properties": {"query": {"type": "string"}, "days_back": {"type": ["integer", "null"]}}}},
+    {"type": "function", "name": "memory_read", "strict": True, "description": "Read a record or a day.",
+     "parameters": {"type": "object", "additionalProperties": False, "required": ["ref"],
+                    "properties": {"ref": {"type": "string"}}}},
+    {"type": "function", "name": "forget_preview", "strict": True, "description": "Count what would go.",
+     "parameters": {"type": "object", "additionalProperties": False, "required": ["query"],
+                    "properties": {"query": {"type": "string"}}}},
+    {"type": "function", "name": "forget_apply", "strict": True, "description": "Forget it.",
+     "parameters": {"type": "object", "additionalProperties": False, "required": ["token"],
+                    "properties": {"token": {"type": "string"}}}},
+]
+
+
+class FakeMemory:
+    """memory.Memory as the build contract names it, around a REAL transcripts.Transcripts in a tmp folder,
+    so what the inlet writes is read back from disk. The profile, tools, handle_tool and star are stubs that
+    record what they were asked; memory.py itself is tested in test_memory.py."""
+
+    def __init__(self, root: Path, profile: str = "") -> None:
+        self.transcripts = Transcripts(TranscriptConfig(enabled=True, root=root / "transcripts"))
+        assert self.transcripts.enabled, "the tmp folder must pass the transcript guards"
+        self.profile_text = profile
+        self.stars: list[str] = []
+        self.calls: list[tuple[str, dict[str, Any], str]] = []
+        self.today_calls: list[tuple[int, Optional[str], int]] = []
+
+    def profile(self) -> str:
+        return self.profile_text
+
+    def profile_for_voice(self) -> str:
+        return self.profile_text[:3000]
+
+    def today(self, max_chars: int, *, exclude_conv: Optional[str] = None, exclude_tail: int = 0,
+              style: str = "text") -> str:
+        self.today_calls.append((max_chars, exclude_conv, exclude_tail))
+        return self.transcripts.today_block(max_chars, exclude_conv=exclude_conv, exclude_tail=exclude_tail,
+                                            style=style)
+
+    def star(self, text: str) -> Optional[str]:
+        self.stars.append(text)
+        return f"- {text} (2026-09-23)"
+
+    def tools(self, *, voice: bool = False) -> list[dict[str, Any]]:
+        return [dict(t) for t in MEMORY_TOOL_SCHEMAS]
+
+    def handle_tool(self, name: str, args: dict[str, Any], *, since: Any = None, channel: str = "") -> dict[str, Any]:
+        self.calls.append((name, args, channel))
+        if name == "memory_search":
+            return self.transcripts.search(str(args.get("query") or ""))
+        return {"ok": True}
+
+    def said(self) -> list[dict[str, Any]]:
+        """Every transcript line written today, in order."""
+        return self.transcripts.lines(self.transcripts.day_of(self.transcripts.now()))
 
 
 async def settle(rounds: int = 200) -> None:
@@ -463,24 +524,31 @@ def test_a_bot_api_error_never_carries_the_url() -> None:
 
 # ---- G6: a text turn --------------------------------------------------------------------------
 
-def test_a_text_turn_is_answered_with_memory_and_history() -> None:
+def test_a_text_turn_is_answered_with_the_brief_and_history() -> None:
     api = FakeApi([update("what's your favourite colour?", update_id=1)], [update("why?", update_id=2)])
     rig = Rig(api, FakeCreate(say("Orange, like my LEDs."), say("It is warm.")),
-              memory=lambda: "Yesterday you talked about the robot's new eyes.")
+              brief=lambda: "Yesterday you talked about the robot's new eyes.")
     run_rig(rig)
     assert rig.api.sent == [(OWNER, "Orange, like my LEDs."), (OWNER, "It is warm.")]
     first, second = rig.create.requests
-    assert "new eyes" in first["instructions"] and first["instructions"].startswith(telegram.INSTRUCTIONS)
+    # the brief is in the turn's developer note, worded for a chat, not in the (cached) instructions
+    assert first["instructions"] == telegram.INSTRUCTIONS and "new eyes" not in first["instructions"]
+    note = first["input"][0]["content"][0]["text"]
+    assert "new eyes" in note and telegram.BRIEF_RULES.strip() in note and "greeting" not in note
     assert first["store"] is False and first["include"] == ["reasoning.encrypted_content"]
     assert "previous_response_id" not in first
     assert first["model"] == "gpt-6-astra" and first["reasoning"] == {"effort": "low"}
     assert first["tools"] == telegram.TOOLS + [{"type": "web_search"}]       # no OpenRouter key in CFG: the hosted search
-    assert [i["role"] for i in first["input"]] == ["user"]
-    # the second turn sees the first: the owner's words as input_text, buddy's as output_text
-    assert [(i["role"], i["content"][0]["type"], i["content"][0]["text"]) for i in second["input"]] == [
+    assert [i["role"] for i in first["input"]] == ["developer", "user"]
+    # the second turn sees the first: the owner's words as input_text, buddy's as output_text; the note sits
+    # right before the newest user message, never in the history
+    assert [(i["role"], i["content"][0]["type"], i["content"][0]["text"]) for i in second["input"]
+            if i["role"] != "developer"] == [
         ("user", "input_text", "what's your favourite colour?"),
         ("assistant", "output_text", "Orange, like my LEDs."),
         ("user", "input_text", "why?")]
+    assert [i["role"] for i in second["input"]] == ["user", "assistant", "developer", "user"]
+    assert all("new eyes" not in text for _, text in rig.inlet.turns)
 
 
 def test_a_long_answer_is_sent_as_html_pieces_under_the_limit_and_nothing_is_lost() -> None:
@@ -991,8 +1059,9 @@ class FakeNotes:
         return {"active": False}
 
 
-def test_a_text_is_a_word_said_to_the_robot() -> None:
-    head, notes, sounds, stars = FakeHead(), FakeNotes(), [], []
+def test_a_text_is_a_word_said_to_the_robot(tmp_path: Path) -> None:
+    head, notes, sounds = FakeHead(), FakeNotes(), []
+    memory = FakeMemory(tmp_path)
 
     async def look() -> dict:
         return {"ok": True, "view": "a desk with a mug"}
@@ -1006,10 +1075,10 @@ def test_a_text_is_a_word_said_to_the_robot() -> None:
                               call("remember", {"claim": "I like ramen"}, "c4"),     # 🏆 is the answer
                               call("look", {}, "c5"), say("A desk with a mug.")),
               head=head, scene=SimpleNamespace(look=look), notes=lambda: notes, on_sound=sounds.append,
-              on_star=lambda c: (stars.append(c), "kept")[1])
+              memory=memory)
     run_rig(rig)
     assert head.moves == [(-60.0, None, False, 15.0)] and notes.calls == ["start"]
-    assert sounds == [False] and stars == ["I like ramen"]
+    assert sounds == [False] and memory.stars == ["I like ramen"]         # "remember that" stars via memory.star
     assert [t for _, t in rig.api.sent] == ["Looking left.", "Taking notes.", "Muted.", "A desk with a mug."]
     assert rig.api.reactions == [(OWNER, 4, telegram.STAR_REACTION)]      # starred: a receipt, not a line
     assert json.loads(rig.create.requests[8]["input"][-1]["output"])["view"] == "a desk with a mug"
@@ -1550,18 +1619,28 @@ def test_a_refused_vault_receipt_says_where_it_went(tmp_path: Path) -> None:
     assert len(rig.create.requests) == 1
 
 
-def test_a_star_is_a_trophy_and_a_refused_one_is_a_line() -> None:
-    stars: list[str] = []
+def test_a_star_is_a_trophy_and_a_refused_one_is_a_line(tmp_path: Path) -> None:
+    memory = FakeMemory(tmp_path)
     api = FakeApi()
-    rig = Rig(api, FakeCreate(call("remember", {"claim": "I like ramen"})),
-              on_star=lambda c: (stars.append(c), "kept")[1])
+    rig = Rig(api, FakeCreate(call("remember", {"claim": "I like ramen"})), memory=memory)
     asyncio.run(rig.inlet._turn(telegram.Inbound(OWNER, OWNER, "remember that I like ramen", message_id=4)))
-    assert stars == ["I like ramen"] and api.reactions == [(OWNER, 4, telegram.STAR_REACTION)] and api.sent == []
+    assert memory.stars == ["I like ramen"] and api.reactions == [(OWNER, 4, telegram.STAR_REACTION)] and api.sent == []
+    # the star's result is in the transcript as a tool line; the history's "(Starred for good.)" is not
+    tools = [ln for ln in memory.said() if ln["kind"] == "tool"]
+    assert [ln["tool"] for ln in tools] == ["remember"] and "I like ramen" in tools[0]["text"]
+    assert rig.inlet.turns[-1] == ("buddy", f"({telegram.STARRED_LINE})")
+    assert not any("Starred for good" in ln["text"] for ln in memory.said())
     # no message id to put it on: the line it stands for
     api = FakeApi()
-    rig = Rig(api, FakeCreate(call("remember", {"claim": "I like ramen"})), on_star=lambda c: "kept")
+    rig = Rig(api, FakeCreate(call("remember", {"claim": "I like ramen"})), memory=FakeMemory(tmp_path / "b"))
     asyncio.run(rig.inlet._turn(telegram.Inbound(OWNER, OWNER, "remember that I like ramen")))
     assert api.sent == [(OWNER, telegram.STARRED_LINE)]
+    # no memory lent: nothing is starred, and the tool says why (the model answers with it)
+    api = FakeApi()
+    rig = Rig(api, FakeCreate(call("remember", {"claim": "I like ramen"}), say("I can't keep that for good here.")))
+    asyncio.run(rig.inlet._turn(telegram.Inbound(OWNER, OWNER, "remember that I like ramen", message_id=5)))
+    out = json.loads(rig.create.requests[1]["input"][-1]["output"])
+    assert out == {"ok": False, "reason": "permanent memory is not set up on this computer"} and api.reactions == []
 
 
 def test_only_a_clean_receipt_round_skips_the_answer(tmp_path: Path) -> None:
@@ -4103,7 +4182,7 @@ def test_a_round_that_stars_a_fact_and_keeps_a_note_says_where_the_note_went(tmp
         {"type": "function_call", "name": "remember", "call_id": "b",
          "arguments": json.dumps({"claim": "I like ramen"})}]}
     api = FakeApi()
-    rig = Rig(api, FakeCreate(both), vault=vault, on_star=lambda c: "kept")
+    rig = Rig(api, FakeCreate(both), vault=vault, memory=FakeMemory(tmp_path))
     asyncio.run(rig.inlet._turn(telegram.Inbound(OWNER, OWNER, "todo: buy milk, and remember I like ramen",
                                                  message_id=4)))
     assert api.reactions == [(OWNER, 4, telegram.STAR_REACTION)]
@@ -4165,3 +4244,324 @@ def test_a_tapped_question_option_is_kept_in_the_chats_record() -> None:
         await rig.inlet._shutdown()
 
     asyncio.run(go())
+
+
+# ---- G12: memory — every word to the transcript, today in the prompt, one set of memory tools ------------
+# telegram.py codes against memory.Memory's contract; FakeMemory (above) wraps a real Transcripts on disk.
+
+def _in(text: str, message_id: int = 1) -> telegram.Inbound:
+    return telegram.Inbound(OWNER, OWNER, text, message_id=message_id)
+
+
+def _rows(memory: FakeMemory, *, closes: bool = False) -> list[tuple[str, str, str]]:
+    return [(ln["who"], ln["kind"], ln["text"]) for ln in memory.said() if closes or ln["kind"] != "close"]
+
+
+def _developer(body: dict[str, Any]) -> list[str]:
+    return [i["content"][0]["text"] for i in body["input"] if i.get("role") == "developer"]
+
+
+CLOCK = "\n\nSystem context:\nLocal clock when this context was generated: CLOCK-SNAPSHOT."
+
+
+def test_with_no_memory_the_instructions_are_the_old_ones_but_for_the_clock(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Pinned: with no Memory lent the instructions are byte for byte what they were before transcripts,
+    with the one planned change: the clock (and the brief, "" with memory off) moved out of them, into the
+    developer note right before the owner's message. No memory tool is offered."""
+    from cc_buddy_bridge.voice_agent import memory_block
+
+    monkeypatch.setattr(system_context, "context", lambda: CLOCK)
+    app = {"type": "function", "name": "GMAIL_FETCH_EMAILS", "parameters": {}}
+    for vault in (False, True):
+        for apps in ((), (app,)):
+            legacy = telegram.INSTRUCTIONS + system_context.context() + memory_block("")
+            if vault:
+                legacy += "\n\n" + second_brain.INSTRUCTIONS_BLOCK
+            if apps:
+                legacy += telegram.APPS_BLOCK
+            body = telegram.request(CFG, [telegram.message_item("user", "hi")], app_tools=apps, vault=vault)
+            assert body["instructions"] == legacy.replace(CLOCK, "")
+            assert "CLOCK-SNAPSHOT" in legacy and "CLOCK-SNAPSHOT" not in body["instructions"]
+            assert body["input"] == [telegram.message_item("developer", CLOCK.strip()),
+                                     telegram.message_item("user", "hi")]
+            names = [t.get("name") or t.get("type") for t in body["tools"]]
+            assert not any(n.startswith(("memory_", "forget_")) for n in names)
+
+
+def test_the_clock_is_in_the_developer_note_right_before_the_owners_message(monkeypatch: pytest.MonkeyPatch,
+                                                                             tmp_path: Path) -> None:
+    monkeypatch.setattr(system_context, "context", lambda: CLOCK)
+    memory = FakeMemory(tmp_path, profile="# The owner\n- Likes tea")
+    api = FakeApi()
+    rig = Rig(api, FakeCreate(say("Hi."), say("Tea.")), memory=memory)
+
+    async def go() -> None:
+        await rig.inlet._turn(_in("hello", 1))
+        await rig.inlet._turn(_in("what do I drink?", 2))
+
+    asyncio.run(go())
+    first, second = rig.create.requests
+    for body in (first, second):
+        assert "CLOCK-SNAPSHOT" not in body["instructions"]
+        roles = [i["role"] for i in body["input"]]
+        assert roles[-2:] == ["developer", "user"] and roles.count("developer") == 1
+        assert "CLOCK-SNAPSHOT" in _developer(body)[0]
+    assert all("CLOCK" not in text for _, text in rig.inlet.turns)         # never kept in the history
+
+
+def test_two_requests_five_seconds_apart_have_identical_instructions(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The prompt-cache regression gate. The clock used to sit right after INSTRUCTIONS, inside the
+    instructions, so two requests built 5 s apart differed from that byte on and nothing after it (the
+    profile, the vault, the apps) could be served from the cache: this test fails on that ordering. The
+    instructions now hold only what is stable within a day; the clock is in the developer note."""
+    clock = {"t": datetime(2026, 9, 23, 10, 0, 0)}
+    monkeypatch.setattr(system_context, "context", lambda: f"\n\nSystem context:\nLocal clock: {clock['t']:%H:%M:%S}.")
+    profile, today = "# The owner\n- Likes tea", "09:00 (spoken) Owner: good morning"
+    items = [telegram.message_item("user", "hi")]
+    kw: dict[str, Any] = dict(profile=profile, today=today, memory_tools=MEMORY_TOOL_SCHEMAS, vault=True)
+    a = telegram.request(CFG, items, **kw)
+    clock["t"] += timedelta(seconds=5)
+    b = telegram.request(CFG, items, **kw)
+    assert a["instructions"] == b["instructions"] and a["tools"] == b["tools"]
+    assert _developer(a) != _developer(b)                                  # the control: the clock did move
+    assert a["prompt_cache_key"] == b["prompt_cache_key"] == telegram.PROMPT_CACHE_KEY == "buddy-telegram"
+    # most stable first: instructions, profile, vault, then today last (it only grows)
+    ins = a["instructions"]
+    assert ins.startswith(telegram.INSTRUCTIONS) and ins.endswith(telegram.TODAY_HEADER + today)
+    assert ins.index(profile) < ins.index(second_brain.INSTRUCTIONS_BLOCK) < ins.index(today)
+
+
+def test_the_developer_note_is_the_same_in_every_round_of_one_turn(monkeypatch: pytest.MonkeyPatch,
+                                                                   tmp_path: Path) -> None:
+    ticks = iter(range(1000))
+    monkeypatch.setattr(system_context, "context", lambda: f"\n\nSystem context:\ntick {next(ticks)}")
+
+    async def look() -> dict:
+        return {"ok": True, "view": "a desk"}
+
+    rig = Rig(FakeApi(), FakeCreate(call("look", {}), say("A desk.")), memory=FakeMemory(tmp_path),
+              scene=SimpleNamespace(look=look))
+    asyncio.run(rig.inlet._turn(_in("what do you see?")))
+    a, b = rig.create.requests
+    assert _developer(a) == _developer(b) and len(_developer(a)) == 1
+    assert a["instructions"] == b["instructions"]
+
+
+def test_a_turn_is_written_to_the_transcript_as_it_happens(tmp_path: Path) -> None:
+    memory = FakeMemory(tmp_path)
+    rig = Rig(FakeApi([update("hello there")]), FakeCreate(say("Hi!")), memory=memory)
+    run_rig(rig)                                          # the loop ends: the chat is closed at shutdown
+    lines = memory.said()
+    assert _rows(memory, closes=True) == [("owner", "say", "hello there"), ("buddy", "say", "Hi!"),
+                                          ("system", "close", "")]
+    assert {ln["conv"] for ln in lines} == {lines[0]["conv"]} and {ln["ch"] for ln in lines} == {"telegram"}
+    assert rig.closed == [[("user", "hello there"), ("buddy", "Hi!")]]    # on_closed, when lent, still runs
+    # the control: with no memory lent nothing is minted or written
+    rig = Rig(FakeApi([update("hello there")]), FakeCreate(say("Hi!")))
+    run_rig(rig)
+    assert rig.inlet._conv is None and rig.inlet._turn_kinds == []
+
+
+def test_code_words_are_commands_and_codex_traffic_is_relay_outside_the_history(tmp_path: Path) -> None:
+    memory = FakeMemory(tmp_path)
+    api = FakeApi([update("claude off", update_id=1)], [update("stealth", update_id=2)],
+                  [update("codex: fix the tests", update_id=3)])
+    rig = Rig(api, FakeCreate(), memory=memory)
+    run_rig(rig)
+    assert _rows(memory) == [("owner", "command", "claude off"), ("owner", "command", "stealth"),
+                             ("owner", "relay", "codex: fix the tests")]
+    assert rig.closed == [[("user", "claude off"), ("user", "stealth")]]  # Codex never reaches the history
+
+
+def test_an_image_turn_is_an_image_line_with_its_caption(tmp_path: Path) -> None:
+    memory = FakeMemory(tmp_path)
+    rig = Rig(FakeApi(), FakeCreate(say("A cat.")), memory=memory)
+    image = SimpleNamespace(data_url=lambda: "data:image/png;base64,AAAA")
+    asyncio.run(rig.inlet._turn(_in("what is this?"), image=image))
+    assert _rows(memory) == [("owner", "image", "what is this?"), ("buddy", "say", "A cat.")]
+    assert rig.inlet.turns[0] == ("user", "what is this? [image attached]")
+
+
+def test_what_claude_says_in_the_relay_is_in_the_transcript(tmp_path: Path) -> None:
+    memory = FakeMemory(tmp_path)
+    rig = Rig(FakeApi(), FakeCreate(), memory=memory)
+
+    async def go() -> None:
+        rig.inlet.claude, rig.inlet._chat_id = True, OWNER
+        await rig.inlet.relay_text("I fixed the failing test.", cwd="/tmp/repo")
+        await settle()
+
+    asyncio.run(go())
+    assert _rows(memory) == [("claude", "relay", "I fixed the failing test.")]
+    assert rig.inlet.turns == []
+
+
+def test_an_idle_close_writes_the_close_marker_first_and_the_next_text_opens_a_new_conversation(
+        tmp_path: Path) -> None:
+    memory = FakeMemory(tmp_path)
+    kinds_at_close: list[list[str]] = []
+    rig = Rig(FakeApi(), FakeCreate(say("One."), say("Two.")), memory=memory,
+              on_closed=lambda turns: kinds_at_close.append([ln["kind"] for ln in memory.said()]))
+
+    async def go() -> tuple[str, str]:
+        await rig.inlet._turn(_in("the first text", 1))
+        first = rig.inlet._conv
+        rig.now["t"] = 599.0
+        rig.inlet._close_quiet_chat()
+        assert rig.inlet._conv == first                   # not quiet long enough
+        rig.now["t"] = 601.0
+        rig.inlet._close_quiet_chat()
+        assert rig.inlet._conv is None and rig.inlet.turns == []
+        await rig.inlet._turn(_in("the second text", 2))
+        return first, rig.inlet._conv
+
+    first, second = asyncio.run(go())
+    assert kinds_at_close == [["say", "say", "close"]]    # the marker is on disk before on_closed runs
+    assert first and second and first != second
+    assert [ln["conv"] for ln in memory.said()] == [first] * 3 + [second] * 2
+    # the RAM history is gone, but the words are not: the closed chat is in the next turn's today block
+    body = rig.create.requests[1]
+    assert [i["role"] for i in body["input"]] == ["developer", "user"]
+    assert "(texted) Owner: the first text" in body["instructions"] and "buddy: One." in body["instructions"]
+
+
+def test_a_voice_line_said_between_two_texts_is_in_the_second_turns_today_block(tmp_path: Path) -> None:
+    """The cross-channel positive control: the voice writes to the same transcript, and the next text
+    sees it, with no close, distil or poll in between."""
+    memory = FakeMemory(tmp_path)
+    rig = Rig(FakeApi(), FakeCreate(say("Noted."), say("Thursday.")), memory=memory)
+
+    async def go() -> None:
+        await rig.inlet._turn(_in("hi", 1))
+        voice = memory.transcripts.new_conv("voice")
+        assert memory.transcripts.append("voice", voice, "owner", "say", "I moved the dentist to Thursday")
+        await rig.inlet._turn(_in("when is my dentist?", 2))
+
+    asyncio.run(go())
+    first, second = rig.create.requests
+    assert "dentist" not in first["instructions"]
+    assert "(spoken) Owner: I moved the dentist to Thursday" in second["instructions"]
+    assert second["instructions"].index(telegram.TODAY_HEADER) < second["instructions"].index("dentist")
+
+
+@pytest.mark.parametrize("commands", [0, 2])
+def test_no_line_of_the_history_is_repeated_in_the_today_block_and_none_is_lost(tmp_path: Path,
+                                                                                 commands: int) -> None:
+    """The today block leaves out exactly the lines the history shows: the history's say lines plus the
+    owner's new message. A code word in the history is not a say line, so it does not count. A fixed
+    exclude_tail=HISTORY_TURNS fails both cases: with no command it repeats one line, with two it loses one."""
+    memory = FakeMemory(tmp_path)
+    earlier = memory.transcripts.new_conv("telegram")
+    memory.transcripts.append("telegram", earlier, "owner", "say", "an earlier chat today")
+    n = HISTORY_TURNS // 2 + 3                            # enough turns to push the first ones out of the history
+    rig = Rig(FakeApi(), FakeCreate(*[say(f"reply {i}") for i in range(n)]), memory=memory)
+
+    async def go() -> None:
+        for i in range(n):
+            if i == n - 4:
+                for c in range(commands):                 # command lines inside the history window
+                    rig.inlet._handle(_in("stealth" if c % 2 == 0 else "stealth off", 90 + c))
+                    await settle()
+            await rig.inlet._turn(_in(f"text {i}", i + 1))
+
+    asyncio.run(go())
+    last = rig.create.requests[-1]
+    history = [i["content"][0]["text"] for i in last["input"] if i["role"] in ("user", "assistant")]
+    block = last["instructions"].split(telegram.TODAY_HEADER, 1)[1]
+    said = [ln["text"] for ln in memory.said() if ln["kind"] == "say"][:-1]   # the last reply came after it
+    for text in said:
+        shown = sum(1 for h in history if h == text) + sum(1 for row in block.split("\n") if row.endswith(": " + text))
+        assert shown == 1, (text, shown)                  # every say line exactly once: history or block
+    assert "an earlier chat today" in block and "Owner: text 0" in block    # the positive controls
+    assert "text 0" not in history and ("stealth" in history) == bool(commands)   # text 0 fell out of it
+
+
+def test_the_memory_tools_are_offered_whenever_memory_is_lent_even_with_no_profile(tmp_path: Path) -> None:
+    names = [t["name"] for t in MEMORY_TOOL_SCHEMAS]
+    own = [t["name"] for t in telegram.TOOLS]
+    rig = Rig(FakeApi(), FakeCreate(say("ok")), memory=FakeMemory(tmp_path, profile=""))
+    asyncio.run(rig.inlet._turn(_in("hi")))
+    body = rig.create.requests[0]
+    assert [t.get("name") for t in body["tools"]][:len(own) + len(names)] == own + names   # a stable order
+    assert telegram.MEMORY_HINT in body["instructions"] and telegram.PROFILE_HEADER not in body["instructions"]
+    # with a profile: the page under its header, and the same tools
+    rig = Rig(FakeApi(), FakeCreate(say("ok")), memory=FakeMemory(tmp_path / "b", profile="# The owner\n- Tea"))
+    asyncio.run(rig.inlet._turn(_in("hi")))
+    body = rig.create.requests[0]
+    assert telegram.PROFILE_HEADER + "\n# The owner\n- Tea" in body["instructions"]
+    assert all(name in [t.get("name") for t in body["tools"]] for name in names)
+    # the control: no memory, no memory tools
+    rig = Rig(FakeApi(), FakeCreate(say("ok")))
+    asyncio.run(rig.inlet._turn(_in("hi")))
+    assert not any(t.get("name") in names for t in rig.create.requests[0]["tools"])
+
+
+def test_a_memory_tool_runs_through_the_memory_with_dated_hits_and_logs_counts_only(
+        tmp_path: Path, caplog: pytest.LogCaptureFixture) -> None:
+    memory = FakeMemory(tmp_path)
+    earlier = memory.transcripts.new_conv("voice")
+    memory.transcripts.append("voice", earlier, "owner", "say", "the plumber comes on Friday")
+    rig = Rig(FakeApi(), FakeCreate(call("memory_search", {"query": "plumber friday", "days_back": None}),
+                                    say("On Friday.")), memory=memory)
+    with caplog.at_level(logging.INFO, logger="cc_buddy_bridge.telegram"):
+        asyncio.run(rig.inlet._turn(_in("when does the plumber come?")))
+    assert memory.calls == [("memory_search", {"query": "plumber friday", "days_back": None}, "telegram")]
+    out = json.loads(rig.create.requests[1]["input"][-1]["output"])
+    hit = next(h for h in out["hits"] if h["text"] == "the plumber comes on Friday")
+    assert hit["day"] == memory.transcripts.day_of(memory.transcripts.now()) and hit["ch"] == "voice"
+    assert re.search(r"memory_search: 1 hit in \d+ ms", caplog.text)
+    assert "plumber" not in caplog.text and "Friday" not in caplog.text
+    assert not any(ln["kind"] == "tool" for ln in memory.said())         # memory results are not re-recorded
+
+
+def test_the_turn_log_line_has_token_counts_and_never_the_words(tmp_path: Path,
+                                                                caplog: pytest.LogCaptureFixture) -> None:
+    async def look() -> dict:
+        return {"ok": True, "view": "a red mug " * 400}
+
+    first, second = call("look", {}), say("A red mug.")
+    first["usage"] = {"input_tokens": 1000, "output_tokens": 20, "input_tokens_details": {"cached_tokens": 900}}
+    second["usage"] = {"input_tokens": 1100, "output_tokens": 10, "input_tokens_details": {"cached_tokens": 1024}}
+    memory = FakeMemory(tmp_path)
+    rig = Rig(FakeApi(), FakeCreate(first, second), memory=memory, scene=SimpleNamespace(look=look))
+    with caplog.at_level(logging.DEBUG):
+        asyncio.run(rig.inlet._turn(_in("secret words about my mug")))
+    line = next(r.getMessage() for r in caplog.records if "turn answered" in r.getMessage())
+    instr = len(rig.create.requests[0]["instructions"])
+    assert line.endswith(f"(2 model calls; in=2100 cached=1924 out=30 instr={instr} chars)")
+    for record in caplog.records:
+        assert "secret words" not in record.getMessage() and "red mug" not in record.getMessage()
+    # what buddy saw is in the transcript, as a tool line, capped
+    tool = [ln for ln in memory.said() if ln["kind"] == "tool"]
+    assert [ln["tool"] for ln in tool] == ["look"] and "a red mug" in tool[0]["text"]
+    assert len(tool[0]["text"]) <= telegram.TOOL_LINE_CHARS
+
+
+def test_think_hard_is_told_the_profile_and_today(tmp_path: Path) -> None:
+    memory = FakeMemory(tmp_path, profile="# The owner\n- Runs on Tuesdays")
+    seen: list[tuple[str, str]] = []
+
+    async def thinker(question: str, context: str = "") -> dict[str, Any]:
+        seen.append((question, context))
+        return {"ok": True, "answer": "Rest tomorrow."}
+
+    rig = Rig(FakeApi(), FakeCreate(call("think_hard", {"question": "run tomorrow?"}), say("Rest.")),
+              memory=memory, thinker=thinker)
+    asyncio.run(rig.inlet._turn(_in("I ran today. Should I run tomorrow?")))
+    (question, context), = seen
+    assert question == "run tomorrow?"
+    assert context.startswith("# The owner\n- Runs on Tuesdays\n\n")
+    assert "(texted) Owner: I ran today. Should I run tomorrow?" in context
+    assert len(context) <= telegram.THINK_CONTEXT_CHARS
+    assert [ln["tool"] for ln in memory.said() if ln["kind"] == "tool"] == ["think_hard"]
+    # the control: no memory, and a thinker that takes only the question is asked exactly as before
+    asked: list[str] = []
+
+    async def old_thinker(question: str) -> dict[str, Any]:
+        asked.append(question)
+        return {"ok": True, "answer": "Rest."}
+
+    rig = Rig(FakeApi(), FakeCreate(call("think_hard", {"question": "run tomorrow?"}), say("Rest.")),
+              thinker=old_thinker)
+    asyncio.run(rig.inlet._turn(_in("Should I run tomorrow?")))
+    assert asked == ["run tomorrow?"]
