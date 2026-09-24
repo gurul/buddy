@@ -4679,3 +4679,19 @@ def test_empty_citation_links_never_reach_the_phone() -> None:
     assert rig.closed == [[("user", "when does the ramen place open?"), ("buddy", sent)]]
     for text, clean in (("Done ([](https://a.example), []()).", "Done."), ("[]()", ""), ("plain", "plain")):
         assert telegram.strip_empty_links(text) == clean, text
+
+
+def test_open_it_after_a_shared_link_carries_the_link_into_the_task() -> None:
+    # 2026-09-23 23:35: "Use Google search to open it up" came right after the owner shared a Maps link; the model
+    # wrote only the second message's words as the goal. The link from the owner's earlier message now rides along.
+    rig = Rig(FakeApi([update("Use Google search to open it up")]),
+              FakeCreate(call("start_task", {"goal": "Use Google search to open it up"})))
+    rig.inlet.turns = [("user", "What do u think of this https://maps.app.goo.gl/EXAMPLE"), ("buddy", "Nice route.")]
+    rig.inlet._turn_kinds = ["say", "say"]
+
+    async def during() -> None:
+        assert "https://maps.app.goo.gl/EXAMPLE" in rig.agents[0].goal
+        assert rig.agents[0].goal.startswith("Use Google search to open it up")
+        rig.agents[0].release.set()
+
+    run_rig(rig, during)

@@ -71,6 +71,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Any, Awaitable, Callable, Collection, Optional, Sequence
 
 from . import (
+    app_reflex,
     claude_launch,
     codex_chat,
     composio_tools,
@@ -3218,6 +3219,9 @@ class TelegramInlet:
     def _start_task(self, goal: str, chat_id: int) -> dict[str, Any]:
         if not goal:
             return {"ok": False, "reason": "empty goal"}
+        # "Use Google search to open it up" after the owner shared a link: the model writes only this message's
+        # words, so the link the owner means is carried in from their recent messages (app_reflex, 2026-09-24).
+        goal = app_reflex.with_referenced_links(goal, [text for who, text in self.turns if who == "user"])
         if not self._agent_enabled or self._agent_factory is None:
             return {"ok": False, "reason": "computer control is disabled (CC_BUDDY_COMPUTER_CONTROL=0)"}
         if self.task_running:

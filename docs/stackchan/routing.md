@@ -281,10 +281,9 @@ own profile.
   (2026-09-24: a Google Maps link, then "Use Google search to open it up").
   `app_reflex.with_referenced_links` adds the links from the owner's last 4
   messages (newest first, at most 3) when the goal refers back ("open it",
-  "that link") and has no link of its own. **Not wired yet:** the Telegram
-  door has to pass its recent owner messages to it when it starts a task
-  (`telegram.py` `_start_task`); until then only the log line is live. Every
-  task logs the goal's shape, never its words:
+  "that link") and has no link of its own. The Telegram door passes its
+  recent owner messages to it when it starts a task (`telegram.py`
+  `_start_task`). Every task logs the goal's shape, never its words:
   `app-reflex: chrome-lane gets a goal of 7 words, 1 link(s) (maps.app.goo.gl), refers back`.
 - **Nothing done in 15 s → Codex** (`chrome_lane.NOTHING_DONE_BUDGET_SECS`).
   If no plan is executing and no step has been reported 15 s after the task
