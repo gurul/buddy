@@ -7,9 +7,11 @@ import json
 
 import pytest
 
-from cc_buddy_bridge import websearch
+from cc_buddy_bridge import system_context, think, websearch
 from cc_buddy_bridge.think import (
     ANSWER_MAX_CHARS,
+    CONTEXT_HEADER,
+    CONTEXT_MAX_CHARS,
     INSTRUCTIONS,
     OpenAIThinker,
     ThinkConfig,
@@ -100,3 +102,58 @@ def test_parse_answer_flattens_and_clips() -> None:
     assert len(long) == ANSWER_MAX_CHARS and long.endswith("…")
     with pytest.raises(ValueError):
         parse_answer("   ")
+
+
+CLOCK = "\n\nSystem context:\nLocal clock when this context was generated: fixed."
+
+
+def test_no_context_keeps_the_body_byte_identical(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(system_context, "context", lambda *a, **k: CLOCK)
+    cfg = ThinkConfig(model="m", search=websearch.SearchConfig(engine="openai"))
+    items = question_items("q")
+    plain = request(cfg, items)
+    assert plain["instructions"] == INSTRUCTIONS + CLOCK            # the context-blind body, as before
+    for empty in ("", "   \n  "):
+        assert json.dumps(request(cfg, items, empty)) == json.dumps(plain)
+    assert plain["store"] is False
+
+
+def test_context_goes_after_the_instructions_before_the_clock_and_is_capped(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(system_context, "context", lambda *a, **k: CLOCK)
+    cfg = ThinkConfig(model="m", search=websearch.SearchConfig(engine="openai"))
+    body = request(cfg, question_items("plan my week"), "Owner works late on weekdays.")
+    instr = body["instructions"]
+    assert instr == INSTRUCTIONS + CONTEXT_HEADER + "Owner works late on weekdays." + CLOCK
+    assert instr.index(INSTRUCTIONS) < instr.index("works late") < instr.index("System context:")
+    assert body["store"] is False and body["input"] == question_items("plan my week")
+    # a huge context is capped at CONTEXT_MAX_CHARS; the head is kept
+    huge = request(cfg, question_items("q"), "A" + "x" * 20000 + "TAIL")["instructions"]
+    ctx = huge[len(INSTRUCTIONS) + len(CONTEXT_HEADER): -len(CLOCK)]
+    assert len(ctx) == CONTEXT_MAX_CHARS and ctx.startswith("Ax") and ctx.endswith("…") and "TAIL" not in huge
+
+
+def test_the_thinker_sends_the_context_every_round(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(think.system_context, "context", lambda *a, **k: CLOCK)
+    seen: list[str] = []
+    replies = iter([
+        {"status": "completed", "output": [
+            {"type": "function_call", "name": "web_search", "call_id": "c1", "arguments": "{\"query\": \"x\"}"}]},
+        {"status": "completed", "output": [
+            {"type": "message", "role": "assistant", "content": [{"type": "output_text", "text": "Tuesday."}]}]},
+    ])
+
+    async def create(req: dict) -> dict:
+        seen.append(req["instructions"])
+        assert req["store"] is False
+        return next(replies)
+
+    cfg = ThinkConfig(model="m", search=websearch.SearchConfig(engine="openrouter-exa"))
+    thinker = OpenAIThinker(cfg, create=create, search=lambda q: {"ok": True})
+    out = asyncio.run(thinker("which day suits me", context="Owner is free on Tuesdays."))
+    assert out == {"ok": True, "answer": "Tuesday."}
+    assert len(seen) == 2 and all("free on Tuesdays" in s for s in seen)
+    # and a caller that passes no context still works, context-blind
+    seen.clear()
+    replies = iter([{"status": "completed", "output": [
+        {"type": "message", "role": "assistant", "content": [{"type": "output_text", "text": "Yes."}]}]}])
+    assert asyncio.run(thinker("q"))["answer"] == "Yes." and seen == [INSTRUCTIONS + CLOCK]
