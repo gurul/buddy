@@ -75,6 +75,7 @@ MAX_CANDIDATES = 120
 SNAPSHOT_TIMEOUT_MS = 3000
 NAV_TIMEOUT_MS = 15000
 SETTLE_CAP_SECS = 3.0
+ENTER_NAV_SECS = 0.6               # Return in a form: how long to wait for the navigation to start
 KEYS = {"return": "Enter", "enter": "Enter", "escape": "Escape", "tab": "Tab", "space": " ", "up": "ArrowUp", "down": "ArrowDown",
         "left": "ArrowLeft", "right": "ArrowRight", "delete": "Backspace"}
 
@@ -486,7 +487,21 @@ class _Page:
         name = KEYS.get(str(key).lower())
         if name is None:
             raise ValueError(f"not a key: {key!r}")
+        before = self.page.url
         self.page.keyboard.press(name)
+        if name == "Enter":
+            # A form submitted with Return navigates a beat after the key, and until the new page commits every
+            # load-state wait answers for the OLD page: the executor moved on while the results were still on
+            # their way (live probe of the eval's docs search, 2026-09-24). Wait for the URL to change, briefly.
+            t0 = self.clock()
+            while self.clock() - t0 < ENTER_NAV_SECS:
+                self.page.wait_for_timeout(50)
+                if self.page.url != before:
+                    try:
+                        self.page.wait_for_load_state("domcontentloaded", timeout=NAV_TIMEOUT_MS)
+                    except Exception:  # noqa: BLE001 — a slow page is still the new page
+                        pass
+                    break
         return f"pressed {key}"
 
     def settle(self, secs: float) -> float:

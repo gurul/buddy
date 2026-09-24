@@ -348,3 +348,31 @@ def test_a_notice_that_only_offers_to_accept_stays_up_and_stops_the_plan(tmp_pat
     finally:
         srv.shutdown()
     assert result["status"] == "none" and result["reason"] == "dialog_open" and choice == "", result
+
+
+SEARCH_HOME = """<!doctype html><html><head><title>Docs</title></head><body><h1>Docs</h1>
+<form action="results.html" method="get" role="search"><input type="search" name="q" aria-label="Search docs"></form>
+</body></html>"""
+RESULTS = """<!doctype html><html><head><title>Results</title></head><body><a href="#guide">Solar Panel Installation Guide</a></body></html>"""
+
+
+@live
+def test_return_in_a_search_field_waits_for_the_results_page(tmp_path: Path) -> None:
+    (tmp_path / "results.html").write_text(RESULTS)
+    srv, url = _serve(tmp_path, "docs.html", SEARCH_HOME)
+    lane = lane_for(tmp_path)
+    plan = {"steps": [{"kind": "type", "target": "the Search docs field", "label_hint": "Search docs", "text": "solar panels"},
+                      {"kind": "press_key", "key": "return"}], "final_say": "Searched.", "success": None}
+
+    async def go() -> tuple[dict[str, Any], str]:
+        await lane.open_url(url)
+        result = await lane.run_plan(plan, "search the docs for solar panels")
+        seen = await lane._run(lambda: lane._ensure().page.url)       # read at once, no extra wait
+        await lane.close()
+        return result, seen
+
+    try:
+        result, seen = asyncio.run(go())
+    finally:
+        srv.shutdown()
+    assert result["status"] == "complete" and "results.html?q=solar+panels" in seen, (result, seen)
