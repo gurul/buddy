@@ -3567,3 +3567,127 @@ def test_a_step_scrolled_off_during_an_in_flight_edit_does_not_lose_a_later_one(
     said = "\n".join(t for _, t in api.sent)
     assert long1 in said and long2 in said                                 # both long steps reached the phone
     assert api.sent[-1] == (OWNER, "Calculator is open.")
+
+
+# ---- review fixes: the owner's message goes where it was meant (2026-09-23) ------------------------------
+
+def test_buddy_yes_while_allow_deny_waits_is_for_buddy_and_allows_nothing() -> None:
+    """Review finding: "buddy: yes" lost its prefix in the relay branch, and the "yes" left over allowed
+    the prompt. It is words for buddy; the prompt keeps waiting for a tap or a plain yes/no."""
+    async def go() -> None:
+        api, typed = FakeApi(), []
+        rig = relay_rig(api, typed)
+        rig.create.responses.append(say("Hi there."))
+        ask = asyncio.ensure_future(rig.inlet.decide_permission("Bash", "rm -rf build/"))
+        await jobs(rig)
+        await dispatch(rig, "buddy: yes", update_id=5)
+        assert not ask.done() and len(rig.create.requests) == 1 and typed == []
+        await dispatch(rig, "yes", update_id=6)                       # the control: a plain yes still answers
+        assert await ask == "allow"
+        await rig.inlet._shutdown()
+
+    asyncio.run(go())
+
+
+def test_a_picker_tap_is_never_taken_as_the_answer_to_a_waiting_task_question(tmp_path: Path) -> None:
+    """Review finding: a new-claude tree button tapped while a task's free question waited was that
+    question's answer, and the tree got nothing. A tap means its picker's choice only."""
+    for area in ("personal", "work"):
+        (tmp_path / area / "buddy").mkdir(parents=True)
+
+    async def launcher(folder: Path, harness: str) -> str:
+        return "Opened."
+
+    async def go() -> None:
+        api = FakeApi()
+        rig = Rig(api, FakeCreate(), launcher=launcher, launch_root=tmp_path, launch_recent=lambda: [])
+        await dispatch(rig, "new claude")
+        question = asyncio.ensure_future(rig.inlet._ask_user("Which account?", OWNER))
+        await jobs(rig)
+        await tap(rig, api.key("Cancel", message=0)[1], api.keyboards[0][0])
+        assert rig.inlet._launch is None and not question.done()     # the tree took it; the question waits
+        await dispatch(rig, "work", update_id=7)                      # the control: typed words answer it
+        assert await question == "work"
+        await rig.inlet._shutdown()
+
+    asyncio.run(go())
+
+
+def test_a_typed_ok_answers_a_codex_command_prompt_as_its_allow_button_does() -> None:
+    """Review finding: Codex accepts only "yes"; a typed "ok" passed the yes/no check and then declined."""
+    async def go() -> None:
+        api = FakeApi()
+        rig = Rig(api, FakeCreate())
+        question = "Codex asks to run this command in /projects/buddy:\nmake test\n\nReply yes or no."
+        ask = asyncio.ensure_future(rig.inlet._ask_user(question, OWNER))
+        await jobs(rig)
+        await dispatch(rig, "ok", update_id=5)
+        assert await ask == "yes"
+        ask = asyncio.ensure_future(rig.inlet._ask_user(question, OWNER))
+        await jobs(rig)
+        await dispatch(rig, "nope", update_id=6)
+        assert await ask == "no"
+        ask = asyncio.ensure_future(rig.inlet._ask_user("Which account?", OWNER))
+        await jobs(rig)
+        await dispatch(rig, "ok", update_id=7)                        # a free question keeps the words as typed
+        assert await ask == "ok"
+        await rig.inlet._shutdown()
+
+    asyncio.run(go())
+
+
+def test_an_image_is_refused_while_a_question_with_buttons_waits_and_no_relay_is_on() -> None:
+    """Review finding: with no relay the next message answers even a prompt with buttons, and an image
+    cannot, so it is refused as before; it used to slip through to buddy."""
+    from cc_buddy_bridge import telegram_images as media
+
+    async def go() -> None:
+        api = FakeApi()
+        rig = Rig(api, FakeCreate())
+        ask = asyncio.ensure_future(rig.inlet._ask_user("Delete the draft? yes / no?", OWNER, choices=telegram.ALLOW_DENY))
+        await jobs(rig)
+        rig.inlet._handle(telegram.Inbound(OWNER, OWNER, "", media.Attachment("f"), message_id=9))
+        await jobs(rig)
+        assert "answer the pending question" in api.sent[-1][1] and not rig.create.requests
+        ask.cancel()
+        await rig.inlet._shutdown()
+
+    asyncio.run(go())
+
+
+def test_a_task_question_asked_during_a_permission_prompt_gives_the_prompt_back_its_typed_yes() -> None:
+    """Review finding: a task's question replaced the waiting permission prompt for good, so a typed yes
+    went to Claude and the prompt waited out its timeout."""
+    async def go() -> None:
+        api, typed = FakeApi(), []
+        rig = relay_rig(api, typed)
+        permission = asyncio.ensure_future(rig.inlet.decide_permission("Bash", "rm -rf build/"))
+        await jobs(rig)
+        question = asyncio.ensure_future(rig.inlet._ask_user("Which account?", OWNER))
+        await jobs(rig)
+        await dispatch(rig, "work", update_id=5)
+        assert await question == "work"
+        await dispatch(rig, "yes", update_id=6)
+        assert await permission == "allow" and typed == []
+        await rig.inlet._shutdown()
+
+    asyncio.run(go())
+
+
+def test_claude_off_during_a_codex_chat_leaves_its_steps_and_result_flowing() -> None:
+    """Review finding: "claude off" bumped the Codex epoch, so the running Codex turn's steps and result
+    were dropped and its progress message kept a dead Stop button."""
+    async def go() -> None:
+        codex, api = FakeCodex(), FakeApi()
+        rig = Rig(api, FakeCreate(), codex=codex, codex_folders=lambda: [CODEX_FOLDER])
+        await dispatch(rig, "codex buddy")
+        await dispatch(rig, "implement it", update_id=7)
+        await dispatch(rig, "claude off", update_id=8)
+        await codex.emit("Reading the tests")
+        await codex.done("Here is the answer.")
+        await settle()
+        assert api.titled[-1] == ("Codex", "buddy", "Here is the answer.")
+        assert api.edits[-1][1].endswith(telegram.PROGRESS_DONE_LINE) and "Reading the tests" in api.edits[-1][1]
+        await rig.inlet._shutdown()
+
+    asyncio.run(go())

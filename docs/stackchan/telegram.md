@@ -171,7 +171,8 @@ as "Claude is waiting on you":
   "no, leave it"). Anything else you type while it waits goes to Claude as
   usual, and the prompt keeps waiting. That includes a sentence that starts
   with a yes-word, like "ok, also update the README": it is a message for
-  Claude, not an Allow. This holds from the moment the prompt is sent. After the answer, or after 240 s with
+  Claude, not an Allow. So is "buddy: yes": it goes to buddy and allows
+  nothing. This holds from the moment the prompt is sent. After the answer, or after 240 s with
   none, the message changes to say "Allowed.", "Denied." or that the dialog on
   the Mac decides, and the buttons go. If you don't answer, the dialog stays on
   the Mac as before. If Telegram refuses the buttons, the prompt is plain text
@@ -538,8 +539,14 @@ Flip it to `ask` if two seconds a command is a price you will pay.
   Claude or Codex relay is on, a question with buttons takes only a tap, a
   plain yes or no, or a button's words typed ("allow for task"). Other text
   goes to Claude or Codex, and the question keeps waiting. With no relay on,
-  your next message is still the answer. After the answer the question
-  changes to say what was chosen, and its buttons go.
+  your next message is still the answer, and an image is refused until you
+  answer. A typed yes or no in any wording ("ok", "nope") is handed on as the
+  buttons' own yes or no, so it does what the tap does. A tap on a picker
+  (the new-session tree, say) is never the answer to a different question
+  that happens to be waiting. A task's question asked while a Claude
+  permission prompt waits is answered first; the prompt then takes a typed
+  yes again. After the answer the question changes to say what was chosen,
+  and its buttons go.
 
 One agent drives the mouse at a time. While a spoken conversation is open, or a
 task it started is running, a texted task is refused ("the Mac is theirs until

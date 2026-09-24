@@ -520,6 +520,9 @@ class Inbound:
     text: str
     image: Optional[telegram_images.Attachment] = None
     message_id: int = field(default=0, compare=False)   # what a reaction lands on; 0 when unknown
+    # A picker's tap, fed to _handle as its words: it means that picker's choice and nothing else, so it is
+    # never taken as the answer to a different question that happens to be waiting.
+    tapped: bool = field(default=False, compare=False)
 
 
 # accept() verdicts. OK carries an Inbound; the two *_LINE verdicts are the owner, so they get one fixed
@@ -1227,6 +1230,10 @@ class TelegramInlet:
         self._codex_chat: Optional[int] = None
         self._codex_title = ""
         self._codex_epoch = 0
+        # Bumped when the Claude relay goes on or off: an image downloading meanwhile is never retargeted.
+        # Separate from the Codex epoch, which only a change of Codex chat may bump (a bump strands the
+        # running Codex turn's steps and result).
+        self._claude_epoch = 0
         self._codex_lock = asyncio.Lock()
         self._terminal = terminal
         self._launcher, self._launch_root, self._launch_recent = launcher, launch_root, launch_recent
@@ -1543,6 +1550,25 @@ class TelegramInlet:
             return False                                  # a permission prompt stays strict, relay or not
         return not (self.claude or self._codex_chat is not None)
 
+    def _strict_answer(self, text: str) -> str:
+        """What a typed answer hands the waiting question. A prompt with buttons takes a bare yes or no in
+        any wording ("ok", "sure", "nope"): it is handed on as the buttons' own "yes" or "no", so the words
+        the owner typed do what a tap does. A Codex command's prompt accepts only "yes" (ONCE_ANSWERS), and
+        a typed "ok" used to decline it (review, 2026-09-23). Any other answer goes on as it was typed."""
+        if not self._pending_strict or text.strip().lower().rstrip(".!") in self._pending_words:
+            return text
+        bare = consent.bare_decision(text)
+        return {"allow": "yes", "deny": "no"}.get(bare, text)
+
+    def _image_waits(self) -> bool:
+        """An image cannot answer a question, so while one waits on a typed answer the image is refused.
+        That is every question with no relay on (the next message is its answer, buttons or not), and a
+        question without buttons with one on. A prompt with buttons while a relay takes the chat's words
+        lets the image through to the relay, as it lets other text through."""
+        if not self._awaiting_answer:
+            return False
+        return not self._pending_strict or not (self.claude or self._codex_chat is not None)
+
     def _defer_permission(self) -> None:
         """The relay is going off, or to another session: a permission prompt still waiting ends as "no
         answer here", so the dialog on the Mac decides and the prompt is edited to say so. Without this the
@@ -1556,7 +1582,7 @@ class TelegramInlet:
         """One accepted message from the owner, routed. A picker's tap comes here too, with the button's
         words as its text (``_on_tap``), so a tap and a typed reply do exactly the same thing."""
         if inbound.image is not None:
-            if self._answers_pending(None):
+            if self._image_waits():
                 self._spawn(self._say(inbound.chat_id, "Please answer the pending question in a separate text, then resend the image."), "telegram-say")
                 return
             for_buddy = BUDDY_PREFIX.match(inbound.text)
@@ -1564,7 +1590,8 @@ class TelegramInlet:
                                                else "claude" if self.claude else "buddy")
             if for_buddy:
                 inbound = dataclasses.replace(inbound, text=for_buddy.group(2).strip())
-            self._spawn(self._image(inbound, target, self._codex_epoch), "telegram-image")
+            self._spawn(self._image(inbound, target, self._codex_epoch, claude_epoch=self._claude_epoch),
+                        "telegram-image")
             return
         word = inbound.text.lower().rstrip(".! ")
         if not re.match(r"/?claude[ _](on|off)\b", word) and self._launch_dispatch(inbound, word):
@@ -1603,11 +1630,14 @@ class TelegramInlet:
         self._chat_id = inbound.chat_id
         claude_on_target = re.fullmatch(r"/?claude[ _]on\s+(.+)", word)
         if word in CLAUDE_ON or word in CLAUDE_OFF or claude_on_target:
-            self._codex_epoch += 1
+            self._claude_epoch += 1
             if (word in CLAUDE_ON or claude_on_target) and self._codex_chat is not None:
                 if self._codex_chat != inbound.chat_id:
                     self._spawn(self._say(inbound.chat_id, "The Codex relay is in use by another owner chat."), "telegram-say")
                     return
+                # Only a change of Codex chat bumps its epoch: "claude off" during a Codex chat used to bump
+                # it too, and every later step and result of that chat was dropped (review, 2026-09-23).
+                self._codex_epoch += 1
                 self._codex_chat = None
                 self._spawn(self._codex_command(inbound.chat_id, "disconnect", None, self._codex_epoch), "telegram-codex")
             self._note("user", inbound.text)
@@ -1622,6 +1652,9 @@ class TelegramInlet:
             self._claude_on(inbound, claude_on_target.group(1).strip() if claude_on_target else "")
             return
         codex_text = re.match(r"^/?codex\s*:\s*(.+)$", inbound.text, re.I | re.S)
+        # "buddy: yes" while a prompt with buttons waits is words for buddy: the prefix came off on the way
+        # (below), and the "yes" left over must not answer the prompt (review, 2026-09-23: it allowed an rm).
+        addressed_buddy = False
         if codex_text:
             self._spawn(self._codex_send(inbound.chat_id, codex_text.group(1), self._codex_epoch,
                                          message_id=inbound.message_id), "telegram-codex")
@@ -1636,6 +1669,7 @@ class TelegramInlet:
                 return
             inbound = dataclasses.replace(inbound, text=for_buddy.group(2).strip())
             word = inbound.text.lower().rstrip(".! ")
+            addressed_buddy = True
         typed = CLAUDE_PREFIX.match(inbound.text)
         if typed:
             self._note("user", inbound.text)
@@ -1656,6 +1690,7 @@ class TelegramInlet:
                 return
             inbound = dataclasses.replace(inbound, text=for_buddy.group(2).strip())
             word = inbound.text.lower().rstrip(".! ")
+            addressed_buddy = True
         if word in STEALTH_ON or word in STEALTH_OFF:
             self.stealth = word in STEALTH_ON
             self._note("user", inbound.text)
@@ -1668,12 +1703,13 @@ class TelegramInlet:
             self._note("user", inbound.text)
             self._spawn(self._screen_now(inbound.chat_id), "telegram-screen")
             return
-        if self._answers_pending(inbound.text):
+        if (not inbound.tapped and not (addressed_buddy and self._pending_strict)
+                and self._answers_pending(inbound.text)):
             # A task is waiting on the human. This message is the answer, and only the answer.
             if self._pending_answer_chat is not None and self._pending_answer_chat != inbound.chat_id:
                 self._spawn(self._say(inbound.chat_id, "A question is waiting in another owner chat."), "telegram-say")
                 return
-            self._pending_answer.set_result(inbound.text)
+            self._pending_answer.set_result(self._strict_answer(inbound.text))
             self._note("user", inbound.text)
             return
         if word == "/start":
@@ -1681,7 +1717,7 @@ class TelegramInlet:
             return
         self._spawn(self._turn(inbound), "telegram-turn")
 
-    async def _image(self, inbound: Inbound, target: str, epoch: int) -> None:
+    async def _image(self, inbound: Inbound, target: str, epoch: int, *, claude_epoch: Optional[int] = None) -> None:
         """One image from the owner, downloaded and handed to its recipient. For the Claude or Codex relay a
         👀 on the owner's message says it arrived (owner, 2026-09-23), and the 👍 that replaces it says it was
         delivered; when it is not delivered, the 👀 comes off again and the line saying why stays."""
@@ -1689,7 +1725,7 @@ class TelegramInlet:
         seen = relayed and await self._receipt(inbound.chat_id, inbound.message_id, SEEN_REACTION)
         delivered = False
         try:
-            delivered = await self._relay_image(inbound, target, epoch)
+            delivered = await self._relay_image(inbound, target, epoch, claude_epoch)
         finally:
             if seen and not delivered:
                 await self._unreact(inbound.chat_id, inbound.message_id)
@@ -1703,18 +1739,20 @@ class TelegramInlet:
         except Exception as e:  # noqa: BLE001
             log.warning("telegram: could not take a reaction off (%s)", type(e).__name__)
 
-    async def _relay_image(self, inbound: Inbound, target: str, epoch: int) -> bool:
+    async def _relay_image(self, inbound: Inbound, target: str, epoch: int,
+                           claude_epoch: Optional[int] = None) -> bool:
         """The download and the hand-over → True when the image reached the Claude terminal or Codex."""
         try:
             image = await self.api.receive_image(inbound.image)
-            if self._answers_pending(None):
+            if self._image_waits():
                 await self._say(inbound.chat_id, "A question is waiting. Answer it in text, then resend the image.")
                 return False
             if target == "buddy":
                 await self._turn(inbound, image=image)
                 return False
             # The recipient is captured before downloading; changing relay modes must never retarget an image.
-            if epoch != self._codex_epoch or (target == "claude" and not self.claude):
+            if (epoch != self._codex_epoch or (target == "claude" and not self.claude)
+                    or (claude_epoch is not None and claude_epoch != self._claude_epoch)):
                 await self._say(inbound.chat_id, "The relay changed while downloading. Please resend the image.")
                 return False
             path = await asyncio.to_thread(telegram_images.save, image)
@@ -1857,7 +1895,7 @@ class TelegramInlet:
             if board.on_stop is not None:
                 board.on_stop(tap.chat_id)
         else:
-            self._handle(Inbound(chat_id=tap.chat_id, user_id=tap.user_id, text=choice.value))
+            self._handle(Inbound(chat_id=tap.chat_id, user_id=tap.user_id, text=choice.value, tapped=True))
 
     async def _answer_tap(self, tap: Tap, text: str, *, drop: bool = False) -> None:
         try:
@@ -2204,7 +2242,7 @@ class TelegramInlet:
             self._launch = None
         trigger = claude_launch.TRIGGER.match(inbound.text.strip())
         if trigger is None and (self._launch is None
-                                or self._answers_pending(inbound.text)):
+                                or (not inbound.tapped and self._answers_pending(inbound.text))):
             return False
         if trigger is None and word in STOP_WORDS:
             self._launch = None
@@ -2823,8 +2861,13 @@ class TelegramInlet:
         relay is on, only a tap, a bare yes/no or a button's words typed answer it, and any other text goes
         to Claude or Codex as usual. Before this a Composio consent or a Codex "Reply yes or no." took the
         owner's next message for Claude as the answer, and "ok, also update the README" ran a Drive delete
-        (owner, 2026-09-23). Only a send that falls back to plain text makes it non-strict again."""
+        (owner, 2026-09-23). Only a send that falls back to plain text makes it non-strict again.
+
+        A question already waiting (a Claude permission prompt) is put back once this one is answered: a
+        typed yes then reaches it again, instead of going to Claude while the prompt waits out its timeout
+        (review, 2026-09-23)."""
         loop = asyncio.get_running_loop()
+        before = (self._pending_answer, self._pending_answer_chat, self._pending_strict, self._pending_words)
         future = self._pending_answer = loop.create_future()
         self._pending_answer_chat = chat_id
         choices = tuple(answer_choices(question) if choices is None else choices)
@@ -2854,10 +2897,14 @@ class TelegramInlet:
             return f"no (no answer within {int(self.config.ask_timeout_secs)} seconds)"
         finally:
             if self._pending_answer is future:
-                self._pending_answer = None
-                self._pending_answer_chat = None
-                self._pending_strict = False
-                self._pending_words = frozenset()
+                if before[0] is not None and not before[0].done():
+                    (self._pending_answer, self._pending_answer_chat, self._pending_strict,
+                     self._pending_words) = before
+                else:
+                    self._pending_answer = None
+                    self._pending_answer_chat = None
+                    self._pending_strict = False
+                    self._pending_words = frozenset()
             if board is not None:
                 self._retire(board)
                 self._spawn(self._settle_prompt(board, question + "\n\n" + line, title, None), "telegram-edit")
