@@ -3310,6 +3310,8 @@ def test_the_codex_stop_button_interrupts_and_a_steer_keeps_the_progress_message
         await codex.done("Codex stopped.")
         await settle()
         assert api.replies[-1] == ("Codex stopped.", 3)
+        # the progress message closes as stopped, not finished
+        assert api.edits[-1] == (progress_id, "Sent to Codex.\n\n" + telegram.PROGRESS_STOPPED_LINE)
         await dispatch(rig, "codex off")
         await rig.inlet._shutdown()
 

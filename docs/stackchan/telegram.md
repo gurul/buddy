@@ -444,7 +444,8 @@ Flip it to `ask` if two seconds a command is a price you will pay.
   During a running turn they steer it, and a 👍 on your message confirms the steer. Each message that starts a turn gets one
   progress message under **Codex** ("Sent to Codex.", then Codex's public steps,
   edited in place, whole, with the same scroll-off rule as a task) with a
-  **Stop** button that interrupts that turn, like `stop`. The final
+  **Stop** button that interrupts that turn, like `stop`. When the turn ends,
+  the progress message says "Finished", or "Stopped" if you stopped it. The final
   answer is a new message replying to yours. Reasoning and tool output stay out
   of Telegram. Browser tasks
   send the captured image from their own tab using the same validation as Buddy's

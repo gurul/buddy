@@ -1109,6 +1109,7 @@ class _Progress:
     edited_at: float = float("-inf")
     broken: bool = False                                          # edits failed: steps go as new messages
     closed: bool = False
+    stopped: bool = False                                         # a stop was asked for: it closes as "Stopped."
     board: Optional[_Keyboard] = None                             # the Stop button
     lock: asyncio.Lock = field(default_factory=asyncio.Lock)      # the first send, edits and the close, in order
     flush: Optional[asyncio.Task] = None
@@ -2114,7 +2115,8 @@ class TelegramInlet:
                     # (it notifies) replying to the owner's request.
                     if self._codex_chat == chat_id and epoch == self._codex_epoch:
                         progress, self._codex_progress = self._codex_progress, None
-                        await self._close_progress(progress, PROGRESS_DONE_LINE)
+                        stopped = progress is not None and progress.stopped
+                        await self._close_progress(progress, PROGRESS_STOPPED_LINE if stopped else PROGRESS_DONE_LINE)
                         await self._say(chat_id, text, title=CODEX_TITLE, subtitle=folder.name,
                                         reply_to=progress.request_id if progress is not None else 0)
 
@@ -2159,6 +2161,10 @@ class TelegramInlet:
             try:
                 if interrupt:
                     await self._codex.interrupt()
+                    if self._codex_progress is not None:
+                        # The turn ends as interrupted, and its progress message says "Stopped.", not
+                        # "Finished." (owner, 2026-09-23, completeness review of the Telegram batches).
+                        self._codex_progress.stopped = True
                     await self._say(chat_id, "Stop requested in Codex.")
                     return False
                 steering = bool(getattr(self._codex, "running", False))
