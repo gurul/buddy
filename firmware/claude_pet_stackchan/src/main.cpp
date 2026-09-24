@@ -148,6 +148,26 @@ static void clockRefreshRtc() {
   M5.Rtc.GetDate(&_clkDt);
 }
 
+// Power follows the USB port (owner, 2026-09-23: "only take power from the port, not the battery").
+// The body battery stays in circuit because the servo rail is boosted from BAT+, but the robot never
+// runs on it: once USB power has been gone for USB_LOSS_OFF_MS, the AXP2101 cuts power. That also
+// makes a host restart a clean reboot for the robot. On 2026-09-23 the Mac restarted, the robot kept
+// running on its battery and came back wedged, deaf to every reset but a power cycle.
+// Armed only after USB power has been seen once since boot, so a VBUS misread can never power the
+// robot off right after it starts.
+static constexpr uint32_t USB_LOSS_OFF_MS = 5000;
+static bool     _usbSeen   = false;
+static uint32_t _usbLostAt = 0;
+static void powerFollowUsb() {
+  if (_onUsb) { _usbSeen = true; _usbLostAt = 0; return; }
+  if (!_usbSeen) return;
+  uint32_t now = millis();
+  if (_usbLostAt == 0) { _usbLostAt = now; return; }
+  if (now - _usbLostAt < USB_LOSS_OFF_MS) return;
+  Serial.println("[power] USB power gone for 5 s: powering off");
+  halPowerOff();
+}
+
 static void clockUpdateOrient() {
   float ax, ay, az;
   M5.Imu.getAccelData(&ax, &ay, &az);
@@ -792,6 +812,7 @@ void loop() {
 
   diagPhase(DP_CLOCK);
   clockRefreshRtc();   // 1Hz internal throttle; also caches _onUsb
+  powerFollowUsb();
   // The full-screen clock takeover is retired (owner request: the pet should
   // ALWAYS be visible). Time now lives as a small always-on overlay in the
   // top-left of the normal screen — see drawMiniClock(). The takeover and

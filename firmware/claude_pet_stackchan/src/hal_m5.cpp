@@ -127,6 +127,11 @@ void halDeepSleep() {
   M5.Power.deepSleep(0, true);
 }
 
+void halPowerOff() {
+  M5.Display.setBrightness(0);
+  M5.Power.powerOff();
+}
+
 // data.h pushes *local* time components (epoch already tz-adjusted). Store
 // them as-is in the RTC and mirror them into the system clock as "UTC" so
 // time()/gmtime_r agree with what the RTC reads back.
