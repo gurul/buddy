@@ -37,6 +37,11 @@ through the check's router, WebSockets are answered here and closed (an attempt 
 starts with a host resolver that knows no other name and with WebRTC kept off the network. The page is served
 sandboxed, as the Mini App server serves it (miniapp.APP_CSP), so browser storage throws here as it does there.
 
+That first minute is blind: it proves nothing broke, not that the app does what it is for. So when the maker
+wrote journeys for the app (the core flow as steps, and the text it must show afterwards), each one is then
+walked by Jev, in a fresh copy of this same sandbox with no data (jev_verify.py, ``_journeys``). A journey that
+does not go through is a problem in the same report; Jev being unreachable is "journeys not run", never one.
+
 A check that breaks after the app opened keeps what it found: a renderer crash (an app that allocates without
 end) is a finding, and only a checker that could not start at all is a skip.
 """
@@ -53,7 +58,11 @@ import time
 from dataclasses import dataclass, field
 from typing import Any, Optional
 
+from . import jev_verify
+
 log = logging.getLogger(__name__)
+
+_FROM_ENV: Any = object()                       # check_app's verifier default: Jev on this Mac's route, if set
 
 APP_URL = "https://app.buddy.test/apps/check/"
 APP_HOST = "app.buddy.test"
@@ -307,8 +316,8 @@ CLOSE_JS = r"""
 # How the current view looks, checked on every view a check visits. Each finding is a kind and a few
 # examples; `dark` adds the checks only a dark theme can fail.
 LOOK_JS = r"""
-({ dark, pageBg }) => {
-  const out = { tiny: [], font: [], shape: [], contrast: [], selected: [], picker: [] };
+({ dark, pageBg, pencil }) => {
+  const out = { tiny: [], font: [], shape: [], contrast: [], selected: [], picker: [], corner: [] };
   const vis = (el) => { const r = el.getBoundingClientRect(); const s = getComputedStyle(el);
     return r.width > 0 && r.height > 0 && s.visibility !== "hidden" && s.display !== "none"
       && !el.closest("[hidden],[aria-hidden=true],[inert]"); };
@@ -351,6 +360,16 @@ LOOK_JS = r"""
     const hits = [[cx - 20, cy], [cx + 20, cy], [cx, cy - 20], [cx, cy + 20]].filter(([x, y]) => {
       const h = document.elementFromPoint(x, y); return h && (h === el || el.contains(h)); }).length;
     if (hits < 2) out.tiny.push(`"${name(el)}" ${Math.round(r.width)}x${Math.round(r.height)}px`);
+  }
+  // buddy draws its Change pencil over every app's top-right corner (apps_maker.BUDDY_JS), scrolling with the
+  // page: an app's own control there sits under it (on the phone the pencil steps aside, and is then missing)
+  const px = document.documentElement.clientWidth - pencil.right - pencil.size;
+  for (const el of document.querySelectorAll("button,[role=button],[role=tab],[role=link],a[href],input,select,textarea,summary,[onclick]")) {
+    if (!vis(el) || (el.matches("input") && el.closest("label") && el.closest("label") !== el)) continue;
+    const r = el.getBoundingClientRect(), left = r.left + scrollX, top = r.top + scrollY;
+    const w = Math.min(left + r.width, px + pencil.size) - Math.max(left, px);
+    const h = Math.min(top + r.height, pencil.top + pencil.size) - Math.max(top, pencil.top);
+    if (w > 8 && h > 8) out.corner.push(`"${name(el)}"`);
   }
   for (const el of document.querySelectorAll("input:not([type=checkbox]):not([type=radio]):not([type=range]):not([type=color]):not([type=hidden]):not([type=button]):not([type=submit]),textarea,select")) {
     if (vis(el) && parseFloat(getComputedStyle(el).fontSize) < 15.5) out.font.push(`"${name(el)}" ${getComputedStyle(el).fontSize}`);
@@ -425,7 +444,13 @@ LOOKS = {
     "picker": "In Telegram's dark theme, the date or time field {items} draws its picker in light colors (a dark "
               "icon on a dark field). Declare :root {{ color-scheme: light dark; }} and set "
               "document.documentElement.style.colorScheme from Telegram's colorScheme.",
+    "corner": "buddy's Change pencil sits over the top-right corner of every view (a 44x44px button, 6px from the top "
+              "and the right edge, scrolling with the page), and it covers {items} while {action}. Keep the top-right "
+              "56x56px of every view free of controls: give the header padding-right: 56px.",
 }
+
+# Where buddy's Change pencil sits (apps_maker.BUDDY_JS, from the top-right corner of the page, in CSS pixels).
+PENCIL = {"top": 6, "right": 6, "size": 44}
 
 # For the photo only: Telegram draws the MainButton natively under the page, so the owner would see it.
 BAR_JS = r"""
@@ -449,17 +474,20 @@ class CheckReport:
     fields: int = 0
     saves: int = 0
     screenshot: Optional[bytes] = None
+    photo_from: str = ""                       # 'the journey "…"' (its last screen) or "the scripted check"
     saved: Any = None                          # what the app had saved when the check ended
     photo_data: Any = None                     # the data the screenshot shows: the richest it saved
     secs: float = 0.0
     skipped: str = ""                          # why no check ran (Playwright missing): not a pass, not a fail
     trace: list[str] = field(default_factory=list)   # every action, in order: for a person reading a check
+    journeys: Optional[jev_verify.JourneyRun] = None  # Jev walking the maker's journeys (None: the app has none)
 
     def summary(self) -> str:
         if self.skipped:
             return f"not tested ({self.skipped})"
+        walked = self.journeys.summary() if self.journeys is not None else ""
         return (f"{'passed' if self.ok else f'{len(self.issues)} issue(s)'}: {self.fields} fields filled, "
-                f"{self.taps} taps, {self.saves} saves")
+                f"{self.taps} taps, {self.saves} saves" + (f", {walked}" if walked else ""))
 
     def made(self) -> str:
         """What the check's use of the app created ("habits 2, habits.done 5"), or "no records": whether it got
@@ -628,11 +656,17 @@ def _value_for(ctl: dict[str, Any], today: _dt.date, alt: bool = False) -> Optio
     return next((v for rx, v in _WORDS if re.search(rx, words, re.I)), "Morning run")
 
 
-async def check_app(html: str, *, seed: Any = None, browser: Any = None) -> CheckReport:
+async def check_app(html: str, *, seed: Any = None, browser: Any = None,
+                    journeys: Optional[list[jev_verify.Journey]] = None, verifier: Any = _FROM_ENV) -> CheckReport:
     """Run ``html`` like a person's first minute with it. Never raises; a missing Playwright is a skip.
 
     ``seed`` is the data the app starts with (an existing app's real data when it is being changed, so a data
-    migration is tested too); it is copied, never written back. ``browser`` reuses a running Chromium."""
+    migration is tested too); it is copied, never written back. ``browser`` reuses a running Chromium.
+
+    ``journeys`` (the maker's, jev_verify.py) run after the scripted pass, each on a fresh app with no data, and
+    ``verifier`` walks them (default: Jev on this Mac's route, jev_verify.from_env; None: journeys not run). A
+    journey that does not go through is a problem in this report like any other; a verifier that is down is
+    "journeys not run (why)" and never a problem."""
     try:
         from playwright.async_api import async_playwright
     except ImportError:
@@ -652,14 +686,39 @@ async def check_app(html: str, *, seed: Any = None, browser: Any = None) -> Chec
         await _run(b, html, sess, report, today, SMALL_PHONE, dark=False, interact=False,
                    label="reopening the app on a 360px-wide phone")
 
+    async def walk(b: Any) -> None:
+        if not journeys:
+            return
+        if verifier is _FROM_ENV:
+            v, why = jev_verify.from_env()
+        else:
+            v, why = verifier, "" if verifier is not None else "no verifier"
+        report.journeys = await _journeys(b, html, journeys, v, why)
+
+    async def both(b: Any) -> None:
+        try:
+            await asyncio.wait_for(go(b), CHECK_TIMEOUT_S)
+        except asyncio.CancelledError:
+            raise                              # the build was stopped: nothing more to walk
+        except asyncio.TimeoutError:
+            # the app hangs: every journey would wait on it too, for JOURNEY_TIMEOUT_S, and find nothing more
+            if journeys:
+                report.journeys = jev_verify.JourneyRun(
+                    total=len(journeys), not_run="the app stopped responding in the scripted check")
+            raise
+        except BaseException:
+            await walk(b)                      # a scripted pass that broke still leaves the journeys to walk
+            raise
+        await walk(b)
+
     try:
         if browser is not None:
-            await asyncio.wait_for(go(browser), CHECK_TIMEOUT_S)
+            await both(browser)
         else:
             async with async_playwright() as p:
                 b = await p.chromium.launch(headless=True, args=CHROMIUM_ARGS)
                 try:
-                    await asyncio.wait_for(go(b), CHECK_TIMEOUT_S)
+                    await both(b)
                 finally:
                     await b.close()
     except asyncio.TimeoutError:
@@ -688,7 +747,20 @@ async def check_app(html: str, *, seed: Any = None, browser: Any = None) -> Chec
     report.saves, report.saved = sess.saves, sess.data()
     if report.photo_data is None:
         report.photo_data = report.saved
+    report.photo_from = "the scripted check" if report.screenshot else ""
+    shot = next((r for r in report.journeys.results if r.passed and r.screenshot), None) \
+        if report.journeys is not None else None
+    if shot is not None:
+        # The owner's picture is the app doing what it is for: the end of a journey that passed (the splitter
+        # showing who owes whom), not the scripted pass's reopened screen, which can be a setup card, or look
+        # right on an app whose journeys failed.
+        report.screenshot, report.photo_data = shot.screenshot, shot.data
+        report.photo_from = f'the journey "{shot.name}"'
     report.issues = sess.issues[:MAX_ISSUES]
+    if report.journeys is not None:
+        # the core purpose first: a journey that fails says more than a look finding, so it is never cut
+        walked = report.journeys.issues()
+        report.issues = (walked + [i for i in report.issues if i not in walked])[:max(MAX_ISSUES, len(walked))]
     report.ok = not report.issues
     report.trace = sess.trace
     report.secs = time.perf_counter() - t0
@@ -698,6 +770,29 @@ async def check_app(html: str, *, seed: Any = None, browser: Any = None) -> Chec
 async def _run(browser: Any, html: str, sess: _Session, report: CheckReport, today: _dt.date,
                viewport: dict[str, int], *, dark: bool, interact: bool, label: str = "", shoot: bool = False) -> Any:
     """One open of the app. Shooting: returns the screenshot. Issues go to ``sess``."""
+    ctx, page, loaded = await _open(browser, html, sess, viewport, dark=dark, clock=interact, label=label)
+    try:
+        if not loaded:
+            return None
+        if interact:
+            await _use(page, sess, report, today, DARK if dark else LIGHT)
+        sess.step(label or "using the app")
+        await _look(page, sess, DARK if dark else LIGHT, dark)
+        await _layout(page, sess, viewport)
+        if interact:
+            await _close(page, sess)
+        if shoot:
+            return await _photo(page, ctx, viewport)
+        return None
+    finally:
+        await ctx.close()
+
+
+async def _open(browser: Any, html: str, sess: _Session, viewport: dict[str, int], *, dark: bool, clock: bool,
+                label: str = "") -> tuple[Any, Any, bool]:
+    """A new phone-sized context with the app open in it, served and fenced exactly as the server does, the
+    stand-ins installed and every finding wired to ``sess``: (context, page, whether it loaded). The caller
+    closes the context. ``clock``: the page's clock is Playwright's, for the hour jump at the end."""
     theme = DARK if dark else LIGHT
     ctx = await browser.new_context(viewport=viewport, device_scale_factor=2, is_mobile=True, has_touch=True,
                                     locale="en-US", color_scheme="dark" if dark else "light")
@@ -761,7 +856,7 @@ async def _run(browser: Any, html: str, sess: _Session, report: CheckReport, tod
         await page.route("**/*", route)
         await page.add_init_script(f"window.__checkCfg = {json.dumps({'theme': theme, 'scheme': 'dark' if dark else 'light'})};")
         await page.add_init_script(STUBS_JS)
-        if interact:
+        if clock:
             try:
                 await page.clock.install()             # runs in real time until the hour jump at the end
             except Exception:  # noqa: BLE001 — no clock control: the hour is skipped, the rest runs
@@ -773,20 +868,99 @@ async def _run(browser: Any, html: str, sess: _Session, report: CheckReport, tod
             if "Timeout" not in type(e).__name__:
                 raise
             sess.note(f"The app did not finish loading within {LOAD_TIMEOUT_MS // 1000} s ({label or 'first open'}).")
-            return None
+            return ctx, page, False
         await page.wait_for_timeout(SETTLE_MS)
-        if interact:
-            await _use(page, sess, report, today, theme)
-        sess.step(label or "using the app")
-        await _look(page, sess, theme, dark)
-        await _layout(page, sess, viewport)
-        if interact:
-            await _close(page, sess)
-        if shoot:
-            return await _photo(page, ctx, viewport)
-        return None
-    finally:
+        return ctx, page, True
+    except BaseException:
         await ctx.close()
+        raise
+
+
+async def _journeys(browser: Any, html: str, journeys: list[jev_verify.Journey],
+                    verifier: Optional[jev_verify.Verifier], why: str = "") -> jev_verify.JourneyRun:
+    """Walk every journey side by side, each in its own fresh context with no saved data. Never raises.
+
+    A page that breaks under one journey (a crashed tab, a reload that destroyed its context, a page that stops
+    answering) is that journey's failure: the app's, like the scripted pass says of a crash. Jev down, the
+    time limit or a checker fault stops the journeys still running; those are "not run (why)", because a
+    verifier that cannot answer must never block a build, and the journeys that already finished keep their
+    result: a failure seen before Jev went down is still a problem."""
+    from playwright.async_api import Error as PlaywrightError
+
+    run = jev_verify.JourneyRun(total=len(journeys))
+    if verifier is None:
+        run.not_run = why or "no verifier"
+        log.info("app-check: journeys not run (%s)", run.not_run)
+        return run
+    t0 = time.perf_counter()
+
+    async def one(j: jev_verify.Journey) -> jev_verify.JourneyResult:
+        sess = _Session(None)
+        at = [0]
+
+        def on_step(text: str) -> None:
+            at[0] += 1
+            sess.step(text)
+
+        ctx, page, loaded = await _open(browser, html, sess, PHONE, dark=False, clock=False,
+                                        label=f'opening the app for the journey "{j.name}"')
+        try:
+            if not loaded:
+                return jev_verify.JourneyResult(j.name, "step", steps=len(j.steps), step=1,
+                                                reason="the app did not finish loading.", evidence="(nothing)")
+            try:
+                res = await jev_verify.walk(page, j, verifier, errors=sess.issues, on_step=on_step)
+            except PlaywrightError as e:
+                first = (str(e).splitlines() or [""])[0][:160]
+                return jev_verify.JourneyResult(
+                    j.name, "step", steps=len(j.steps), step=max(1, at[0]), evidence="(the page broke)",
+                    step_words=j.steps[max(1, at[0]) - 1].words(),
+                    reason=f"the page stopped working during step {max(1, at[0])} ({type(e).__name__}: {first}).")
+            if res.passed:
+                try:
+                    res.screenshot, res.data = await _photo(page, ctx, PHONE), sess.data()
+                except Exception as e:  # noqa: BLE001 — no picture from this journey; the result stands
+                    log.info("app-check: no picture from the journey %r (%s)", j.name, type(e).__name__)
+            return res
+        finally:
+            await ctx.close()
+
+    tasks = {asyncio.ensure_future(one(j)): n for n, j in enumerate(journeys)}
+    finished: dict[int, jev_verify.JourneyResult] = {}
+    loop = asyncio.get_running_loop()
+    deadline = loop.time() + jev_verify.JOURNEY_TIMEOUT_S
+    try:
+        waiting = set(tasks)
+        while waiting and not run.not_run:
+            left = deadline - loop.time()
+            if left <= 0:
+                run.not_run = f"the journeys took longer than {jev_verify.JOURNEY_TIMEOUT_S:.0f} s"
+                break
+            done, waiting = await asyncio.wait(waiting, timeout=left, return_when=asyncio.FIRST_EXCEPTION)
+            for task in done:
+                if task.cancelled():
+                    continue
+                e = task.exception()
+                if e is None:
+                    finished[tasks[task]] = task.result()
+                elif isinstance(e, jev_verify.JevDown):
+                    run.not_run = run.not_run or f"Jev did not answer: {e}"
+                elif not run.not_run:               # a checker fault is never the app's
+                    run.not_run = f"the journeys could not run ({type(e).__name__})"
+                    log.warning("app-check: journeys could not run (%s: %s)", type(e).__name__, str(e)[:200])
+    finally:
+        # the journeys still going must not go on asking Jev and driving pages after this check returned, into
+        # a browser its caller may close
+        for task in tasks:
+            task.cancel()
+        await asyncio.gather(*tasks, return_exceptions=True)
+    run.results = [finished[n] for n in sorted(finished)]
+    run.secs = time.perf_counter() - t0
+    run.jev = verifier.calls.as_dict()
+    log.info("app-check: %s in %.1f s (Jev %d calls, %d ms, p50 %d ms, %d input tokens, $%.5f, %d errors)",
+             run.summary(), run.secs, run.jev["calls"], run.jev["ms"], run.jev["p50_ms"], run.jev["input_tokens"],
+             run.jev["usd"], run.jev["errors"])
+    return run
 
 
 async def _layout(page: Any, sess: _Session, viewport: dict[str, int]) -> None:
@@ -807,7 +981,7 @@ async def _layout(page: Any, sess: _Session, viewport: dict[str, int]) -> None:
 async def _look(page: Any, sess: _Session, theme: dict[str, str], dark: bool) -> None:
     """The look checks (LOOK_JS) on the view on screen now; each kind of finding is reported once."""
     try:
-        found = await page.evaluate(LOOK_JS, {"dark": dark, "pageBg": _rgb(theme["bg_color"])})
+        found = await page.evaluate(LOOK_JS, {"dark": dark, "pageBg": _rgb(theme["bg_color"]), "pencil": PENCIL})
     except Exception:  # noqa: BLE001 — a page mid-navigation: the next view is checked instead
         return
     for kind, items in found.items():

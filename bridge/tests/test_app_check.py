@@ -248,7 +248,7 @@ def page(body: str, style: str = "", title: str = "Look") -> str:
             "</script></body></html>")
 
 
-SEG = ('<div class="seg"><button aria-selected="true">Today</button><button aria-selected="false">Week</button></div>'
+SEG = ('<h1>Range</h1><div class="seg"><button aria-selected="true">Today</button><button aria-selected="false">Week</button></div>'
        "<p>Pick a range.</p>")
 SEG_STYLE = (".seg { display: flex; padding: 2px; background: rgba(118, 118, 128, .16); border-radius: 10px; }"
              ".seg button { flex: 1; border: 0; background: none; color: var(--tg-theme-text-color); }")
@@ -270,7 +270,7 @@ def test_a_selected_segment_that_looks_like_the_others_in_the_dark_is_caught() -
         " color: var(--tg-theme-button-text-color); }"
     assert run(page(SEG, clear)).ok
     # a state shown inside the element (a filled dot) is a real difference, not a missing one
-    dots = ('<div class="seg"><button aria-pressed="true"><span class="d on"></span>Mon</button>'
+    dots = ('<h1>Days</h1><div class="seg"><button aria-pressed="true"><span class="d on"></span>Mon</button>'
             '<button aria-pressed="false"><span class="d"></span>Tue</button></div>')
     assert run(page(dots, SEG_STYLE + ".d { display: inline-block; width: 8px; height: 8px; } .d.on { background: red; }")).ok
 
@@ -450,3 +450,20 @@ def test_browser_storage_throws_as_it_does_in_the_served_app() -> None:
     stores = variant("(async () => {", "window['local' + 'Storage'].setItem('x', '1');\n(async () => {")
     r = run(stores)
     assert any("sandboxed" in i and "localStorage" in i for i in r.issues), r.issues
+
+
+# A header like the maker's: the title, and an icon button at its right edge, where buddy's Change pencil sits.
+CORNER = HEAD.format(title="Corner", style="header { display: flex; align-items: center; } header h1 { flex: 1; } "
+                     ".icon { width: 44px; height: 44px; }") + BODY.replace(
+    "<form", '<header><h1>Habits</h1><button class="icon" aria-label="Settings">⚙</button></header><form', 1)
+CORNER_FREE = CORNER.replace("header { display: flex;", "header { padding-right: 56px; display: flex;")
+
+
+def test_a_control_under_buddys_change_pencil_is_a_finding_and_a_free_corner_is_not() -> None:
+    from cc_buddy_bridge import app_check
+
+    r = run(CORNER)
+    corner = [i for i in r.issues if "Change pencil" in i]
+    assert len(corner) == 1 and '"Settings"' in corner[0] and "padding-right: 56px" in corner[0], r.issues
+    assert not any("Change pencil" in i for i in run(CORNER_FREE).issues)            # the fix the finding asks for
+    assert app_check.PENCIL == {"top": 6, "right": 6, "size": 44}
