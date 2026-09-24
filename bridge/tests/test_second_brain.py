@@ -492,7 +492,9 @@ def test_dispatch_round_trip(vault: Path) -> None:
     moved = dispatch(vault, "file_note", {"path": saved["path"], "into": "04-areas/garden"})
     assert moved["ok"] and moved["path"].startswith("04-areas/garden/")
     wf = dispatch(vault, "second_brain_workflow", {"name": "daily-plan", "extra": None})
-    assert wf["ok"] and wf["note"] == "hand this prompt to think_hard"
+    assert wf["ok"] and "calendar" in wf["note"]
+    review = dispatch(vault, "second_brain_workflow", {"name": "weekly-review", "extra": None})
+    assert review["ok"] and review["note"] == "hand this prompt to think_hard"
     assert "water the plants" in wf["prompt"] and wf["tokens"] == len(wf["prompt"]) // 4
     json.dumps([saved, todo, forced, found, note, listed, moved, wf])
 
@@ -696,3 +698,16 @@ def test_edit_rechecks_after_backup_when_an_external_editor_changes_note(vault: 
     result = _edit(vault, path, "keep", "changed")
     assert not result["ok"] and "note changed" in result["reason"]
     assert (vault / path).read_text() == "edited in Obsidian\n"
+
+
+def test_the_daily_plan_is_written_in_one_pass_with_the_calendar(vault: Path) -> None:
+    """2026-09-24 08:44: "plan my day" went vault → think_hard (20.5 s at high effort) and came back as "a
+    suggested plan … with no calendar checked": the pack never reads the calendar and the second model has
+    no tools to. The brain that holds the calendar tools writes the plan itself, from the calendar and the pack."""
+    wf = dispatch(vault, "second_brain_workflow", {"name": "daily-plan", "extra": None})
+    assert "think_hard" not in wf["note"] and "calendar" in wf["note"]
+    assert "calendar" in wf["prompt"].split("<context")[0]
+    tool = next(t for t in sb.SECOND_BRAIN_TOOLS if t["name"] == "second_brain_workflow")
+    assert "think_hard" not in tool["description"]
+    sentence = next(x for x in sb.INSTRUCTIONS_BLOCK.replace("\n", " ").split(". ") if "plan my day" in x)
+    assert "think_hard" not in sentence and "calendar" in sentence
