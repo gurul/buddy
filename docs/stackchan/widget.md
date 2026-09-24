@@ -13,7 +13,7 @@ for the feeling it was written in; the large size adds what changed. **Tap it**
 
 | Tab | What |
 |---|---|
-| **Talking** | what buddy heard: the claims you promoted by saying *"remember that"* pinned at the top, then every conversation newest first with what it was about and any **debt of buddy's own** (`buddy owes …`) |
+| **Talking** | what buddy heard: the claims you promoted by saying *"remember that"* pinned at the top, then the dream journal of today and yesterday — what the day was about and any **debt of buddy's own** (`buddy owes …`) |
 | **Notes** | recordings buddy made of the room on request ([voice.md](voice.md#taking-notes-on-the-room)), each with *Open*, *Save a copy…* and *Show in Finder* |
 | Thoughts | every thought by day; click one for the observations, what changed, tags, novelty and importance, and valence/arousal gauges; a toggle shows the unwritten candidates buddy kept in memory only; **★ stars** a thought into `highlights.md` |
 | Feelings | valence and arousal per thought over time (Swift Charts), a tally of feelings |
@@ -44,23 +44,24 @@ buddy remembers two different kinds of thing, and the widget never merges them:
 
 | | What buddy **saw** | What buddy **heard** |
 |---|---|---|
-| Written by | `diary.py` | `chat_memory.py` |
-| Lives in | `~/.config/cc-buddy-bridge/notes/` | `~/.config/cc-buddy-bridge/debrief/` (its own claude-debrief store) |
-| Shown in | Thoughts, Photos, Feelings, Profile, Dreams | **Talking**, and one line on the card |
+| Written by | `diary.py` | the transcripts, then the nightly dream (`dream.py`, `records.py`) |
+| Lives in | `~/.config/cc-buddy-bridge/notes/` | `~/.config/cc-buddy-bridge/memory/` ([memory.md](memory.md)) |
+| Shown in | Thoughts, Photos, Feelings, Profile, Dreams | **Talking** and **Notes**, and one line on the card |
 | Quotable as fact | no — a camera suggested it | yes — the owner said it |
-| Starred by | ★ in the diary window (`notes/highlights.md`) | saying *"remember that"* out loud (`debrief/HIGHLIGHTS.md`, under `## From talking`) |
+| Starred by | ★ in the diary window (`notes/highlights.md`) | saying *"remember that"* out loud or in Telegram (`memory/records/starred.md`) |
 
 The card shows the newest `buddy owes …` line above everything buddy saw, because
 it is the one line about the owner rather than about the room, and it is the thing
 buddy has not done yet.
 
-**Only buddy's own section of `debrief/HIGHLIGHTS.md` is ever read.** A fresh
-`era-debrief install` seeds that file with a worked example carrying ★ lines of
-its own, about somebody else's outage. Scanning the whole file put one of those on
-the desktop as buddy's memory of its owner (2026-09-11); reading only the
-`## From talking` section makes that impossible rather than unlikely.
-`CC_BUDDY_DEBRIEF_DIR` overrides the store path, as `CC_BUDDY_NOTES_DIR` does the
-notes one.
+The widget only reads the memory folder, never creates it: the daemon's one-time
+move of the old store skips a target that already exists, so a folder made by the
+widget would strand the owner's records. The Talking tab reads
+`records/starred.md` (the same claims buddy starts every conversation with) and
+`records/days/<day>.md` (the dream journal, written the night after); the Notes
+tab reads `transcripts/meetings/`. It never reads a transcript.
+`CC_BUDDY_MEMORY_DIR` overrides the memory folder, as `CC_BUDDY_NOTES_DIR` does
+the notes one.
 
 ## How notes flow
 
@@ -96,7 +97,7 @@ section, tolerant `Thought` decoding for `memory.jsonl` (missing fields default)
 Environment knobs on the helper:
 
 - `CC_BUDDY_NOTES_DIR` — override the notes directory (default `~/.config/cc-buddy-bridge/notes`).
-- `CC_BUDDY_DEBRIEF_DIR` — override buddy's spoken-memory store (default `~/.config/cc-buddy-bridge/debrief`).
+- `CC_BUDDY_MEMORY_DIR` — override buddy's memory folder (default `~/.config/cc-buddy-bridge/memory`).
 - `CC_BUDDY_NO_LOGIN_ITEM=1` — skip the one-time login-item registration (smoke tests from a build dir).
 
 ## Build and install

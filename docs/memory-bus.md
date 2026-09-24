@@ -1,23 +1,23 @@
 # buddy's memory bus
 
-buddy keeps three memories, and until now none of them was live. The diary is a
-JSONL stream of what it saw. The debrief store holds one distilled note per
-conversation, written after the conversation closes. A lesson is a SQLite row.
-The memory bus is the one place those become events the moment they happen, so
-that anything else can watch buddy's day as it forms.
+buddy keeps two memories that go on this bus. The diary is a JSONL stream of
+what it saw. A lesson is a SQLite row. The memory bus is the one place those
+become events the moment they happen, so that anything else can watch buddy's
+day as it forms. What was **said** in a conversation is not on the bus: it stays
+in buddy's memory folder ([stackchan/memory.md](stackchan/memory.md)).
 
 ```
  eyes / voice / lessons / diary ──► daemon ──► MemoryBus (in-process pub/sub)
                                                  │
             ┌────────────────────────────────────┼──────────────────────────┐
             ▼                                    ▼                          ▼
-  rosbridge server  ws://127.0.0.1:9090   claude-mem sink               recall (as before)
-  /buddy/memory/observation               POST /api/memory/save         debrief store
-  /buddy/memory/conversation              project "buddy"
-  /buddy/memory/lesson                    ▲
-  /buddy/state                            │ GET /api/search
-  service /buddy/memory/recall ───────────┘  answers a recall call
-  + inbound publish /buddy/memory/remember ──► a ★ (candidate) draft
+  rosbridge server  ws://127.0.0.1:9090   claude-mem sink               memory folder
+  /buddy/memory/observation               POST /api/memory/save         (CC_BUDDY_MEMORY=1)
+  /buddy/memory/lesson                    project "buddy"               ▲
+  /buddy/state                            ▲                             │
+                                          │ GET /api/search             │
+  service /buddy/memory/recall ───────────┘  answers a recall call      │
+  + inbound publish /buddy/memory/remember ──► one transcript line ──────┘
   + /claude/observation ◄── mirrored from claude-mem's live stream
 ```
 
@@ -34,7 +34,6 @@ rosbridge client sends with `subscribe`.
 | Topic | Type | Fields | Fires when |
 | --- | --- | --- | --- |
 | `/buddy/memory/observation` | `buddy_msgs/Observation` | `thought`, `observations[]`, `changed[]`, `tags[]`, `importance`, `novelty` | The diary **writes** a thought to the day file. Candidates it keeps only in memory never fire. Photos never ride along. |
-| `/buddy/memory/conversation` | `buddy_msgs/ConversationNote` | `title`, `note[]`, `open[]`, `owes[]`, `session_id`, `ended` | A conversation closed and buddy distilled it. The note, never the transcript. |
 | `/buddy/memory/lesson` | `buddy_msgs/LessonEvent` | `action`, `stage`, `topic`, `level`, `mode`, `lesson_id`, `feedback` | A lesson moved on: from the web page, the voice, or `cc-buddy-bridge lesson`. `feedback` is buddy's own words. `action` is the lesson action when the event came through the terminal or voice, `notice` when the web page drove it. |
 | `/buddy/state` | `buddy_msgs/AgentState` | `state` | The conversation phase changed: `idle`, `wake`, `listening`, `thinking`, `speaking`, `working`, `done`, `error`. |
 | `/buddy/presence` | `buddy_msgs/Presence` | `state` | In a conversation, buddy's sense of where its person is changed ([vision.md](stackchan/vision.md#following-whoever-is-talking)): `seen`, `lost` (with `leaving`: they were moving fast or left by a frame edge), `found` (with `how`: where they were heading, where they usually are, either side, up and down). Carries `yaw`, `pitch`, `speed` (deg/s) and `phase`. Live only: not stored in claude-mem. |
@@ -50,11 +49,13 @@ answers `{"results": [], "error": "claude-mem is off (CC_BUDDY_CLAUDE_MEM=1)"}`.
 
 ## What a `remember` does
 
-buddy never stars anything for itself. A line published on
-`/buddy/memory/remember` becomes a draft in buddy's chat-memory store,
-`sessions/<date>/<time>-bus-<id>.md`, with the line under **Proposed for the
-permanent layer** as a `★ (candidate)`. The owner promotes it, or not, the same
-way as any candidate from a conversation.
+buddy never stars anything for itself, and a bus line is not something the owner
+said. With `CC_BUDDY_MEMORY=1`, a line published on `/buddy/memory/remember`
+becomes one line in the day's transcript (channel `bus`, labelled "sent" in
+search), and the nightly dream judges it beside everything else said that day
+([stackchan/memory.md](stackchan/memory.md)). It is never a star, never in a
+prompt's today block, and never the "last talked" time. With memory off it is
+dropped.
 
 ## Environment
 
@@ -113,8 +114,8 @@ an HTTP API on localhost. buddy uses three of its routes:
 - `GET /stream` (server-sent events) for the mirror, which republishes
   `new_observation` events and skips project `buddy` so buddy never echoes itself.
 
-So a Claude Code session with claude-mem installed can search what buddy saw and
-said today. In that session: *"what did buddy notice this afternoon?"* reaches
+So a Claude Code session with claude-mem installed can search what buddy saw
+and taught today. What was said in a conversation is not there. In that session: *"what did buddy notice this afternoon?"* reaches
 claude-mem's `search` tool with project `buddy`.
 
 The worker starts when a Claude Code session starts. If buddy boots first, or
@@ -132,7 +133,9 @@ or claude-mem:
   images stay in the lesson store on this computer (docs/learning.md). A lesson
   event carries the action, the stage, the topic, the level and buddy's own
   feedback line, nothing else.
-- **Conversation transcripts.** The distilled note goes out, the turns do not.
+- **Anything said in a conversation.** The transcripts, the records and the
+  profile stay in buddy's memory folder; claude-mem receives no conversation
+  content at all.
 
 The rosbridge server binds `127.0.0.1` unless told otherwise. There is no
 authentication on the protocol, which is why the default is loopback only.

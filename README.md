@@ -33,13 +33,19 @@ and desktop widget show its diary, memories and lessons.
   for an object, explore the room, take a photo on request, or dance.
 - **Has moods and a diary.** An on-board affect engine drives expressions, movement,
   LED patterns and chirps. The host keeps observations, selected thoughts and
-  photos, a room/person profile, and nightly reflections. Conversation memories
-  are stored separately as distilled notes; “remember that” promotes a spoken fact.
+  photos, a room/person profile, and nightly reflections.
+- **Remembers what you said (opt-in).** With `CC_BUDDY_MEMORY=1`, every word of a
+  voice or Telegram conversation is kept on the Mac the moment it is said, both
+  channels see each other, and a nightly dream turns each day into editable records
+  and a profile. Both brains can `memory_search` it; “remember that” stars a fact;
+  “forget that” previews the counts, then forgets everywhere on a yes. See
+  [memory](docs/stackchan/memory.md).
 - **Mirrors Claude Code.** Session hooks and transcript updates make buddy sleep,
   work, celebrate, or ask for attention. A tap can focus a waiting terminal;
   Claude Code permission prompts remain in that terminal.
 - **Shows its day.** The macOS menu-bar app, diary window and WidgetKit extension
-  show thoughts, photos, feelings, conversation notes and saved lessons, with
+  show thoughts, photos, feelings, what you asked buddy to remember, its dream
+  journal and saved lessons, with
   microphone and daemon power controls.
 
 ### On your Mac
@@ -296,7 +302,7 @@ flowchart TB
 | Host bridge | Python with `asyncio`; `cc-buddy-bridge` is the CLI and daemon entry point. Hooks and CLI commands use local JSON IPC; the robot link is newline-delimited JSON over USB serial. |
 | Voice and reasoning | sherpa-onnx keyword spotting with sounddevice audio input; the configured defaults are `gpt-live-1` for voice and `gpt-6-astra` for reasoning. Captions are the default output. Voice, text and deep reasoning use OpenAI's built-in web search by default (`websearch.py`); Exa is opt-in. |
 | Desktop control | The voice and text `start_task` tool delegates to Codex app-server and its installed `cua_repl.js` Computer Use plugin. Progress, explicit permissions, results, steering and cancellation return through buddy. |
-| Vision and memory | macOS Vision for face detection, host-side identity/following logic, model-assisted scene observations and reflections, plus separate diary and conversation stores. |
+| Vision and memory | macOS Vision for face detection, host-side identity/following logic, model-assisted scene observations and reflections, plus a separate conversation memory: transcripts, records rewritten by a nightly dream, and a mem0 index. |
 | Learning | Python HTTP service on `127.0.0.1:48766`, SQLite persistence, and a React/TypeScript tldraw canvas built with Vite. Tutor responses use a validated JSON shape for problems, feedback, steps and completion state. |
 | Native UI | SwiftUI menu-bar app and diary window, with a WidgetKit extension. The helper mirrors local data into an App Group snapshot for the widget. |
 | Memory integrations | In-process publish/subscribe bus; optional rosbridge-compatible WebSocket endpoint and claude-mem sink/recall. Neither is required. |
@@ -368,8 +374,7 @@ Every message is shaped for the phone by `telegram_format.py`.
 | Buttons | Yes/no prompts (Claude permissions, app actions, Codex approvals), Claude's question options and the pickers are inline buttons. A tap does what typing would; typing still works. |
 | `codex on` / `codex <folder>` | Starts a new Codex chat in a saved folder, with approvals relayed to Telegram. Each turn shows one progress message with a Stop button. `stop` interrupts, `codex off` returns to buddy, `buddy:` addresses buddy directly. |
 | `new claude` | Opens a coding session in Warp from a few short texts. |
-| Records (`CC_BUDDY_RECORDS=1`) | Typed, git-tracked markdown records and a profile, written only by a nightly reconcile (`records.py`) that also reads what you said to remember. Telegram and voice both read the profile. |
-| mem0 (`CC_BUDDY_MEM0=1`) | Self-hosted mem0 beside the records: a local meaning search over the session notes that `memory_search` also returns (`mem0_memory.py`). |
+| Memory (`CC_BUDDY_MEMORY=1`) | One memory for both channels ([memory.md](docs/stackchan/memory.md)): every line kept in a local per-day transcript, records and a profile rewritten by a nightly dream, and a self-hosted mem0 index (`CC_BUDDY_MEM0=0` turns just that off). Tools: `memory_search`, `memory_read`, `forget_preview`, `forget_apply`. |
 | Composio (`CC_BUDDY_COMPOSIO=1`) | Your apps by API (`composio_tools.py`): Gmail read-only, calendar writable, Drive and the rest asked first. |
 | Second brain (`CC_BUDDY_SECOND_BRAIN=1`) | Texts become notes in a local markdown vault Obsidian opens (`second_brain.py`). |
 
@@ -391,7 +396,7 @@ Persistent data lives under `~/.config/cc-buddy-bridge/`:
 |---|---|
 | `env` | API credentials and runtime settings |
 | `notes/` | Diary Markdown, observation JSONL, profiles, highlights and photo records |
-| `debrief/` | Distilled conversation memories and promoted spoken facts; with records on, a git repository holding `records/` |
+| `memory/` | With `CC_BUDDY_MEMORY=1`: `transcripts/` (every word, and meeting notes), `records/` (profile, stars, records and the dream journal, a sealed local git repository), `mem0/` (the meaning index) and `archive/` (the retired debrief store, moved once). See [memory.md](docs/stackchan/memory.md). |
 | `learning/` | `lessons.sqlite3` and saved lesson/whiteboard data |
 | `agent-runs/` | Desktop-task run logs |
 
@@ -399,8 +404,8 @@ Persistent data lives under `~/.config/cc-buddy-bridge/`:
 - The menu-bar app and desktop widget have a persistent **Turn buddy off / on** control.
 - `CC_BUDDY_ROSBRIDGE=1` exposes memory events at `ws://127.0.0.1:9090` (no
   authentication, loopback by default); `CC_BUDDY_CLAUDE_MEM=1` saves them to a local
-  claude-mem worker. Both are off by default. The event bus excludes conversation
-  transcripts and learner input; lesson events carry metadata and buddy's feedback.
+  claude-mem worker. Both are off by default. The event bus carries nothing said in
+  a conversation and no learner input; lesson events carry metadata and buddy's feedback.
   See [memory-bus.md](docs/memory-bus.md).
 
 ## Repository guide
@@ -414,7 +419,7 @@ Persistent data lives under `~/.config/cc-buddy-bridge/`:
 | `bridge/tests/`, `bridge/tools/` | Python tests, fixtures and routing/desktop evaluation tools | [Routing evaluations](docs/stackchan/routing.md) |
 | `widget/` | SwiftUI app, shared data readers, WidgetKit extension and Xcode project | [Widget setup](docs/stackchan/widget.md) |
 | `tools/` | Firmware flashing, standalone learning launcher and demo utilities | [Build](docs/stackchan/build.md), [learning](docs/learning.md) |
-| `docs/stackchan/` | Hardware notes, personality, vision and integration details | [Personality](docs/stackchan/personality.md), [vision](docs/stackchan/vision.md), [Claude Code](docs/stackchan/claude-code-integration.md) |
+| `docs/stackchan/` | Hardware notes, personality, vision and integration details | [Personality](docs/stackchan/personality.md), [vision](docs/stackchan/vision.md), [memory](docs/stackchan/memory.md), [Claude Code](docs/stackchan/claude-code-integration.md) |
 | `docs/launch-video/` | Launch films (Remotion), script and reference material | [Video project](docs/launch-video/remotion/README.md) |
 | `past-experiments/` | Earlier boards, e-ink firmware and enclosure experiments | [Archive overview](past-experiments/README.md) |
 

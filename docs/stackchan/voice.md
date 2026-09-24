@@ -283,6 +283,7 @@ Buddy uses a fresh lookup for current time instead of reusing its start time.
 | `CC_BUDDY_MIC_FILE` | `~/.config/cc-buddy-bridge/mic.json` | where the owner's `mic on/off` choice is kept |
 | `CC_BUDDY_KWS_MODEL_DIR` | see above | where the sherpa-onnx model lives |
 | `CC_BUDDY_LIVE_MODEL` | `gpt-live-1` | the voice model (Live API) |
+| `CC_BUDDY_MEMORY` | `0` | `1`: keep every word in the transcripts, give the voice the profile, today's lines and the memory tools, and dream nightly ([memory.md](memory.md)); `CC_BUDDY_RECORDS=1` is a legacy alias |
 | `CC_BUDDY_LIVE_BACKEND_MODEL` | `gpt-6-astra` | the Responses backend that owns the tools (`gpt-5-mini` answers faster, calls tools less reliably) |
 | `CC_BUDDY_LIVE_BACKEND_EFFORT` | `low` | reasoning effort for that backend |
 | `CC_BUDDY_LIVE_WEB_SEARCH` | on | `0`: the backend gets no `web_search` tool, so live facts are answered from training only |
@@ -326,48 +327,53 @@ Buddy uses a fresh lookup for current time instead of reusing its start time.
 
 ## What buddy remembers of talking with you
 
-Every conversation used to start from nothing. Now it does not.
+Every conversation used to start from nothing. With `CC_BUDDY_MEMORY=1` it does
+not. The full design — the three stores, the nightly dream, forget, the one-time
+move from the old store, and what leaves the Mac — is in [memory.md](memory.md).
+For the voice:
 
 ```
-a conversation closes
-  └─ chat_memory.py distils the turns held in RAM into one short note
-       ~/.config/cc-buddy-bridge/debrief/sessions/<day>/<HHMM>-<id>.md   status: machine-draft
-       └─ buddy's own day pass, every 30 min, aggregates a finished day
-            <day>-<slug>.md  +  a row in INDEX.md
 a conversation opens
-  └─ recall.py reads the gap and one carried-over line, into the session prompt
+  └─ recall.py: one clause — the gap since the last word on either channel, and
+     the title of that day's dream journal when it was before today
+  └─ the Live front gets that clause, the short voice profile (≤ 3,000 chars) and
+     today's lines on both channels, worded for voice (≤ 4,000)
+  └─ the backend gets the full profile and today's lines (≤ 16,000), and the tools
+     memory_search · memory_read · recent_conversation · forget_preview · forget_apply
+every turn closes
+  └─ both sides, and the results buddy answered from, go into
+     ~/.config/cc-buddy-bridge/memory/transcripts/<day>.jsonl at once
+the conversation ends (goodbye, silence, a restart)
+  └─ a close marker; the nightly dream turns the day into the records and the index
 ```
 
-- **The transcript is never written to disk.** The words go to a small model and a
-  few lines come back. That was the owner's choice: distilled memories only.
-- **The gap comes from one integer** in `notes/last_conversation`. "Been a day."
-  costs no model call, no index and no network.
-- **The best thing buddy can open with is a debt of its own.** The distiller records
-  what it failed to answer as `buddy owes …`, and the reader prefers those lines over
-  anything else, so the next morning sounds like *"I still owe you an answer about
-  the right servo"* rather than a summary of you.
-- **buddy runs its own day pass.** In the owner's claude-debrief system a human
-  curates; buddy's store is its own system and curates itself (owner instruction
-  2026-09-11). What it will not do is **star**: a highlight is permanent, so buddy
-  only proposes a `★ (candidate)` line.
+- **Every word is kept, on this Mac.** The owner reversed the old distilled-only
+  rule on 2026-09-23: a failed model call or a restart used to lose a conversation
+  for good. The words are written the moment a turn closes, in a folder that refuses
+  to sit in a git tree or a synced folder.
+- **The voice can look things up.** A question about the owner or about what was
+  said before goes to the memory tools first, before the web or `think_hard`.
+  `memory_search` returns dated record lines, memories found by meaning, and the
+  words themselves; `recent_conversation` has what the owner texted since this
+  conversation began. A lookup gets 2.5 s; past that the backend is told it took too
+  long.
 - **Starring is by voice.** Say *"remember that"*, *"don't forget that"*, *"keep that
-  in mind"* and the claim from the previous turn goes into
-  `debrief/HIGHLIGHTS.md` under `## From talking`, dated. It is anaphoric on purpose:
-  the claim is in the turn before, not in the words "remember that". Two independent
-  paths catch it — a phrase table and the classifier — so it does not depend on the
-  model choosing a tool. "I remember that" and "remember when you said that?"
-  promote nothing.
-- **A conversation two minutes after the last one gets no time clause**, because to a
-  person that is one conversation.
-- **Silence is the right answer when there is nothing.** An empty store means the
-  session prompt is byte-identical to before, so the first ever conversation sounds
-  exactly as it always did. buddy never announces that it has no memories.
-- **All of it is visible in the widget**, under Talking —
+  in mind"* and the claim from the previous turn goes into `records/starred.md`,
+  dated, and is on the profile from the next conversation (or the next Telegram
+  message). It is anaphoric on purpose: the claim is in the turn before, not in the
+  words "remember that". Two independent paths catch it — a phrase table and the
+  classifier — so it does not depend on the model choosing a tool. "I remember that"
+  and "remember when you said that?" promote nothing.
+- **Think out loud keeps nothing.** In a lesson the learner's words are never
+  written, starred or given the memory tools.
+- **A conversation less than fifteen minutes after the last one gets no time
+  clause**, because to a person that is one conversation.
+- **Silence is the right answer when there is nothing.** With memory off, or before
+  anything was said, the session prompt is byte-identical to before, so the first
+  ever conversation sounds exactly as it always did. buddy never announces that it
+  has no memories.
+- **The stars and the dream journal are visible in the widget**, under Talking —
   [widget.md](widget.md#the-two-provenances).
-
-Knobs: `CC_BUDDY_DEBRIEF_DIR` (the store), `CC_BUDDY_CHAT_MEMORY_MODEL` (the
-distiller, default `gpt-5.4-nano`). No key means buddy talks and remembers nothing,
-and says so once in the log.
 
 ## Taking notes on the room
 
@@ -382,7 +388,7 @@ and it writes the meeting up.
             12 s segments ─▶ gpt-4o-mini-transcribe ─▶ a running transcript
             each segment's tail primes the next, so names stay spelled the same
 "stop taking notes"  (or a tap, or the command)
-  └─ one summary call ─▶ ~/.config/cc-buddy-bridge/debrief/notes/<day>/<HHMM>-<slug>.md
+  └─ one summary call ─▶ ~/.config/cc-buddy-bridge/memory/transcripts/meetings/<day>/<HHMM>-<slug>.md
        the write-up AND the full transcript, stamped by minute
 ```
 
@@ -394,10 +400,9 @@ command, and a tap on the robot.
 
 **What is kept.** The write-up — gist, points, decisions, actions, open questions, and
 what it could not make out — **and the full transcript**, because the point of notes on a
-meeting is being able to go back to the words. That is the opposite of the rule for
-conversations, where only the distillation is kept, and it is deliberate: a conversation
-is remembered, a meeting is recorded. `CC_BUDDY_NOTES_KEEP_TRANSCRIPT=0` drops the
-transcript.
+meeting is being able to go back to the words. The file sits beside the conversation
+transcripts, so `memory_search` finds it and forget reaches it ([memory.md](memory.md)).
+`CC_BUDDY_NOTES_KEEP_TRANSCRIPT=0` drops the transcript.
 
 **Ordering.** Segments are transcribed one at a time by a single worker. Transcribing
 them concurrently scrambles the transcript, because a slow segment lands after the one

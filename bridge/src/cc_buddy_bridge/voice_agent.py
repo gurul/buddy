@@ -287,7 +287,7 @@ back as a list, never say more than one clause about it, never ask them to confi
 having or not having memories. If none of it fits, say nothing about it at all."""
 
 
-# The records profile (records.py), when CC_BUDDY_RECORDS is on: who the owner is, what they like, how they
+# The records profile (records.py), when CC_BUDDY_MEMORY is on: who the owner is, what they like, how they
 # like to talk. Unlike the brief it is background, never something to bring up: it shapes the words.
 PROFILE_HEADER = """
 

@@ -1,6 +1,7 @@
 # The second brain: your notes, texted to buddy
 
-`records.py` is what buddy knows about you and never writes mid-conversation.
+buddy's memory ([memory.md](memory.md)) is what buddy knows about you, rewritten
+only by its nightly dream and never mid-conversation.
 The second brain is the other thing: what **you** write down and want back
 later. A thought texted from the bus, a todo, a line for the journal, a meeting
 to distil. `second_brain.py` turns a text to buddy into a markdown file in your

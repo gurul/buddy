@@ -18,7 +18,8 @@ your phone ── Telegram ──▶ api.telegram.org ◀── long poll (outbo
                                                           tools: start_task · steer_task · stop_task · take_photo ·
                                                                  screenshot · send_file · list_files · look · look_around ·
                                                                  find · move_head · go_explore · set_sound · take_notes ·
-                                                                 remember · think_hard · web_search (+ memory_search · memory_get)
+                                                                 remember · think_hard · web_search (+ memory_search · memory_read ·
+                                                                 forget_preview · forget_apply with CC_BUDDY_MEMORY=1)
                                                                                    │ start_task
                                                                                    ▼
                                               codex_computer.py → Codex app-server → installed cua_repl.js
@@ -348,8 +349,8 @@ Flip it to `ask` if two seconds a command is a price you will pay.
 ## What you can text
 
 - **Anything you would say at the desk.** Buddy answers in a line or three, with
-  what it remembers of your conversations in its prompt (`recall.opening_brief`)
-  and the earlier turns of this chat as context (the last 24).
+  the earlier turns of this chat as context (the last 24) and, with memory on,
+  your profile and today's talk on both channels ([Memory](#memory)).
 - **A task for the Mac** — "open the calculator", "play my focus playlist". When
   the request is ambiguous (which account, what to look for once the page is
   open), buddy asks one question in the chat first and starts nothing on a
@@ -571,126 +572,36 @@ task it started is running, a texted task is refused ("the Mac is theirs until
 that conversation ends"); while a texted task runs, the voice refuses to start
 another. Touching the robot to cancel a task works for a texted task too.
 
-After ten quiet minutes the chat's turns are handed to the same conversation
-memory a spoken conversation feeds (`chat_memory.py`), so tomorrow's "hey buddy"
-knows what you texted about.
+After ten quiet minutes the chat is over: its turns are cleared from RAM and its
+transcript gets a close marker. Nothing is handed anywhere, because with memory on
+every line was already written down the moment it was typed or sent.
 
-## The memory layer: records
+## Memory
 
-A spoken conversation opens with one clause of memory (`recall.opening_brief`),
-which is right at the desk. A text chat needs more: "what was that restaurant"
-is a lookup, not a greeting. `records.py` is that layer, and it follows the shape
-Instinct (the iMessage assistant) was found to use — reverse-engineered by
-Dhravya Shah, 2026-09-20 — for one property: **the agent never writes its own
-memory.**
+With `CC_BUDDY_MEMORY=1` the text brain shares one memory with the voice. The full
+design is in [memory.md](memory.md); what matters for the chat:
 
-```
-~/.config/cc-buddy-bridge/debrief/          the store chat_memory.py already keeps, now a git repository
-├── sessions/<day>/…                        distilled notes, one per conversation (spoken or texted)
-├── <day>-<slug>.md                         the curated day
-└── records/
-    ├── profile.md                          the one-pager every text turn starts with
-    ├── dining.md  cafe-nero.md  sam.md …   one typed record per thing
-    └── .reconciled                         which days have been read
-```
+- **Every line is in the day's transcript as it happens**
+  (`~/.config/cc-buddy-bridge/memory/transcripts/<day>.jsonl`): what you typed,
+  buddy's replies, commands, relayed Claude lines, image turns and the tool results
+  buddy answered from. A restart or a failed model call loses nothing, and a voice
+  conversation a minute later sees this chat.
+- **Every turn's prompt carries** the profile (`records/profile.md`, re-read each
+  turn, up to 6,000 characters, with the stars the nightly dream has not absorbed
+  yet on top) and today's lines on both channels (up to 32,000 characters, minus
+  what this chat's history already shows). The opening brief rides in the turn note.
+- **Four memory tools:** `memory_search` (record lines, mem0 memories found by
+  meaning, and the words said, each dated), `memory_read` (a record by id, or a day
+  or a stretch of one), and the two-step forget, `forget_preview` then
+  `forget_apply`, which runs only after you confirm in a new message.
+- **"remember that …"** goes through the `remember` tool into
+  `records/starred.md`, and counts from your next message. A 🏆 on your message is
+  the confirmation.
+- **The brain never writes what it knows.** The records and the mem0 index are
+  rewritten once a night by the dream, from the transcript.
 
-A record is a markdown file the owner can open and edit:
-
-```
----
-id: dining
-type: preference
-aliases: [food, lunch, restaurants, takeout]
-updated: 2026-09-20
----
-- Now prefers ramen for lunch (changed 2026-09-20; was pasta).
-- Usual lunch spot is [[cafe-nero]] (said 2026-09-18).
-```
-
-Types are `preference`, `person`, `organization`, `project`, `place`, `routine`,
-`conversation`. Facts carry their date; a wrong fact becomes a dated correction,
-never a silent edit. `[[id]]` links records to each other. **Aliases are the
-index**: search is keyword matching over ids, aliases and fact lines — no
-vectors — so every record carries the words you might use for it.
-
-What the text brain gets, all read-only:
-
-- **The profile** in its instructions, every turn: three sections (life context,
-  acting on your behalf, how you like to talk) and an index of the records with
-  their aliases, so it knows what it can look up before it looks. Re-read from
-  disk per turn, so a hand edit counts at once. Capped at 6,000 characters. The
-  model is told to let it shape every reply (your name, your taste, how you like
-  to be talked to), not only questions about you, and to search the records
-  before saying it does not know something about you.
-- **What you said to remember** ("remember that …", the ★ lines in
-  `HIGHLIGHTS.md`). Stars newer than the profile's `updated:` date go on top of
-  it, verbatim, so a star counts on the next message rather than after the
-  nightly reconcile. With no profile yet, the stars alone are the page.
-- **`memory_search(query)`** — the matching fact lines with their record ids.
-- **`memory_get(id)`** — one whole record.
-
-The only writer is the **nightly reconcile**: once a day's curated file exists
-(`chat_memory.py` writes it the next day), the model is shown every current
-record, everything you said to remember (your words, authoritative; it folds
-the real facts, your name first, into the records and the profile and leaves out
-a stray line the microphone caught), and that day's notes and returns the records that change, whole — it
-merges examples into traits, drops incidental detail, adds dated corrections —
-plus the profile. Before the result is written, whatever is on disk (your hand
-edits included) is committed as its own git commit; the reconcile is a second
-commit. So an old fact is one `git log` away, a wrong reconcile is one revert,
-and the model's diff is exactly what it changed. "Forget the cafe" removes the
-file from the working tree; history keeps it. The first live run on this Mac's
-real notes (2026-09-21, gpt-5.4-nano, two days) produced eight typed records
-and a three-section profile.
-
-| Variable | Default | What it does |
-|---|---|---|
-| `CC_BUDDY_RECORDS` | `0` | The switch: reconcile each curated day into records, give the text brain the profile and the two memory tools, and give each spoken conversation the same profile. |
-| `CC_BUDDY_RECORDS_MODEL` | `gpt-5.4-nano` | The reconciling model (one call per day, `store=False`). |
-
-**Voice gets the profile too.** When the switch is on, every spoken conversation
-opens with the same page in its instructions, as background: the voice is told to
-let it shape what it says without reciting it. The one-clause opening brief is
-unchanged. The page is read once, when the conversation starts, because the
-voice's instructions cannot change mid-session.
-
-**The history never leaves this computer.** The store's repository is buddy's
-own, separate from this project's, and on every start buddy locks it
-(`records.seal`): any remote is removed, every push URL is rewritten to one that
-cannot resolve (which `--no-verify` cannot skip), and a pre-push hook refuses. A
-store inside some other git repository is never committed to at all. The debrief
-installer's `*` `.gitignore` stays; buddy adds with `--force` in its own
-repository only.
-
-### Memory by meaning: mem0, self-hosted
-
-Keyword search misses a question asked in other words than the note used ("where
-does my sister live" against "Ana moved to Lisbon"). With `CC_BUDDY_MEM0=1`
-(records on too), `mem0_memory.py` runs mem0's open-source library on this Mac
-and `memory_search` returns its hits as `recalled` beside the record lines.
-
-- **Fed only the distilled session notes**, never the text brain: the first run
-  reads every note already on disk, then new ones every five minutes. The model
-  in a conversation still cannot write memory.
-- **Stored locally:** Qdrant on disk and a SQLite history under
-  `~/.config/cc-buddy-bridge/mem0`, outside any git repository. The two model
-  calls (fact extraction with `gpt-5.4-nano`, embeddings with
-  `text-embedding-3-small`) go to OpenAI.
-- **Telemetry off:** mem0 ships PostHog telemetry, on by default and read at
-  import. buddy sets `MEM0_TELEMETRY=False` and `MEM0_DIR` (so nothing lands in
-  `~/.mem0`) before the first import, and refuses mem0 if telemetry still reads on.
-- Install with `pip install -e ".[mem0]"` (mem0ai 2.2). Hits scoring under 0.25
-  are dropped as guesses.
-
-| Variable | Default | What it does |
-|---|---|---|
-| `CC_BUDDY_MEM0` | `0` | The switch, beside `CC_BUDDY_RECORDS=1`. |
-| `CC_BUDDY_MEM0_MODEL` | `gpt-5.4-nano` | The extracting model. |
-| `CC_BUDDY_MEM0_HOME` | `~/.config/cc-buddy-bridge/mem0` | Where the vector store and history live. |
-
-Off, nothing changes: no records directory, no git repository, the text brain
-gets the one-clause brief only. On, the store becomes a git repository (`git`
-must be installed; without it records are still written, without history).
+With memory off there is no transcript, no profile, no memory tool, and the prompt
+is what it was before memory existed.
 
 ## The rules, and why they are code
 
