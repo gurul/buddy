@@ -232,3 +232,147 @@ def test_a_sensitive_control_stops_the_plan_for_the_human_and_a_yes_lets_it_thro
     assert first["status"] == "needs_human" and first["confirm"].casefold() == "place order"
     assert not any(e["effect"] == "confirmed" and "Order" in e["step"] for e in first["ledger"])
     assert second["status"] == "complete" and second["sentence"] == "Ordered."
+
+
+# ---- what the eval's fixture pages taught (tools/browser_model_eval.py, 2026-09-24) -----------------------
+
+def _serve(tmp_path: Path, name: str, html: str):
+    import functools
+    import http.server
+    import threading
+
+    (tmp_path / name).write_text(html)
+    handler = functools.partial(http.server.SimpleHTTPRequestHandler, directory=str(tmp_path))
+    srv = http.server.ThreadingHTTPServer(("127.0.0.1", 0), handler)
+    srv.RequestHandlerClass.log_message = lambda *a, **k: None
+    threading.Thread(target=srv.serve_forever, daemon=True).start()
+    return srv, f"http://127.0.0.1:{srv.server_address[1]}/{name}"
+
+
+BELOW_THE_FOLD = """<!doctype html><html><head><title>Pricing</title></head><body>
+<nav><a href="#top">Home</a></nav><h1>Pricing</h1><div style="height:3000px">Features and more features.</div>
+<button onclick="document.getElementById('out').textContent='Starter $5, Team $15'">Compare all plans</button>
+<p id="out"></p></body></html>"""
+
+
+@live
+def test_a_control_below_the_fold_is_collected_and_scrolled_to_before_the_click(tmp_path: Path) -> None:
+    srv, url = _serve(tmp_path, "pricing.html", BELOW_THE_FOLD)
+    lane = lane_for(tmp_path)
+    plan = {"steps": [{"kind": "click", "target": "the Compare all plans button", "label_hint": "Compare all plans",
+                       "expect": {"kind": "text_visible", "value": "Starter $5"}}],
+            "final_say": "Compared.", "success": None}
+
+    async def go() -> tuple[dict[str, Any], dict[str, Any]]:
+        await lane.open_url(url)
+        outline = await lane.outline()
+        result = await lane.run_plan(plan, "click the Compare all plans button at the bottom")
+        await lane.close()
+        return outline, result
+
+    try:
+        outline, result = asyncio.run(go())
+    finally:
+        srv.shutdown()
+    assert "button: Compare all plans" in outline["lines"]              # the planner can see it
+    assert result["status"] == "complete" and result["ledger"][0]["effect"] == "confirmed", result
+
+
+def _recipes(buttons: str) -> str:
+    return ("""<!doctype html><html><head><title>Recipes</title></head><body><h1>Recipes</h1>
+<ul><li><a href="#apple" onclick="document.title='Apple Crumble'">Apple Crumble</a></li>
+<li><a href="#lemon" onclick="document.title='Lemon Tart'">Lemon Tart</a></li></ul>
+<div role="dialog" style="display:none">A hidden dialog is not an open one.</div>
+<div id="cookie" role="dialog" aria-label="Cookie consent" style="position:fixed;inset:0;background:rgba(0,0,0,.5)">
+<div style="background:#fff;padding:24px"><p>We use cookies to improve your experience.</p>""" + buttons
+            + "</div></div></body></html>")
+
+
+REJECT = ("<button onclick=\"document.getElementById('cookie').remove(); window.choice='reject'\">Reject non-essential cookies</button>"
+          "<button onclick=\"document.getElementById('cookie').remove(); window.choice='accept'\">Accept all cookies</button>")
+ACCEPT_ONLY = "<button onclick=\"document.getElementById('cookie').remove(); window.choice='accept'\">Accept all cookies</button>"
+
+
+def test_a_consent_notice_is_dismissed_only_by_refusing_or_closing() -> None:
+    names = lambda *xs: [{"id": str(i), "name": x} for i, x in enumerate(xs)]  # noqa: E731
+    assert bl.consent_choice(names("Accept all cookies", "Reject non-essential cookies"))["name"].startswith("Reject")
+    assert bl.consent_choice(names("Agree", "Necessary only"))["name"] == "Necessary only"
+    assert bl.consent_choice(names("OK", "Close"))["name"] == "Close"
+    for agreeing in (names("Accept all cookies"), names("I agree", "OK"), names("Accept necessary cookies"), names()):
+        assert bl.consent_choice(agreeing) is None, agreeing
+    assert bl.CONSENT_TEXT.search("We use cookies to improve your experience.")
+    assert not bl.CONSENT_TEXT.search("Delete this event?")
+
+
+@live
+def test_a_cookie_notice_over_the_page_is_refused_before_the_plan_clicks(tmp_path: Path) -> None:
+    srv, url = _serve(tmp_path, "recipes.html", _recipes(REJECT))
+    lane = lane_for(tmp_path)
+    plan = {"steps": [{"kind": "click", "target": "the Lemon Tart link", "label_hint": "Lemon Tart",
+                       "expect": {"kind": "title_contains", "value": "Lemon Tart"}}],
+            "final_say": "Opened.", "success": None}
+
+    async def go() -> tuple[dict[str, Any], dict[str, Any], Any]:
+        await lane.open_url(url)
+        result = await lane.run_plan(plan, "open the Lemon Tart recipe")
+        outline = await lane.outline()
+        choice = await lane._run(lambda: lane._ensure().page.evaluate("() => window.choice"))
+        await lane.close()
+        return outline, result, choice
+
+    try:
+        outline, result, choice = asyncio.run(go())
+    finally:
+        srv.shutdown()
+    assert result["status"] == "complete", result
+    assert result["ledger"][0]["step"] == "dismiss the cookie notice" and choice == "reject"
+    assert "link: Lemon Tart" in outline["lines"]
+
+
+@live
+def test_a_notice_that_only_offers_to_accept_stays_up_and_stops_the_plan(tmp_path: Path) -> None:
+    srv, url = _serve(tmp_path, "recipes.html", _recipes(ACCEPT_ONLY))
+    lane = lane_for(tmp_path)
+    plan = {"steps": [{"kind": "click", "target": "the Lemon Tart link", "label_hint": "Lemon Tart"}],
+            "final_say": "Opened.", "success": None}
+
+    async def go() -> tuple[dict[str, Any], Any]:
+        await lane.open_url(url)
+        result = await lane.run_plan(plan, "open the Lemon Tart recipe")
+        choice = await lane._run(lambda: lane._ensure().page.evaluate("() => window.choice || ''"))
+        await lane.close()
+        return result, choice
+
+    try:
+        result, choice = asyncio.run(go())
+    finally:
+        srv.shutdown()
+    assert result["status"] == "none" and result["reason"] == "dialog_open" and choice == "", result
+
+
+SEARCH_HOME = """<!doctype html><html><head><title>Docs</title></head><body><h1>Docs</h1>
+<form action="results.html" method="get" role="search"><input type="search" name="q" aria-label="Search docs"></form>
+</body></html>"""
+RESULTS = """<!doctype html><html><head><title>Results</title></head><body><a href="#guide">Solar Panel Installation Guide</a></body></html>"""
+
+
+@live
+def test_return_in_a_search_field_waits_for_the_results_page(tmp_path: Path) -> None:
+    (tmp_path / "results.html").write_text(RESULTS)
+    srv, url = _serve(tmp_path, "docs.html", SEARCH_HOME)
+    lane = lane_for(tmp_path)
+    plan = {"steps": [{"kind": "type", "target": "the Search docs field", "label_hint": "Search docs", "text": "solar panels"},
+                      {"kind": "press_key", "key": "return"}], "final_say": "Searched.", "success": None}
+
+    async def go() -> tuple[dict[str, Any], str]:
+        await lane.open_url(url)
+        result = await lane.run_plan(plan, "search the docs for solar panels")
+        seen = await lane._run(lambda: lane._ensure().page.url)       # read at once, no extra wait
+        await lane.close()
+        return result, seen
+
+    try:
+        result, seen = asyncio.run(go())
+    finally:
+        srv.shutdown()
+    assert result["status"] == "complete" and "results.html?q=solar+panels" in seen, (result, seen)

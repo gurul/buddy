@@ -643,3 +643,15 @@ def test_dialog_open_beats_a_satisfied_done_when() -> None:
     result, eff = run("switch to week view", Senses([s]), Decider([]), done_when="Week")
     assert result.status == "escalate" and 'dialog_open: "Delete this event?"' in result.line
     assert eff.clicks == [] and eff.presses == []
+
+
+def test_a_control_named_exactly_is_not_mistaken_for_a_withheld_look_alike() -> None:
+    # browser_model_eval contact_form, 2026-09-24: the plan clicked the "Your message" field and the lane asked the
+    # human about "Send message" instead (one shared word each), which a yes would then have pressed.
+    form = snap(cand("0", "text field", "Your message", actions=("AXPress", "AXFocus")), cand("1", "button", "Send message"),
+                app="browser", bundle="buddy.browser", title="Contact us")
+    r, eff = run("Your message", Senses([form, form]), Decider([]))
+    assert r.status == "stopped" and eff.clicks == ["Your message"], r.line
+    # a looser objective still gets the withheld control's confirm, and the withheld control is never clicked
+    r, eff = run("the message", Senses([form]), Decider([]))
+    assert r.status == "confirm" and r.line.startswith('confirm: "Send message"') and eff.clicks == []

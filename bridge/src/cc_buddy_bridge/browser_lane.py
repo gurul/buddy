@@ -75,6 +75,7 @@ MAX_CANDIDATES = 120
 SNAPSHOT_TIMEOUT_MS = 3000
 NAV_TIMEOUT_MS = 15000
 SETTLE_CAP_SECS = 3.0
+ENTER_NAV_SECS = 0.6               # Return in a form: how long to wait for the navigation to start
 KEYS = {"return": "Enter", "enter": "Enter", "escape": "Escape", "tab": "Tab", "space": " ", "up": "ArrowUp", "down": "ArrowDown",
         "left": "ArrowLeft", "right": "ArrowRight", "delete": "Backspace"}
 
@@ -86,6 +87,13 @@ WEB_WORDS = re.compile(
 
 # What the page's JavaScript is asked for: every visible interactive element, with its accessible name,
 # role, state and box. One evaluate, ~1 ms on a busy page; no screenshots, no OCR.
+# Controls above or below the viewport are collected too, after every on-screen one (the cap cuts them
+# first): a plan names "the Compare all plans button at the bottom", and the effectors scroll a control into
+# view before they touch it. Only on-screen controls were collected before, and the plan vocabulary has no
+# scroll, so a control below the fold could never be reached (browser_model_eval below_the_fold, 2026-09-24:
+# 0 of 15 runs across five models). Off to the side (carousels, off-canvas menus) is still left out.
+# Every earlier data-buddy-id is cleared first, so a control that is no longer collected can never answer
+# to an id that now belongs to another.
 _COLLECT_JS = """() => {
   const sel = 'a[href],button,input,textarea,select,summary,[role=button],[role=link],[role=tab],[role=menuitem],' +
               '[role=checkbox],[role=radio],[role=textbox],[role=combobox],[role=option],[role=switch],' +
@@ -110,11 +118,15 @@ _COLLECT_JS = """() => {
     if (own) return own;
     const img = e.querySelector('img[alt],svg[aria-label],[aria-label]');
     return img ? (img.getAttribute('alt') || img.getAttribute('aria-label') || '').trim() : ''; };
+  for (const e of document.querySelectorAll('[data-buddy-id]')) e.removeAttribute('data-buddy-id');
   const out = []; const H = window.innerHeight, W = window.innerWidth; let i = 0;
+  const onscreen = [], offscreen = [];
   for (const e of document.querySelectorAll(sel)) {
     const r = e.getBoundingClientRect();
-    if (r.width < 2 || r.height < 2 || r.bottom < 0 || r.top > H || r.right < 0 || r.left > W) continue;
+    if (r.width < 2 || r.height < 2 || r.right < 0 || r.left > W) continue;
     const cs = getComputedStyle(e); if (cs.visibility === 'hidden' || cs.display === 'none' || cs.opacity === '0') continue;
+    ((r.bottom < 0 || r.top > H) ? offscreen : onscreen).push([e, r]); }
+  for (const [e, r] of onscreen.concat(offscreen)) {
     const role = roleOf(e); const name = nameOf(e).replace(/\\s+/g, ' ').slice(0, 120);
     let value = '';
     if (role === 'checkbox' || role === 'switch' || role === 'menuitemcheckbox') value = (e.checked || e.getAttribute('aria-checked') === 'true') ? 'checked' : 'unchecked';
@@ -126,15 +138,55 @@ _COLLECT_JS = """() => {
     out.push({id: String(i++), role, name, value, x: Math.round(r.left), y: Math.round(r.top), w: Math.round(r.width),
               h: Math.round(r.height), enabled: !(e.disabled || e.getAttribute('aria-disabled') === 'true'),
               secure: role === 'password', editable, dialog: !!e.closest('dialog,[role=dialog],[role=alertdialog]'),
-              focused: document.activeElement === e});
+              focused: document.activeElement === e, offscreen: r.bottom < 0 || r.top > H});
     if (out.length >= %d) break; }
-  const dlg = document.querySelector('dialog[open],[role=dialog],[role=alertdialog]');
+  const dlg = Array.from(document.querySelectorAll('dialog[open],[role=dialog],[role=alertdialog]')).find(d => {
+    const r = d.getBoundingClientRect(); const cs = getComputedStyle(d);
+    return r.width >= 2 && r.height >= 2 && cs.visibility !== 'hidden' && cs.display !== 'none'; });
   const focused = document.activeElement;
   return {elements: out, title: document.title, url: location.href,
           dialog: dlg ? (dlg.innerText || '').trim().slice(0, 80) : '',
           focused_id: focused && focused.getAttribute ? focused.getAttribute('data-buddy-id') : null,
           text_hash: (document.body ? document.body.innerText : '').length + ':' + document.body?.innerText?.slice(0, 4000)}; }
 """ % MAX_CANDIDATES
+
+# A cookie or consent notice covering the page. Sites put it in a dialog, which the lane (rightly) never
+# operates, so every click stopped at dialog_open and no plan dismissed it first (browser_model_eval
+# cookie_banner, 2026-09-24: 0 of 15 runs across five models). Code dismisses it before a click or a type:
+# only a notice whose text is about cookies or consent, and only with a button that REFUSES or closes —
+# never one that agrees. A label the sensitive table knows ("Accept all", "Agree", "OK") is never pressed
+# here; a notice that offers nothing else stays up, and the step stops at dialog_open as before.
+CONSENT_TEXT = re.compile(r"\b(cookies?|consent|gdpr|tracking technologies|privacy (settings|preferences|choices))\b", re.I)
+CONSENT_REFUSE = re.compile(r"\b(reject|refuse|deny|necessary|essential|required only|only required|no,? thanks)\b", re.I)
+CONSENT_CLOSE = re.compile(r"^\s*(close|dismiss|not now|×|✕|x)\s*$", re.I)
+_CONSENT_JS = r"""(pattern) => {
+  const re = new RegExp(pattern, 'i');
+  const vis = (e) => { const r = e.getBoundingClientRect(); if (r.width < 2 || r.height < 2) return false;
+    const cs = getComputedStyle(e); return cs.visibility !== 'hidden' && cs.display !== 'none' && cs.opacity !== '0'; };
+  const boxes = Array.from(document.querySelectorAll('dialog[open],[role=dialog],[role=alertdialog],[aria-modal=true],' +
+    '[id*=cookie i],[class*=cookie i],[id*=consent i],[class*=consent i]')).filter(vis);
+  for (const b of boxes) {
+    const text = (b.innerText || '').trim();
+    if (!re.test(text)) continue;
+    const btns = Array.from(b.querySelectorAll('button,[role=button],input[type=button],input[type=submit]')).filter(vis);
+    for (const e of document.querySelectorAll('[data-buddy-consent]')) e.removeAttribute('data-buddy-consent');
+    btns.forEach((e, i) => e.setAttribute('data-buddy-consent', String(i)));
+    return {text: text.replace(/\s+/g, ' ').slice(0, 200), buttons: btns.map((e, i) => ({id: String(i),
+      name: (e.getAttribute('aria-label') || e.innerText || e.value || e.title || '').trim().replace(/\s+/g, ' ').slice(0, 80)}))};
+  }
+  return null; }"""
+
+
+def consent_choice(buttons: list[Mapping[str, Any]]) -> Optional[Mapping[str, Any]]:
+    """The button that dismisses a consent notice without agreeing to anything, or None: a refusal first
+    ("Reject non-essential cookies", "Necessary only"), else a plain close. A sensitive label never."""
+    for rx in (CONSENT_REFUSE, CONSENT_CLOSE):
+        for b in buttons:
+            name = str(b.get("name") or "")
+            if name and rx.search(name) and not is_sensitive(name):
+                return b
+    return None
+
 
 ROLE_WORDS = {"link": "link", "button": "button", "checkbox": "checkbox", "radio": "radio button",
               "searchbox": "search field", "textbox": "text field", "password": "secure text field",
@@ -401,6 +453,7 @@ class _Page:
         try:
             if loc.count() == 0:
                 return f"refused: {c.label!r} is no longer on the page"
+            loc.scroll_into_view_if_needed(timeout=SNAPSHOT_TIMEOUT_MS)      # a field below the fold
             loc.click(timeout=SNAPSHOT_TIMEOUT_MS)
             focused = self.page.evaluate("() => document.activeElement && document.activeElement.getAttribute('data-buddy-id')")
             if str(focused) != c.id:
@@ -410,11 +463,45 @@ class _Page:
             return f"refused: could not type into {c.label!r} ({type(e).__name__})"
         return f"typed {len(text)} characters into {c.role} {c.label!r}"
 
+    def clear_consent(self) -> str:
+        """Dismiss a cookie/consent notice (CONSENT_TEXT) with a refusing or closing button. The line says what
+        was pressed, "" when there was no such notice or no safe button. Never raises."""
+        try:
+            found = self.page.evaluate(_CONSENT_JS, CONSENT_TEXT.pattern)
+        except Exception:  # noqa: BLE001 — a page mid-navigation: nothing to dismiss yet
+            return ""
+        if not isinstance(found, dict):
+            return ""
+        choice = consent_choice(list(found.get("buttons") or []))
+        if choice is None:
+            return ""
+        try:
+            loc = self.page.locator(f'[data-buddy-consent="{choice["id"]}"]').first
+            loc.click(timeout=SNAPSHOT_TIMEOUT_MS)
+        except Exception as e:  # noqa: BLE001
+            return f"refused: could not dismiss the cookie notice ({type(e).__name__})"
+        self.settle(0.3)
+        return f"dismissed the cookie notice with {choice['name']!r}"
+
     def press(self, key: str) -> str:
         name = KEYS.get(str(key).lower())
         if name is None:
             raise ValueError(f"not a key: {key!r}")
+        before = self.page.url
         self.page.keyboard.press(name)
+        if name == "Enter":
+            # A form submitted with Return navigates a beat after the key, and until the new page commits every
+            # load-state wait answers for the OLD page: the executor moved on while the results were still on
+            # their way (live probe of the eval's docs search, 2026-09-24). Wait for the URL to change, briefly.
+            t0 = self.clock()
+            while self.clock() - t0 < ENTER_NAV_SECS:
+                self.page.wait_for_timeout(50)
+                if self.page.url != before:
+                    try:
+                        self.page.wait_for_load_state("domcontentloaded", timeout=NAV_TIMEOUT_MS)
+                    except Exception:  # noqa: BLE001 — a slow page is still the new page
+                        pass
+                    break
         return f"pressed {key}"
 
     def settle(self, secs: float) -> float:
@@ -649,6 +736,9 @@ class BrowserLane:
     # -- what the agent calls --
     def _outline(self) -> dict[str, Any]:
         p = self._ensure()
+        cleared = p.clear_consent()                  # the planner reads the page, not the notice over it
+        if cleared:
+            log.info("browser lane: %s", cleared)
         snap = p.snapshot()
         return {"app": "browser", "lines": outline_lines(snap), "title": snap.title,
                 "url": next((ln[5:] for ln in snap.context_lines if ln.startswith("url: ")), "")}
@@ -663,7 +753,7 @@ class BrowserLane:
         p = self._ensure()
         plan = pc.parse_plan(plan_dict, goal, source=str(plan_dict.get("source") or "astra"))
         ok = {int(k): v for k, v in (approved or {}).items()}
-        p.approve = next(iter(ok.values()), None)
+        p.approve = None                          # the executor grants each approved click its label (_grant)
 
         def open_app(name: str) -> str:
             if name.casefold() in ("browser", "chrome", "chromium", "google chrome", "safari"):

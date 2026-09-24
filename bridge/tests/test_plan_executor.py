@@ -226,8 +226,9 @@ def test_among_several_fields_jev_picks_or_nothing_is_typed() -> None:
     eff = Effectors()
     assert go(p, Senses([form]), eff, Desk(front="Safari"), asker=asker_saying("City")).status == "complete"
     assert eff.typed == [("City", "Lisbon")]
-    unsure = Effectors()
-    r = go(p, Senses([form]), unsure, Desk(front="Safari"), asker=asker_saying("City", p=0.5))
+    unsure = Effectors()                                   # a step that names no field: Jev's pick alone, under the cut-offs
+    vague = plan({"kind": "type", "target": "the place field", "text": "Lisbon"}, request="put Lisbon as the city")
+    r = go(vague, Senses([form]), unsure, Desk(front="Safari"), asker=asker_saying("City", p=0.5))
     assert r.status == "none" and r.reason == "ambiguous_field" and unsure.typed == []
 
 
@@ -261,3 +262,107 @@ def test_the_app_the_plan_was_written_for_is_brought_back_before_the_first_step(
     still = Desk(front="Calendar")
     go(p, Senses([calendar(), calendar(True)], changed=[True]), Effectors(), still, decide="keyword", planned_for="Calendar")
     assert still.opened == []                              # already in front: nothing is opened
+
+
+# ---- a form of several fields (browser_model_eval contact_form, 2026-09-24) ----------------------------------
+
+
+def _contact_form(focused: str = "") -> Any:
+    web = {"app": "browser", "actions": ("AXPress", "AXFocus")}   # a page's field is clickable too (browser_lane)
+    fields = (cand("1", "text field", "Full name", **web), cand("2", "text field", "Email address", **web),
+              cand("3", "text field", "Your message", **web))
+    return snap(*fields, cand("4", "button", "Send message", app="browser"), app="browser", bundle="buddy.browser",
+                title="Contact us", focused=next((c for c in fields if c.label == focused), None))
+
+
+def test_the_field_the_step_names_is_typed_into_when_jev_agrees_even_below_its_cut_offs() -> None:
+    # The eval's failure: three labelled fields, Jev's top pick right but under the step cut-offs -> ambiguous_field.
+    p = plan({"kind": "type", "target": "the focused Email address text field", "text": "ada@example.com"},
+             request="fill in the email ada@example.com")
+    eff = Effectors()
+    r = go(p, Senses([_contact_form()]), eff, Desk(front="browser"), asker=asker_saying("Email address", p=0.4))
+    assert r.status == "complete" and eff.typed == [("Email address", "ada@example.com")], r.to_dict()
+    assert r.ledger[0].how == "code+jev"
+
+
+def test_jev_still_refuses_a_named_field_it_reads_as_another() -> None:
+    p = plan({"kind": "type", "target": "the Email address field", "text": "ada@example.com"},
+             request="fill in the email ada@example.com")
+    eff = Effectors()
+    r = go(p, Senses([_contact_form()]), eff, Desk(front="browser"), asker=asker_saying("Full name", p=0.4))
+    assert r.status == "none" and r.reason == "ambiguous_field" and eff.typed == [], r.to_dict()
+    risky = Effectors()
+    r = go(p, Senses([_contact_form()]), risky, Desk(front="browser"), asker=asker_saying("Email address", risky=0.9))
+    assert r.status == "needs_human" and risky.typed == []
+
+
+def test_right_after_clicking_a_field_the_focused_field_is_the_proposal() -> None:
+    p = plan({"kind": "click", "target": "the message box", "label_hint": "Your message"},
+             {"kind": "type", "target": "the text area", "text": "Please call me back"},
+             request="write Please call me back in the message")
+    eff = Effectors()
+    senses = Senses([_contact_form(), _contact_form("Your message"), _contact_form("Your message")], changed=[True])
+    r = go(p, senses, eff, Desk(front="browser"), asker=asker_saying("Your message", p=0.4))
+    assert r.status == "complete" and eff.clicks == ["Your message"], r.to_dict()
+    assert eff.typed == [("Your message", "Please call me back")]
+
+
+def test_the_longest_label_wins_and_a_repeated_label_names_nothing() -> None:
+    from cc_buddy_bridge.plan_executor import _named_field
+
+    pool = [cand("1", "text field", "Name"), cand("2", "text field", "Name for the booking")]
+    step = pc.parse_step({"kind": "type", "target": "the Name for the booking field", "text": "x"}, 1, "x")
+    assert _named_field(step, pool).id == "2"
+    twins = [cand("1", "text field", "Name"), cand("2", "text field", "Name")]
+    assert _named_field(pc.parse_step({"kind": "type", "target": "the name field", "text": "x"}, 1, "x"), twins) is None
+
+
+class ConsentEffectors(Effectors):
+    """A browser page's effectors: they can dismiss a cookie notice, and say what they pressed."""
+
+    def __init__(self, said: str = "dismissed the cookie notice with 'Reject all'") -> None:
+        super().__init__()
+        self.said, self.cleared = said, 0
+
+    def clear_consent(self) -> str:
+        self.cleared += 1
+        return self.said
+
+
+def test_a_cookie_notice_is_dismissed_before_a_click_and_is_in_the_ledger() -> None:
+    eff = ConsentEffectors()
+    p = plan({"kind": "click", "target": "week", "label_hint": "Week"})
+    r = go(p, Senses([calendar(), calendar(True)], changed=[True]), eff, decide="keyword")
+    assert r.status == "complete" and eff.cleared == 1 and eff.clicks == ["Week"], r.to_dict()
+    assert [(e.step, e.effect, e.how) for e in r.ledger][0] == ("dismiss the cookie notice", "confirmed", "code")
+    quiet = ConsentEffectors(said="")                       # nothing to dismiss: nothing in the ledger
+    r = go(p, Senses([calendar(), calendar(True)], changed=[True]), quiet, decide="keyword")
+    assert [e.step for e in r.ledger] == ["click week"]
+
+
+class GatedEffectors(Effectors):
+    """Effectors with their own sensitive-label gate, as browser_lane's page and desktop_helpers' adapter have."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.approve = ""
+
+    def click_candidate(self, c) -> str:
+        from cc_buddy_bridge.ax_candidates import is_sensitive
+
+        if is_sensitive(c.label) and self.approve != " ".join(c.label.split()).casefold():
+            return f"refused: {c.label!r} is a sensitive control without approval"
+        return super().click_candidate(c)
+
+
+def test_the_humans_yes_to_a_flagged_step_reaches_the_effectors_own_gate_for_that_step_only() -> None:
+    form = _contact_form()
+    p = plan({"kind": "click", "target": "button labelled Send message", "label_hint": "Send message", "consequential": True},
+             request="send the contact form")
+    eff = GatedEffectors()
+    first = go(p, Senses([form]), eff, Desk(front="browser"), asker=asker_saying("Send message"))
+    assert first.status == "needs_human" and eff.clicks == []
+    r = go(p, Senses([form, form, form, form]), eff, Desk(front="browser"), asker=asker_saying("Send message"),
+           approved={0: first.confirm})
+    assert eff.clicks == ["Send message"] and r.status != "partial", r.to_dict()
+    assert eff.approve == ""                                   # nothing carries over to a later step
