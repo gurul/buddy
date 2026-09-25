@@ -1266,6 +1266,16 @@ class _Keyboard:
 
 
 @dataclass(eq=False)
+class _Question:
+    """One question waiting on the owner (``_ask_user``, ``decide_permission``): its future and what answers
+    it. ``chat_id`` None is any owner chat, as a permission prompt has always been answered."""
+    future: asyncio.Future
+    chat_id: Optional[int]
+    strict: bool
+    words: frozenset[str] = frozenset()
+
+
+@dataclass(eq=False)
 class _Progress:
     """One running piece of work's progress message: a computer task started from the chat, or one Codex
     relay turn. ``head`` is what it says before any step ("On it…", "Sent to Codex."); ``steps`` are the
@@ -1466,6 +1476,11 @@ class TelegramInlet:
         # (the Mac dialog decides), so it never lingers to take the owner's next message, meant for buddy,
         # as its answer (owner, 2026-09-23; review of "claude off" with Allow/Deny still on the screen).
         self._permission_future: Optional[asyncio.Future] = None
+        # Every question still open, in the order it was asked. The slot above always names the newest one
+        # whose future is not done (_show_question), so a typed answer reaches the innermost question still
+        # waiting, whatever order the others end in. A saved "before" per question used to lose an outer
+        # question when two inner ones ended out of order (verification/Buddy/Questions.lean, 2026-09-25).
+        self._questions: list[_Question] = []
         # Inline buttons: key -> (keyboard, choice). The generation makes keys from before a restart unknown.
         self._taps: dict[str, tuple[_Keyboard, Choice]] = {}
         self._tap_gen = secrets.token_hex(3)
@@ -1473,6 +1488,10 @@ class TelegramInlet:
         self._options_board: Optional[_Keyboard] = None       # the relayed question's option buttons
         self._picker_board: Optional[_Keyboard] = None        # the latest picker (claude on, new claude, codex)
         self._stopped_from_chat = False
+        # The running task's agent has returned: its result is on its way (the progress message closing, the
+        # result being sent), and a stop now has nothing left to stop. A "stop" typed in that window used to
+        # say "Stopped." and eat the finished task's result (verification/Buddy/TaskStop.lean, 2026-09-25).
+        self._task_returned = False
         self._stopping = False                            # _shutdown has begun: no new edit jobs are started
         # Owner messages wearing buddy's 👀 (an image on its way): a 👍 that then cannot be set takes it off,
         # so the message never keeps saying "on its way" after it arrived (review, 2026-09-23).
@@ -2853,29 +2872,27 @@ class TelegramInlet:
         title = CLAUDE_PERMISSION_TITLE.format(tool=tool)
         subtitle = Path(cwd).name if cwd else None
         loop = asyncio.get_running_loop()
-        future = self._pending_answer = self._permission_future = loop.create_future()
+        future = self._permission_future = loop.create_future()
         # Strict from the start, not from when the send returns: while the prompt is on its way the owner may
         # well be typing to Claude, and a non-strict prompt would take that text as its answer and lose it.
-        # Only a send that falls back to plain text makes it non-strict (owner, 2026-09-23).
-        self._pending_strict = True
-        self._pending_words = frozenset()                  # yes and no only: bare_decision reads those
+        # Only a send that falls back to plain text makes it non-strict (owner, 2026-09-23). No words beyond
+        # yes and no: bare_decision reads those.
+        asked = self._open_question(future, None, strict=True)
         board = _Keyboard(self._chat_id, ANSWER, list(ALLOW_DENY), future=future)
         self._note("buddy", f"{title}: {hint.strip()[:300]}", "relay")
         outcome: Optional[str] = None
         try:
             buttons = await self._send_choices(self._chat_id, question, board, title=title, subtitle=subtitle,
                                                per_row=2)
-            if not buttons and self._pending_answer is future and not future.done():
-                self._pending_strict = False
+            if not buttons and not future.done():
+                asked.strict = False
+                self._show_question()
             answer = await asyncio.wait_for(future, timeout=self._permission_timeout)
             outcome = consent.decision(answer) or None    # neither a clear yes nor a no: the dialog decides
         except asyncio.TimeoutError:
             outcome = None
         finally:
-            if self._pending_answer is future:
-                self._pending_answer = None
-                self._pending_strict = False
-                self._pending_words = frozenset()
+            self._close_question(asked)
             if self._permission_future is future:
                 self._permission_future = None
             self._retire(board)
@@ -2894,7 +2911,7 @@ class TelegramInlet:
             await self._say(chat_id, NOTHING_TO_STOP_LINE)
 
     async def _stop(self, chat_id: int) -> None:
-        if self._agent is not None and self.task_running:
+        if self._agent is not None and self.task_running and not self._task_returned:
             # Said now, by code: the agent can take seconds to unwind, and its own "I stopped" would
             # only repeat this, so that one is not sent (_run_agent).
             self._stopped_from_chat = True
@@ -3194,7 +3211,7 @@ class TelegramInlet:
         return {"ok": bool(ok)} if ok else {"ok": False, "reason": "no task is running"}
 
     async def _tool_stop_task(self, name: str, args: dict[str, Any], chat_id: int) -> dict[str, Any]:
-        if self._agent is not None and self.task_running:
+        if self._agent is not None and self.task_running and not self._task_returned:
             self._agent.cancel(reason="stopped from Telegram")
             return {"ok": True}
         return {"ok": False, "reason": "no task is running"}
@@ -3296,7 +3313,7 @@ class TelegramInlet:
         if self._busy():
             return {"ok": False, "reason": "someone is talking with buddy at the desk right now; the Mac is theirs "
                                            "until that conversation ends"}
-        self._stopped_from_chat = False
+        self._stopped_from_chat = self._task_returned = False
         # One message for the task's progress, "On it" with a Stop button, edited as steps come (owner,
         # 2026-09-23). It stands for the "On it" reply a started task used to get.
         progress = self._task_progress = self._open_progress(
@@ -3321,6 +3338,7 @@ class TelegramInlet:
             failed = True
         else:
             failed = False
+        self._task_returned = True                       # before any await: a stop from here on is too late
         final = str(final or "").strip() or "The task ended without a result."
         self._note("buddy", final)
         self._show(None, final)
@@ -3372,6 +3390,33 @@ class TelegramInlet:
         elif state is not None:
             self._show(state)
 
+    def _open_question(self, future: asyncio.Future, chat_id: Optional[int], *, strict: bool,
+                       words: frozenset[str] = frozenset()) -> _Question:
+        """A new question waiting on the owner: the newest, so the slot names it. When its future is
+        settled (an answer, a tap, a timeout, its asker gone) the slot moves on at once, not only when the
+        asker's ``finally`` runs (``_close_question``)."""
+        asked = _Question(future, chat_id, strict, words)
+        self._questions.append(asked)
+        future.add_done_callback(lambda _f: self._show_question())
+        self._show_question()
+        return asked
+
+    def _close_question(self, asked: _Question) -> None:
+        if asked in self._questions:
+            self._questions.remove(asked)
+        self._show_question()
+
+    def _show_question(self) -> None:
+        """The slot (``_pending_answer`` and the three fields beside it) names the newest open question whose
+        future is not done, or nothing when none is."""
+        live = next((q for q in reversed(self._questions) if not q.future.done()), None)
+        if live is None:
+            self._pending_answer, self._pending_answer_chat = None, None
+            self._pending_strict, self._pending_words = False, frozenset()
+        else:
+            self._pending_answer, self._pending_answer_chat = live.future, live.chat_id
+            self._pending_strict, self._pending_words = live.strict, live.words
+
     async def _ask_user(self, question: str, chat_id: int, title: str = TASK_ASKS_TITLE,
                         choices: Optional[Sequence[Choice]] = None) -> str:
         """A question for the owner from a task, an app or Codex. A free question needs words: the owner's
@@ -3385,16 +3430,15 @@ class TelegramInlet:
         owner's next message for Claude as the answer, and "ok, also update the README" ran a Drive delete
         (owner, 2026-09-23). Only a send that falls back to plain text makes it non-strict again.
 
-        A question already waiting (a Claude permission prompt) is put back once this one is answered: a
-        typed yes then reaches it again, instead of going to Claude while the prompt waits out its timeout
-        (review, 2026-09-23)."""
+        A question already waiting (a Claude permission prompt, another task's question) gets the slot back
+        once every question asked after it has ended, in whatever order they end: a typed yes then reaches
+        it again, instead of going to Claude while the prompt waits out its timeout (review, 2026-09-23;
+        ``_questions``)."""
         loop = asyncio.get_running_loop()
-        before = (self._pending_answer, self._pending_answer_chat, self._pending_strict, self._pending_words)
-        future = self._pending_answer = loop.create_future()
-        self._pending_answer_chat = chat_id
+        future = loop.create_future()
         choices = tuple(answer_choices(question) if choices is None else choices)
-        self._pending_strict = bool(choices)               # a free question: any next message answers it
-        self._pending_words = frozenset(c.value for c in choices)
+        # A free question: any next message answers it.
+        asked = self._open_question(future, chat_id, strict=bool(choices), words=frozenset(c.value for c in choices))
         self._note("buddy", question)
         board = _Keyboard(chat_id, ANSWER, list(choices), future=future) if choices else None
         # Waiting on the owner is not working: no "typing…" under the question. It comes back with the answer,
@@ -3410,9 +3454,9 @@ class TelegramInlet:
             if board is not None:
                 buttons = await self._send_choices(chat_id, question, board, title=title,
                                                    per_row=2 if len(choices) == 2 else 1)
-                if not buttons and self._pending_answer is future and not future.done():
-                    self._pending_strict = False           # plain text after all: the next message answers
-                    self._pending_words = frozenset()
+                if not buttons and not future.done():
+                    asked.strict, asked.words = False, frozenset()   # plain text after all: the next message answers
+                    self._show_question()
             else:
                 # A free question opens the reply box on itself (ForceReply): the next message is its answer.
                 await self._say(chat_id, question, title=title, force_reply=ASK_PLACEHOLDER)
@@ -3429,15 +3473,7 @@ class TelegramInlet:
             await self._say(chat_id, UNANSWERED_LINE)
             return f"no (no answer within {int(self.config.ask_timeout_secs)} seconds)"
         finally:
-            if self._pending_answer is future:
-                if before[0] is not None and not before[0].done():
-                    (self._pending_answer, self._pending_answer_chat, self._pending_strict,
-                     self._pending_words) = before
-                else:
-                    self._pending_answer = None
-                    self._pending_answer_chat = None
-                    self._pending_strict = False
-                    self._pending_words = frozenset()
+            self._close_question(asked)
             if board is not None:
                 self._retire(board)
                 if not self._stopping:                     # a restart's buttons answer "expired" anyway
