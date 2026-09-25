@@ -1347,8 +1347,13 @@ class VoiceSession:
                 await self._tool(_attr(item, "name") or "",
                                  _attr(item, "call_id") or "",
                                  _attr(item, "arguments") or "{}")
-        elif et in ("response.completed", "response.failed", "response.incomplete"):
-            self._bill_backend(_attr(ev, "response"))
+        elif et in ("response.completed", "response.failed", "response.incomplete", "error"):
+            # A stream `error` is terminal too: no completed/failed follows it, and left active every later
+            # response.create waited forever and the face held "thinking" (Buddy/Voice.lean, sub-target A).
+            if et == "error":
+                log.warning("voice: backend error: %s", _attr(ev, "error") or ev)
+            else:
+                self._bill_backend(_attr(ev, "response"))
             self._response_active = False
             self._last_activity = self._clock()
             if self._response_wanted and not self._ended.is_set():
@@ -1369,8 +1374,6 @@ class VoiceSession:
                 log.info("voice: backend replied (%d chars; words not logged while listening)", len(text))
             elif text:
                 log.info("voice: backend said: %s", text[:160])
-        elif et == "error":
-            log.warning("voice: backend error: %s", _attr(ev, "error") or ev)
 
     # -- transcript turns --
     def _transcript_delta(self, who: str, text: str) -> None:
@@ -1939,12 +1942,14 @@ class VoiceSession:
             return "no (the owner has ended the conversation and is not listening)"
         loop = asyncio.get_running_loop()
         self._pending_answer = loop.create_future()
-        # The backend gets the question as context (no response): it is the half that
-        # calls answer_question when the owner replies. The voice gets it to ask.
-        await self._backend_note(f"[task question] {question}")
-        await self._speak(f"The computer task needs an answer from the owner. Ask exactly this, then wait for "
-                          f"their answer: {question}")
+        # The slot is released on every exit, a failed send included: a question left pending
+        # blocks the idle close and the goodbye for the rest of the session (Buddy/Voice.lean, B).
         try:
+            # The backend gets the question as context (no response): it is the half that
+            # calls answer_question when the owner replies. The voice gets it to ask.
+            await self._backend_note(f"[task question] {question}")
+            await self._speak(f"The computer task needs an answer from the owner. Ask exactly this, then wait for "
+                              f"their answer: {question}")
             return await asyncio.wait_for(self._pending_answer, timeout=60.0)
         except asyncio.TimeoutError:
             return "no (no answer within a minute)"
