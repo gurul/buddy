@@ -743,3 +743,86 @@ def test_ticketmaster_far_future_dates_and_a_retried_lookup(tmp_path: Path, monk
     clock.t += 86401
     asyncio.run(w.read(item))                                    # a day later: looked up again
     assert sum("attractions.json" in c for c in calls) == 2
+
+
+# ---- pause, resume, and a watch for a period (owner, 2026-09-25: "sometimes i only need it for a certain period") --
+
+def test_a_paused_watch_is_not_checked_and_resumes_by_itself_or_on_ask(tmp_path: Path) -> None:
+    fetched: list[str] = []
+    clock = Clock()
+
+    def fetch(url: str, **kw: Any) -> tuple[int, str]:
+        fetched.append(url)
+        return 200, quote_body(310)
+
+    w = make_watcher(tmp_path / "w.json", fetch=fetch, clock=clock)
+    asyncio.run(w.add({"kind": "quote", "target": "AAPL", "label": "Apple", "condition": "below", "value": 300,
+                       "text": None, "city": None, "every_minutes": 5, "for_hours": None}))
+    item = w.watches[0]
+    out = asyncio.run(w.handle("watch_pause", {"id": "W1", "for_hours": None}))
+    assert out == {"ok": True, "paused": "Apple", "until": "until you resume it"} and item.paused
+    n = len(fetched)
+    for _ in range(3):
+        clock.t += 3600
+        asyncio.run(w.tick())
+    assert len(fetched) == n and item.checks == 1                  # paused: no checks, its state kept
+    assert "paused" in w.listing().splitlines()[0]
+    out = asyncio.run(w.handle("watch_resume", {"id": "w1"}))
+    assert out["ok"] and not item.paused
+    asyncio.run(w.tick())
+    assert len(fetched) == n + 1                                     # checked again right away
+    # a pause for a while ends by itself
+    asyncio.run(w.handle("watch_pause", {"id": "w1", "for_hours": 2}))
+    assert "paused until" in w.listing().splitlines()[0]
+    clock.t += 3600
+    asyncio.run(w.tick())
+    assert item.paused and len(fetched) == n + 1
+    clock.t += 3601
+    asyncio.run(w.tick())
+    assert not item.paused and len(fetched) == n + 2
+    # it survives a restart paused
+    asyncio.run(w.handle("watch_pause", {"id": "w1", "for_hours": None}))
+    assert make_watcher(tmp_path / "w.json").watches[0].paused is True
+    # an unknown id and a bad period are said, not raised
+    assert not asyncio.run(w.handle("watch_pause", {"id": "w9", "for_hours": None}))["ok"]
+    assert not asyncio.run(w.handle("watch_pause", {"id": "w1", "for_hours": -3}))["ok"]
+
+
+def test_a_watch_for_a_period_ends_by_itself_and_says_so(tmp_path: Path) -> None:
+    told: list[str] = []
+    clock = Clock()
+
+    async def notify(text: str) -> bool:
+        told.append(text)
+        return True
+
+    w = make_watcher(tmp_path / "w.json", fetch=lambda url, **kw: (200, quote_body(310)), clock=clock, notify=notify)
+    out = asyncio.run(w.add({"kind": "quote", "target": "AAPL", "label": "Apple", "condition": "below", "value": 300,
+                             "text": None, "city": None, "every_minutes": 5, "for_hours": 24}))
+    assert out["ok"] and "until" in w.listing().splitlines()[0]
+    assert asyncio.run(w.tick()) <= 24 * 3600                        # the loop wakes for the end, at the latest
+    clock.t += 23 * 3600
+    asyncio.run(w.tick())
+    assert len(w.watches) == 1
+    clock.t += 3601
+    asyncio.run(w.tick())
+    assert w.watches == [] and told[-1] == "I've stopped watching Apple: the time you gave it is up."
+    assert make_watcher(tmp_path / "w.json").watches == []
+    # an end set later, and cleared
+    asyncio.run(w.add({"kind": "quote", "target": "AAPL", "label": "Apple", "condition": "change", "value": None,
+                       "text": None, "city": None, "every_minutes": None, "for_hours": None}))
+    wid = w.watches[0].id
+    assert asyncio.run(w.handle("watch_set_end", {"id": wid, "for_hours": 48}))["ends"] != "no end"
+    assert asyncio.run(w.handle("watch_set_end", {"id": wid, "for_hours": None}))["ends"] == "no end"
+    assert w.watches[0].ends_at == 0.0
+    refused = asyncio.run(w.add({"kind": "quote", "target": "AAPL", "label": "x", "condition": "change", "value": None,
+                                 "text": None, "city": None, "every_minutes": None, "for_hours": 10 ** 9}))
+    assert not refused["ok"] and "year" in refused["reason"]
+
+
+def test_the_pause_tools_are_offered_to_the_brain(tmp_path: Path) -> None:
+    w = make_watcher(tmp_path / "w.json")
+    names = [t["name"] for t in w.tools()]
+    assert names == ["watch_add", "watch_list", "watch_remove", "watch_pause", "watch_resume", "watch_set_end"]
+    assert "for_hours" in w.tools()[0]["parameters"]["required"]
+    assert "watch_pause" in w.instructions() and "watch_set_end" in w.instructions()

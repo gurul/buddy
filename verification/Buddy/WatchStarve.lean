@@ -30,6 +30,10 @@
   tick goes on) and in `add` (a first check that raises keeps the watch, "the first check failed"). The rule now
   runs before the error streak is cleared, so a rule that raises adds to the streak. The stretch's exponent is
   capped, since 2.0 ** 1024 overflowed at the 1025th failure and raised out of the except itself.
+
+  Paused watches (2026-09-25, later): a watch the owner paused is not due, whatever its next_at, until it is
+  resumed or its pause runs out; tick skips it and `_run_one` refuses it. So "due" in the property reads "due
+  and not paused". A watch whose window ended is removed at the top of the tick, before any check.
 -/
 namespace Buddy.WatchStarve
 

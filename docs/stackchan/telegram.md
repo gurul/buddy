@@ -462,7 +462,8 @@ Flip it to `ask` if two seconds a command is a price you will pay.
   each: the condition, the latest reading and how often it checks. It is
   answered by code, with no model call. `/watch <words>` ("/watch AAPL below
   300") is a watch request for the text brain, which has `watch_add`,
-  `watch_list` and `watch_remove`. An alert arrives as a new message titled
+  `watch_list`, `watch_remove`, `watch_pause`, `watch_resume` and `watch_set_end` (a
+  watch can be paused, or kept only for a while). An alert arrives as a new message titled
   **Watch** and joins the chat's history, so "stop watching that" in reply
   works. See [watching](watch.md).
 - **"typing…"** shows while buddy works on a reply, for the whole turn, not only

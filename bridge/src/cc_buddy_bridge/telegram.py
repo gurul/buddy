@@ -117,7 +117,7 @@ PROMPT_CACHE_KEY = "buddy-telegram"  # every turn shares one prefix: route them 
 # tools are not here (their results are memory already), nor the owner's apps (third-party mail and files
 # are not the owner's conversation), nor calls whose result is only "ok" (owner, 2026-09-23).
 TRANSCRIBED_TOOLS = ("web_search", "think_hard", "look", "look_around", "find", "take_photo", "remember",
-                     "capture_note", "watch_add", "watch_remove")
+                     "capture_note", "watch_add", "watch_remove", "watch_pause", "watch_resume", "watch_set_end")
 MAX_TOOL_ROUNDS = 6                 # model calls in one turn, at most
 MAX_OUTPUT_TOKENS = 1200
 BACKOFF_MAX_SECS = 60.0

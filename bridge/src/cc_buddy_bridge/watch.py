@@ -85,6 +85,7 @@ FLOOR_SECS = {"quote": 60, "page": 300, "search": 3600, "ticketmaster": 300,
               "browser": 900}                     # a page that needs headless Chromium: a render is seconds of CPU
 DEFAULT_EVERY_SECS = {"quote": 900, "page": 1800, "search": 6 * 3600, "ticketmaster": 1800}
 MAX_EVERY_SECS = 7 * 24 * 3600
+MAX_PERIOD_HOURS = 24 * 366          # a watch window or a pause, at most a year
 MAX_WATCHES = 25
 JITTER = 0.1                         # ±10% on each next check, so watches on one host never march in step
 PENDING_RETRY_SECS = 120.0           # a refused alert is sent again no sooner than this
@@ -1463,6 +1464,9 @@ class Watch:
     told_error: bool = False
     last_error: str = ""
     pending: str = ""                    # an alert whose send failed, sent again at the next tick
+    paused: bool = False                 # not checked while paused (its state is kept)
+    paused_until: float = 0.0            # a pause that ends by itself at this time; 0: until resumed
+    ends_at: float = 0.0                 # the watch is removed at this time, and the owner told; 0: no end
     last_note: str = ""
     last_url: str = ""
     via: str = ""                        # "browser" (rendered, then seen) or "search" when a page refuses a plain read
@@ -1693,6 +1697,25 @@ def _alert_about(w: "Watch") -> str:
     return f"(I texted a watch alert: {w.id}, {w.label}, {describe(w)}.)"
 
 
+def _hours(raw: Any) -> tuple[Optional[float], str]:
+    """A period in hours from a tool call: a positive number up to MAX_PERIOD_HOURS, or None for none."""
+    if raw is None:
+        return None, ""
+    if isinstance(raw, bool) or not isinstance(raw, (int, float)) or not math.isfinite(raw) or raw <= 0:
+        return None, "the period must be a positive number of hours"
+    if raw > MAX_PERIOD_HOURS:
+        return None, "a period of at most a year"
+    return float(raw), ""
+
+
+def _when(t: float) -> str:
+    """A local time for the owner: "Fri Sep 26, 3:00 PM"."""
+    try:
+        return datetime.fromtimestamp(t).astimezone().strftime("%a %b %d, %I:%M %p").replace(" 0", " ")
+    except (ValueError, OverflowError, OSError):
+        return "later"
+
+
 def _stretch(errors: int) -> float:
     """How far a failing watch's interval is stretched: 1, 2, 4 … up to MAX_ERROR_STRETCH. The exponent is capped:
     2.0 ** 1024 overflowed a float at the 1025th failure in a row and stopped the tick (re-verification, 2026-09-25)."""
@@ -1717,7 +1740,7 @@ TOOLS: list[dict[str, Any]] = [
                        "when the condition happens. Runs a first check now and returns the current reading.",
         "parameters": {"type": "object", "additionalProperties": False,
                        "required": ["kind", "target", "label", "condition", "value", "text", "city",
-                                    "every_minutes"],
+                                    "every_minutes", "for_hours"],
                        "properties": {
                            "kind": {"type": "string", "enum": list(KINDS)},
                            "target": {"type": "string",
@@ -1734,7 +1757,11 @@ TOOLS: list[dict[str, Any]] = [
                            "city": {"type": ["string", "null"],
                                     "description": "ticketmaster only: the city, when the owner named one."},
                            "every_minutes": {"type": ["number", "null"],
-                                             "description": "How often to check, when the owner said; else null."}}},
+                                             "description": "How often to check, when the owner said; else null."},
+                           "for_hours": {"type": ["number", "null"],
+                                         "description": "How long to keep watching, in hours from now, when the "
+                                                        "owner gave a period or an end (\"for a week\" is 168, "
+                                                        "\"until Friday\" is the hours until then); else null."}}},
     },
     {
         "type": "function", "name": "watch_list", "strict": True,
@@ -1743,9 +1770,34 @@ TOOLS: list[dict[str, Any]] = [
     },
     {
         "type": "function", "name": "watch_remove", "strict": True,
-        "description": "Stop watching one thing, by the id watch_list or watch_add gave.",
+        "description": "Stop watching one thing for good, by the id watch_list or watch_add gave.",
         "parameters": {"type": "object", "additionalProperties": False, "required": ["id"],
                        "properties": {"id": {"type": "string"}}},
+    },
+    {
+        "type": "function", "name": "watch_pause", "strict": True,
+        "description": "Pause a watch: no checks and no alerts until it is resumed, or until the hours given run "
+                       "out. The watch, its mark and its last reading are kept.",
+        "parameters": {"type": "object", "additionalProperties": False, "required": ["id", "for_hours"],
+                       "properties": {"id": {"type": "string"},
+                                      "for_hours": {"type": ["number", "null"],
+                                                    "description": "Resume by itself after this many hours; null "
+                                                                   "to stay paused until resumed."}}},
+    },
+    {
+        "type": "function", "name": "watch_resume", "strict": True,
+        "description": "Resume a paused watch; it is checked again right away.",
+        "parameters": {"type": "object", "additionalProperties": False, "required": ["id"],
+                       "properties": {"id": {"type": "string"}}},
+    },
+    {
+        "type": "function", "name": "watch_set_end", "strict": True,
+        "description": "Set when a watch ends by itself (it is removed then, and the owner told), or clear its end.",
+        "parameters": {"type": "object", "additionalProperties": False, "required": ["id", "for_hours"],
+                       "properties": {"id": {"type": "string"},
+                                      "for_hours": {"type": ["number", "null"],
+                                                    "description": "End this many hours from now; null to keep "
+                                                                   "watching with no end."}}},
     },
 ]
 TOOL_NAMES = tuple(t["name"] for t in TOOLS)
@@ -1762,7 +1814,11 @@ new price, available for in stock or on sale, appears when a phrase shows up on 
 short question first when the thing to watch or the mark is unclear.
 watch_add checks once right away: tell them that reading in a few words and how often you will check. When
 the reading already meets the condition, say so plainly. watch_list shows what you are watching; watch_remove
-stops one by its id."""
+stops one for good by its id.
+When the owner wants it only for a while ("for the next week", "until Friday", "during the presale"), pass
+for_hours to watch_add, or watch_set_end for a watch they already have; work the hours out from the current
+time in your context. "pause" is watch_pause (for_hours when they say for how long) and "resume" or "start
+again" is watch_resume: a paused watch keeps its mark and its last reading."""
 TICKETMASTER_LINE = """
 - tickets for a concert, game or show going on sale: kind ticketmaster, condition available, target the
   artist, team or show (or its ticketmaster.com event link), city when they named one. Prefer it over search
@@ -2167,7 +2223,7 @@ class Watcher:
 
     async def _run_one(self, w: Watch) -> None:
         async with self._lock:
-            if not self._kept(w):
+            if not self._kept(w) or w.paused:
                 return
             held = self.limiter.backed_off(self.host(w))
             if held > 0:                # a refusal landed on this host while the check waited for the lock
@@ -2217,8 +2273,17 @@ class Watcher:
                     self._resend_at = self._clock() + PENDING_RETRY_SECS    # Telegram is still refusing
                     break
         now = self._clock()
+        for w in [x for x in self.watches if x.ends_at and now >= x.ends_at]:
+            # the time the owner gave it is up: removed, and said once (a lost send is not retried: it is gone)
+            self.watches.remove(w)
+            self.save()
+            await self._tell(f"I've stopped watching {w.label}: the time you gave it is up.",
+                             about=f"(I texted that watch {w.id}, {w.label}, ended: its time was up.)")
+        for w in [x for x in self.watches if x.paused and x.paused_until and now >= x.paused_until]:
+            w.paused, w.paused_until, w.next_at = False, 0.0, now       # the pause ran out: checked right away
+            self.save()
         for w in sorted(self.watches, key=lambda x: x.next_at):
-            if w.next_at > now:
+            if w.next_at > now or w.paused:
                 continue
             wait = self.limiter.ready_in(self.host(w))
             if wait > 0:
@@ -2227,9 +2292,11 @@ class Watcher:
             self.limiter.take(self.host(w))
             await self._run_one(w)
             now = self._clock()
-        if not self.watches:
+        times = [t for w in self.watches for t in (
+            (w.paused_until,) if w.paused else (w.next_at,)) if t] + [w.ends_at for w in self.watches if w.ends_at]
+        if not times:
             return 300.0
-        return max(1.0, min(w.next_at for w in self.watches) - self._clock())
+        return max(1.0, min(times) - self._clock())
 
     async def run(self) -> None:
         log.info("watch: %d watch(es); %g requests/min, burst %d, %g s per host, %d model checks/day",
@@ -2277,14 +2344,66 @@ class Watcher:
             return {"ok": True, "watches": [self._summary(w) for w in self.watches]}
         if name == "watch_remove":
             return self.remove(str(args.get("id") or ""))
+        if name == "watch_pause":
+            return self.pause(str(args.get("id") or ""), args.get("for_hours"))
+        if name == "watch_resume":
+            return self.resume(str(args.get("id") or ""))
+        if name == "watch_set_end":
+            return self.set_end(str(args.get("id") or ""), args.get("for_hours"))
         return {"ok": False, "reason": f"unknown watch tool {name}"}
+
+    def _find(self, wid: str) -> Optional[Watch]:
+        wid = wid.strip().lower()
+        return next((w for w in self.watches if w.id == wid), None)
+
+    def _no_such(self, wid: str) -> dict[str, Any]:
+        return {"ok": False, "reason": f"no watch with id {wid.strip().lower()!r}; watch_list shows the ids"}
+
+    def pause(self, wid: str, for_hours: Any = None) -> dict[str, Any]:
+        """No checks and no alerts until resumed, or until ``for_hours`` run out; the watch keeps its state."""
+        w = self._find(wid)
+        if w is None:
+            return self._no_such(wid)
+        hours, why = _hours(for_hours)
+        if why:
+            return {"ok": False, "reason": why}
+        w.paused, w.paused_until = True, (self._clock() + hours * 3600 if hours else 0.0)
+        self.save()
+        self._wake.set()
+        return {"ok": True, "paused": w.label,
+                "until": _when(w.paused_until) if w.paused_until else "until you resume it"}
+
+    def resume(self, wid: str) -> dict[str, Any]:
+        w = self._find(wid)
+        if w is None:
+            return self._no_such(wid)
+        if not w.paused:
+            return {"ok": True, "resumed": w.label, "note": "it was not paused"}
+        w.paused, w.paused_until, w.next_at = False, 0.0, self._clock()
+        self.save()
+        self._wake.set()
+        return {"ok": True, "resumed": w.label, "note": "checked again right away"}
+
+    def set_end(self, wid: str, for_hours: Any = None) -> dict[str, Any]:
+        w = self._find(wid)
+        if w is None:
+            return self._no_such(wid)
+        hours, why = _hours(for_hours)
+        if why:
+            return {"ok": False, "reason": why}
+        w.ends_at = self._clock() + hours * 3600 if hours else 0.0
+        self.save()
+        self._wake.set()
+        return {"ok": True, "label": w.label, "ends": _when(w.ends_at) if w.ends_at else "no end"}
 
     def _summary(self, w: Watch) -> dict[str, Any]:
         return {"id": w.id, "label": w.label, "kind": w.kind, "watching_for": describe(w), "now": now_line(w),
                 "every": _every_words(w.every_secs), "alerts_sent": w.fired,
                 **({"via": "search (the site refuses automated reads)"} if w.via == "search" else
            {"via": "browser (rendered and looked at)"} if w.via == "browser" else {}),
-                **({"problem": w.last_error} if w.errors else {})}
+                **({"problem": w.last_error} if w.errors else {}),
+                **({"paused": _when(w.paused_until) if w.paused_until else "until resumed"} if w.paused else {}),
+                **({"ends": _when(w.ends_at)} if w.ends_at else {})}
 
     def remove(self, wid: str) -> dict[str, Any]:
         wid = wid.strip().lower()
@@ -2349,8 +2468,12 @@ class Watcher:
         every = (int(float(minutes) * 60) if isinstance(minutes, (int, float)) and not isinstance(minutes, bool)
                  and math.isfinite(minutes) and minutes > 0 else DEFAULT_EVERY_SECS[kind])
         every = max(FLOOR_SECS[kind], min(MAX_EVERY_SECS, every))
+        hours, why = _hours(args.get("for_hours"))
+        if why:
+            return None, why
         w = Watch(id=self._new_id(), kind=kind, target=target, label=label, condition=condition, value=value,
-                  text=text, city=city if kind == "ticketmaster" else "", every_secs=every, created=self._clock(), next_at=self._clock())
+                  text=text, city=city if kind == "ticketmaster" else "", every_secs=every, created=self._clock(),
+                  next_at=self._clock(), ends_at=self._clock() + hours * 3600 if hours else 0.0)
         return w, ""
 
     async def add(self, args: dict[str, Any]) -> dict[str, Any]:
@@ -2425,9 +2548,12 @@ class Watcher:
         for w in self.watches:
             extra = {"search": " (by search)", "browser": " (seen in a browser)"}.get(w.via, "")
             problem = f" (can't read it: {w.last_error})" if w.errors >= TELL_AFTER_ERRORS else ""
+            state = (f" · paused until {_when(w.paused_until)}" if w.paused and w.paused_until
+                     else " · paused" if w.paused else "")
+            end = f" · until {_when(w.ends_at)}" if w.ends_at else ""
             lines.append(f"{w.id} · {w.label}: {describe(w)} · now {now_line(w)} · every "
-                         f"{_every_words(w.every_secs)}{extra}{problem}")
-        lines.append("Say \"stop watching w1\" to drop one.")
+                         f"{_every_words(w.every_secs)}{extra}{problem}{state}{end}")
+        lines.append("Say \"stop watching w1\" to drop one, \"pause w1\" or \"resume w1\".")
         return "\n".join(lines)
 
 

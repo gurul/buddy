@@ -18,6 +18,14 @@ call. `/watch <words>` is a watch request for the text brain. "stop watching w2"
 removes one. Alerts arrive as a new message titled **Watch**, and they join the
 chat's history, so you can reply to one directly ("stop watching that").
 
+**Pause, resume, and a watch for a while.** "pause w1" stops its checks and
+alerts until "resume w1". "pause w1 for 2 days" resumes it by itself. A paused
+watch keeps its mark and its last reading, and it stays paused across a
+restart. "watch AAPL below 300 for the next week", "until Friday", or "stop w1
+after the presale" gives a watch an end. At that time it is removed, and you
+get a text saying so. `/watch` shows each watch's state: paused, paused until
+when, or watched until when.
+
 Code: `bridge/src/cc_buddy_bridge/watch.py`. Tests: `bridge/tests/test_watch.py`
 and the watcher test in `test_telegram.py`. Live check:
 `bridge/tools/watch_smoke.py`. The watcher's state machines are proved in Lean in
