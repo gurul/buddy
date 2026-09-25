@@ -1,0 +1,5 @@
+name = "buddy-verification"
+defaultTargets = ["Buddy"]
+
+[[lean_lib]]
+name = "Buddy"

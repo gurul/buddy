@@ -280,20 +280,78 @@ def derive_always_pattern(command: str) -> str:
     return "^" + re.escape(" ".join(words)) + r"( |$)"
 
 
+# Characters the shell reads as structure: a separator, a pipe, a redirection,
+# a substitution, a grouping, a quote or an escape. A command holding one can
+# run more than its first word, and quotes can hide a flag from the word check
+# below, so it is never auto-allowed.
+_SHELL_META = frozenset(";&|<>$`(){}\\'\"#!")
+_GLOB = frozenset("*?[")
+# Programs that run another command taken from their arguments. Bare they are
+# harmless (`env` prints the environment); given any argument they are not.
+_RUNNERS = frozenset({
+    "env", "xargs", "nice", "nohup", "timeout", "time", "command", "exec",
+    "eval", "watch", "sh", "bash", "zsh", "sudo", "doas", "su",
+})
+# Read-only programs with a flag that runs a program or writes a file: the
+# long-flag prefixes, then the letters that do it inside a short-flag cluster
+# (`fd -Hx rm`, `tree -ao out`).
+_RUN_OR_WRITE_FLAGS: dict[str, tuple[tuple[str, ...], str]] = {
+    "find": (("-exec", "-ok", "-delete", "-fprint", "-fls"), ""),
+    "fd": (("--exec",), "xX"),
+    "rg": (("--pre",), ""),
+    "tree": ((), "o"),
+    "git": (("--output", "--ext-diff", "-c"), ""),
+}
+
+
+def is_simple(command: str) -> bool:
+    """Whether a command is one simple command that runs only its first word
+    and writes nothing — the only shape the allow tier may answer.
+
+    The allow patterns are anchored at the start, so without this `echo x;
+    rm -rf ~` matched `^echo( |$)`. verification/Buddy/Command.lean models this
+    function and proves allow implies it for every matcher config.
+    """
+    if any(c in _SHELL_META or (c.isspace() and c != " ") for c in command):
+        return False
+    words = [w for w in command.split(" ") if w]
+    if not words:
+        return False
+    prog, args = words[0], words[1:]
+    if "=" in prog:  # `FOO=x prog` sets the environment of what runs
+        return False
+    if prog in _RUNNERS:
+        return not args
+    flags = _RUN_OR_WRITE_FLAGS.get(prog)
+    if flags is None:
+        return True
+    prefixes, letters = flags
+    if any(c in _GLOB for c in command):  # a file named `--pre=sh` would do
+        return False
+    for w in args:
+        if prefixes and w.startswith(prefixes):
+            return False
+        if w.startswith("-") and not w.startswith("--") and any(c in w for c in letters):
+            return False
+    return True
+
+
 def classify_command(command: str, cfg: MatcherConfig) -> Decision:
     """Returns "allow" | "ask" | "default".
 
     always_ask beats auto_allow when both match, so a loose allow pattern can't
     accidentally silence a deliberate ask pattern. Under ``cfg.strict``, an
     otherwise-unmatched command becomes "ask" instead of "default" so the
-    stick is the sole approval surface.
+    stick is the sole approval surface. An allow pattern answers only a
+    command that ``is_simple``; anything else falls through as unmatched.
     """
     if not command:
         return "ask" if cfg.strict else "default"
     for pat in cfg.always_ask:
         if pat.search(command):
             return "ask"
-    for pat in cfg.auto_allow:
-        if pat.search(command):
-            return "allow"
+    if is_simple(command):
+        for pat in cfg.auto_allow:
+            if pat.search(command):
+                return "allow"
     return "ask" if cfg.strict else "default"
