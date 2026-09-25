@@ -14,7 +14,15 @@ refocused on the robot; the current knobs are in [../../bridge/README.md](../../
 - **Never decides a permission.** The swipe-to-decide card is gone (owner request). Every
   tool call the matcher does not auto-allow defers to Claude Code's own prompt in the
   terminal, immediately — the daemon never blocks a tool call waiting on the board. The
-  `auto_allow` matcher fast path still works, because it never needed the screen.
+  `auto_allow` matcher fast path still works, because it never needed the screen. It
+  answers only **one simple command**: a command holding a separator, pipe, redirection,
+  substitution, quote or escape (`echo x; rm -rf ~`, `ls $(…)`), a runner given arguments
+  (`env rm …`, `xargs …`), an environment assignment (`FOO=1 ls`), or a read-only program
+  given a flag that runs or writes (`find -exec`/`-execdir`/`-ok`/`-delete`/`-fprint`,
+  `fd -x`, `rg --pre`, `tree -o`, `git --output`/`--ext-diff`/`-c`) falls through as
+  unmatched, whatever the config says. Before 2026-09-25 the anchored patterns allowed
+  `echo x; rm -rf ~`. This holds for every `matchers.toml`, and is proved in Lean
+  (`verification/Buddy/Command.lean`; see [verification](../verification.md)).
 - **Summons your terminal.** Tap the pet while it demands attention and the daemon raises
   the terminal of the session that's blocked on you. Window-level matching by the session's repo name works everywhere —
   AppleScript for iTerm2/Terminal.app, Accessibility (AXRaise) for Ghostty, Warp, cmux and
@@ -31,7 +39,16 @@ refocused on the robot; the current knobs are in [../../bridge/README.md](../../
   board last reset, what it was doing, and which loop phase hung, from an event ring that
   survives panics and watchdog reboots. The daemon watches the link both ways and escalates
   from reconnects (with a deliberate closed-port hold) up to an automatic RTS hardware reset
-  of the board, so a wedged link heals without touching a cable.
+  of the board, so a wedged link heals without touching a cable. Only **two consecutive
+  answered watchdog polls** de-escalate: a missed poll ends the streak, and the ack to the
+  status line sent on every reconnect does not count. Before 2026-09-25 that ack counted, so
+  a link that answered it and one poll after each reconnect, then went deaf, reset the
+  escalation every cycle and never reached the RTS reset. The serial writer keeps its lock
+  until the port's write returns (bounded by `write_timeout=2`), even when its sender is
+  cancelled, so two lines can never go out interleaved. A folder push registers each ack
+  waiter before it sends, and a chunk waiter takes only the ack whose `n` is the bytes
+  written to that file so far. All three are proved in Lean
+  (`verification/Buddy/Serial.lean`; see [verification](../verification.md)).
 
 ## Host bridge
 

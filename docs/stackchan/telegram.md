@@ -464,7 +464,10 @@ Flip it to `ask` if two seconds a command is a price you will pay.
   for your answer to a question.
 - **`stop`** (or `cancel`, `/stop`, `/cancel`, or the **Stop** button) — stops
   the running task. This is code, not a model call: it works when the model is
-  down or mid-turn.
+  down or mid-turn. A stop that arrives after the task's agent has already
+  returned (while its result is on the way) answers "Nothing is running." and
+  the result still arrives; it used to say "Stopped." and eat the result
+  (`verification/Buddy/TaskStop.lean`).
 - **A photo** — "send me a picture of my desk". The robot snaps, the diary keeps
   and captions it as it does for the voice, and the picture arrives in the chat.
 - **The screen** — "screenshot", "show me the screen", "what's on the screen".
@@ -638,7 +641,9 @@ Flip it to `ask` if two seconds a command is a price you will pay.
   (the new-session tree, say) is never the answer to a different question
   that happens to be waiting. A task's question asked while a Claude
   permission prompt waits is answered first; the prompt then takes a typed
-  yes again. After the answer the question changes to say what was chosen,
+  yes again. This holds for any number of nested questions ending in any
+  order: every open question is kept in order, and a typed answer goes to
+  the newest one still waiting (`verification/Buddy/Questions.lean`). After the answer the question changes to say what was chosen,
   and its buttons go.
 
 One agent drives the mouse at a time. While a spoken conversation is open, or a

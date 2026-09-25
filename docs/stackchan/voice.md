@@ -117,7 +117,11 @@ daemon ─{"cmd":"agent","state":…}─▶ robot: wake · listening · thinking
 4. **Ask.** Before anything consequential — sending, paying, deleting, posting —
    the task calls `ask_user`. The robot looks up (`asking`, "yes / no?"), the
    question is spoken, and your spoken answer goes back through `answer_question`.
-   With nobody listening the answer is always no.
+   With nobody listening the answer is always no. The question is released on every
+   exit, including a failed send, so the idle close and the goodbye are never
+   blocked by a question that was never asked. A backend stream `error` ends the
+   backend's response like `response.failed` does: the face settles and a held-back
+   reply is sent (`verification/Buddy/Voice.lean`).
 5. **Done.** The task's final sentence is handed back to the voice model to show
    as a caption; the robot nods (`done`) or winces (`error`), and the conversation
    closes right after.

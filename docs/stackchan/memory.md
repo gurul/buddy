@@ -173,6 +173,14 @@ wake**, so a week away does not become one burst of model calls.
    "Tomorrow" and "Friday" are read from the date of the line that said them.
    Owner hand edits survive,
    because the current files are always its input. One commit, `dream: <day>`.
+   **A forget during the dream wins.** The model call runs with the records
+   unlocked, so a forget can land mid-dream; the night pins a forget generation
+   (`records/.forgets`, a number) before it reads the day, and reconcile and
+   consolidate write nothing if it moved. The night is dreamt again next wake from
+   what is left. The mem0 ingest guards each add the same way, and forget finds and
+   deletes index entries in one hold of its lock. Before 2026-09-25 a dream could
+   write forgotten words back into the records and the git history the forget had
+   just squashed (`verification/Buddy/Forget.lean`).
 2. `records.consolidate` — **one** model call over every record merges the same
    thing filed under two ids and dates a fact a newer one replaced. Skipped, with a
    log line, when the records pass 120,000 characters.

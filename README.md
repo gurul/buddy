@@ -361,6 +361,12 @@ buddy's own Chromium with Playwright; attach mode reuses it for your own Chrome.
 See [routing](docs/stackchan/routing.md) for switches and measured evaluations, and
 [voice and computer control](docs/stackchan/voice.md) for worker details.
 
+Six state machines are **formally verified in Lean 4** (`verification/`): the Bash
+allow tier, the Telegram question slot and Stop, forget against the nightly dream,
+the serial link to the robot, and the voice turn state. Each has a kernel-checked
+counterexample on the code before 2026-09-25 and a proof for every trace of the
+fix. See [formal verification](docs/verification.md).
+
 </details>
 
 ### The Telegram door
