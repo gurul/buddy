@@ -463,11 +463,10 @@ offline demo.
 
 ## Credits
 
-The lessons were built for the OpenAI, OpenRouter and CopilotKit *Agents,
-Everywhere: Bots, Channels & More* global hackathon by **Gurucharan Lingamallu,
-Swetank Griyage and Emaha Tekle**. The whiteboard began with Swetank's `smartboard`
+The lessons were built for an event by **Gurucharan Lingamallu, Swetank Griyage
+and Emaha Tekle**. The whiteboard began with Swetank's `smartboard`
 work; the tutor, voice integration and widget cards were developed on buddy and
-merged back here. The hackathon fork, first launch film and presentation are in
+merged back here. The event fork, first launch film and presentation are in
 [gurul/buddyTinkerer](https://github.com/gurul/buddyTinkerer). The cut-paper
 illustration above also comes from that project.
 
