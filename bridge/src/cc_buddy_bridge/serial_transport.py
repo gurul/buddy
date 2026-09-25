@@ -199,7 +199,8 @@ class BuddySerial:
                 # termios.tcdrain, which no timeout covers — one board that
                 # stopped draining the OUT endpoint would block a sender
                 # forever while every other sender queued on the lock.
-                await loop.run_in_executor(None, ser.write, data)
+                fut = loop.run_in_executor(None, ser.write, data)
+                await self._write_holding_lock(fut, ser)
             return True
         except Exception as e:  # noqa: BLE001
             log.warning("serial send failed: %s", e)
@@ -208,6 +209,32 @@ class BuddySerial:
             if self._ser is ser:
                 self._request_drop(f"send failed: {e}")
             return False
+
+    async def _write_holding_lock(self, fut: asyncio.Future, ser: serial.Serial) -> None:
+        """Await the executor write with _send_lock held until the thread's
+        ser.write has RETURNED, even if the sender is cancelled meanwhile.
+
+        A cancelled sender (every ``asyncio.wait_for(ble.send(...))`` that
+        times out) used to leave the ``async with`` at once, freeing the lock
+        while its thread was still inside ser.write, so the next sender's line
+        went out alongside it and broke the NDJSON framing on the wire. The
+        wait is bounded by the port's write_timeout. The cancellation is
+        re-raised once the port is free (verification/Buddy/Serial.lean, A).
+        """
+        cancelled = False
+        while not fut.done():
+            try:
+                await asyncio.wait((fut,))  # never cancels fut, never raises its error
+            except asyncio.CancelledError:
+                cancelled = True
+        if cancelled:
+            err = None if fut.cancelled() else fut.exception()
+            if err is not None:
+                log.warning("serial send failed: %s", err)
+                if self._ser is ser:
+                    self._request_drop(f"send failed: {err}")
+            raise asyncio.CancelledError
+        fut.result()
 
     async def run(self) -> None:
         loop = asyncio.get_running_loop()

@@ -284,7 +284,7 @@ class Daemon:
         self._status_sent_at: Optional[float] = None
         self._status_missed = 0
         self._ack_escalation = 0   # consecutive missed-ack episodes
-        self._clean_polls = 0      # answered polls since the last escalation
+        self._clean_polls = 0      # consecutive answered watchdog polls (resync acks excluded)
         # session_id → task that'll flip running→0 after a grace window.
         # Delays the turn_end so the stick's HUD stays drawn long enough to
         # display the @-entry the tailer just emitted. See firmware's
@@ -294,8 +294,9 @@ class Daemon:
         self._last_stick_sec: Optional[bool] = None
         self._last_stick_battery_pct: Optional[int] = None
         # Futures awaiting a specific ack type. Used by folder_push's
-        # chunk-by-chunk flow control. Each entry: (ack_type, Future).
-        self._ack_waiters: list[tuple[str, asyncio.Future]] = []
+        # chunk-by-chunk flow control. Each entry: (ack_type, n, Future); n,
+        # when not None, is the ack's "n" the waiter expects (see expect_ack).
+        self._ack_waiters: list[tuple[str, Optional[int], asyncio.Future]] = []
         # Track last heartbeat to dedupe (avoid spamming BLE with identical snapshots).
         self._last_hb_serialized: Optional[str] = None
         self._last_hb_sent_at: float = 0.0
@@ -805,6 +806,10 @@ class Daemon:
                 continue
             if self._status_sent_at is not None:
                 self._status_missed += 1
+                # A missed poll ends the clean streak: de-escalation needs
+                # CONSECUTIVE answered polls, or a link that answers every
+                # other poll would keep resetting the escalation.
+                self._clean_polls = 0
                 if self._status_missed >= MISSED_LIMIT:
                     self._status_missed = 0
                     self._status_sent_at = None
@@ -2493,14 +2498,23 @@ class Daemon:
             # escalation on any single ack meant pulse_reset could never fire.
             # Only a streak of clean poll cycles (counted in the poller)
             # de-escalates; here we just mark the poll answered.
+            #
+            # Only an ack that answers an OUTSTANDING watchdog poll counts.
+            # The {"cmd":"status"} in _send_resync goes out on every reconnect
+            # and is answered by the same fresh link that then goes deaf; when
+            # it counted, "resync ack + one poll ack" made the streak of two
+            # after every reconnect and the RTS pulse never fired
+            # (verification/Buddy/Serial.lean, B).
+            answered_poll = self._status_sent_at is not None
             self._status_sent_at = None
             self._status_missed = 0
-            self._clean_polls += 1
-            if self._ack_escalation and self._clean_polls >= 2:
-                log.info("status acks stable for %d clean polls — "
-                         "resetting ack escalation (was %d)",
-                         self._clean_polls, self._ack_escalation)
-                self._ack_escalation = 0
+            if answered_poll:
+                self._clean_polls += 1
+                if self._ack_escalation and self._clean_polls >= 2:
+                    log.info("status acks stable for %d clean polls — "
+                             "resetting ack escalation (was %d)",
+                             self._clean_polls, self._ack_escalation)
+                    self._ack_escalation = 0
         if ack == "status" and obj.get("ok"):
             data = obj.get("data") or {}
             sec = data.get("sec")
@@ -2547,12 +2561,20 @@ class Daemon:
 
         # Route any ack (status already handled above, but others — char_begin,
         # file, chunk, file_end, char_end, name, owner, unpair, etc.) to the
-        # oldest waiter that registered for that ack type.
+        # oldest waiter that registered for that ack type. A waiter that names
+        # an "n" takes only a successful ack carrying that n: a late ack from a
+        # timed-out request must not answer the next one (firmware failure acks
+        # carry n=0, so those still match).
         if ack is not None:
-            for waiter_type, fut in self._ack_waiters:
-                if waiter_type == ack and not fut.done():
-                    fut.set_result(obj)
-                    break
+            for waiter_type, want_n, fut in self._ack_waiters:
+                if waiter_type != ack or fut.done():
+                    continue
+                if want_n is not None and obj.get("ok") and obj.get("n") != want_n:
+                    log.debug("ack %s n=%r is stale (waiting for n=%r) — ignored",
+                              ack, obj.get("n"), want_n)
+                    continue
+                fut.set_result(obj)
+                break
             return
 
         if cmd in {"name", "owner", "unpair", "char_begin", "char_end", "file", "file_end", "chunk"}:
@@ -2635,20 +2657,31 @@ class Daemon:
 
     # ---- turn event ----
 
-    async def wait_for_ack(self, ack_type: str, timeout: float = 5.0) -> dict[str, Any]:
+    def expect_ack(self, ack_type: str, n: Optional[int] = None) -> asyncio.Future[dict[str, Any]]:
+        """Register a waiter for ``ack_type`` NOW, before the request goes out,
+        and return its future; pass it to wait_for_ack(waiter=...). Registering
+        after the send left a window in which the board's ack reached the
+        router with no waiter and was dropped (verification/Buddy/Serial.lean,
+        C). ``n``, when given, is the ack's expected "n" field."""
+        # Waiters whose request never went out (the send failed) were cancelled
+        # by their caller; prune them here.
+        self._ack_waiters = [w for w in self._ack_waiters if not w[2].done()]
+        fut: asyncio.Future[dict[str, Any]] = asyncio.get_running_loop().create_future()
+        self._ack_waiters.append((ack_type, n, fut))
+        return fut
+
+    async def wait_for_ack(self, ack_type: str, timeout: float = 5.0, *,
+                           waiter: Optional[asyncio.Future[dict[str, Any]]] = None) -> dict[str, Any]:
         """Block until we receive an ack matching ``ack_type``. Used by the
         folder-push flow — the firmware requires a per-chunk ack before we
-        send the next chunk, since its UART RX buffer is only ~256 bytes."""
-        fut: asyncio.Future[dict[str, Any]] = asyncio.get_running_loop().create_future()
-        entry = (ack_type, fut)
-        self._ack_waiters.append(entry)
+        send the next chunk, since its UART RX buffer is only ~256 bytes.
+        Pass the ``waiter`` from expect_ack to wait on one registered before
+        the send; without it the waiter is registered here."""
+        fut = waiter if waiter is not None else self.expect_ack(ack_type)
         try:
             return await asyncio.wait_for(fut, timeout=timeout)
         finally:
-            try:
-                self._ack_waiters.remove(entry)
-            except ValueError:
-                pass
+            self._ack_waiters = [w for w in self._ack_waiters if w[2] is not fut]
 
 
 # Daemon._handle_ipc's dispatch table: event name -> handler (called as handler(daemon, req)).

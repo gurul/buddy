@@ -101,14 +101,18 @@ async def push_character(
         await _send_expect(daemon, {"cmd": "file", "path": fp.name, "size": size},
                            "file", timeout=ACK_TIMEOUT_FAST)
 
+        file_bytes = 0
         with fp.open("rb") as fh:
             while True:
                 piece = fh.read(CHUNK_SIZE)
                 if not piece:
                     break
                 b64 = base64.b64encode(piece).decode("ascii")
+                # The firmware's chunk ack carries n = bytes written to this
+                # file so far (xfer.h), so this chunk's ack is exactly n=file_bytes.
+                file_bytes += len(piece)
                 await _send_expect(daemon, {"cmd": "chunk", "d": b64},
-                                   "chunk", timeout=ACK_TIMEOUT_FAST)
+                                   "chunk", timeout=ACK_TIMEOUT_FAST, n=file_bytes)
                 bytes_pushed += len(piece)
                 if on_progress is not None:
                     await on_progress(bytes_pushed, total_bytes)
@@ -129,12 +133,29 @@ async def push_character(
     }
 
 
-async def _send_expect(daemon, payload: dict, ack_type: str, *, timeout: float) -> dict[str, Any]:
-    """Write one line over BLE and block until a matching ack arrives."""
-    ok = await daemon.ble.send(payload)
-    if not ok:
-        raise RuntimeError(f"ble write failed for cmd:{payload.get('cmd')}")
-    ack = await daemon.wait_for_ack(ack_type, timeout=timeout)
+async def _send_expect(daemon, payload: dict, ack_type: str, *, timeout: float,
+                       n: Optional[int] = None) -> dict[str, Any]:
+    """Write one line over BLE and block until a matching ack arrives.
+
+    The waiter is registered BEFORE the line goes out: the board can answer
+    before this coroutine resumes from the send, and an ack with no waiter is
+    dropped (verification/Buddy/Serial.lean, C). ``n`` is the ack's expected
+    "n" field, so a late ack from an earlier request cannot answer this one.
+    A daemon without expect_ack (test stubs) falls back to waiting after the send.
+    """
+    expect = getattr(daemon, "expect_ack", None)
+    waiter = expect(ack_type, n) if expect is not None else None
+    try:
+        ok = await daemon.ble.send(payload)
+        if not ok:
+            raise RuntimeError(f"ble write failed for cmd:{payload.get('cmd')}")
+        if waiter is None:
+            ack = await daemon.wait_for_ack(ack_type, timeout=timeout)
+        else:
+            ack = await daemon.wait_for_ack(ack_type, timeout=timeout, waiter=waiter)
+    finally:
+        if waiter is not None and not waiter.done():
+            waiter.cancel()
     if not ack.get("ok"):
         err = ack.get("error") or "no detail"
         raise RuntimeError(f"{ack_type} rejected: {err}")
