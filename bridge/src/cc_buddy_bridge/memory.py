@@ -446,8 +446,13 @@ class Memory:
             log.warning("memory: forget failed in records (%s)", type(e).__name__)
         if self.index is not None:
             try:
-                ids = [str(r.get("id")) for r in self.index.find(pred) or [] if isinstance(r, dict) and r.get("id")]
-                done["index"] = int(self.index.forget(ids) or 0) if ids else 0
+                forget_matching = getattr(self.index, "forget_matching", None)
+                if forget_matching is not None:       # mem0: find and delete in one hold of its lock
+                    done["index"] = int(forget_matching(pred) or 0)
+                else:
+                    ids = [str(r.get("id")) for r in self.index.find(pred) or []
+                           if isinstance(r, dict) and r.get("id")]
+                    done["index"] = int(self.index.forget(ids) or 0) if ids else 0
             except Exception as e:  # noqa: BLE001
                 log.warning("memory: forget failed in the index (%s)", type(e).__name__)
         done["archive"] = forget_markdown(self.cfg.archive_dir, pred)

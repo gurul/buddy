@@ -56,6 +56,14 @@ index fails, the night is still marked: both are retried by the next night's
 dream anyway (consolidate reads all records; the index ingests each conversation
 it has not seen). A day with nothing said is marked with no model call. Logs
 carry days, counts and seconds, never a word that was said.
+
+### A forget during a dream
+
+The model call runs for minutes with the records unlocked. A forget that lands meanwhile would be undone
+by the night's write — the model answered from the words before the forget — and the commit would put
+them back into the history the forget had just squashed. So the night pins the forget generation before
+it reads the day, and reconcile and consolidate write nothing when it moved: the night counts as a failed
+reconcile and is dreamt again next wake, from what is left. mem0 guards its own adds the same way.
 """
 
 from __future__ import annotations
@@ -205,7 +213,10 @@ class Dreamer:
         with self._night_lock:
             started = time.monotonic()
             report = DreamReport(day=day)
-            self._run(day, report)
+            # Pinned before the day is read: a forget from here on makes the night's writes drop, since
+            # the model would answer from words that are forgotten by then (verification/Buddy/Forget.lean).
+            with records.forgets_pinned(self.cfg):
+                self._run(day, report)
             report.secs = round(time.monotonic() - started, 1)
             if report.dreamt and not report.empty:
                 self._append_report(day, report)

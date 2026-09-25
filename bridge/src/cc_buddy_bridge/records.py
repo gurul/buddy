@@ -27,7 +27,10 @@ Who writes, and nothing else does:
    then merges the same thing filed under two ids and dates superseded facts. The model can shorten,
    merge and correct; owner edits survive because the current files are always its input.
 3. **Forget** (owner-confirmed, memory.py) → ``forget_lines`` removes matching lines everywhere here, and
-   ``squash_history`` makes git forget them too.
+   ``squash_history`` makes git forget them too. A forget that lands while a dream's model call is out
+   would be undone by that dream's write (the model answered from the words before the forget), so every
+   forget moves a generation (``.forgets``) and a dream writes only when the generation it pinned before
+   reading the day has not moved (``forgets_pinned``; proved in verification/Buddy/Forget.lean).
 
 Git is how nothing is lost otherwise: every dream is one commit, so a wrong edit is one revert away. The
 repository root is the records folder itself — never the memory root, which holds the transcripts, and a
@@ -217,6 +220,61 @@ def _locked(folder: Path) -> Iterator[None]:
                 with contextlib.suppress(OSError):
                     fcntl.flock(fd, fcntl.LOCK_UN)
                 os.close(fd)
+
+
+# The forget generation. The dream reads the day and the records, calls a model for minutes with the lock
+# released, then writes; a forget that ran in between would be undone by that write, and its commit would
+# land after the forget squashed the history. So a forget moves the generation inside the same hold of the
+# lock in which it scrubs the records, the dream pins it before it reads anything, and a write whose pin
+# moved is dropped: the night is dreamt again, from what is left. On disk because the CLI forgets from
+# another process; in memory too, so a failed write of the file cannot hide a forget from this process.
+FORGETS_FILE = ".forgets"
+_FORGETS = [0]                               # forgets begun in this process
+_PIN = threading.local()                     # the generation this thread's dream pinned, or None
+
+
+def _generation(folder: Path) -> tuple[int, str]:
+    """Call with _locked(folder) held."""
+    try:
+        disk = (folder / FORGETS_FILE).read_text(encoding="utf-8").strip()
+    except (OSError, UnicodeDecodeError):
+        disk = ""
+    return _FORGETS[0], disk
+
+
+def _bump(folder: Path) -> None:
+    """Move the generation. Call with _locked(folder) held, in the hold that scrubs the records."""
+    with _WRITE_LOCK:
+        _FORGETS[0] += 1
+        if not folder.is_dir():
+            return
+        disk = _generation(folder)[1]
+        try:
+            _write(folder / FORGETS_FILE, f"{int(disk) + 1 if disk.isdigit() else 1}\n")
+        except OSError as e:
+            log.warning("records: could not note a forget on disk (%s)", type(e).__name__)
+
+
+def _pinned(folder: Path) -> tuple[int, str]:
+    """The generation a write is checked against: the dream's pin, or now. Call with _locked(folder) held."""
+    pin = getattr(_PIN, "gen", None)
+    return pin if pin is not None else _generation(folder)
+
+
+@contextlib.contextmanager
+def forgets_pinned(cfg: RecallConfig) -> Iterator[None]:
+    """Pin the forget generation for this thread before reading what a model will rewrite (the day's
+    transcript included). reconcile_day and consolidate inside it write nothing when a forget ran since."""
+    folder = records_dir(cfg)
+    outer = getattr(_PIN, "gen", None)
+    if outer is None:
+        with _locked(folder):
+            _PIN.gen = _generation(folder)
+    try:
+        yield
+    finally:
+        if outer is None:
+            _PIN.gen = None
 
 
 # ---- stars: the owner's "remember that" ---------------------------------------------------------
@@ -847,6 +905,7 @@ def reconcile_day(cfg: RecallConfig, client: Any, day: str, day_text: str) -> Op
         current = load_records(cfg)
         page = _profile_page(cfg)
         star_rows = _star_rows(cfg)[-MAX_STARS_READ:]
+        since = _pinned(folder)
     body = "## Records now\n\n" + (_render_all(current) or "(none yet)")
     body += "\n\n## The profile page now\n\n" + (page or "(none yet)")
     if star_rows:
@@ -861,6 +920,9 @@ def reconcile_day(cfg: RecallConfig, client: Any, day: str, day_text: str) -> Op
         return None
     try:
         with _locked(folder):
+            if _generation(folder) != since:
+                log.info("records: a forget ran during the dream of a day — nothing written, it is dreamt again")
+                return None
             change = apply_day(cfg, result, day)
             sha = commit(folder, f"dream: {day}") if git else None
     except OSError as e:
@@ -891,6 +953,7 @@ def consolidate(cfg: RecallConfig, client: Any) -> tuple[int, int]:
     with _locked(folder):
         current = load_records(cfg)
         page = _profile_page(cfg)
+        since = _pinned(folder)
     if len(current) < 2 and not any(len(r.facts) > 1 for r in current.values()):
         return 0, 0
     rendered = _render_all(current)
@@ -905,6 +968,9 @@ def consolidate(cfg: RecallConfig, client: Any) -> tuple[int, int]:
     day = datetime.now().strftime("%Y-%m-%d")
     try:
         with _locked(folder):
+            if _generation(folder) != since:     # a forget ran during the call: its answer holds the words
+                log.info("records: a forget ran during the consolidation — nothing written")
+                return 0, 0
             latest = load_records(cfg)       # a star or an edit may have landed during the call
             renames: dict[str, str] = {}
             for m in result.get("merged") or []:
@@ -1008,12 +1074,18 @@ def forget_lines(cfg: RecallConfig, match: Callable[[str], bool], dry_run: bool 
     """Remove every line `match` accepts from the records, the profile, starred.md and the journals.
     → how many lines. Frontmatter lines stay (the files must still parse) but lose what matched: an alias,
     a journal title. A record whose id matches, or that is left with no fact, is removed whole. One commit
-    "forget: N lines" (squash_history is the caller's next step, so git forgets too)."""
+    "forget: N lines" (squash_history is the caller's next step, so git forgets too). A real forget moves
+    the forget generation in the same hold of the lock, even when nothing here matched: a dream out on a
+    model call may still hold the words."""
     folder = records_dir(cfg)
     if not folder.is_dir():
+        if not dry_run:
+            _bump(folder)
         return 0
     total = 0
     with _locked(folder):
+        if not dry_run:
+            _bump(folder)
         paths = sorted(folder.glob("*.md")) + sorted((folder / DAYS_DIR).glob("*.md"))
         for path in paths:
             is_record = path.parent == folder and path.stem != PROFILE_ID and path.name != STARRED_FILE

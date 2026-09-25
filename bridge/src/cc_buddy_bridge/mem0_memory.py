@@ -219,6 +219,7 @@ class OwnerMemory:
         self._mem: Any = None
         self._failed_at: Optional[float] = None
         self._lock = threading.Lock()
+        self._forgets = 0                    # forgets so far; an ingest that saw it move adds nothing more
         self._in_flight = 0
         self._count_lock = threading.Lock()
         self._last_timeout_log = -TIMEOUT_LOG_EVERY_SECS
@@ -363,6 +364,8 @@ class OwnerMemory:
         marked read and not sent."""
         added = 0
         done = self._done()
+        with self._lock:
+            since = self._forgets            # before a word is read: a forget after it voids what was read
         for info in transcripts.conversations(day):
             if info.conv in done:
                 continue
@@ -372,6 +375,9 @@ class OwnerMemory:
             ok = True
             for chunk in chunks:
                 with self._lock:
+                    if self._forgets != since:
+                        log.info("mem0: a forget ran while a day was read — the rest is read again next night")
+                        return added
                     mem = self._memory()
                     if mem is None:
                         return added
@@ -445,11 +451,33 @@ class OwnerMemory:
         if not ids:
             return 0
         with self._lock:
+            self._forgets += 1
             mem = self._memory()
             if mem is None:
                 return 0
             gone = self._delete(mem, ids)
             self._scrub(ids)
+        log.info("mem0: forgot %d memories", len(gone))
+        return len(gone)
+
+    def forget_matching(self, match: Callable[[str], bool]) -> int:
+        """``find`` and ``forget`` in one hold of the lock, so nothing ``ingest_day`` adds can land between
+        the listing and the deletes; and an ingest that read its conversation before this adds nothing
+        after it. → how many memories were deleted."""
+        with self._lock:
+            self._forgets += 1
+            mem = self._memory()
+            if mem is None:
+                return 0
+            try:
+                rows = self._all(mem)
+            except Exception as e:  # noqa: BLE001
+                log.warning("mem0: listing failed (%s)", type(e).__name__)
+                return 0
+            ids = [str(r["id"]) for r in rows if r.get("id") and match(str(r.get("memory") or ""))]
+            gone = self._delete(mem, ids) if ids else []
+            if ids:
+                self._scrub(ids)
         log.info("mem0: forgot %d memories", len(gone))
         return len(gone)
 
