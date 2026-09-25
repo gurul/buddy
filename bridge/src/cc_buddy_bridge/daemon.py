@@ -388,6 +388,11 @@ class Daemon:
         if self._telegram is not None:
             tasks.append(asyncio.create_task(self._telegram.run(), name="telegram"))
             self._command_risk()                     # one log line at start: the Auto Mode gate's mode
+            # The watcher (watch.py): prices, quotes and ticket releases on a schedule, texted through the door.
+            watcher = getattr(self, "_watcher", None)
+            if watcher is not None:
+                watcher.notify = self._telegram.tell_owner
+                tasks.append(asyncio.create_task(watcher.run(), name="watch"))
         # The "Ask Claude" Mini App (miniapp.py): the owner's menu button opens a Claude chat inside Telegram,
         # served here through a Cloudflare quick tunnel. Off unless CC_BUDDY_MINIAPP=1.
         Daemon._start_miniapp(self, tasks)
@@ -1175,8 +1180,17 @@ class Daemon:
         vault = second_brain.configured()
         if tg.enabled:
             log.info("second brain: %s", f"on at {vault.root}" if vault.enabled else "off (CC_BUDDY_SECOND_BRAIN)")
+        # The watcher texts through this door, so it exists only with it. Made here, started beside the door.
+        from . import watch as watch_mod
+
+        try:
+            watcher = watch_mod.make_watcher() if tg.enabled else None
+        except Exception:  # noqa: BLE001 — a watcher that cannot start costs the watching, never the daemon
+            log.exception("watch: could not start; watching is off this run")
+            watcher = None
+        self._watcher = watcher
         return telegram_mod.make_inlet(
-            tg,
+            tg, watcher=watcher,
             apps=Daemon._make_apps(self, tg.owner_ids) if tg.enabled else None,
             vault=vault if tg.enabled and vault.enabled else None,
             agent_factory=self._make_agent, agent_enabled=self._agent_cfg.enabled,

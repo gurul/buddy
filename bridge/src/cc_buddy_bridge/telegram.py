@@ -82,6 +82,7 @@ from . import (
     spend,
     system_context,
     telegram_images,
+    watch,
     websearch,
 )
 from . import telegram_format as fmt
@@ -116,7 +117,7 @@ PROMPT_CACHE_KEY = "buddy-telegram"  # every turn shares one prefix: route them 
 # tools are not here (their results are memory already), nor the owner's apps (third-party mail and files
 # are not the owner's conversation), nor calls whose result is only "ok" (owner, 2026-09-23).
 TRANSCRIBED_TOOLS = ("web_search", "think_hard", "look", "look_around", "find", "take_photo", "remember",
-                     "capture_note")
+                     "capture_note", "watch_add", "watch_remove")
 MAX_TOOL_ROUNDS = 6                 # model calls in one turn, at most
 MAX_OUTPUT_TOKENS = 1200
 BACKOFF_MAX_SECS = 60.0
@@ -127,6 +128,13 @@ STOP_WORDS = ("stop", "/stop", "cancel", "/cancel")
 APPS_WORDS = ("/apps", "apps", "my apps", "open apps", "open buddy")
 # /spend: what buddy has spent, answered by code like /apps (no model call, relay or not). spend.brief writes it.
 SPEND_WORDS = ("/spend", "spend", "spending", "/spending", "what did i spend", "how much did i spend")
+# /watches: what buddy is watching (watch.py), answered by code like /spend. Stopping or adding one is a model turn.
+WATCH_WORDS = ("/watch", "/watches", "watches", "/watchlist", "watchlist", "my watches", "what are you watching")
+# "/watch AAPL below 300": the words after the command are a watch request, handed to the text brain as one
+# (owner, 2026-09-25: "make this /watch on telegram"). Bare "/watch" lists, by code.
+WATCH_COMMAND = re.compile(r"^/watch(?:@\w+)?\s+(.+)$", re.I | re.S)
+WATCH_TITLE = "Watch"                 # an alert's title: not a reply to anything the owner just said
+WATCH_OFF_LINE = "Watching is off on this computer (CC_BUDDY_WATCH)."
 APPS_TEXT = "Your apps:"
 APPS_OFF_LINE = "The apps aren't running right now (CC_BUDDY_MINIAPP, or the tunnel is still starting)."
 STEALTH_ON = ("stealth mode", "stealth", "stealth on", "go stealth", "/stealth", "play dead", "act asleep")
@@ -209,6 +217,7 @@ BOT_COMMANDS: tuple[tuple[str, str], ...] = (
     ("new_claude", "Open a new Claude Code session"),
     ("codex", "Chat with Codex in a folder"),
     ("rundown", "Mail, calendar and todos in one brief"),
+    ("watch", "Watch a price, stock or ticket release, or list them"),
     ("screenshot", "Send the Mac's screen"),
     ("stealth", "Act asleep at the desk"),
     ("wake", "Wake up from stealth"),
@@ -480,14 +489,16 @@ what came back in your own few words; never paste a raw record."""
 
 
 def tools_for(config: TelegramConfig, memory_tools: Sequence[dict[str, Any]] = (),
-              extra: Sequence[dict[str, Any]] = (), vault: bool = False) -> list[dict[str, Any]]:
+              extra: Sequence[dict[str, Any]] = (), vault: bool = False,
+              watch_tools: Sequence[dict[str, Any]] = ()) -> list[dict[str, Any]]:
     """The tools of one turn, in a fixed order (the list is part of the cached prefix): buddy's own, the
     memory tools whenever a Memory is lent, the web search the engine calls for (websearch.tools_for: Exa
     through OpenRouter, or the hosted one), the second brain's tools when the vault is on, and the app tools
     lent. The memory tools no longer depend on the profile: an empty or missing profile used to hide them,
-    and with them everything buddy could look up (owner, 2026-09-23)."""
+    and with them everything buddy could look up (owner, 2026-09-23). The watch tools (watch.py) come after the
+    vault's when a Watcher is lent."""
     return (TOOLS + list(memory_tools) + websearch.tools_for(config.search)
-            + (list(second_brain.SECOND_BRAIN_TOOLS) if vault else []) + list(extra))
+            + (list(second_brain.SECOND_BRAIN_TOOLS) if vault else []) + list(watch_tools) + list(extra))
 # A request that asks to SEE something: its task's result comes with the screen it left. Only then — the
 # owner wants a picture when they ask for one, not with every result (owner, 2026-09-21).
 # The whole message is a request for the screen: answered by code, no model call, mid-task or not — like
@@ -803,7 +814,8 @@ def with_turn_context(items: list[dict[str, Any]], context: str) -> list[dict[st
 def request(config: TelegramConfig, items: list[dict[str, Any]], brief: str = "",
             profile: str = "", app_tools: Sequence[dict[str, Any]] = (), vault: bool = False, *,
             today: str = "", memory_tools: Sequence[dict[str, Any]] = (),
-            context: Optional[str] = None) -> dict[str, Any]:
+            context: Optional[str] = None, watch_tools: Sequence[dict[str, Any]] = (),
+            watch_block: str = "") -> dict[str, Any]:
     """The exact Responses body. Stateless: ``store=False`` and the turn's own items sent back each round
     (with the model's reasoning as ``encrypted_content``), so nothing the owner texted is kept on OpenAI's
     side and no ``previous_response_id`` is needed.
@@ -822,6 +834,8 @@ def request(config: TelegramConfig, items: list[dict[str, Any]], brief: str = ""
         instructions += MEMORY_HINT
     if vault:
         instructions += "\n\n" + second_brain.INSTRUCTIONS_BLOCK
+    if watch_block:
+        instructions += "\n\n" + watch_block
     if app_tools:
         instructions += APPS_BLOCK
     if today:
@@ -831,7 +845,7 @@ def request(config: TelegramConfig, items: list[dict[str, Any]], brief: str = ""
         "model": config.model,
         "instructions": instructions,
         "input": with_turn_context(items, note),
-        "tools": tools_for(config, memory_tools, app_tools, vault),
+        "tools": tools_for(config, memory_tools, app_tools, vault, watch_tools),
         "tool_choice": "auto",
         "parallel_tool_calls": False,
         "reasoning": {"effort": config.effort},
@@ -1329,6 +1343,8 @@ class TelegramInlet:
                           calendar writable, everything else asked first), or None
     * ``vault``         — second_brain.VaultConfig: the owner's own notes, todos and journals as a local
                           markdown vault (PARA+), captured from this chat and read back, or None
+    * ``watcher``       — watch.Watcher: prices, quotes and ticket releases watched on a schedule; its tools are
+                          offered, /watches lists them, and its alerts reach this chat through ``tell_owner``
     * ``screen``        — () -> Path | None: a JPEG of the screen (capture_screen); tests hand in a fake
     * ``scene``, ``head`` — the daemon's SceneWatcher and Head, for look / look_around / find / move_head
     * ``on_explore``    — () -> None: "go explore" (daemon._request_explore)
@@ -1374,6 +1390,7 @@ class TelegramInlet:
                  on_state: Callable[[str], None] = lambda state: None,
                  on_closed: Optional[Callable[[list[tuple[str, str]]], None]] = None,
                  memory: Optional[Memory] = None, apps: Any = None, vault: Any = None,
+                 watcher: Optional[watch.Watcher] = None,
                  screen: Callable[[], Optional[Path]] = capture_screen,
                  scene: Any = None, head: Any = None,
                  on_explore: Optional[Callable[[], Any]] = None,
@@ -1407,6 +1424,7 @@ class TelegramInlet:
         self._maker: Any = None                            # apps_maker.ChatMaker once the Mini App runs, or None
         self._app_policy = composio_tools.toolkit_policy()
         self._vault = vault                                # second_brain.VaultConfig (enabled), or None
+        self._watcher = watcher                            # watch.Watcher, or None (CC_BUDDY_WATCH=0)
         self._screen = screen
         self._scene, self._head = scene, head
         self._on_explore, self._on_sound, self._on_caption = on_explore, on_sound, on_caption
@@ -1850,7 +1868,15 @@ class TelegramInlet:
                         "telegram-image")
             return
         word = inbound.text.lower().rstrip(".! ")
-        if not re.match(r"/?claude[ _](on|off)\b", word) and self._launch_dispatch(inbound, word):
+        if re.fullmatch(r"/watch(es|list)?@\w+", word):
+            word = word.split("@", 1)[0]                 # "/watch@BuddyBot", as a menu in a group sends it
+        watch_ask = WATCH_COMMAND.match(inbound.text.strip())
+        if watch_ask:
+            # a model turn, worded as the owner would say it, with the watch tools
+            inbound = dataclasses.replace(inbound, text="Watch " + watch_ask.group(1).strip())
+            word = inbound.text.lower().rstrip(".! ")
+        # "/watch <words>" is never an answer to an open "new claude" tree (it was taken as a folder name)
+        if not watch_ask and not re.match(r"/?claude[ _](on|off)\b", word) and self._launch_dispatch(inbound, word):
             return
         if rundown.matches(inbound.text):
             self._spawn(self._turn(inbound), "telegram-rundown")
@@ -1917,8 +1943,11 @@ class TelegramInlet:
             self._spawn(self._codex_send(inbound.chat_id, codex_text.group(1), self._codex_epoch,
                                          message_id=inbound.message_id), "telegram-codex")
             return
+        # "/watch <words>" is buddy's own command, from buddy's own menu: like a code word it skips both relays
+        # and reaches the brain (verification/Buddy/WatchRoute.lean). It used to be typed into the session.
         if (self._codex_chat == inbound.chat_id
-                and word not in STEALTH_ON + STEALTH_OFF + APPS_WORDS + SPEND_WORDS
+                and word not in STEALTH_ON + STEALTH_OFF + APPS_WORDS + SPEND_WORDS + WATCH_WORDS
+                and not watch_ask
                 and not SCREEN_NOW.match(inbound.text)
                 and not self._answers_pending(inbound.text)):
             for_buddy = BUDDY_PREFIX.match(inbound.text)
@@ -1937,9 +1966,9 @@ class TelegramInlet:
                         "telegram-claude")
             return
         if (word in STEALTH_ON or word in STEALTH_OFF or word in APPS_WORDS or word in SPEND_WORDS
-                or SCREEN_NOW.match(inbound.text)):
+                or word in WATCH_WORDS or SCREEN_NOW.match(inbound.text)):
             pass                                          # buddy's own code words, relay or not
-        elif self.claude and not self._answers_pending(inbound.text):
+        elif self.claude and not watch_ask and not self._answers_pending(inbound.text):
             # Relay on: the chat IS the terminal. A yes/no while Claude is asking answers Claude (below);
             # "buddy: ..." is for buddy; everything else is typed into the session. With Allow/Deny on the
             # screen, only a clear yes/no is the answer: other words still go to Claude, the prompt waits.
@@ -1959,6 +1988,11 @@ class TelegramInlet:
         if word in SPEND_WORDS:
             self._note("user", inbound.text, "command")
             self._spawn(self._spend_now(inbound.chat_id), "telegram-spend")
+            return
+        if word in WATCH_WORDS:
+            self._note("user", inbound.text, "command")
+            self._spawn(self._say(inbound.chat_id, self._watcher.listing() if self._watcher is not None
+                                  else WATCH_OFF_LINE, title="Watching"), "telegram-watches")
             return
         if word in STEALTH_ON or word in STEALTH_OFF:
             self.stealth = word in STEALTH_ON
@@ -3116,11 +3150,15 @@ class TelegramInlet:
         app_tools = self._app_tools()
         app_names = frozenset(t["name"] for t in app_tools)
         allowed = app_names | {t["name"] for t in mem_tools} | (
-            set(second_brain.SECOND_BRAIN_TOOL_NAMES) if self._vault is not None else set())
+            set(second_brain.SECOND_BRAIN_TOOL_NAMES) if self._vault is not None else set()) | (
+            set(watch.TOOL_NAMES) if self._watcher is not None else set())
+        watch_tools = self._watcher.tools() if self._watcher is not None else []
+        watch_block = self._watcher.instructions() if self._watcher is not None else ""
         text = ""
         for round_no in range(1, MAX_TOOL_ROUNDS + 1):
             payload = request(self.config, items, profile=prof, app_tools=app_tools,
-                              vault=self._vault is not None, today=today, memory_tools=mem_tools, context=note)
+                              vault=self._vault is not None, today=today, memory_tools=mem_tools, context=note,
+                              watch_tools=watch_tools, watch_block=watch_block)
             if round_no == 1:
                 usage["instr"] = len(payload["instructions"])
             if daily:
@@ -3191,6 +3229,10 @@ class TelegramInlet:
                 return await self._memory_tool(name, args)
             if self._apps is not None and name in self._apps.names:
                 return await self._app_tool(name, args, chat_id)
+            if name in watch.TOOL_NAMES:
+                if self._watcher is None:
+                    return {"ok": False, "reason": watch.OFF_REASON}
+                return await self._watcher.handle(name, args)
             if name in second_brain.SECOND_BRAIN_TOOL_NAMES:
                 if self._vault is None:
                     return {"ok": False, "reason": "the second brain is off on this computer (CC_BUDDY_SECOND_BRAIN)"}
@@ -3253,6 +3295,26 @@ class TelegramInlet:
     async def _tool_web_search(self, name: str, args: dict[str, Any], chat_id: int) -> dict[str, Any]:
         # Exa through OpenRouter (websearch.py), off the loop: a second or two of network
         return await asyncio.to_thread(websearch.search, str(args.get("query") or ""), self.config.search)
+
+    async def tell_owner(self, text: str, about: str = "") -> bool:
+        """A watch alert (watch.Watcher.notify): a new message in the owner's chat, unasked. It goes into the
+        chat's history and transcript as buddy's, so "stop watching that" in reply has something to point at.
+        Stealth does not hold it back: stealth is the desk's, and this is the phone. Returns whether it was sent:
+        the watcher keeps an alert Telegram refused and sends it again (``_say`` would swallow the refusal).
+        The history and the transcript get ``about``, a line the watcher builds from the watch alone: the alert
+        itself can carry words from the web, and the brain reading them as its own words was a stored prompt
+        injection (re-verification, 2026-09-25)."""
+        if self._chat_id is None:
+            return False
+        try:
+            await self.api.send_message(self._chat_id, text, title=WATCH_TITLE)
+        except asyncio.CancelledError:
+            raise
+        except Exception as e:  # noqa: BLE001 — BotApiError, a network error: not sent, tried again later
+            log.warning("telegram: a watch alert was not sent (%s)", e if isinstance(e, BotApiError) else type(e).__name__)
+            return False
+        self._note("buddy", about or text)
+        return True
 
     async def _spend_now(self, chat_id: int) -> None:
         """/spend: today, yesterday, this month, the top features and OpenRouter's own figure, from the ledgers on

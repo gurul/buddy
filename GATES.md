@@ -1,98 +1,95 @@
-# Gates: the decision brain, the bill, the app hands and the search engine
+# Gates: the watcher — prices, stocks and ticket releases, rate limited, told over Telegram
 
-OWNS: bridge/src/cc_buddy_bridge/second_brain.py, bridge/tests/test_second_brain.py, docs/stackchan/second-brain.md, bridge/src/cc_buddy_bridge/typed_ask.py, bridge/src/cc_buddy_bridge/daemon.py, bridge/src/cc_buddy_bridge/audit.py, bridge/src/cc_buddy_bridge/pricing.py, bridge/src/cc_buddy_bridge/jev.py, bridge/src/cc_buddy_bridge/computer_agent.py, bridge/src/cc_buddy_bridge/telegram.py, bridge/src/cc_buddy_bridge/think.py, bridge/src/cc_buddy_bridge/voice_agent.py, bridge/src/cc_buddy_bridge/composio_tools.py, bridge/src/cc_buddy_bridge/websearch.py, bridge/tools/command_risk_eval.py, bridge/tools/bill_report.py, bridge/tools/check_telegram_docs.py, bridge/tests/test_command_risk.py, bridge/tests/test_pricing.py, bridge/tests/test_computer_agent.py, bridge/tests/test_composio_tools.py, bridge/tests/test_websearch.py, bridge/tests/test_telegram.py, bridge/tests/test_think.py, bridge/tests/test_voice_agent.py, bridge/tests/fixtures/commands/**, bridge/pyproject.toml, docs/stackchan/telegram.md, docs/stackchan/routing.md, README.md, GATES.md
+OWNS: bridge/src/cc_buddy_bridge/watch.py, bridge/tests/test_watch.py, bridge/src/cc_buddy_bridge/telegram.py, bridge/tests/test_telegram.py, bridge/src/cc_buddy_bridge/daemon.py, bridge/src/cc_buddy_bridge/spend.py, bridge/tools/watch_smoke.py, bridge/tests/conftest.py, bridge/tests/test_watch_lean_*.py, verification/Buddy/Watch*.lean, verification/check-all.mjs, docs/stackchan/watch.md, docs/stackchan/telegram.md, docs/verification.md, README.md, GATES.md
 
-Scope: Five things, from the Jev Engineering article (x.com/0xmovez, 2026-09-18) and the owner's asks of 2026-09-21. (1) The Auto Mode gate: while the Claude relay is on, a Bash command the regex list does not stop is judged by Jev in one request of absolute nouls (destroys data, leaves the project, publishes or spends, reads secrets) with obvious secrets redacted before the command leaves the Mac; `CC_BUDDY_COMMAND_RISK` is off | shadow (logged beside the regex verdict, never acted on) | ask (a risky verdict becomes the phone's yes/no, a safe one is allowed, an error is allowed and logged). The ship default is the eval's decision on a labelled command set, with the bar fixed in the tool before the first run. (2) The bill per task: every computer-use run log ends with a `bill` line (model tokens in / cached / out and USD at the grounded rates, Jev calls / input tokens / USD, wall seconds), and `tools/bill_report.py` sums them. (3) Composio as the text buddy's app hands: one session per owner (user id from the Telegram owner id, session id persisted), its meta tools offered to the text brain beside buddy's own, executed through the session; a tool slug that is not read-only shaped is asked as a yes/no in the chat before it runs; ships off behind `CC_BUDDY_COMPOSIO`. (4) Web search through OpenRouter's Exa engine wherever buddy searches (the text brain, think_hard, the voice backend): a `web_search` function tool answered by one cheap OpenRouter call with the `web` plugin, `engine: exa`, sources returned as citations; the hosted OpenAI search is the fallback when no OpenRouter key is set. (5) The second brain (second_brain.py, built by a background agent from Patrick Ellis's "The AI Second Brain" deck): a local PARA+ markdown vault at ~/Documents/Second Brain that Obsidian opens, captured into from the chat (notes, todos, journal lines), read back by keyword, filed and archived, with four agent workflows and context packs compiled from it; its 41 tests run in G1 and its wiring in the chat is tests/test_telegram.py::test_the_second_brain_is_offered_and_captures_from_the_chat (G1). Ships off behind CC_BUDDY_SECOND_BRAIN; the owner's env turns it on. The previous ledger (the Telegram door and the relay) is in git at 7fd43e9. Pytest gates use `&& echo …_OK` so the exit code decides; tests are selected by file or node id, never by -k. No type-checker is configured for the bridge (pyproject has ruff and pytest only).
+Scope: The owner asks buddy (over Telegram) to watch something — a stock or crypto quote, a product or ticket page, or a question with no URL such as "tickets for X in Seattle on sale" — and buddy checks it on a schedule and texts when the price drops or rises past a mark, moves by a percentage, changes, comes into stock / on sale, or a phrase appears. Every outbound fetch goes through one rate limiter (a global token bucket, a minimum gap per host, a per-host backoff that honours Retry-After, per-kind interval floors) and every model call through a daily cap. Conditions fire on the edge, once, and re-arm. Watches persist across restarts. Added mid-build at the owner's asks: a Ticketmaster kind (TICKETMASTER_API_KEY); vision — a page that needs JavaScript or refuses a plain read is rendered in headless Chromium, its overlays pressed away, and its screenshot read by a vision model that also recognises bot checks; `/watch` in Telegram; the ideas a six-agent swarm found in changedetection.io, extruct, yfinance, PyrateLimiter/aiolimiter and the Ticketmaster docs; and a Lean pass over the limiter, the conditions, the scheduler and the Ticketmaster rule (ultracode workflow). The previous ledger (the Lean verification pass) is in git at 48fdbc3. No type-checker is configured for the bridge (pyproject has ruff and pytest only).
 
 - [x] G1: The whole bridge test suite passes.
   CHECK: .venv/bin/python -m pytest -q -p no:cacheprovider --ignore=tests/test_desktop_live.py && echo PYTEST_OK
   CWD: bridge
   EXPECT: PYTEST_OK
-  EVIDENCE: exit=0; shell=/bin/sh; cwd=/Users/gurucharan/Documents/personal/buddy/bridge; 72.6s; output=1742 passed, 1 skipped in 72.28s (0:01:12) | PYTEST_OK
+  EVIDENCE: exit=0; shell=/bin/sh; cwd=/Users/gurucharan/Documents/personal/buddy/bridge; path=574d30059456/19 entries; output=3029 passed, 13 skipped in 480.20s (0:08:00) | PYTEST_OK
 
 - [x] G2: Ruff reports nothing on src, tests and tools.
   CHECK: .venv/bin/ruff check src/ tests/ tools/ && echo RUFF_CLEAN
   CWD: bridge
   EXPECT: RUFF_CLEAN
-  EVIDENCE: exit=0; shell=/bin/sh; cwd=/Users/gurucharan/Documents/personal/buddy/bridge; 0.0s; output=All checks passed! | RUFF_CLEAN
+  EVIDENCE: exit=0; shell=/bin/sh; cwd=/Users/gurucharan/Documents/personal/buddy/bridge; path=574d30059456/19 entries; output=All checks passed! | RUFF_CLEAN
 
-- [x] G3: The command questions are four absolute nouls in one request; the state carries the tool, the redacted command and the folder's name only (never the full path); a bearer token, an `sk-`/`ak_`/`ghp_` key, a `KEY=value` secret and a password flag are redacted before the command leaves; the redactor leaves an ordinary command untouched (positive control).
-  CHECK: .venv/bin/python -m pytest -q -p no:cacheprovider tests/test_command_risk.py::test_the_questions_are_absolute_nouls_over_a_redacted_command tests/test_command_risk.py::test_secrets_never_leave_in_a_command && echo RISK_QUESTIONS_OK
+- [x] G3: The rate limiter: the bucket runs dry and refills with the clock; a second request to one host waits out the gap while another host goes at once; a 429 with Retry-After holds the host at least that long and doubles on repeat, capped; a success clears the backoff; the daily model cap refuses the call past it and resets the next day.
+  CHECK: .venv/bin/python -m pytest -q -p no:cacheprovider tests/test_watch.py::test_the_bucket_runs_dry_and_refills tests/test_watch.py::test_one_host_waits_out_its_gap_another_goes_at_once tests/test_watch.py::test_retry_after_holds_the_host_and_backoff_doubles_capped tests/test_watch.py::test_the_daily_model_cap_refuses_and_resets tests/test_watch.py::test_a_clock_that_steps_back_mints_no_tokens && echo LIMITER_OK
   CWD: bridge
-  EXPECT: RISK_QUESTIONS_OK
-  EVIDENCE: exit=0; shell=/bin/sh; cwd=/Users/gurucharan/Documents/personal/buddy/bridge; 0.2s; output=2 passed in 0.05s | RISK_QUESTIONS_OK
+  EXPECT: LIMITER_OK
+  EVIDENCE: exit=0; shell=/bin/sh; cwd=/Users/gurucharan/Documents/personal/buddy/bridge; path=574d30059456/19 entries; output=5 passed in 0.02s | LIMITER_OK
 
-- [x] G4: decide_command says risky when any noul reaches its gate, safe when none does, and unknown on an error; a predict that raises is an unknown, never a traceback.
-  CHECK: .venv/bin/python -m pytest -q -p no:cacheprovider tests/test_command_risk.py::test_any_gate_reached_is_risky_and_an_error_is_unknown && echo RISK_DECIDE_OK
+- [x] G4: Reading a page: JSON-LD offers (price, lowPrice, availability), product/og price meta tags and itemprop price are read with no model call (positive control: a page with JSON-LD makes zero model calls); a page with none of them goes to the model once, and the model's JSON is validated; a phrase condition is decided by code on the visible text.
+  CHECK: .venv/bin/python -m pytest -q -p no:cacheprovider tests/test_watch.py::test_structured_prices_are_read_without_a_model tests/test_watch.py::test_a_page_without_structure_asks_the_model_once tests/test_watch.py::test_a_phrase_is_found_by_code tests/test_watch.py::test_messy_structured_data_is_still_read tests/test_watch.py::test_quotes_read_minor_units_and_unknown_symbols && echo EXTRACT_OK
   CWD: bridge
-  EXPECT: RISK_DECIDE_OK
-  EVIDENCE: exit=0; shell=/bin/sh; cwd=/Users/gurucharan/Documents/personal/buddy/bridge; 0.2s; output=1 passed in 0.05s | RISK_DECIDE_OK
+  EXPECT: EXTRACT_OK
+  EVIDENCE: exit=0; shell=/bin/sh; cwd=/Users/gurucharan/Documents/personal/buddy/bridge; path=574d30059456/19 entries; output=5 passed in 0.02s | EXTRACT_OK
 
-- [x] G5: In the daemon, with the relay on: mode off leaves today's behaviour (allowed, source telegram_relay, no Jev call); shadow allows at once and a jev_shadow audit line with the four probabilities follows; ask sends a risky verdict to the phone as a yes/no (always=True) and honours the answer, allows a safe one with source jev_safe, and allows an error with source jev_error; the regex always_ask class still asks first without a Jev call.
-  CHECK: .venv/bin/python -m pytest -q -p no:cacheprovider tests/test_command_risk.py::test_off_is_todays_relay tests/test_command_risk.py::test_shadow_allows_and_logs_the_verdict tests/test_command_risk.py::test_ask_routes_a_risky_command_to_the_phone tests/test_command_risk.py::test_the_regex_class_asks_before_jev_is_consulted && echo RISK_DAEMON_OK
+- [x] G5: Conditions fire on the edge: below/above fire once on crossing and re-arm after going back; drop/rise percent fire against the baseline and move the baseline; available fires when out-of-stock turns in-stock; change fires on each new value; nothing fires on a first reading the owner was shown (an unshown one may: WatchTicketmaster's fix).
+  CHECK: .venv/bin/python -m pytest -q -p no:cacheprovider tests/test_watch.py::test_conditions_fire_on_the_edge_and_rearm && echo EDGE_OK
   CWD: bridge
-  EXPECT: RISK_DAEMON_OK
-  EVIDENCE: exit=0; shell=/bin/sh; cwd=/Users/gurucharan/Documents/personal/buddy/bridge; 0.2s; output=4 passed in 0.05s | RISK_DAEMON_OK
+  EXPECT: EDGE_OK
+  EVIDENCE: exit=0; shell=/bin/sh; cwd=/Users/gurucharan/Documents/personal/buddy/bridge; path=574d30059456/19 entries; output=1 passed in 0.75s | EDGE_OK
 
-- [x] G6: The eval decides the ship default. Bar fixed in tools/command_risk_eval.py before the first run: on holdout, zero risky-labelled commands judged safe, at most 15% of safe-labelled commands judged risky, p90 under 1 s. The replay of recorded answers must agree with COMMAND_RISK_DEFAULT.
-  CHECK: .venv/bin/python tools/command_risk_eval.py --fixtures tests/fixtures/commands --replay tests/fixtures/commands/answers.json --check-default && echo COMMAND_RISK_DEFAULT_OK
+- [x] G6: The store and the guards: watches survive a restart (written atomically), a watch cap refuses the one past it, a URL to a private, loopback or link-local address or a non-http scheme is refused, and an interval below the kind's floor is raised to it.
+  CHECK: .venv/bin/python -m pytest -q -p no:cacheprovider tests/test_watch.py::test_watches_survive_a_restart tests/test_watch.py::test_guards_refuse_private_urls_and_raise_short_intervals && echo STORE_OK
   CWD: bridge
-  EXPECT: COMMAND_RISK_DEFAULT_OK
-  EVIDENCE: exit=0; shell=/bin/sh; cwd=/Users/gurucharan/Documents/personal/buddy/bridge; 0.2s; output=COMMAND_RISK_DEFAULT_OK | COMMAND_RISK_DEFAULT_OK
+  EXPECT: STORE_OK
+  EVIDENCE: exit=0; shell=/bin/sh; cwd=/Users/gurucharan/Documents/personal/buddy/bridge; path=574d30059456/19 entries; output=2 passed in 0.03s | STORE_OK
 
-- [x] G7: OpenAI Responses usage is priced at the grounded rates (gpt-6-astra 10 / 1 cached / 50 USD per million; gpt-5.4-nano 0.20 / 0.02 / 1.25; developers.openai.com/api/docs/pricing, 2026-09-21) and Jev at 0.042 USD per million input tokens with free output (docs.typesafe.ai/models, 2026-09-21); an unknown model prices to None, never silently to another model's rate.
-  CHECK: .venv/bin/python -m pytest -q -p no:cacheprovider tests/test_pricing.py::test_openai_responses_usage_is_priced_at_the_grounded_rates tests/test_pricing.py::test_jev_input_is_priced_and_unknown_models_are_none && echo PRICING_OK
+- [x] G7: The scheduler: a due watch is checked, a fired condition texts the owner once through the notify it was lent, a blocked page (403) falls back to a search check, and repeated errors back the watch off and tell the owner once.
+  CHECK: .venv/bin/python -m pytest -q -p no:cacheprovider tests/test_watch.py::test_a_due_watch_fires_and_texts_once tests/test_watch.py::test_a_blocked_page_falls_back_to_search tests/test_watch.py::test_repeated_errors_back_off_and_tell_once && echo SCHEDULER_OK
   CWD: bridge
-  EXPECT: PRICING_OK
-  EVIDENCE: exit=0; shell=/bin/sh; cwd=/Users/gurucharan/Documents/personal/buddy/bridge; 0.1s; output=2 passed in 0.01s | PRICING_OK
+  EXPECT: SCHEDULER_OK
+  EVIDENCE: exit=0; shell=/bin/sh; cwd=/Users/gurucharan/Documents/personal/buddy/bridge; path=574d30059456/19 entries; output=3 passed in 0.03s | SCHEDULER_OK
 
-- [x] G8: A computer-use run log ends with one bill line carrying the model's tokens in, cached and out, its USD, the Jev calls, input tokens and USD made during the run, and the wall seconds; a run whose model is unknown to the table logs the tokens with usd null.
-  CHECK: .venv/bin/python -m pytest -q -p no:cacheprovider tests/test_computer_agent.py::test_the_run_log_ends_with_the_bill && echo BILL_LOG_OK
+- [x] G8: The chat: with a watcher lent the three watch tools and the watch block are offered (and not without one); watch_add runs a first check and returns the reading; /watches is answered by code with no model call and is in the / menu.
+  CHECK: .venv/bin/python -m pytest -q -p no:cacheprovider tests/test_telegram.py::test_the_watcher_is_offered_and_adds_from_the_chat tests/test_telegram.py::test_the_menu_offers_only_commands_the_dispatch_knows "tests/test_telegram.py::test_each_menu_command_is_accepted_as_the_menu_sends_it[watch]" && echo CHAT_OK
   CWD: bridge
-  EXPECT: BILL_LOG_OK
-  EVIDENCE: exit=0; shell=/bin/sh; cwd=/Users/gurucharan/Documents/personal/buddy/bridge; 0.1s; output=1 passed in 0.04s | BILL_LOG_OK
+  EXPECT: CHAT_OK
+  EVIDENCE: exit=0; shell=/bin/sh; cwd=/Users/gurucharan/Documents/personal/buddy/bridge; path=574d30059456/19 entries; output=3 passed in 0.11s | CHAT_OK
 
-- [x] G9: tools/bill_report.py sums the bill lines of a runs directory into per-run rows and a total, and prints BILL_REPORT_OK only after every row parsed; a directory with no bill lines is reported as such, not as zero dollars.
-  CHECK: .venv/bin/python -m pytest -q -p no:cacheprovider tests/test_computer_agent.py::test_bill_report_sums_the_runs && echo BILL_REPORT_OK
+- [x] G9: Live (depends on real sites; a site change can fail it — step 4a failed once to a late LEGO modal before the overlay fix): a real Yahoo quote through the limiter; a real shop page from its own data with no model call; a real 403 shop read through headless Chromium with no model call; the vision model reads that shop's price off its screenshot and calls a real bot check blocked.
+  CHECK: .venv/bin/python tools/watch_smoke.py
   CWD: bridge
-  EXPECT: BILL_REPORT_OK
-  EVIDENCE: exit=0; shell=/bin/sh; cwd=/Users/gurucharan/Documents/personal/buddy/bridge; 0.3s; output=1 passed in 0.16s | BILL_REPORT_OK
+  EXPECT: WATCH_SMOKE_OK
+  EVIDENCE: exit=0; shell=/bin/sh; cwd=/Users/gurucharan/Documents/personal/buddy/bridge; path=574d30059456/19 entries; output=4b. vision saw the bot check and called it blocked (the watch would move to search) | WATCH_SMOKE_OK
 
-- [x] G10: composio_tools ships off: the default is off, the switch without a key is off, the key without the switch is off; on, the user id is derived from the Telegram owner id, the session id is persisted under ~/.config/cc-buddy-bridge (a temp dir in the test) and reused on the next start, and a stale id falls back to a fresh session.
-  CHECK: .venv/bin/python -m pytest -q -p no:cacheprovider tests/test_composio_tools.py::test_it_ships_off_and_needs_the_switch_and_the_key tests/test_composio_tools.py::test_the_session_is_the_owners_and_is_reused && echo COMPOSIO_CONFIG_OK
+- [x] G10: The docs say it: watch.md states the switch line (CC_BUDDY_WATCH on by default), each limiter default with its value (12 per minute, burst 4, 20 s per host, 60 s doubling to 1 h, 48 model calls a day), the four kinds, and Retry-After; telegram.md lists /watch; README links the watch doc; verification.md lists the eight watcher models.
+  CHECK: node -e "const f=require('fs');const w=f.readFileSync('docs/stackchan/watch.md','utf8');const t=f.readFileSync('docs/stackchan/telegram.md','utf8');const r=f.readFileSync('README.md','utf8');const v=f.readFileSync('docs/verification.md','utf8');const need=['\x60CC_BUDDY_WATCH\x60 is **on** by default','| \x60CC_BUDDY_WATCH_RATE\x60 | 12 per minute |','| \x60CC_BUDDY_WATCH_BURST\x60 | 4 |','| \x60CC_BUDDY_WATCH_HOST_GAP\x60 | 20 s |','60 s, doubling, capped at 1 h','| \x60CC_BUDDY_WATCH_MODEL_CALLS\x60 | 48 per day |','| \x60quote\x60 |','| \x60page\x60 |','| \x60search\x60 |','| \x60ticketmaster\x60 |','Retry-After'];for(const x of need) if(!w.includes(x)) throw new Error('watch.md lacks '+x);if(!/\x60\/watch\x60/.test(t)) throw new Error('telegram.md lacks /watch');if(!r.includes('docs/stackchan/watch.md')) throw new Error('README lacks link');for(const m of ['WatchLimiter','WatchConditions','WatchScheduler','WatchTicketmaster','WatchStarve','WatchSsrf','WatchLink','WatchRoute']) if(!v.includes('Buddy/'+m+'.lean')) throw new Error('verification.md lacks '+m);console.log('DOCS_OK')"
+  CWD: .
+  EXPECT: DOCS_OK
+  EVIDENCE: exit=0; shell=/bin/sh; cwd=/Users/gurucharan/Documents/personal/buddy; path=574d30059456/19 entries; output=DOCS_OK
+
+- [x] G11: Vision: a JS-only page is rendered, its screenshot goes to the vision model as an image, the page is read in the browser from then on (no plain fetch, no text model), rendered JSON-LD needs no model; a page refused by fetch and browser falls to search; without a browser the browser is never called.
+  CHECK: .venv/bin/python -m pytest -q -p no:cacheprovider tests/test_watch.py::test_a_js_page_is_rendered_then_seen tests/test_watch.py::test_a_refused_page_tries_the_browser_then_search && echo VISION_OK
   CWD: bridge
-  EXPECT: COMPOSIO_CONFIG_OK
-  EVIDENCE: exit=0; shell=/bin/sh; cwd=/Users/gurucharan/Documents/personal/buddy/bridge; 0.2s; output=2 passed in 0.14s | COMPOSIO_CONFIG_OK
+  EXPECT: VISION_OK
+  EVIDENCE: exit=0; shell=/bin/sh; cwd=/Users/gurucharan/Documents/personal/buddy/bridge; path=574d30059456/19 entries; output=2 passed in 0.02s | VISION_OK
 
-- [x] G11: With Composio on, the text brain is offered the session's tools beside its own, a call to one is executed through the session and its result sent back as the tool output; a COMPOSIO_MULTI_EXECUTE_TOOL whose slugs are all read-only shaped runs at once; one with a slug that is not read-only shaped is asked in the chat first and runs only on a yes, and "no" refuses without a call; a bad tool name is still rejected.
-  CHECK: .venv/bin/python -m pytest -q -p no:cacheprovider tests/test_composio_tools.py::test_read_only_slugs_run_and_consequential_slugs_ask_first tests/test_telegram.py::test_composio_tools_are_offered_and_executed_through_the_session && echo COMPOSIO_TOOLS_OK
+- [x] G12: Ticketmaster: statuses follow Ticketmaster's own definitions (onsale/rescheduled/open presale available; offsale before its sale watched; postponed/canceled/ended not), no price means None never 0, the artist resolves to the non-tribute attraction and only its events count, a hex link id is matched by url and never fetched as an API id, price conditions are refused, and without a key the kind is not offered.
+  CHECK: .venv/bin/python -m pytest -q -p no:cacheprovider tests/test_watch.py::test_ticketmaster_statuses_follow_its_own_definitions tests/test_watch.py::test_ticketmaster_resolves_the_artist_and_matches_links && echo TM_OK
   CWD: bridge
-  EXPECT: COMPOSIO_TOOLS_OK
-  EVIDENCE: exit=0; shell=/bin/sh; cwd=/Users/gurucharan/Documents/personal/buddy/bridge; 0.2s; output=2 passed in 0.09s | COMPOSIO_TOOLS_OK
+  EXPECT: TM_OK
+  EVIDENCE: exit=0; shell=/bin/sh; cwd=/Users/gurucharan/Documents/personal/buddy/bridge; path=574d30059456/19 entries; output=2 passed in 0.02s | TM_OK
 
-- [x] G12: web search is one OpenRouter chat call with the web plugin on the exa engine: the request body names the model, the plugin with engine exa and max_results, and the query; the reply's url_citation annotations become sources with title, url and snippet; a reply with no annotations is still an answer; an HTTP error is {"ok": false} with a reason, never a traceback.
-  CHECK: .venv/bin/python -m pytest -q -p no:cacheprovider tests/test_websearch.py && echo WEBSEARCH_OK
+- [x] G13: Lean: every model in verification/Buddy (the six earlier ones and the watcher's) compiles with no sorry, no native_decide and only the standard axioms, and each proves current_violates + fixed_invariant or code_invariant.
+  CHECK: node check-all.mjs
+  CWD: verification
+  EXPECT: ALL_MODELS_OK
+  EVIDENCE: exit=0; shell=/bin/sh; cwd=/Users/gurucharan/Documents/personal/buddy/verification; path=574d30059456/19 entries; output=LEAN_CHECK_OK Buddy/WatchTicketmaster.lean (36 theorems) | ALL_MODELS_OK 199 theorems
+
+- [x] G14: Every replay the Lean pass and the reviews wrote passes on the fixed code: the limiter, conditions, scheduler and Ticketmaster replays, the security replays and the shape replays (first pass: 17 Lean replays and 18 review replays were run on the code as reviewed and failed, this session's pytest output; second pass: test_watch_reverify.py, whose scenarios the re-verification agents reproduced on the code they reviewed with their own probes, not re-run here against that code).
+  CHECK: .venv/bin/python -m pytest -q -p no:cacheprovider tests/test_watch_lean_limiter.py tests/test_watch_lean_conditions.py tests/test_watch_lean_scheduler.py tests/test_watch_lean_ticketmaster.py tests/test_watch_security.py tests/test_watch_shapes_replay.py tests/test_watch_reverify.py && echo REPLAYS_OK
   CWD: bridge
-  EXPECT: WEBSEARCH_OK
-  EVIDENCE: exit=0; shell=/bin/sh; cwd=/Users/gurucharan/Documents/personal/buddy/bridge; 0.1s; output=4 passed in 0.01s | WEBSEARCH_OK
+  EXPECT: REPLAYS_OK
+  EVIDENCE: exit=0; shell=/bin/sh; cwd=/Users/gurucharan/Documents/personal/buddy/bridge; path=574d30059456/19 entries; output=77 passed, 3 skipped in 13.95s | REPLAYS_OK
 
-- [x] G13: Every place buddy searched the web now offers the web_search function tool when an OpenRouter key is set (the text brain's tools, think_hard's request and its tool loop, the voice backend's delegation tools) and falls back to the hosted OpenAI search without one; the voice's slow tools run web_search off the loop.
-  CHECK: .venv/bin/python -m pytest -q -p no:cacheprovider tests/test_telegram.py::test_a_text_turn_is_answered_with_memory_and_history tests/test_think.py tests/test_voice_agent.py::test_session_config_offers_web_search_through_exa_or_the_hosted_tool && echo WEBSEARCH_WIRED_OK
+- [x] G15: Live, a real headless Chromium behind the guard proxy: a page's redirect, sub-resource redirect, iframe, fetch, beacon, WebSocket and popup never reach a private address, while the page's own asset does load (positive control). Negative control (runnable): the same page with the guard letting everything through reaches the LAN. An overlay button that navigates is undone; a hung render is killed with its whole process tree.
+  CHECK: CC_BUDDY_LIVE=1 .venv/bin/python -m pytest -q -p no:cacheprovider tests/test_watch_security.py::test_the_render_guard_covers_redirects_websockets_and_popups tests/test_watch_security.py::test_a_render_that_never_answers_is_killed_at_its_deadline tests/test_watch_reverify.py::test_negative_control_the_guard_test_sees_a_leak_when_the_guard_is_open tests/test_watch_reverify.py::test_an_overlay_button_that_navigates_is_undone tests/test_watch_reverify.py::test_a_render_that_hangs_is_killed_with_everything_it_started && echo GUARD_OK
   CWD: bridge
-  EXPECT: WEBSEARCH_WIRED_OK
-  EVIDENCE: exit=0; shell=/bin/sh; cwd=/Users/gurucharan/Documents/personal/buddy/bridge; 0.5s; output=7 passed in 0.32s | WEBSEARCH_WIRED_OK
-
-- [x] G14: The docs say what the code reads: every CC_BUDDY_TELEGRAM*, CC_BUDDY_COMPOSIO*, CC_BUDDY_COMMAND_RISK* and CC_BUDDY_WEB_SEARCH* name the code reads is documented in docs/stackchan/telegram.md, and the README names the modules.
-  CHECK: .venv/bin/python tools/check_telegram_docs.py && echo TELEGRAM_DOCS_OK
-  CWD: bridge
-  EXPECT: TELEGRAM_DOCS_OK
-  EVIDENCE: exit=0; shell=/bin/sh; cwd=/Users/gurucharan/Documents/personal/buddy/bridge; 0.0s; output=TELEGRAM_DOCS_OK | TELEGRAM_DOCS_OK
-
-- [x] G15: Live, from the daemon's own code path: one Composio session for the owner exists, an app is connected through its Connect Link, and one safe read-only tool call returns a real provider result with a Composio log id.
-  EVIDENCE: manual, 2026-09-21 ~20:00 PDT, scratch scripts over composio_tools.ComposioBridge (the daemon's own code path) with the real key from ~/.config/cc-buddy-bridge/env: one session for user telegram-<owner id> (trs_9pw3…) persisted at ~/.config/cc-buddy-bridge/composio.json and resumed on a second start; toolkits() reported gmail, googlecalendar and googledrive connected after the owner opened the Connect Links; COMPOSIO_MULTI_EXECUTE_TOOL ran GMAIL_FETCH_EMAILS (successful, log_y-FCah_HejBw), GOOGLECALENDAR_EVENTS_LIST_ALL_CALENDARS with a one-day window (successful, log_9hEETH_Ovk8r) and GOOGLEDRIVE_FIND_FILE discovered through COMPOSIO_SEARCH_TOOLS (successful, log_eKUMS4as78L9; search log_iZQgsm2X9bn5); every one read-only, decide() said run for each; no content of any result was printed or kept.
-
-- [x] G16: Live: one web_search through OpenRouter's Exa engine returns sources for a current-facts query, and the cost line is under a cent.
-  EVIDENCE: manual, 2026-09-21 20:05 PDT, websearch.search() live through OpenRouter with the web plugin on exa, model openai/gpt-5.4-nano: ok, 5 sources (espn.com, nba.com, cbssports.com), 5311 ms, usage in 1756 / out 63 tokens, cost_usd 0.007 (the flat Exa request price; the model's tokens add about 0.0004). The answer named a game and its score with its source. Slower than a hosted search; the owner chose the engine.
-
-- [x] G17: The daemon restarts on the new code and its log reports the command-risk mode, the Composio state and the search engine at startup.
-  EVIDENCE: manual, 2026-09-21 20:10:57 PDT, launchctl kickstart -k of com.github.cc-buddy-bridge.daemon (PID 71303), ~/Library/Logs/cc-buddy-bridge.log: 'command risk: shadow (Jev typesafe/jev-1.13 judges a relayed Bash command …)', 'telegram: web search openrouter-exa', 'second brain: on at /Users/gurucharan/Documents/Second Brain', 'think: hard questions go to gpt-6-astra at high effort (up to 90 s); web search openrouter-exa', 'telegram: listening for 1 owner id(s)'. The Composio session starts on a thread; its 'apps: Composio session up' line follows once the network answers.
+  EXPECT: GUARD_OK
+  EVIDENCE: exit=0; shell=/bin/sh; cwd=/Users/gurucharan/Documents/personal/buddy/bridge; path=574d30059456/19 entries; output=5 passed in 16.97s | GUARD_OK

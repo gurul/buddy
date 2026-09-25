@@ -31,3 +31,10 @@ def _spend_ledger_in_tmp(tmp_path_factory: pytest.TempPathFactory):
     spend.set_dir(folder)
     yield folder
     spend.set_dir(None)
+
+
+@pytest.fixture(autouse=True)
+def _watch_list_in_tmp(tmp_path_factory: pytest.TempPathFactory, monkeypatch: pytest.MonkeyPatch):
+    """Every test's watch list (watch.py) is a temporary file, never the owner's real one: the daemon builds a
+    Watcher whenever the Telegram door is on, and a Watcher reads its file when it is made."""
+    monkeypatch.setenv("CC_BUDDY_WATCH_FILE", str(tmp_path_factory.mktemp("watch") / "watches.json"))

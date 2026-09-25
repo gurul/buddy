@@ -12,8 +12,13 @@ for (const f of readdirSync(join(here, "Buddy")).filter((f) => f.endsWith(".lean
   const src = readFileSync(join(here, "Buddy", f), "utf8");
   const ns = (src.match(/^namespace\s+(\S+)/m) || [])[1];
   const names = [...src.matchAll(/^(?:private\s+)?theorem\s+([A-Za-z_0-9']+)/gm)].map((m) => (ns ? `${ns}.${m[1]}` : m[1]));
-  if (!names.includes(`${ns}.current_violates`) || !names.includes(`${ns}.fixed_invariant`)) {
-    console.error(`FAIL Buddy/${f}: missing current_violates or fixed_invariant`);
+  // Two honest shapes: a model that found a bug proves the old code breaks the property (current_violates)
+  // and the fixed code keeps it (fixed_invariant); a model of code that was right from the start proves the
+  // property of the code as it is (code_invariant). Nothing else passes.
+  const bug = names.includes(`${ns}.current_violates`) && names.includes(`${ns}.fixed_invariant`);
+  const sound = names.includes(`${ns}.code_invariant`);
+  if (!bug && !sound) {
+    console.error(`FAIL Buddy/${f}: needs current_violates + fixed_invariant, or code_invariant`);
     failed++;
     continue;
   }

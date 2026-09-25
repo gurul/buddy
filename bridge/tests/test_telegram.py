@@ -396,8 +396,16 @@ def test_the_daemon_builds_no_inlet_when_off(monkeypatch: pytest.MonkeyPatch) ->
     monkeypatch.setenv("CC_BUDDY_TELEGRAM_TOKEN", TOKEN)
     monkeypatch.setenv("CC_BUDDY_TELEGRAM_OWNER", str(OWNER))
     monkeypatch.setenv("OPENAI_API_KEY", "sk-test")
-    inlet = Daemon._make_telegram(_bare_daemon())
+    bare = _bare_daemon()
+    inlet = Daemon._make_telegram(bare)
     assert isinstance(inlet, TelegramInlet) and inlet.config.owner_ids == frozenset({OWNER})
+    # the watcher comes with the door (CC_BUDDY_WATCH is on by default), lent to it, and CC_BUDDY_WATCH=0 drops it
+    assert bare._watcher is not None and inlet._watcher is bare._watcher
+    asyncio.run(inlet.api.close())
+    monkeypatch.setenv("CC_BUDDY_WATCH", "0")
+    bare = _bare_daemon()
+    inlet = Daemon._make_telegram(bare)
+    assert bare._watcher is None and inlet._watcher is None
     asyncio.run(inlet.api.close())
 
 
@@ -1610,6 +1618,58 @@ def test_the_second_brain_is_offered_and_captures_from_the_chat(tmp_path: Path) 
     assert result == {"ok": False, "reason": "the second brain is off on this computer (CC_BUDDY_SECOND_BRAIN)"}
 
 
+def test_the_watcher_is_offered_and_adds_from_the_chat(tmp_path: Path) -> None:
+    from cc_buddy_bridge import watch
+
+    quote = json.dumps({"chart": {"result": [{"meta": {"symbol": "AAPL", "currency": "USD",
+                                                       "regularMarketPrice": 341.07}}]}})
+    fetched: list[str] = []
+
+    def fetch(url: str, **kw: Any) -> tuple[int, str]:
+        fetched.append(url)
+        return 200, quote
+
+    watcher = watch.Watcher(watch.WatchConfig(enabled=True, path=tmp_path / "watches.json"), fetch=fetch,
+                            offload=False)
+    add = {"kind": "quote", "target": "AAPL", "label": "Apple", "condition": "below", "value": 300, "text": None,
+           "city": None, "every_minutes": None}
+    api = FakeApi()
+    rig = Rig(api, FakeCreate(call("watch_add", add), say("Apple is at $341 now. I'll text you under $300.")),
+              watcher=watcher)
+    asyncio.run(rig.inlet._turn(telegram.Inbound(OWNER, OWNER, "tell me when apple drops under 300", message_id=7)))
+    first = rig.create.requests[0]
+    assert [t["name"] for t in first["tools"] if t.get("name") in watch.TOOL_NAMES] == list(watch.TOOL_NAMES)
+    assert watcher.instructions() in first["instructions"]
+    # the first check ran through the watcher and its reading went back to the model
+    assert len(fetched) == 1 and "AAPL" in fetched[0]
+    output = json.loads(next(i for i in rig.create.requests[1]["input"] if i.get("type") == "function_call_output")["output"])
+    assert output["ok"] and output["id"] == "w1" and output["now"] == "$341.07"
+    assert api.sent[-1] == (OWNER, "Apple is at $341 now. I'll text you under $300.")
+    assert [w.target for w in watch.Watcher(watch.WatchConfig(enabled=True, path=tmp_path / "watches.json")).watches] == ["AAPL"]
+    # an alert reaches the owner's chat, titled, and joins the history so a reply can point at it
+    asyncio.run(rig.inlet.tell_owner("Apple dropped to $299, past your $300 mark."))
+    assert api.titled[-1] == (telegram.WATCH_TITLE, None, "Apple dropped to $299, past your $300 mark.")
+    assert rig.inlet.turns[-1] == ("buddy", "Apple dropped to $299, past your $300 mark.")
+    # /watches is answered by code, no model call
+    before = len(rig.create.requests)
+    run_rig(Rig(api := FakeApi([update("/watch", update_id=3)]), FakeCreate(), watcher=watcher))
+    assert api.sent[-1][1].startswith("w1 · Apple: at or below $300 · now $341.07")
+    assert len(rig.create.requests) == before
+    # "/watch <words>" is a watch request for the brain, with the watch tools, worded as the owner would say it
+    api = FakeApi([update("/watch BTC-USD above 100000", update_id=4)])
+    rig = Rig(api, FakeCreate(say("On it.")), watcher=watcher)
+    run_rig(rig)
+    first = rig.create.requests[0]
+    said = [c["text"] for i in first["input"] if i.get("role") == "user" for c in i["content"] if c.get("type") == "input_text"]
+    assert said[-1] == "Watch BTC-USD above 100000" and any(t.get("name") == "watch_add" for t in first["tools"])
+    # off: no watch tools, no block, and a stray call is told why
+    rig = Rig(FakeApi(), FakeCreate(say("ok")))
+    asyncio.run(rig.inlet._turn(telegram.Inbound(OWNER, OWNER, "hi", message_id=8)))
+    assert not any(t.get("name") in watch.TOOL_NAMES for t in rig.create.requests[0]["tools"])
+    assert "watch_add" not in rig.create.requests[0]["instructions"]
+    assert asyncio.run(rig.inlet._tool("watch_list", {}, OWNER)) == {"ok": False, "reason": watch.OFF_REASON}
+
+
 def test_a_refused_vault_receipt_says_where_it_went(tmp_path: Path) -> None:
     from cc_buddy_bridge import second_brain
 
@@ -2107,8 +2167,13 @@ def _check_spend(rig: Rig) -> None:
     assert rig.create.requests == []
 
 
+def _check_watches(rig: Rig) -> None:
+    assert rig.api.sent[-1] == (OWNER, telegram.WATCH_OFF_LINE)         # no Watcher in this rig: says so, by code
+
+
 MENU_CHECKS = {
     "apps": ([], _check_apps),
+    "watch": ([], _check_watches),
     "spend": ([], _check_spend),
     "claude_on": ([], _check_claude_on),
     "claude_off": (["/claude_on"], _check_claude_off),

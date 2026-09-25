@@ -450,7 +450,7 @@ Flip it to `ask` if two seconds a command is a price you will pay.
   most 2 seconds, so a slow Telegram never holds up the restart.
 - **The `/` menu.** At startup buddy sets its code words as bot commands in
   your own chat only (`setMyCommands`, scoped to your chat): `/apps`, `/spend`,
-  `/claude_on`, `/claude_off`, `/new_claude`, `/codex`, `/rundown`,
+  `/claude_on`, `/claude_off`, `/new_claude`, `/codex`, `/rundown`, `/watch`,
   `/screenshot`, `/stealth`, `/wake` and `/stop`. Each works exactly like the
   typed word. If Telegram refuses the menu, the words still work when typed.
 - **`/spend`** (or `spend`, `spending`) — what buddy has spent: today,
@@ -458,6 +458,13 @@ Flip it to `ask` if two seconds a command is a price you will pay.
   figure for today. It is answered by code from the spend ledger, with no model
   call, and it works while a relay is on. The full dashboard is the Mini App's
   Spending view. See [what buddy spends](spending.md).
+- **`/watch`** (or `watches`, `my watches`) — what buddy is watching, one line
+  each: the condition, the latest reading and how often it checks. It is
+  answered by code, with no model call. `/watch <words>` ("/watch AAPL below
+  300") is a watch request for the text brain, which has `watch_add`,
+  `watch_list` and `watch_remove`. An alert arrives as a new message titled
+  **Watch** and joins the chat's history, so "stop watching that" in reply
+  works. See [watching](watch.md).
 - **"typing…"** shows while buddy works on a reply, for the whole turn, not only
   the first 5 seconds. It is sent again every 4 s and stops when the reply goes
   out. `think_hard` keeps it up for up to 5 minutes. It pauses while buddy waits

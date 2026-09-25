@@ -58,6 +58,7 @@ TRANSCRIPTION = "transcription"
 ROOM_NOTES = "room notes"
 LESSONS = "lessons"
 CODEX = "codex"
+WATCH = "watching"
 
 _lock = threading.Lock()
 _dir_override: Optional[Path] = None

@@ -77,8 +77,15 @@ The [Telegram door](docs/stackchan/telegram.md) is **off by default**. With it o
   consents and Codex approvals too: only a tap or a plain answer ("yes", "no",
   "allow for task") answers them. `claude off` while a prompt waits hands it
   back to the dialog on the Mac.
+- **Watches prices, stocks and ticket releases.** "Tell me when AAPL drops below
+  300", "tell me when this is under $80: <link>", "let me know when tickets for X in
+  Seattle go on sale", or `/watch VOO below 500`. buddy checks on a schedule
+  through one rate limiter and texts you when it happens. It reads a page's own
+  price data first, then its text, then the page in a headless browser with a
+  vision model looking at it. Bare `/watch` lists the watches. See
+  [watching](docs/stackchan/watch.md).
 - **A `/` menu** of the code words (`/claude_on`, `/new_claude`, `/codex`,
-  `/rundown`, `/screenshot`, `/stealth`, `/wake`, `/stop` and more), in your
+  `/rundown`, `/watch`, `/screenshot`, `/stealth`, `/wake`, `/stop` and more), in your
   chat only.
 - **Keeps your personal notes.** With the [second brain](docs/stackchan/second-brain.md)
   on, a text saves a note, updates a list, checks off a todo, or undoes an edit in
