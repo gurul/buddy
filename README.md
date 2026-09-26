@@ -77,6 +77,11 @@ The [Telegram door](docs/stackchan/telegram.md) is **off by default**. With it o
   consents and Codex approvals too: only a tap or a plain answer ("yes", "no",
   "allow for task") answers them. `claude off` while a prompt waits hands it
   back to the dialog on the Mac.
+- **Answers web lookups in seconds.** "What's the weather in Seattle this weekend" or
+  "compare the Linear and Jira team plans" doesn't need your browser. Jev spots a
+  public-web reading task, and Firecrawl reads the top pages and answers with its
+  sources. Anything that needs your accounts, your Mac or typing into a site stays on
+  your computer. See [routing](docs/stackchan/routing.md#public-web-reading-tasks-go-to-firecrawl).
 - **Watches prices, stocks and ticket releases.** "Tell me when AAPL drops below
   300", "tell me when this is under $80: <link>", "let me know when tickets for X in
   Seattle go on sale", or `/watch VOO below 500`. buddy checks on a schedule
@@ -129,7 +134,7 @@ cc-buddy-bridge lesson ideas --text "I think I add the tops"
 cc-buddy-bridge lesson hint     # or: check, step
 ```
 
-Live lessons use OpenAI by default, with OpenRouter opt-in and optional Exa practice
+Live lessons use OpenAI by default, with OpenRouter opt-in and optional Firecrawl practice
 references. See [the learning guide](docs/learning.md) for the full workflow,
 think-out-loud mode, configuration and current limits.
 
@@ -189,9 +194,13 @@ Add your credentials to that file, keeping any existing entries:
 
 ```dotenv
 OPENAI_API_KEY=your-key-here
-# Optional: practice references for live lessons
-# EXA_API_KEY=your-key-here
+# Optional: Firecrawl, for web lookups answered in seconds, practice references in
+# live lessons, and watches on sites that refuse every reader on this Mac
+# FIRECRAWL_API_KEY=your-key-here
 ```
+
+For watches on shops that refuse Python's own requests, add the optional Chrome-like
+reader: `bridge/.venv/bin/python -m pip install -e './bridge[tls]'` (`curl_cffi`).
 
 Install the Claude Code hooks and the login service:
 
@@ -335,6 +344,13 @@ flowchart TB
 Codex drives native apps through its `cua` API while buddy relays progress and
 permission choices.
 
+- **Web lookups go to Firecrawl first (with `FIRECRAWL_API_KEY`):** Jev
+  (`browser_router.py`) sends a task there only when the whole job is reading public
+  websites: no accounts, nothing on the Mac, nothing to show on screen, nothing typed
+  into a site. Firecrawl reads the top three pages and a cheap model answers from them
+  with their links, in seconds. Anything it can't answer, and every other task, goes
+  to Codex. Blind-tested: 30 of 30 routed correctly, 0 unsafe. See
+  [routing](docs/stackchan/routing.md#public-web-reading-tasks-go-to-firecrawl).
 - **Your own Chrome first (opt-in):** with `CC_BUDDY_BROWSER_ATTACH=1`, web goals try
   your logged-in Chrome first. Chrome's “Allow remote debugging?” prompt is answered
   from your phone (a no or silence cancels), or pressed by buddy with no question when
@@ -380,11 +396,13 @@ buddy's own Chromium with Playwright; attach mode reuses it for your own Chrome.
 See [routing](docs/stackchan/routing.md) for switches and measured evaluations, and
 [voice and computer control](docs/stackchan/voice.md) for worker details.
 
-Six state machines are **formally verified in Lean 4** (`verification/`): the Bash
-allow tier, the Telegram question slot and Stop, forget against the nightly dream,
-the serial link to the robot, and the voice turn state. Each has a kernel-checked
-counterexample on the code before 2026-09-25 and a proof for every trace of the
-fix. See [formal verification](docs/verification.md).
+Fourteen state machines are **formally verified in Lean 4** (`verification/`, 199
+theorems): the Bash allow tier, the Telegram question slot and Stop, forget against the
+nightly dream, the serial link to the robot, the voice turn state, and eight for the
+watcher (its rate limiter, conditions, scheduler and reading ladder, connection safety,
+links, routing and Ticketmaster). Each is either a kernel-checked counterexample on the
+old code plus a proof for every trace of the fix, or a proof of the code as it stands.
+See [formal verification](docs/verification.md).
 
 </details>
 
@@ -419,7 +437,10 @@ Wake-word detection runs locally. Live voice, tutoring, reasoning and scene anal
 use the configured model providers, and the relevant audio, text, board images or
 camera frames are sent for those requests. Computer tasks send screenshots. Local
 storage does not make those features offline. With the Telegram door on, your texts
-and buddy's replies also pass through Telegram's servers.
+and buddy's replies also pass through Telegram's servers. With a Firecrawl key, a
+computer task's text goes to Jev (TypeSafe's model, through TypeSafe or OpenRouter) to choose where it runs,
+and a public-web lookup's text goes to Firecrawl as a search. A lesson sends only its
+topic and level to Firecrawl, and the watcher sends only the page you asked it to watch.
 
 Persistent data lives under `~/.config/cc-buddy-bridge/`:
 
@@ -493,7 +514,7 @@ The firmware began as [anthropics/claude-desktop-buddy](https://github.com/anthr
 and the bridge as [SnowWarri0r/cc-buddy-bridge](https://github.com/SnowWarri0r/cc-buddy-bridge).
 Other foundations include FluxGarage RoboEyes, sherpa-onnx, M5Stack's libraries,
 and OpenAI's computer-use sample; the chirps draw on Marcelo Larios' R2D2 sound
-generator. Practice references use Exa. Research behind the affect engine and diary
+generator. Practice references and web lookups use Firecrawl. Research behind the affect engine and diary
 is cited in [personality.md](docs/stackchan/personality.md).
 
 See the [bridge license](bridge/LICENSE), [canvas attribution](bridge/web-canvas/LICENSE.md),
