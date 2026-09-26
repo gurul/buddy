@@ -101,7 +101,7 @@ def test_the_words() -> None:
         "The Mac is at 100%, fully charged."
     assert qa.battery_line("Now drawing from 'Battery Power'\n -InternalBattery-0\t41%; discharging; 3:02") == \
         "The Mac is at 41%, on battery."
-    assert qa.air_line("Seattle", {"current": {"us_aqi": 42}}) == "The air in Seattle is good: US AQI 42."
+    assert qa.air_line("Springfield", {"current": {"us_aqi": 42}}) == "The air in Springfield is good: US AQI 42."
 
 
 FORECAST = {
@@ -113,11 +113,11 @@ FORECAST = {
 
 
 def test_weather_words() -> None:
-    assert qa.weather_line("Seattle", FORECAST) == \
-        "In Seattle it's 64°F and partly cloudy, feels like 60°F, wind 11 mph. Today 51 to 70°F, 10% chance of rain."
-    assert qa.weather_line("Seattle", FORECAST, day=1) == "Tomorrow in Seattle: light rain, 49 to 67°F, 60% chance of rain."
-    assert qa.sun_line("Seattle", FORECAST, "sunset") == "Sunset in Seattle is at 7:01 PM today."
-    assert qa.weather_line("Seattle", {"current": {}}) is None
+    assert qa.weather_line("Springfield", FORECAST) == \
+        "In Springfield it's 64°F and partly cloudy, feels like 60°F, wind 11 mph. Today 51 to 70°F, 10% chance of rain."
+    assert qa.weather_line("Springfield", FORECAST, day=1) == "Tomorrow in Springfield: light rain, 49 to 67°F, 60% chance of rain."
+    assert qa.sun_line("Springfield", FORECAST, "sunset") == "Sunset in Springfield is at 7:01 PM today."
+    assert qa.weather_line("Springfield", {"current": {}}) is None
 
 
 class Api:
@@ -143,7 +143,7 @@ def quick(env: dict[str, str], api: Api) -> QuickAnswers:
 
 def test_here_is_looked_up_once_and_answers_come_from_code() -> None:
     api = Api()
-    q = quick({"CC_BUDDY_WEATHER_PLACE": "Seattle"}, api)
+    q = quick({"CC_BUDDY_WEATHER_PLACE": "Springfield"}, api)
 
     async def go() -> list[Any]:
         a = await q.answer(q.match("what's the weather"))
@@ -151,7 +151,7 @@ def test_here_is_looked_up_once_and_answers_come_from_code() -> None:
         return [a, b]
 
     a, b = asyncio.run(go())
-    assert a.startswith("In Seattle it's 64°F") and b == "Sunset in Seattle is at 7:01 PM today."
+    assert a.startswith("In Springfield it's 64°F") and b == "Sunset in Springfield is at 7:01 PM today."
     assert [u for u, _ in api.calls].count(qa.GEOCODE_URL) == 1
 
 
@@ -163,7 +163,7 @@ def test_without_a_home_place_weather_is_the_models() -> None:
 
 
 def test_a_failed_source_hands_the_question_back_to_the_model() -> None:
-    q = quick({"CC_BUDDY_WEATHER_PLACE": "Seattle"}, Api(fail=True))
+    q = quick({"CC_BUDDY_WEATHER_PLACE": "Springfield"}, Api(fail=True))
     assert asyncio.run(q.answer(q.match("what's the weather"))) is None
     assert asyncio.run(q.answer(q.match("what time is it"))) == "It's 4:05 PM."   # the clock never fails
 
