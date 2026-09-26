@@ -1,5 +1,5 @@
 #pragma once
-// Person tracking + owner memory glue (spike: firmware/spikes/stackchan_look).
+// Person tracking + owner memory glue (spike: past-experiments/firmware/spikes/stackchan_look).
 //
 // look.cpp runs the GC0308 on a core-0 task and reports a motion/face
 // bearing; owner_model.h keeps a LIVE gaze (fresh motion) and a MEMORY of

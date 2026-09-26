@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Turn a `[frame] W H` hex dump from the stackchan_look spike into a PNG.
+"""Turn a `[frame] W H` hex dump from the firmware's look debug output (look.cpp) into a PNG.
 
 Usage: frame_dump_to_png.py <capture.log> <out.png> [scale]
 

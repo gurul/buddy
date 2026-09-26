@@ -196,3 +196,14 @@ stand is unchanged and still fits — don't reprint it. Print the **gauge** firs
 1.2mm board-footprint plate with the hole grid; lay the bare PCB on it flush and
 confirm daylight through all four holes before committing to the shell print.
 
+## Later experiments, moved here 2026-09-26
+
+Kept for their history and results; nothing in buddy runs them. Paths mirror where they lived.
+
+| What | Now under | Why it stopped |
+|---|---|---|
+| The `stackchan_look` firmware spike (person tracking + owner memory) | `firmware/spikes/stackchan_look/` | Its layers went into the product firmware's `gaze.cpp` / `look.cpp`. |
+| `voicekey`, a signed Swift helper that held Option+Space for "hold the pet to dictate" | `tools/voicekey/` | That feature (and its `voice_trigger.py`) is gone from the bridge; nothing starts or talks to the helper. |
+| The slither.io eval of the local decider | `bridge/tools/slither_eval.py`, its test, `docs/stackchan/slither.md` | The Laya decider it measured was removed on 2026-09-24. |
+| The Laya emotion controller and its three eval tools | `bridge/src/cc_buddy_bridge/emotion_policy.py`, `bridge/tools/emotion_*.py`, its test | Research that was never wired in; the write-up stays at `docs/stackchan/laya-emotion/`. |
+

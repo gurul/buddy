@@ -1,7 +1,7 @@
 // Person tracking + owner memory glue. Includes M5StackChan.h (M5Unified's
 // global ::M5); must never include board_compat.h — see hal_m5.h.
 //
-// Layers (from the bench-proven spike firmware/spikes/stackchan_look):
+// Layers (from the bench-proven spike, now past-experiments/firmware/spikes/stackchan_look):
 //   look.cpp      GC0308 on a core-0 task: motion centroid + skin-blob face
 //   owner_model.h LIVE gaze (fresh target, EMA) + MEMORY (habit histogram)
 //   this file     per-state policy -> bodyLookAt() / bodySearchSweep()

@@ -1,5 +1,7 @@
 # Laya for Buddy's eyes and chirps: research and tuning
 
+**Archived 2026-09-26.** The controller, its tests and the three tools named below (`emotion_eval.py`, `emotion_head_tune.py`, `emotion_confirm.py`) moved to `past-experiments/bridge/`; nothing in the product imported them. The commands below record how the results were produced; they no longer run from `bridge/`. The hashes in the results files name the old paths, as they were when measured.
+
 **Live follow-up:** the owner subsequently requested expressions on the robot. [Live Laya expressions](../laya-expressions/README.md) implements an explicitly enabled experimental top-choice mode using the original checkpoint. The research failures and measurements below remain unchanged.
 
 **Decision, 2026-09-21: fast enough to investigate, not accurate enough to enable.**
@@ -121,7 +123,7 @@ Large weights live locally under `.test-artifacts/laya-emotion/` and
 
 ## How this would reach the eyes and speaker
 
-The offline [controller](../../../bridge/src/cc_buddy_bridge/emotion_policy.py)
+The offline [controller](../../../past-experiments/bridge/src/cc_buddy_bridge/emotion_policy.py)
 tests a 1.2-second minimum dwell, a four-second event lifetime, duplicate and
 out-of-order rejection, mute, and an eight-second chirp cooldown. These timings
 are engineering starting values, not values established by the papers.

@@ -1,5 +1,7 @@
 # slither.io: a real-time eval of the local decider
 
+**Archived 2026-09-26** to `past-experiments/`, with its tool and test. The local decider it measured was retired (the fast lane's Laya decider was removed on 2026-09-24), so nothing runs it. Paths below are the ones it had in `bridge/`.
+
 Not a product feature. `bridge/tools/slither_eval.py` measures how the local
 typed-decision model (laya-mlx, the checkpoint the eye expressions use; the
 computer-use fast lane used it until 2026-09-24) holds up at twenty decisions a
