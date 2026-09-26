@@ -430,6 +430,21 @@ TOOLS: list[dict[str, Any]] = [
                     "description": "The question in the owner's own words, with any detail they gave."}},
                     "required": ["question"], "additionalProperties": False}},
 ]
+# The Meet notetaker (meet.py), lent when it runs: "join my meeting" out loud. Listen only: buddy never speaks in
+# the call; the notes are texted when it ends.
+MEET_TOOLS: list[dict[str, Any]] = [
+    {"type": "function", "name": "join_meeting",
+     "description": "Join one of the owner's Google Meet calls as a silent notetaker (microphone and camera off; "
+                    "the notes are texted to them when it ends). Returns at once; joining takes a minute.",
+     "parameters": {"type": "object", "properties": {"meeting": {"type": "string",
+                    "description": "Which meeting, in the owner's words: \"now\", \"next\", a time like \"3pm\", "
+                                   "words from its title, or a meeting code they read out."}},
+                    "required": ["meeting"], "additionalProperties": False}},
+    {"type": "function", "name": "leave_meeting",
+     "description": "Leave the Google Meet call buddy is taking notes in; the notes are texted to the owner.",
+     "parameters": {"type": "object", "properties": {}, "additionalProperties": False}},
+]
+MEET_TOOL_NAMES = frozenset(t["name"] for t in MEET_TOOLS)
 WEB_SEARCH_TOOL: dict[str, Any] = {"type": "web_search"}   # OpenAI's hosted search: the fallback without an OpenRouter key
 
 DEFAULT_CAPTION_CPS = PagerConfig().read_cps
@@ -489,7 +504,8 @@ def configured(environ: Any = None) -> VoiceConfig:
 def session_config(config: VoiceConfig, brief: str = "",
                    think_aloud: Optional[dict[str, Any]] = None, profile: str = "", *,
                    backend_profile: str = "", today: str = "", backend_today: str = "",
-                   memory_tools: Optional[list[dict[str, Any]]] = None) -> dict[str, Any]:
+                   memory_tools: Optional[list[dict[str, Any]]] = None,
+                   meet_tools: Optional[list[dict[str, Any]]] = None) -> dict[str, Any]:
     """The `session.start` payload (Live API, openai 3.13).
 
     There is no `output_modalities` and no turn-detection block: gpt-live-1 is
@@ -513,6 +529,7 @@ def session_config(config: VoiceConfig, brief: str = "",
         brief = profile = backend_profile = today = backend_today = ""
         memory_tools = None
     extra = list(memory_tools or [])
+    meeting = [] if listening else list(meet_tools or [])      # a lesson never sends buddy into a call
     return {
         "model": config.model,
         "instructions": INSTRUCTIONS + profile_block(profile) + today_block(today) + context + memory_block(brief)
@@ -531,7 +548,7 @@ def session_config(config: VoiceConfig, brief: str = "",
                                 + backend_profile_block(backend_profile)
                                 + today_block(backend_today, BACKEND_TODAY_HEADER) + context
                                 + (think_aloud_mod.backend_instructions(think_aloud) if listening else ""),
-                "tools": TOOLS + (websearch.tools_for(config.search) if config.web_search else []) + extra,
+                "tools": TOOLS + (websearch.tools_for(config.search) if config.web_search else []) + extra + meeting,
                 "tool_choice": "auto",
                 "reasoning": {"effort": config.backend_effort},
                 "parallel_tool_calls": False,
@@ -720,7 +737,9 @@ class VoiceSession:
         gate: Any = None,              # voice_gate.SpeakerGate for this conversation, or None (today's behaviour)
         on_expression: Optional[Callable[[str, str], None]] = None,
         mac_busy: Callable[[], bool] = lambda: False,       # a task from another door (telegram.py) has the Mac
+        meeter: Any = None,                                 # meet.Meeter, or None: "join my meeting" out loud
     ) -> None:
+        self.meeter = meeter
         self.on_expression = on_expression
         self.mac_busy = mac_busy
         self._expression_chars = 0
@@ -849,7 +868,7 @@ class VoiceSession:
                 memory_tools = self._memory_tools()
         cfg = session_config(self.config, self.brief, self._think_aloud, profile,
                              backend_profile=backend_profile, today=self.today, backend_today=self.backend_today,
-                             memory_tools=memory_tools)
+                             memory_tools=memory_tools, meet_tools=MEET_TOOLS if self.meeter is not None else None)
         log.info("voice: prompt front %d chars, backend %d chars",
                  len(cfg["instructions"]), len(cfg["delegation"]["responses"]["instructions"]))
         await self.conn.session.start(session=cfg)
@@ -1527,7 +1546,7 @@ class VoiceSession:
             else:
                 result = {"ok": False, "reason": "on must be true or false"}
         elif (name in ("look", "look_around", "find", "think_hard", "lesson", "take_photo", websearch.TOOL_NAME)
-              or name in self._memory_tool_names):
+              or name in self._memory_tool_names or name in MEET_TOOL_NAMES):
             # Seconds (or a minute, for think_hard) of camera, head, model or disk work:
             # answered from a background task, so Live events (the owner talking,
             # captions) keep flowing meanwhile.
@@ -1607,6 +1626,8 @@ class VoiceSession:
                     result = await self._take_photo(str(args.get("note", "")))
                 elif name in self._memory_tool_names:
                     result = await self._memory_tool(name, args)
+                elif name in MEET_TOOL_NAMES:
+                    result = await self._meeting(name, args)
                 else:
                     result = await self._find(str(args.get("target", "")))
             except asyncio.CancelledError:
@@ -1633,6 +1654,15 @@ class VoiceSession:
         task = asyncio.ensure_future(run())
         self._slow_tasks.add(task)
         task.add_done_callback(self._slow_tasks.discard)
+
+    async def _meeting(self, name: str, args: dict[str, Any]) -> dict[str, Any]:
+        """join_meeting / leave_meeting: the same Meeter the chat uses (a calendar read can take a second or two,
+        so it runs as a slow tool)."""
+        if self.meeter is None:
+            return {"ok": False, "reason": "joining meetings is off on this computer"}
+        if name == "leave_meeting":
+            return self.meeter.leave()
+        return await self.meeter.join(str(args.get("meeting") or "").strip() or "now")
 
     async def _look(self) -> dict[str, Any]:
         if self.scene is None:
@@ -2047,6 +2077,7 @@ async def open_session(
     gate: Any = None,
     on_expression: Optional[Callable[[str, str], None]] = None,
     mac_busy: Callable[[], bool] = lambda: False,
+    meeter: Any = None,
 ) -> None:
     """Run one full conversation on the real Live API — captions to the robot,
     or the real speaker in audio mode.
@@ -2076,7 +2107,7 @@ async def open_session(
                                    backend_today=backend_today, learning=learning,
                                    think_aloud=think_aloud, lesson_wake=lesson_wake, on_spoken_idea=on_spoken_idea,
                                    on_think_aloud=on_think_aloud, head_pose=head_pose, gate=gate,
-                                   on_expression=on_expression, mac_busy=mac_busy)
+                                   on_expression=on_expression, mac_busy=mac_busy, meeter=meeter)
             if on_open is not None:
                 on_open(session)
             try:

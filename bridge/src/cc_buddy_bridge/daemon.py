@@ -393,6 +393,15 @@ class Daemon:
             if watcher is not None:
                 watcher.notify = self._telegram.tell_owner
                 tasks.append(asyncio.create_task(watcher.run(), name="watch"))
+            # The Meet notetaker (meet.py) texts through the same door: in the call, the lobby, the notes.
+            meeter = getattr(self, "_meeter", None)
+            if meeter is not None:
+                inlet = self._telegram
+
+                async def meet_notify(text: str, about: str = "") -> None:
+                    await inlet.tell_owner(text, about=about, title=telegram_mod.MEET_TITLE)
+
+                meeter.notify = meet_notify
         # The "Ask Claude" Mini App (miniapp.py): the owner's menu button opens a Claude chat inside Telegram,
         # served here through a Cloudflare quick tunnel. Off unless CC_BUDDY_MINIAPP=1.
         Daemon._start_miniapp(self, tasks)
@@ -419,6 +428,8 @@ class Daemon:
                 await asyncio.gather(self._expression_audition, return_exceptions=True)
             await self._send_cam(False)
             self._vision.stop()
+            if getattr(self, "_meeter", None) is not None:
+                await self._meeter.close()                  # a call in progress: its notes are written
             if getattr(self, "_chrome_lane", None) is not None:
                 await self._chrome_lane.close()             # buddy's tab only; the owner's Chrome stays
             for t in tasks:
@@ -1077,7 +1088,8 @@ class Daemon:
                                            on_think_aloud=lambda on, lesson_id: Daemon._on_think_aloud(
                                                self, on, lesson_id),
                                            on_open=lambda session: Daemon._on_voice_session(self, session),
-                                           mac_busy=lambda: Daemon._texted_task_running(self))
+                                           mac_busy=lambda: Daemon._texted_task_running(self),
+                                           meeter=getattr(self, "_meeter", None))
         except asyncio.CancelledError:
             self._explore_after_conversation = None      # hushed: stay put
             self._think_aloud_wish = None                # a hush or a stop cancels a pending listen too
@@ -1189,9 +1201,11 @@ class Daemon:
             log.exception("watch: could not start; watching is off this run")
             watcher = None
         self._watcher = watcher
+        apps = Daemon._make_apps(self, tg.owner_ids) if tg.enabled else None
+        self._meeter = Daemon._make_meeter(self, apps) if tg.enabled else None
         return telegram_mod.make_inlet(
-            tg, watcher=watcher,
-            apps=Daemon._make_apps(self, tg.owner_ids) if tg.enabled else None,
+            tg, watcher=watcher, meeter=self._meeter,
+            apps=apps,
             vault=vault if tg.enabled and vault.enabled else None,
             agent_factory=self._make_agent, agent_enabled=self._agent_cfg.enabled,
             busy=lambda: Daemon._desk_has_the_mac(self),
@@ -1235,6 +1249,15 @@ class Daemon:
                         "(pip install -e \".[miniapp]\"); off")
             return
         self._miniapp = miniapp.MiniApp(cfg)
+        # "Call buddy" in the Mini App (phone_call.py): push to talk into the Telegram chat's own brain, every
+        # reply read back. It needs the chat (the brain) and the OpenAI key (the ears and the voice).
+        from .phone_call import PhoneCalls, make_voice
+
+        server = getattr(self._miniapp, "server", None)
+        if server is not None:
+            server.calls = PhoneCalls(
+                lambda init_data: miniapp.check_init_data(init_data, cfg.token, cfg.owner_ids),
+                getattr(self, "_telegram", None), make_voice())
         tasks.append(asyncio.create_task(self._miniapp.run(), name="miniapp"))
         if getattr(self, "_telegram", None) is not None:
             # "make me a habit tracker" texted to buddy builds an app (apps_maker.ChatMaker); its Open button
@@ -1271,6 +1294,26 @@ class Daemon:
                  "pressed by buddy (CC_BUDDY_CHROME_ACCESS=allow)" if chrome_consent.access_preference() == "allow"
                  else "asked on the phone")
         return lane
+
+    def _make_meeter(self, apps: Any) -> Any:
+        """The Meet notetaker (meet.py): joins from the owner's Chrome (attach mode) on a browser lane of its own,
+        reads the owner's calendar through their Composio session for "join my 3pm", and writes the notes beside
+        the room notes. Chrome's "Allow remote debugging?" for its connection goes through the same broker as the
+        Chrome lane's. None when it is off or cannot run."""
+        from . import chrome_consent
+        from . import meet as meet_mod
+        from .notes import notes_dir
+
+        broker = chrome_consent.ConsentBroker(
+            lambda q: Daemon._ask_owner_on_phone(self, q),
+            tell_owner=lambda text: Daemon._tell_owner_on_phone(self, text),
+            auto_allow=chrome_consent.access_preference() == "allow")
+        try:
+            return meet_mod.make_meeter(None, notes_dir(self._recall_cfg), answer=broker.answer_own_connection,
+                                        apps=apps)
+        except Exception:  # noqa: BLE001 — a notetaker that cannot start costs the meetings, never the daemon
+            log.exception("meet: could not start; joining meetings is off this run")
+            return None
 
     async def _ask_owner_on_phone(self, question: str) -> str:
         """A yes/no for the owner over Telegram (chrome_consent.py). Raises when there is no way to ask."""

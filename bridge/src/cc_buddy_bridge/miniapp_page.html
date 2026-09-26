@@ -185,13 +185,51 @@
     dialog.sheet[open] .panel { animation: rise .18s ease-out; }
     @keyframes rise { from { transform: translateY(24px); opacity: .6; } to { transform: none; opacity: 1; } }
   }
+  /* Call buddy (phone_call.py): a button in the header, then a full-screen call */
+  header .ends { display: flex; align-items: center; gap: 12px; }
+  header .call-btn { background: var(--accent); color: var(--accent-text); border-radius: 999px; padding: 6px 14px;
+    font-weight: 600; font-size: 14px; min-height: 36px; }
+  header .call-btn:disabled { opacity: .5; }
+  .call { position: fixed; inset: 0; z-index: 50; background: var(--bg); display: flex; flex-direction: column;
+    align-items: center; justify-content: center; gap: 18px; padding: 24px 16px calc(24px + env(safe-area-inset-bottom)); }
+  .call .face { width: 132px; height: 132px; border-radius: 50%; background: var(--accent); color: var(--accent-text);
+    display: grid; place-items: center; font: 700 40px system-ui, sans-serif; transition: transform .2s; }
+  .call[data-state="speaking"] .face { animation: talk 0.9s ease-in-out infinite; }
+  .call[data-state="thinking"] .face { opacity: .75; }
+  @keyframes talk { 50% { transform: scale(1.07); } }
+  @media (prefers-reduced-motion: reduce) { .call[data-state="speaking"] .face { animation: none; } }
+  .call h2 { margin: 0; font-size: 22px; }
+  .call .status { color: var(--hint); min-height: 1.5em; text-align: center; max-width: 30ch; }
+  .call .time { font-variant-numeric: tabular-nums; color: var(--hint); font-size: 14px; }
+  .call .heard { min-height: 3em; max-width: 34ch; text-align: center; font-size: 15px; }
+  .call .controls { display: flex; flex-direction: column; align-items: center; gap: 22px; margin-top: 12px; }
+  .call .controls button { border: 0; font: 600 15px system-ui, sans-serif; }
+  .call .controls button:focus-visible { outline: 3px solid var(--link); outline-offset: 3px; }
+  .call .talk { width: 132px; height: 132px; border-radius: 50%; background: var(--bubble); color: var(--text);
+    touch-action: none; user-select: none; -webkit-user-select: none; -webkit-touch-callout: none; }
+  .call .talk[aria-pressed="true"] { background: var(--accent); color: var(--accent-text); transform: scale(1.06); }
+  .call .end { background: #d93a3a; color: #fff; border-radius: 999px; padding: 10px 26px; }
 </style>
 </head>
 <body>
 <header>
   <h1 class="who">Your apps</h1>
-  <button type="button" class="spent" id="spent" aria-label="Spent today. Open spending" disabled></button>
+  <div class="ends">
+    <button type="button" class="spent" id="spent" aria-label="Spent today. Open spending" disabled></button>
+    <button type="button" class="call-btn" id="call-open">Call buddy</button>
+  </div>
 </header>
+<div class="call" id="call" data-state="idle" role="dialog" aria-modal="true" aria-labelledby="call-title" hidden>
+  <div class="face" aria-hidden="true">b</div>
+  <h2 id="call-title">buddy</h2>
+  <p class="status" id="call-status" role="status" aria-live="polite">Calling…</p>
+  <span class="time" id="call-time">0:00</span>
+  <p class="heard" id="call-heard" aria-live="polite"></p>
+  <div class="controls">
+    <button type="button" class="talk" id="call-talk" aria-pressed="false">Hold to talk</button>
+    <button type="button" class="end" id="call-end">End</button>
+  </div>
+</div>
 <section id="apps">
   <div class="make" id="make-card">
     <label for="want" id="want-label">What should I build?</label>
@@ -928,6 +966,177 @@
   });
   window.addEventListener("pageshow", (e) => { if (e.persisted) { loadApps(); if (chat) loadChat(); } });
 
+})();
+</script>
+<script>
+// Call buddy (phone_call.py): push to talk. While the button is held, the microphone goes to buddy as 24 kHz
+// 16-bit PCM over a WebSocket; on release buddy transcribes it and handles it exactly like a text in the chat,
+// then reads every reply back the same way. A press while buddy talks interrupts it.
+(() => {
+  const tg = window.Telegram && window.Telegram.WebApp;
+  const initData = tg ? tg.initData : "";
+  const $ = (id) => document.getElementById(id);
+  const RATE = 24000, BLOCK = 2400;                  // 100 ms blocks, as the desk's ears hand them out
+  const box = $("call"), status = $("call-status"), timer = $("call-time"), talkBtn = $("call-talk");
+  const heard = $("call-heard");
+  const openBtn = $("call-open");
+  const words = { connected: "Connected. Hold the button and talk.", listening: "Hold the button and talk.",
+                  thinking: "Thinking…", speaking: "buddy is talking. Hold to interrupt." };
+  let ws = null, ctx = null, stream = null, proc = null, source = null, talking = false, started = 0, tick = null;
+  let playhead = 0, playing = [], wake = null, ending = false, beat = null;
+
+  if (!initData || !navigator.mediaDevices || !window.WebSocket || !(window.AudioContext || window.webkitAudioContext)) {
+    openBtn.disabled = true;
+    openBtn.title = !initData ? "Open this from buddy's pinned message in Telegram." : "This browser can't make calls.";
+  }
+
+  function say(text, state) {
+    status.textContent = text;
+    if (state) box.dataset.state = state;
+  }
+
+  function flush() {
+    for (const s of playing) { try { s.stop(); } catch (e) {} }
+    playing = []; playhead = 0;
+  }
+
+  function play(buf) {
+    const pcm = new Int16Array(buf);
+    if (!pcm.length || !ctx) return;
+    const audio = ctx.createBuffer(1, pcm.length, RATE);
+    const ch = audio.getChannelData(0);
+    for (let i = 0; i < pcm.length; i++) ch[i] = pcm[i] / 32768;
+    const src = ctx.createBufferSource();
+    src.buffer = audio; src.connect(ctx.destination);
+    const at = Math.max(ctx.currentTime + 0.06, playhead);
+    src.start(at); playhead = at + audio.duration;
+    playing.push(src);
+    src.onended = () => { playing = playing.filter((s) => s !== src); };
+  }
+
+  // The microphone, resampled from the device's rate to 24 kHz, sent in 100 ms blocks.
+  function capture() {
+    source = ctx.createMediaStreamSource(stream);
+    proc = ctx.createScriptProcessor(4096, 1, 1);
+    const step = ctx.sampleRate / RATE;
+    let pos = 0, out = new Int16Array(BLOCK), n = 0, last = 0;
+    proc.onaudioprocess = (e) => {
+      const input = e.inputBuffer.getChannelData(0);
+      e.outputBuffer.getChannelData(0).fill(0);
+      if (!ws || ws.readyState !== 1 || !talking) { last = input[input.length - 1]; pos = 0; n = 0; return; }
+      while (pos < input.length) {
+        const i = Math.floor(pos), f = pos - i;
+        const a = i === 0 ? last : input[i - 1], b = input[i];
+        const v = Math.max(-1, Math.min(1, a + (b - a) * f));
+        out[n++] = v < 0 ? v * 32768 : v * 32767;
+        if (n === BLOCK) { ws.send(out.buffer.slice(0)); n = 0; }
+        pos += step;
+      }
+      pos -= input.length; last = input[input.length - 1];
+    };
+    source.connect(proc); proc.connect(ctx.destination);
+  }
+
+  async function start() {
+    ending = false;
+    box.hidden = false; say("Calling…", "idle"); timer.textContent = "0:00";
+    talking = false; talkBtn.setAttribute("aria-pressed", "false"); heard.textContent = "";
+    talkBtn.focus();
+    try {
+      ctx = new (window.AudioContext || window.webkitAudioContext)();
+      await ctx.resume();
+      stream = await navigator.mediaDevices.getUserMedia({ audio: { echoCancellation: true, noiseSuppression: true,
+        autoGainControl: true, channelCount: 1 } });
+    } catch (e) {
+      finish("buddy can't hear you: the microphone isn't allowed here. Allow it for Telegram in your phone's settings.");
+      return;
+    }
+    try { wake = navigator.wakeLock && await navigator.wakeLock.request("screen"); } catch (e) { wake = null; }
+    const url = new URL("api/call", location.href);
+    url.protocol = url.protocol === "https:" ? "wss:" : "ws:";
+    ws = new WebSocket(url.href);
+    ws.binaryType = "arraybuffer";
+    ws.onopen = () => {
+      ws.send(JSON.stringify({ initData })); capture();
+      // a heartbeat: buddy ends a call it has not heard from in 30 s (a page closed without saying goodbye)
+      beat = setInterval(() => { if (ws && ws.readyState === 1) ws.send(JSON.stringify({ type: "ping" })); }, 10000);
+    };
+    ws.onmessage = (e) => {
+      if (typeof e.data !== "string") { if (!talking) play(e.data); return; }
+      let m = {}; try { m = JSON.parse(e.data); } catch (err) { return; }
+      if (m.type === "state") {
+        if (m.state === "connected") { started = Date.now(); tick = setInterval(showTime, 1000); }
+        if (!talking) say(m.note || words[m.state] || "", m.state);
+      } else if (m.type === "heard") heard.textContent = "“" + m.text + "”";
+      else if (m.type === "flush") flush();
+      else if (m.type === "ended") finish(m.reason || "Call ended.");
+    };
+    ws.onclose = () => { if (!ending) finish(started ? "Call ended." : "buddy couldn't be reached. Is the Mac awake?"); };
+  }
+
+  function showTime() {
+    const s = Math.floor((Date.now() - started) / 1000);
+    timer.textContent = Math.floor(s / 60) + ":" + String(s % 60).padStart(2, "0");
+  }
+
+  function finish(reason) {
+    ending = true;
+    if (ws && ws.readyState <= 1) { try { ws.send(JSON.stringify({ type: "end" })); } catch (e) {} ws.close(); }
+    ws = null;
+    if (proc) { proc.disconnect(); proc.onaudioprocess = null; proc = null; }
+    if (source) { source.disconnect(); source = null; }
+    if (stream) { stream.getTracks().forEach((t) => t.stop()); stream = null; }
+    flush();
+    if (ctx) { ctx.close().catch(() => {}); ctx = null; }
+    if (wake) { wake.release().catch(() => {}); wake = null; }
+    clearInterval(tick); tick = null; started = 0;
+    clearInterval(beat); beat = null;
+    say(reason, "idle");
+    setTimeout(() => { if (!ws) { box.hidden = true; openBtn.focus(); } }, 2500);
+  }
+
+  // Hold to talk: pointer or touch, and the space bar for a keyboard. A press interrupts buddy.
+  function press() {
+    if (talking || !ws || ws.readyState !== 1) return;
+    talking = true; flush();
+    talkBtn.setAttribute("aria-pressed", "true"); talkBtn.textContent = "Listening…";
+    say("Listening… let go when you're done.", "listening");
+    ws.send(JSON.stringify({ type: "talk" }));
+    if (tg && tg.HapticFeedback) tg.HapticFeedback.impactOccurred("light");
+  }
+  // A soft two-note blip the moment the button is let go: buddy has it (the answer takes a few seconds more).
+  function blip() {
+    if (!ctx) return;
+    try {
+      const t = ctx.currentTime, g = ctx.createGain();
+      g.gain.setValueAtTime(0.0001, t);
+      g.gain.exponentialRampToValueAtTime(0.12, t + 0.02);
+      g.gain.exponentialRampToValueAtTime(0.0001, t + 0.22);
+      g.connect(ctx.destination);
+      [660, 880].forEach((f, i) => {
+        const o = ctx.createOscillator();
+        o.type = "sine"; o.frequency.value = f; o.connect(g);
+        o.start(t + i * 0.09); o.stop(t + 0.1 + i * 0.09);
+      });
+    } catch (e) {}
+  }
+  function release() {
+    if (!talking) return;
+    talking = false;
+    blip();
+    talkBtn.setAttribute("aria-pressed", "false"); talkBtn.textContent = "Hold to talk";
+    if (ws && ws.readyState === 1) ws.send(JSON.stringify({ type: "done" }));
+  }
+  talkBtn.addEventListener("pointerdown", (e) => { e.preventDefault(); talkBtn.setPointerCapture(e.pointerId); press(); });
+  talkBtn.addEventListener("pointerup", release);
+  talkBtn.addEventListener("pointercancel", release);
+  talkBtn.addEventListener("contextmenu", (e) => e.preventDefault());
+  talkBtn.addEventListener("keydown", (e) => { if ((e.key === " " || e.key === "Enter") && !e.repeat) { e.preventDefault(); press(); } });
+  talkBtn.addEventListener("keyup", (e) => { if (e.key === " " || e.key === "Enter") release(); });
+  openBtn.onclick = start;
+  $("call-end").onclick = () => finish("Call ended.");
+  document.addEventListener("keydown", (e) => { if (e.key === "Escape" && !box.hidden) finish("Call ended."); });
+  window.addEventListener("pagehide", () => { if (ws) finish("Call ended."); });
 })();
 </script>
 </body>

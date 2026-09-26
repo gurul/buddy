@@ -352,6 +352,7 @@ class MiniAppServer:
         self.builds: dict[int, dict[str, Any]] = {}
         self.notify = notify
         self.public_url = ""                              # the tunnel's address: the origin app pages are bound to
+        self.calls: Any = None                            # phone_call.PhoneCalls: "Call buddy", or None
         self._conns: set[asyncio.Task] = set()
         self._server: Optional[asyncio.base_events.Server] = None
         self.port = 0
@@ -433,6 +434,18 @@ class MiniAppServer:
             from .apps_maker import BUDDY_JS
 
             await self._send(writer, 200, BUDDY_JS.encode(), "application/javascript; charset=utf-8")
+            return
+        if method == "GET" and path == "/api/call":
+            # "Call buddy" (phone_call.py): a WebSocket, from the home page only; the owner is checked on it.
+            from .phone_call import is_upgrade
+
+            origin = headers.get("origin", "")
+            if self.calls is None or not is_upgrade(headers):
+                await self._send(writer, 404, b"not found", "text/plain")
+            elif not origin or origin == "null" or (self.public_url and origin != self._origin(headers)):
+                await self._send(writer, 403, b"only buddy's home page can call", "text/plain")
+            else:
+                await self.calls.serve(reader, writer, headers)
             return
         app_route = APP_ROUTE_RE.match(path)
         if method == "GET" and app_route and self.store is not None:

@@ -59,6 +59,8 @@ ROOM_NOTES = "room notes"
 LESSONS = "lessons"
 CODEX = "codex"
 WATCH = "watching"
+MEET = "meet notes"
+CALLS = "phone calls"
 
 _lock = threading.Lock()
 _dir_override: Optional[Path] = None

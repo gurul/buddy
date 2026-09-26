@@ -77,6 +77,7 @@ from . import (
     codex_chat,
     composio_tools,
     consent,
+    meet,
     rundown,
     second_brain,
     spend,
@@ -117,7 +118,8 @@ PROMPT_CACHE_KEY = "buddy-telegram"  # every turn shares one prefix: route them 
 # tools are not here (their results are memory already), nor the owner's apps (third-party mail and files
 # are not the owner's conversation), nor calls whose result is only "ok" (owner, 2026-09-23).
 TRANSCRIBED_TOOLS = ("web_search", "think_hard", "look", "look_around", "find", "take_photo", "remember",
-                     "capture_note", "watch_add", "watch_remove", "watch_pause", "watch_resume", "watch_set_end")
+                     "capture_note", "watch_add", "watch_remove", "watch_pause", "watch_resume", "watch_set_end",
+                     "meet_join", "meet_leave")
 MAX_TOOL_ROUNDS = 6                 # model calls in one turn, at most
 MAX_OUTPUT_TOKENS = 1200
 BACKOFF_MAX_SECS = 60.0
@@ -134,6 +136,32 @@ WATCH_WORDS = ("/watch", "/watches", "watches", "/watchlist", "watchlist", "my w
 # (owner, 2026-09-25: "make this /watch on telegram"). Bare "/watch" lists, by code.
 WATCH_COMMAND = re.compile(r"^/watch(?:@\w+)?\s+(.+)$", re.I | re.S)
 WATCH_TITLE = "Watch"                 # an alert's title: not a reply to anything the owner just said
+# "/meet <link>", "/meet 6pm", "/meet leave", bare "/meet": the Meet notetaker (meet.py), answered by code with no
+# model call, relay or not. "join my 3pm" in words is a model turn with the meet tools.
+MEET_COMMAND = re.compile(r"^/meet(?:@\w+)?(?:\s+(.*))?$", re.I | re.S)
+MEET_LEAVE_WORDS = ("leave", "stop", "end", "out", "quit", "exit")
+MEET_TITLE = "Meet"
+# "Call buddy" (phone_call.py). On a call buddy speaks instead of texting (owner, 2026-09-25: "don't send a text
+# unless it's necessary for a function like watch or screenshot or search or link"): a reply is read out, and only
+# what the owner needs in writing is texted — the part after a line of just WRITTEN_MARK, and any link. Titled
+# messages (a watch alert, Meet notes, Chrome access), buttons and pictures are functional and still go.
+WRITTEN_MARK = "📎"
+# On a call, a round that goes off to a tool without a word said gets one of these at once (live 2026-09-25: "open
+# Google" was silent 11 s until the task's result, a rundown 25 s). A task gets "On it."; anything else a check.
+CALL_ON_IT = "On it."
+CALL_CHECKING = "One sec, checking."
+# A question with buttons on a call (a task's "Should I go ahead…?", an app's consent) is read out with its choices,
+# and the owner's spoken answer is understood rather than keyword-matched (owner, 2026-09-25: "ask for approval
+# through voice i never heard approval"; "Can you search, bro?" was taken as a no). A Claude Code permission prompt
+# stays strict: only a plain yes or no answers it by voice.
+CALL_ASK_AGAIN = "Sorry, was that a yes or a no?"
+ANSWER_SCHEMA_NAME = "spoken_answer"
+CALL_NOTE = (
+    "The owner is talking to you on a voice call from their phone, push to talk. Your reply is read aloud and is "
+    "not texted: answer in one to three short spoken sentences, with no Markdown, lists or emoji. When they will "
+    "need something in writing (a link, an address, a code, numbers to copy, a list to keep), end your reply with "
+    "a line that is just " + WRITTEN_MARK + " and put only that part after it: that part alone is texted to them.")
+MEET_OFF_LINE = "Joining meetings is off on this computer (CC_BUDDY_MEET, and Chrome attach: CC_BUDDY_BROWSER_ATTACH)."
 WATCH_OFF_LINE = "Watching is off on this computer (CC_BUDDY_WATCH)."
 APPS_TEXT = "Your apps:"
 APPS_OFF_LINE = "The apps aren't running right now (CC_BUDDY_MINIAPP, or the tunnel is still starting)."
@@ -218,6 +246,7 @@ BOT_COMMANDS: tuple[tuple[str, str], ...] = (
     ("codex", "Chat with Codex in a folder"),
     ("rundown", "Mail, calendar and todos in one brief"),
     ("watch", "Watch a price, stock or ticket release, or list them"),
+    ("meet", "Join a Google Meet call and take notes (a link, or 6pm)"),
     ("screenshot", "Send the Mac's screen"),
     ("stealth", "Act asleep at the desk"),
     ("wake", "Wake up from stealth"),
@@ -811,6 +840,62 @@ def with_turn_context(items: list[dict[str, Any]], context: str) -> list[dict[st
     return list(items) + [note]
 
 
+def spoken_question(text: str, choices: Sequence[Choice]) -> str:
+    """A question with buttons, as words to hear: the question, then how to answer it out loud. Buttons that
+    mean yes and no (Yes/No, Allow/Deny) are asked as "Yes or no?"."""
+    if {c.value for c in choices} <= {"yes", "no"}:
+        return f"{text} Yes or no?"
+    plain_labels = [" ".join(re.sub(r"[^\w\s'-]", " ", c.label).split()) for c in choices]
+    return f"{text} Say " + ", or ".join(lb for lb in plain_labels if lb) + "."
+
+
+def split_for_call(text: str) -> tuple[str, str]:
+    """(what to say, what to text) for a reply on a phone call: the words before a line of just WRITTEN_MARK are
+    said, what follows is texted, and every link is texted too (a link read aloud is no use)."""
+    head, _, written = (text or "").partition(WRITTEN_MARK)
+    spoken, written = head.strip(), written.strip()
+    links = [u.rstrip(").,;") for u in re.findall(r"https?://\S+", spoken)]
+    extra = [u for u in links if u not in written]
+    return spoken, "\n".join(x for x in (written, *extra) if x)
+
+
+class SentenceStream:
+    """A streamed reply into sentences: each finished sentence goes to ``say`` while the rest is still being
+    written. The written part (after WRITTEN_MARK) is never said."""
+
+    def __init__(self, say: Callable[[str], None], min_chars: int = 12) -> None:
+        self.say, self.min_chars = say, min_chars
+        self.text = ""
+        self._buf = ""
+        self._stopped = False
+
+    def feed(self, delta: str) -> None:
+        self.text += delta
+        if self._stopped:
+            return
+        self._buf += delta
+        if WRITTEN_MARK in self._buf:
+            self._emit(self._buf.split(WRITTEN_MARK, 1)[0])
+            self._buf, self._stopped = "", True
+            return
+        cut = -1
+        for m in re.finditer(r"[.!?](?:\s)|\n", self._buf):
+            if m.end() >= self.min_chars:
+                cut = m.end()
+        if cut > 0:
+            self._emit(self._buf[:cut])
+            self._buf = self._buf[cut:]
+
+    def flush(self) -> None:
+        if not self._stopped:
+            self._emit(self._buf)
+        self._buf = ""
+
+    def _emit(self, piece: str) -> None:
+        if piece.strip():
+            self.say(piece.strip())
+
+
 def request(config: TelegramConfig, items: list[dict[str, Any]], brief: str = "",
             profile: str = "", app_tools: Sequence[dict[str, Any]] = (), vault: bool = False, *,
             today: str = "", memory_tools: Sequence[dict[str, Any]] = (),
@@ -1287,6 +1372,7 @@ class _Question:
     chat_id: Optional[int]
     strict: bool
     words: frozenset[str] = frozenset()
+    text: str = ""                                  # the question as asked: what a spoken answer is judged against
 
 
 @dataclass(eq=False)
@@ -1383,6 +1469,7 @@ class TelegramInlet:
     """
 
     def __init__(self, config: TelegramConfig, api: Any, create: Create, *,
+                 stream_create: Optional[Callable[[dict[str, Any], Callable[[str], None]], Awaitable[dict[str, Any]]]] = None,
                  agent_factory: Optional[Callable[..., Any]] = None, agent_enabled: bool = True,
                  busy: Callable[[], bool] = lambda: False, brief: Callable[[], str] = lambda: "",
                  on_photo: Optional[Callable[[str], Awaitable[dict[str, Any]]]] = None,
@@ -1391,6 +1478,7 @@ class TelegramInlet:
                  on_closed: Optional[Callable[[list[tuple[str, str]]], None]] = None,
                  memory: Optional[Memory] = None, apps: Any = None, vault: Any = None,
                  watcher: Optional[watch.Watcher] = None,
+                 meeter: Optional[meet.Meeter] = None,
                  screen: Callable[[], Optional[Path]] = capture_screen,
                  scene: Any = None, head: Any = None,
                  on_explore: Optional[Callable[[], Any]] = None,
@@ -1425,6 +1513,10 @@ class TelegramInlet:
         self._app_policy = composio_tools.toolkit_policy()
         self._vault = vault                                # second_brain.VaultConfig (enabled), or None
         self._watcher = watcher                            # watch.Watcher, or None (CC_BUDDY_WATCH=0)
+        self._meeter = meeter                              # meet.Meeter, or None (CC_BUDDY_MEET=0, no Chrome attach)
+        self._call_say: Optional[Callable[[str], None]] = None   # a phone call's reader (phone_call.Call.say)
+        self._stream_create = stream_create                # responses streamed a sentence at a time, on a call
+        self._streamed: Optional[str] = None               # this turn's reply, already read out as it was made
         self._screen = screen
         self._scene, self._head = scene, head
         self._on_explore, self._on_sound, self._on_caption = on_explore, on_sound, on_caption
@@ -1867,6 +1959,12 @@ class TelegramInlet:
             self._spawn(self._image(inbound, target, self._codex_epoch, claude_epoch=self._claude_epoch),
                         "telegram-image")
             return
+        meet_ask = MEET_COMMAND.match(inbound.text.strip())
+        if meet_ask:
+            # buddy's own command, from buddy's own menu: by code, ahead of both relays and any open picker
+            self._note("user", inbound.text, "command")
+            self._spawn(self._meet_command(inbound.chat_id, (meet_ask.group(1) or "").strip()), "telegram-meet")
+            return
         word = inbound.text.lower().rstrip(".! ")
         if re.fullmatch(r"/watch(es|list)?@\w+", word):
             word = word.split("@", 1)[0]                 # "/watch@BuddyBot", as a menu in a group sends it
@@ -2087,6 +2185,18 @@ class TelegramInlet:
         ``buttons`` are tap-to-send replies; ``reply_to`` is the owner's message this answers; ``force_reply``
         opens the reply box on it. A message Telegram refuses with a reply link or a reply box goes again
         without them: the words always matter more than the link."""
+        if (self._call_say is not None and chat_id == self._chat_id and title is None and not buttons
+                and force_reply is None):
+            # on a call: said, not texted, save what the owner needs in writing
+            spoken, written = split_for_call(text)
+            streamed, self._streamed = self._streamed, None
+            if spoken and (streamed is None or split_for_call(streamed)[0] != spoken):
+                self._to_call(chat_id, spoken, None)
+            if not written:
+                return
+            text = written
+        else:
+            self._to_call(chat_id, text, title)
         extra: dict[str, Any] = {}
         if reply_to:
             extra["reply_to"] = reply_to
@@ -2143,6 +2253,8 @@ class TelegramInlet:
         or with ``fallback`` as a reply keyboard. The message is never lost for want of its buttons."""
         if chat_id is None:
             return False
+        if self._call_say is not None and chat_id == self._chat_id and board.choices:
+            self._to_call(chat_id, spoken_question(text, board.choices), title)
         self._register(board)
         rows: list[list[tuple[str, str, str]]] = []
         for i, (choice, key) in enumerate(zip(board.choices, board.keys, strict=True)):
@@ -3085,6 +3197,7 @@ class TelegramInlet:
         async with self._turn_lock:
             chat_id = inbound.chat_id
             self._turn_request = inbound.message_id          # a task this turn starts replies to it
+            self._streamed = None
             t0 = self._clock()
             user_item = message_item("user", inbound.text or "Please describe this image.")
             if image is not None:
@@ -3141,35 +3254,40 @@ class TelegramInlet:
     async def _think(self, items: list[dict[str, Any]], chat_id: int, *, daily: bool = False, tail: int = 0,
                      usage: Optional[dict[str, int]] = None) -> tuple[str, int]:
         usage = usage if usage is not None else {"in": 0, "cached": 0, "out": 0, "instr": 0}
-        # One developer note for the whole turn: the clock and the brief, identical in every round of it.
+        # One developer note for the whole turn: the clock and the brief, identical in every round of it; on a
+        # phone call, also how to answer out loud (it rides the turn's note, so the cached prefix is untouched).
         note = turn_context(self._brief())
-        mem_tools = self._memory_tools()
-        prof, today = ("", "")
-        if self._memory is not None:
-            prof, today = await asyncio.to_thread(self._prompt_memory, tail)
-        app_tools = self._app_tools()
-        app_names = frozenset(t["name"] for t in app_tools)
-        allowed = app_names | {t["name"] for t in mem_tools} | (
-            set(second_brain.SECOND_BRAIN_TOOL_NAMES) if self._vault is not None else set()) | (
-            set(watch.TOOL_NAMES) if self._watcher is not None else set())
-        watch_tools = self._watcher.tools() if self._watcher is not None else []
-        watch_block = self._watcher.instructions() if self._watcher is not None else ""
+        if self._call_say is not None:
+            note += "\n\n" + CALL_NOTE
+        parts, allowed, app_tools = await self._turn_parts(tail)
         text = ""
+        said_on_call = False
         for round_no in range(1, MAX_TOOL_ROUNDS + 1):
-            payload = request(self.config, items, profile=prof, app_tools=app_tools,
-                              vault=self._vault is not None, today=today, memory_tools=mem_tools, context=note,
-                              watch_tools=watch_tools, watch_block=watch_block)
+            payload = request(self.config, items, context=note, **parts)
             if round_no == 1:
                 usage["instr"] = len(payload["instructions"])
             if daily:
                 payload["tools"] = [t for t in app_tools if t["name"] in rundown.READ_META_TOOLS
                                     or t["name"] == composio_tools.MULTI_EXECUTE]
-            response = await self._create(payload)
+            if self._call_say is not None and self._stream_create is not None:
+                # on a call: each sentence is read out as soon as the model has written it
+                reader = SentenceStream(self._call_say)
+                response = await self._stream_create(payload, reader.feed)
+                reader.flush()
+                self._streamed = reader.text or None
+            else:
+                response = await self._create(payload)
             self._count_usage(response, usage)
             spend.record_response(spend.CHAT, response, model=str(payload.get("model") or ""))
             calls, text, carry = parse_response(response, allowed)
             if not calls:
                 return text, round_no
+            if self._call_say is not None and not text.strip() and not said_on_call:
+                said_on_call = True                   # a call is never silent while buddy works
+                self._to_call(chat_id, CALL_ON_IT if any(c["name"] == "start_task" for c in calls) else CALL_CHECKING,
+                              None)
+            elif text.strip():
+                said_on_call = True
             items = items + carry
             results = []
             for call in calls:
@@ -3212,6 +3330,45 @@ class TelegramInlet:
                 return "\n".join(x for x in (text, *others) if x), round_no
         return text or "I got tangled up in that one. Ask me again?", MAX_TOOL_ROUNDS
 
+    async def _turn_parts(self, tail: int) -> tuple[dict[str, Any], set[str], list[dict[str, Any]]]:
+        """What every round of a turn sends besides its items: request()'s keyword arguments, the tool names the
+        model may call, and the app tools (the rundown narrows them). The cache warm-up sends the same."""
+        mem_tools = self._memory_tools()
+        prof, today = ("", "")
+        if self._memory is not None:
+            prof, today = await asyncio.to_thread(self._prompt_memory, tail)
+        app_tools = self._app_tools()
+        allowed = {t["name"] for t in app_tools} | {t["name"] for t in mem_tools} | (
+            set(second_brain.SECOND_BRAIN_TOOL_NAMES) if self._vault is not None else set()) | (
+            set(watch.TOOL_NAMES) if self._watcher is not None else set()) | (
+            set(meet.TOOL_NAMES) if self._meeter is not None else set())
+        # the watcher's tools and block, then the Meet notetaker's: both ride the same slot of the prompt
+        watch_tools = (self._watcher.tools() if self._watcher is not None else []) + (
+            self._meeter.tools() if self._meeter is not None else [])
+        watch_block = "\n\n".join(b for b in (self._watcher.instructions() if self._watcher is not None else "",
+                                                self._meeter.instructions() if self._meeter is not None else "") if b)
+        parts = {"profile": prof, "app_tools": app_tools, "vault": self._vault is not None, "today": today,
+                 "memory_tools": mem_tools, "watch_tools": watch_tools, "watch_block": watch_block}
+        return parts, allowed, app_tools
+
+    async def _warm(self) -> None:
+        """A call opened: send the chat's own prompt once with nothing to answer, so the owner's first question
+        finds it cached (measured 2026-09-25: a call's first turn read 12k tokens with none cached). The reply is
+        thrown away, and nothing is recorded but its spend."""
+        try:
+            tail = self._shown(self._turn_kinds[-HISTORY_TURNS:])
+            parts, _, _ = await self._turn_parts(tail)
+            payload = request(self.config, self._history() + [message_item("user", "(the call connected)")],
+                              context=turn_context(self._brief()) + "\n\n" + CALL_NOTE, **parts)
+            payload["max_output_tokens"] = 16
+            payload["reasoning"] = {"effort": "low"}
+            response = await self._create(payload)
+            spend.record_response(spend.CALLS, response, model=str(payload.get("model") or ""))
+        except asyncio.CancelledError:
+            raise
+        except Exception as e:  # noqa: BLE001 — a cold first answer, nothing worse
+            log.info("telegram: the call's cache warm-up failed (%s)", type(e).__name__)
+
     # -- tools --
     async def _tool(self, name: str, args: dict[str, Any], chat_id: int) -> dict[str, Any]:
         """One tool call from the text brain. The fixed tools are a table (TOOL_HANDLERS, below the class);
@@ -3229,6 +3386,10 @@ class TelegramInlet:
                 return await self._memory_tool(name, args)
             if self._apps is not None and name in self._apps.names:
                 return await self._app_tool(name, args, chat_id)
+            if name in meet.TOOL_NAMES:
+                if self._meeter is None:
+                    return {"ok": False, "reason": meet.OFF_REASON}
+                return await self._meeter.handle(name, args)
             if name in watch.TOOL_NAMES:
                 if self._watcher is None:
                     return {"ok": False, "reason": watch.OFF_REASON}
@@ -3296,7 +3457,112 @@ class TelegramInlet:
         # Exa through OpenRouter (websearch.py), off the loop: a second or two of network
         return await asyncio.to_thread(websearch.search, str(args.get("query") or ""), self.config.search)
 
-    async def tell_owner(self, text: str, about: str = "") -> bool:
+    async def _meet_command(self, chat_id: int, rest: str) -> None:
+        """/meet by code: bare (or "status") says where buddy is, "leave" takes it out, anything else is a link or
+        the owner's words for a meeting on their calendar."""
+        m = self._meeter
+        if m is None:
+            await self._say(chat_id, MEET_OFF_LINE, title=MEET_TITLE)
+            return
+        if not rest or rest.lower() == "status":
+            await self._say(chat_id, m.status_line(), title=MEET_TITLE)
+            return
+        if rest.lower().rstrip(".!") in MEET_LEAVE_WORDS:
+            r = m.leave()
+            await self._say(chat_id, f"Leaving {r['leaving']}; the notes follow." if r.get("ok") else "I'm not in a meeting.",
+                            title=MEET_TITLE)
+            return
+        r = await m.join(rest)
+        if r.get("ok"):
+            text = (f"Joining {r['joining']} with the microphone and camera off. I'll text you when I'm in, "
+                    "and send the notes when it ends.")
+        else:
+            text = f"I can't join that: {r.get('reason')}."
+        self._note("buddy", text)
+        await self._say(chat_id, text, title=MEET_TITLE)
+
+    # ---- "Call buddy" (phone_call.py): the chat, spoken ----
+    def listen(self, say: Optional[Callable[[str], None]]) -> bool:
+        """A phone call starts (``say``) or ends (None). While it lasts, what buddy says in the owner's chat is also
+        read out on the call. False when there is no owner chat to be in."""
+        self._call_say = say
+        if say is not None and self._chat_id is not None:
+            self._spawn(self._warm(), "telegram-call-warm")     # the first answer should not pay a cold cache
+        return self._chat_id is not None
+
+    def hear(self, text: str) -> None:
+        """The owner's words from a call, handled exactly as a text from them, so the call can do everything the
+        chat can. Not echoed into the chat (owner: no text unless it is needed); the transcript keeps them."""
+        chat = self._chat_id
+        if chat is None or not text.strip():
+            return
+        pending = self._live_question()
+        if pending is not None and pending.words:
+            self._spawn(self._hear_answer(chat, text.strip(), pending), "telegram-call-answer")
+            return
+        self._handle(Inbound(chat_id=chat, user_id=chat, text=text.strip()))
+
+    def _live_question(self) -> Optional[_Question]:
+        return next((q for q in reversed(self._questions) if not q.future.done()), None)
+
+    async def _hear_answer(self, chat: int, text: str, asked: _Question) -> None:
+        """A spoken answer to a question with choices. The exact choice or a plain yes/no counts at once; a
+        Claude permission prompt takes nothing else. Other words are read against the question by the model
+        ("Can you search, bro?" to "press Return?" is a yes); when it cannot tell, buddy asks again, and the
+        words never start a new request while the question waits."""
+        choices = sorted(asked.words)
+        said = text.lower().strip().rstrip(".!?")
+        pick = said if said in asked.words else None
+        if pick is None and {"yes", "no"} <= asked.words:
+            pick = {"allow": "yes", "deny": "no"}.get(consent.bare_decision(text))
+        strict = asked.future is self._permission_future
+        if pick is None and not strict:
+            pick = await self._judge_answer(asked.text, choices, text)
+        if asked.future.done():
+            return                                        # answered meanwhile (a tap, a timeout)
+        if pick is None or pick not in asked.words:
+            self._to_call(chat, CALL_ASK_AGAIN if {"yes", "no"} <= asked.words
+                          else "Sorry, which one: " + ", ".join(choices) + "?", None)
+            return
+        self._handle(Inbound(chat_id=chat, user_id=chat, text=pick))
+
+    async def _judge_answer(self, question: str, choices: list[str], said: str) -> Optional[str]:
+        """Which choice a spoken answer means, or None when it is not clearly one of them."""
+        payload = {
+            "model": self.config.model, "store": False, "reasoning": {"effort": "low"}, "max_output_tokens": 400,
+            "instructions": ("The owner was asked a question on a voice call and answered out loud; the answer "
+                             "was transcribed automatically. Say which choice they meant. Pick a choice only "
+                             "when they clearly mean it; for anything unsure, sarcastic, or about something "
+                             "else, pick unclear."),
+            "input": f"Question: {question}\nChoices: {', '.join(choices)}\nThey said: {said}",
+            "text": {"format": {"type": "json_schema", "name": ANSWER_SCHEMA_NAME, "strict": True, "schema": {
+                "type": "object", "additionalProperties": False, "required": ["choice"],
+                "properties": {"choice": {"type": "string", "enum": [*choices, "unclear"]}}}}},
+        }
+        try:
+            response = await self._create(payload)
+            spend.record_response(spend.CALLS, response, model=self.config.model)
+            _, out, _ = parse_response(response, ())
+            choice = json.loads(out or "{}").get("choice")
+        except Exception as e:  # noqa: BLE001 — not understood is asked again, never taken as an answer
+            log.info("telegram: a spoken answer could not be judged (%s)", type(e).__name__)
+            return None
+        return choice if choice in choices else None
+
+    def _to_call(self, chat_id: int, text: str, title: Optional[str]) -> None:
+        """Read a message out on the phone call, when one is on: the owner's chat only, and not the call's own
+        echo of what they said or a task's step-by-step progress."""
+        say = self._call_say
+        if say is None or chat_id != self._chat_id or not text:
+            return
+        if title and "progress" in title.lower():
+            return
+        try:
+            say(text)
+        except Exception:  # noqa: BLE001 — a call that cannot read costs the reading, never the message
+            log.exception("telegram: could not read a message out on the call")
+
+    async def tell_owner(self, text: str, about: str = "", title: str = WATCH_TITLE) -> bool:
         """A watch alert (watch.Watcher.notify): a new message in the owner's chat, unasked. It goes into the
         chat's history and transcript as buddy's, so "stop watching that" in reply has something to point at.
         Stealth does not hold it back: stealth is the desk's, and this is the phone. Returns whether it was sent:
@@ -3306,8 +3572,9 @@ class TelegramInlet:
         injection (re-verification, 2026-09-25)."""
         if self._chat_id is None:
             return False
+        self._to_call(self._chat_id, text, title)
         try:
-            await self.api.send_message(self._chat_id, text, title=WATCH_TITLE)
+            await self.api.send_message(self._chat_id, text, title=title)
         except asyncio.CancelledError:
             raise
         except Exception as e:  # noqa: BLE001 — BotApiError, a network error: not sent, tried again later
@@ -3501,6 +3768,7 @@ class TelegramInlet:
         choices = tuple(answer_choices(question) if choices is None else choices)
         # A free question: any next message answers it.
         asked = self._open_question(future, chat_id, strict=bool(choices), words=frozenset(c.value for c in choices))
+        asked.text = question
         self._note("buddy", question)
         board = _Keyboard(chat_id, ANSWER, list(choices), future=future) if choices else None
         # Waiting on the owner is not working: no "typing…" under the question. It comes back with the answer,
@@ -3770,9 +4038,10 @@ def make_inlet(config: TelegramConfig, **lent: Any) -> Optional[TelegramInlet]:
         log.warning("telegram: OPENAI_API_KEY not set — the text door stays shut")
         return None
     try:
-        from .computer_agent import make_response_creator
+        from .computer_agent import make_response_creator, make_stream_creator
 
-        return TelegramInlet(config, BotApi(config.token), make_response_creator(), **lent)
+        return TelegramInlet(config, BotApi(config.token), make_response_creator(),
+                             stream_create=make_stream_creator(), **lent)
     except ImportError as e:
         log.warning("telegram: not importable (%s) — the text door stays shut", e)
         return None

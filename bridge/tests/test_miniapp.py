@@ -622,7 +622,16 @@ def test_the_daemon_shares_one_set_of_apps_being_changed_between_the_doors(monke
 def page_script() -> str:
     import re
 
-    return re.findall(r"<script>(.*?)</script>", miniapp.PAGE_PATH.read_text(), re.S)[-1]
+    # the home page's own script (the one with the apps); "Call buddy" has a script block of its own after it
+    return next(b for b in re.findall(r"<script>(.*?)</script>", miniapp.PAGE_PATH.read_text(), re.S)
+                if "// ---- apps ----" in b)
+
+
+def call_script() -> str:
+    import re
+
+    return next(b for b in re.findall(r"<script>(.*?)</script>", miniapp.PAGE_PATH.read_text(), re.S)
+                if 'new URL("api/call"' in b)
 
 
 def test_the_home_pages_script_parses(tmp_path: Path) -> None:
@@ -633,8 +642,10 @@ def test_the_home_pages_script_parses(tmp_path: Path) -> None:
     if node is None:
         pytest.skip("node is not installed")
     (tmp_path / "page.js").write_text(page_script())
+    (tmp_path / "call.js").write_text(call_script())
     (tmp_path / "broken.js").write_text(page_script() + "\n})(;")                     # positive control
     assert subprocess.run([node, "--check", str(tmp_path / "page.js")], capture_output=True).returncode == 0
+    assert subprocess.run([node, "--check", str(tmp_path / "call.js")], capture_output=True).returncode == 0
     assert subprocess.run([node, "--check", str(tmp_path / "broken.js")], capture_output=True).returncode != 0
 
 

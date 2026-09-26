@@ -84,8 +84,17 @@ The [Telegram door](docs/stackchan/telegram.md) is **off by default**. With it o
   price data first, then its text, then the page in a headless browser with a
   vision model looking at it. Bare `/watch` lists the watches. See
   [watching](docs/stackchan/watch.md).
+- **Takes calls from your phone.** **Call buddy** in the Mini App is push to talk into
+  the same brain you text, so a call can do everything a text can. Replies are spoken,
+  not texted, except what you need in writing (links, codes, alerts, screenshots). See
+  [calling buddy](docs/stackchan/miniapp.md#calling-buddy).
+- **Sits in on your Google Meet calls.** `/meet <link>`, `/meet 6pm`, "join my
+  3pm", or "hey buddy, join my meeting": buddy joins from your Chrome with the
+  microphone and camera off, never speaks, reads the captions, and texts you the
+  notes (decisions, actions, open questions) when the call ends. See
+  [sitting in on Meet calls](docs/stackchan/meet.md).
 - **A `/` menu** of the code words (`/claude_on`, `/new_claude`, `/codex`,
-  `/rundown`, `/watch`, `/screenshot`, `/stealth`, `/wake`, `/stop` and more), in your
+  `/rundown`, `/watch`, `/meet`, `/screenshot`, `/stealth`, `/wake`, `/stop` and more), in your
   chat only.
 - **Keeps your personal notes.** With the [second brain](docs/stackchan/second-brain.md)
   on, a text saves a note, updates a list, checks off a todo, or undoes an edit in

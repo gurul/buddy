@@ -43,6 +43,50 @@ Mini App is always one tap away three other ways:
 Telegram's menu button can be either the command list or one Mini App, never
 both, which is why the Mini App gets the pinned message instead.
 
+## Calling buddy
+
+The owner asked on 2026-09-25 for voice calls over Telegram, then for push to talk "instead of live",
+for "full functionality like i am texting it", and for no texts on a call "unless it's necessary". A
+Telegram bot cannot take a Telegram call, so the call is in the Mini App: **Call buddy**, top right.
+
+- **Hold to talk, let go to send.** While the button is held the phone's microphone goes to the daemon
+  (24 kHz 16-bit audio over a WebSocket, through the same tunnel). A soft two-note blip says it was sent.
+- **It is the chat, spoken.** The words are handed to the **Telegram chat's own brain exactly as if you had
+  typed them**, so a call can do everything a text can: mail, calendar, Drive, watch, `/meet`, notes, tasks
+  on the Mac, app building, memory, and the relays. The brain is told it is on a call, so it answers in one
+  to three spoken sentences.
+- **Spoken, not texted.** On a call buddy's replies are read out and do not appear in the chat. What you
+  need in writing is still texted: any link, and anything the brain puts after a line of just 📎 (an
+  address, a code, numbers to copy). Functional messages still go as they always do: watch alerts and
+  lists, screenshots and photos, Meet notes, questions with buttons, task progress. Your words are not
+  echoed into the chat; buddy's memory transcript keeps the conversation.
+- **Hold while buddy talks** to interrupt it.
+- **Only you.** The call opens only with Telegram's signed initData for an owner, from the Mini App's own
+  page. One call at a time, up to an hour.
+
+### Latency
+
+Measured 2026-09-25 (owner: "how can we improve latency"). Before: 5 to 11 s from letting go to buddy's
+voice. What each stage costs now, and how:
+
+| Stage | How | Measured |
+|---|---|---|
+| Your words to text | OpenAI realtime transcription (`gpt-4o-mini-transcribe`), one session per call, fed while you talk; the server transcribes at pauses | 0.39 to 0.50 s after release, whatever the press's length (uploading after release: 0.51 to 0.92 s, growing with length) |
+| The answer | The chat's model (`gpt-6-luna`) streamed: each sentence is spoken as soon as it is written; the prompt cache is warmed when the call opens | first sentence 1.9 s for a plain answer; tool turns take longer (each tool is real work) |
+| Text to voice | Deepgram Aura-2 through OpenRouter (`deepgram/aura-2`, voice `aura-2-thalia-en`), streamed; OpenAI `gpt-4o-mini-tts` if it fails | first sound 0.31 to 0.50 s (OpenAI streamed: 1.15 s; Kokoro on OpenRouter: 7 to 10 s) |
+
+Every press is timed in the daemon's log (`call: press … → heard in … → first reply … → first sound …`).
+None of OpenRouter's transcription models beat the live session (Deepgram Nova-3 0.69 s, Whisper Large V3
+Turbo 1.32 s, both uploaded), so the ears stay on OpenAI.
+
+Code: `bridge/src/cc_buddy_bridge/phone_call.py` (the WebSocket, the call, the ears and the voice),
+`TelegramInlet.listen` / `hear`, `split_for_call` and `SentenceStream` in `telegram.py`,
+`make_stream_creator` in `computer_agent.py`, and the call screen in `miniapp_page.html`. Tests:
+`bridge/tests/test_phone_call.py` and the call tests in `test_telegram.py`. Spend shows as "phone calls".
+Switches: `CC_BUDDY_CALL_LIVE_STT` (on), `CC_BUDDY_CALL_TTS_PROVIDER` (`openrouter`, or `openai`),
+`CC_BUDDY_CALL_OR_TTS_MODEL`, `CC_BUDDY_CALL_OR_VOICE`, `CC_BUDDY_CALL_STT_MODEL`,
+`CC_BUDDY_CALL_TTS_MODEL`, `CC_BUDDY_CALL_VOICE`.
+
 ## Making an app
 
 Ask in the chat ("make me a habit tracker with streaks", "build a workout

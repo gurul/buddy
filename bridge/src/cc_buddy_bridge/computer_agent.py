@@ -1607,3 +1607,37 @@ def make_response_creator(api_key: Optional[str] = None) -> Callable[[dict[str, 
         return r.model_dump(exclude_none=True)
 
     return create
+
+
+def make_stream_creator(api_key: Optional[str] = None) -> Callable[[dict[str, Any], Callable[[str], None]],
+                                                                   Awaitable[dict[str, Any]]]:
+    """responses.create, streamed: ``on_text`` gets each piece of the reply's text as it is written, and the
+    finished response comes back as the same dict ``make_response_creator`` returns (the Telegram call reads a
+    reply out a sentence at a time, telegram.SentenceStream)."""
+    from openai import AsyncOpenAI
+
+    client = AsyncOpenAI(api_key=api_key) if api_key else AsyncOpenAI()
+
+    async def create(request: dict[str, Any], on_text: Callable[[str], None]) -> dict[str, Any]:
+        async with client.responses.stream(**request) as stream:
+            async for event in stream:
+                if getattr(event, "type", "") == "response.output_text.delta":
+                    on_text(event.delta)
+            final = await stream.get_final_response()
+        return plain_response(final.model_dump(exclude_none=True))
+
+    return create
+
+
+def plain_response(response: dict[str, Any]) -> dict[str, Any]:
+    """A streamed response as ``responses.create`` returns it. The SDK's stream helper adds what it parsed
+    (``parsed_arguments`` on a strict tool's call, ``parsed`` on text), and the API refuses those fields when the
+    call is sent back as input in the next round: live, 2026-09-25, a rundown on a phone call failed with
+    "Unknown parameter: 'input[2].parsed_arguments'" (the Composio tools are strict)."""
+    for item in response.get("output") or []:
+        if isinstance(item, dict):
+            item.pop("parsed_arguments", None)
+            for part in item.get("content") or []:
+                if isinstance(part, dict):
+                    part.pop("parsed", None)
+    return response

@@ -451,7 +451,7 @@ Flip it to `ask` if two seconds a command is a price you will pay.
 - **The `/` menu.** At startup buddy sets its code words as bot commands in
   your own chat only (`setMyCommands`, scoped to your chat): `/apps`, `/spend`,
   `/claude_on`, `/claude_off`, `/new_claude`, `/codex`, `/rundown`, `/watch`,
-  `/screenshot`, `/stealth`, `/wake` and `/stop`. Each works exactly like the
+  `/meet`, `/screenshot`, `/stealth`, `/wake` and `/stop`. Each works exactly like the
   typed word. If Telegram refuses the menu, the words still work when typed.
 - **`/spend`** (or `spend`, `spending`) — what buddy has spent: today,
   yesterday, this month, the top three features today and OpenRouter's own
@@ -466,6 +466,13 @@ Flip it to `ask` if two seconds a command is a price you will pay.
   watch can be paused, or kept only for a while). An alert arrives as a new message titled
   **Watch** and joins the chat's history, so "stop watching that" in reply
   works. See [watching](watch.md).
+- **`/meet`** — the Meet notetaker. `/meet <link>` or `/meet 6pm` (a meeting on
+  your calendar) has buddy join the Google Meet call from your Chrome, muted
+  with the camera off, and text the notes when it ends. Bare `/meet` says
+  whether it is in a call; `/meet leave` takes it out. All three are answered by
+  code with no model call, relay or not. "join my 3pm" in words is a model turn
+  with `meet_join`, `meet_status` and `meet_leave`. The texts are titled
+  **Meet**. See [sitting in on Meet calls](meet.md).
 - **"typing…"** shows while buddy works on a reply, for the whole turn, not only
   the first 5 seconds. It is sent again every 4 s and stops when the reply goes
   out. `think_hard` keeps it up for up to 5 minutes. It pauses while buddy waits

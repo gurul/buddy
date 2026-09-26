@@ -2326,3 +2326,63 @@ def test_a_session_without_usage_events_is_metered_by_its_own_clock(_spend_ledge
     asyncio.run(go())
     [row] = spend.day_rows(date.today().isoformat(), _spend_ledger_in_tmp)
     assert row["usd"] == pytest.approx(0.10) and row["note"] == "clock-timed: no usage event"
+
+
+# ---- Meet: "join my meeting" out loud (meet.py) ---------------------------------------------------
+
+class _FakeMeeter:
+    def __init__(self) -> None:
+        self.joined: list[str] = []
+        self.left = 0
+
+    async def join(self, meeting: str) -> dict:
+        self.joined.append(meeting)
+        return {"ok": True, "joining": "Design review"}
+
+    def leave(self) -> dict:
+        self.left += 1
+        return {"ok": True, "leaving": "Design review"}
+
+
+def test_the_meeting_tools_are_offered_only_with_a_meeter_and_never_in_a_lesson() -> None:
+    from cc_buddy_bridge import voice_agent
+
+    names = lambda cfg: [t.get("name") for t in cfg["delegation"]["responses"]["tools"]]  # noqa: E731
+    cfg = VoiceConfig()
+    assert "join_meeting" not in names(voice_agent.session_config(cfg))
+    with_meet = names(voice_agent.session_config(cfg, meet_tools=voice_agent.MEET_TOOLS))
+    assert "join_meeting" in with_meet and "leave_meeting" in with_meet
+    lesson = names(voice_agent.session_config(cfg, think_aloud={"id": "l1", "topic": "fractions"},
+                                              meet_tools=voice_agent.MEET_TOOLS))
+    assert "join_meeting" not in lesson
+
+
+def test_join_meeting_out_loud_reaches_the_meeter_and_leave_too() -> None:
+    meeter = _FakeMeeter()
+    conn = FakeConnection([_tool_call("join_meeting", "c1", meeting="my 3pm")])
+    s, _, _ = _session(conn, [FakeAgent(None, None)], meeter=meeter)
+
+    async def go():
+        task = asyncio.create_task(s.run())
+        await _eventually(lambda: bool(conn.tool_outputs()))
+        conn.feed(_tool_call("leave_meeting", "c2"), None)
+        await _eventually(lambda: len(conn.tool_outputs()) >= 2)
+        conn.feed(_tool_call("end_conversation", "c9"), None)
+        await task
+    asyncio.run(go())
+    assert meeter.joined == ["my 3pm"] and meeter.left == 1
+    assert conn.tool_outputs()[0] == {"ok": True, "joining": "Design review"}
+    assert conn.tool_outputs()[1]["leaving"] == "Design review"
+
+
+def test_join_meeting_without_a_meeter_says_why() -> None:
+    conn = FakeConnection([_tool_call("join_meeting", "c1", meeting="now")])
+    s, _, _ = _session(conn, [FakeAgent(None, None)])
+
+    async def go():
+        task = asyncio.create_task(s.run())
+        await _eventually(lambda: bool(conn.tool_outputs()))
+        conn.feed(_tool_call("end_conversation", "c9"), None)
+        await task
+    asyncio.run(go())
+    assert conn.tool_outputs()[0]["ok"] is False and "off" in conn.tool_outputs()[0]["reason"]
