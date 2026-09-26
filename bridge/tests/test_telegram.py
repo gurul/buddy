@@ -633,7 +633,7 @@ def test_a_texted_task_runs_the_agent_and_texts_the_result() -> None:
     rig = Rig(FakeApi([update("open the calculator")]), FakeCreate(call("start_task", {"goal": "open the calculator"})))
 
     async def during() -> None:
-        assert rig.agents[0].goal == "open the calculator" and rig.inlet.task_running
+        assert rig.agents[0].goal == "open the calculator" + telegram.TASK_FILE_HINT and rig.inlet.task_running
         assert rig.api.sent == [(OWNER, ON_IT_LINE)]      # started, not finished — and no second model call
         assert len(rig.create.requests) == 1
         rig.agents[0].release.set()
@@ -5143,3 +5143,37 @@ def test_on_a_call_a_claude_permission_takes_only_a_plain_yes_or_no() -> None:
 
     asyncio.run(go())
     assert read[-1] == telegram.CALL_ASK_AGAIN and len(rig.create.requests) == 1   # only the warm-up
+
+
+def test_a_file_a_task_made_is_sent_with_its_result(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Live, 2026-09-25: a Photo Booth task saved the photo, tried to attach it through a browser, was blocked,
+    and sent only its path. Now the task is told to name the file, and buddy sends what it made."""
+    home = tmp_path / "home"
+    (home / "Documents").mkdir(parents=True)
+    photo = home / "Documents" / "Buddy Photo 2026-09-25.jpg"
+    old = home / "Documents" / "old notes.txt"
+    old.write_text("from last year")
+    import os as _os
+    _os.utime(old, (1, 1))
+    monkeypatch.setattr(Path, "home", classmethod(lambda cls: home))
+    sent: list[tuple[str, str]] = []
+
+    class Api(FakeApi):
+        async def send_document(self, chat_id: int, path: Path, caption: str = "") -> None:
+            sent.append((Path(path).name, caption))
+
+    class PhotoAgent(FakeAgent):
+        async def run(self, goal: str) -> str:
+            self.goal = goal
+            photo.write_bytes(b"jpeg")                                  # the task makes the file
+            return ("Took the photo. Saved it as [Buddy Photo 2026-09-25.jpg]"
+                    "(/x/Documents/Buddy%20Photo%202026-09-25.jpg), also ~/Documents/Buddy Photo 2026-09-25.jpg. "
+                    "Your old notes are at ~/Documents/old notes.txt.")
+
+    agents: list[PhotoAgent] = []
+    rig = Rig(Api([update("take a picture in Photo Booth and send it to me")]),
+              FakeCreate(call("start_task", {"goal": "take a picture in Photo Booth and send it to me"})),
+              agent_factory=lambda ev, ask: agents.append(PhotoAgent(ev, ask)) or agents[-1])
+    run_rig(rig)
+    assert sent == [("Buddy Photo 2026-09-25.jpg", "From the task: Buddy Photo 2026-09-25.jpg")]   # once, not the old file
+    assert telegram.TASK_FILE_HINT in agents[0].goal                     # the task was told how files reach the owner

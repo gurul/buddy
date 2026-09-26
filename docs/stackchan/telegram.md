@@ -466,6 +466,12 @@ Flip it to `ask` if two seconds a command is a price you will pay.
   watch can be paused, or kept only for a while). An alert arrives as a new message titled
   **Watch** and joins the chat's history, so "stop watching that" in reply
   works. See [watching](watch.md).
+- **Files a task makes are sent to you.** A texted task on the Mac (a Photo Booth picture, an export, a
+  screenshot saved to disk) is told to name the file's full path in its result, and buddy sends every
+  file the result names that the task made or changed while it ran, as `send_file` does: inside your
+  home folder, no hidden folders, under 50 MB, at most five. A file the result only mentions and that is
+  older than the task is never sent. Before this (2026-09-25) a task saved a photo, tried to attach it
+  through a browser, was blocked, and could only send its path.
 - **`/meet`** — the Meet notetaker. `/meet <link>` or `/meet 6pm` (a meeting on
   your calendar) has buddy join the Google Meet call from your Chrome, muted
   with the camera off, and text the notes when it ends. Bare `/meet` says

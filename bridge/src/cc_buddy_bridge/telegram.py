@@ -1031,6 +1031,66 @@ def resolve_owner_path(raw: str, home: Optional[Path] = None) -> tuple[Optional[
     return real, ""
 
 
+# A task that makes a file for the owner hands it over through buddy (owner, 2026-09-25: "route sending files
+# through the sending call so that it always works"; a Photo Booth task saved the photo, then tried to attach it
+# through a browser, was blocked, and sent only its path). The task is told to name the file's full path, and
+# every file the task's result names that was made or changed while it ran is sent, as send_file sends one.
+TASK_FILE_HINT = ("\n\n(If you make or save a file the owner should get, such as a photo, a screenshot or a "
+                  "document, give its full path in your final answer: buddy sends it to them. Do not try to "
+                  "attach, upload or open it in a browser yourself.)")
+MAX_TASK_FILES = 5
+TASK_FILE_SLACK_SECS = 5.0              # a file saved just before the task's clock started still counts
+_TASK_LINKED = re.compile(r"\]\(([^)\s]+)\)|`([^`\n]+)`")          # a Markdown link's target, or `code`
+_TASK_BARE_START = re.compile(r"(?:file://)?(~/|/Users/)")
+# where a bare path may end: after an extension, at a space, punctuation or the end
+_TASK_BARE_END = re.compile(r"\.[A-Za-z0-9]{1,6}(?=[\s).,;:!?'\"]|$)")
+
+
+def _task_path_candidates(text: str) -> list[list[str]]:
+    """Each path a result names, as the spellings it could be, shortest first. A bare path may hold spaces and
+    dots ("Buddy Photo 2026-09-25.jpg", "my.photo.v2.png"), so every place it could end on its line is a
+    candidate, and the caller keeps the first that is a real file."""
+    out: list[list[str]] = [[next(g for g in m.groups() if g)] for m in _TASK_LINKED.finditer(text)]
+    for m in _TASK_BARE_START.finditer(text):
+        start = m.start(1)
+        line_end = text.find("\n", start)
+        rest = text[start: line_end if line_end >= 0 else len(text)]
+        nxt = _TASK_BARE_START.search(rest, 2)
+        rest = rest[: nxt.start() if nxt else len(rest)][:400]
+        out.append([rest[: e.end()].strip() for e in _TASK_BARE_END.finditer(rest)])
+    return out
+
+
+def task_files(result: str, since: float, home: Optional[Path] = None) -> list[Path]:
+    """The files a task's result names that the task made: markdown links, `code` and bare ~/ or /Users/ paths
+    (URL-encoded or not), each inside the owner's home by resend's own rules (resolve_owner_path), a regular
+    file under Telegram's limit, and written at or after ``since`` — an old file a result merely mentions is
+    never sent. In order, without repeats, at most MAX_TASK_FILES."""
+    from urllib.parse import unquote
+
+    out: list[Path] = []
+    for spellings in _task_path_candidates(result or ""):
+        for spelling in spellings:
+            raw = unquote(spelling).strip()
+            if raw.startswith("file://"):
+                raw = raw[len("file://"):]
+            if not raw.startswith(("/", "~")):
+                continue
+            real, _ = resolve_owner_path(raw, home)
+            if real is None or not real.is_file():
+                continue
+            try:
+                st = real.stat()
+            except OSError:
+                break
+            if real not in out and st.st_size <= MAX_DOCUMENT_BYTES and st.st_mtime >= since - TASK_FILE_SLACK_SECS:
+                out.append(real)
+            break                                         # this path's file is found: its longer spellings are not
+        if len(out) >= MAX_TASK_FILES:
+            break
+    return out
+
+
 def list_files(raw: str, home: Optional[Path] = None) -> dict[str, Any]:
     real, why = resolve_owner_path(raw, home)
     if real is None:
@@ -3652,12 +3712,14 @@ class TelegramInlet:
         self._agent = self._agent_factory(lambda ev: self._on_agent_event(ev, chat_id, progress),
                                           lambda question: self._ask_user(question, chat_id))
         self._task_chat, self._task_goal = chat_id, goal
+        self._task_started = time.time()                  # a file the task writes after this is the owner's to get
         self._agent_task = self._spawn(self._run_agent(goal, chat_id, progress), "telegram-agent")
         return {"ok": True, "goal": goal, "note": "started, not finished; the result is texted when it is done"}
 
     async def _run_agent(self, goal: str, chat_id: int, progress: Optional[_Progress] = None) -> None:
+        since = getattr(self, "_task_started", time.time())
         try:
-            final = await self._agent.run(goal)
+            final = await self._agent.run(goal + TASK_FILE_HINT)
         except asyncio.CancelledError:
             raise                                        # the daemon is stopping: nothing to say or settle
         except Exception as e:  # noqa: BLE001
@@ -3679,6 +3741,10 @@ class TelegramInlet:
             # is a new message (an edit would not notify) replying to the owner's request.
             await self._say(chat_id, final, title=TASK_FAILED_TITLE if failed else TASK_DONE_TITLE, subtitle=goal,
                             reply_to=progress.request_id if progress is not None else 0)
+            for path in await asyncio.to_thread(task_files, final, since):
+                sent = await self._send_file(chat_id, str(path), "From the task: " + path.name)
+                if not sent.get("ok"):
+                    await self._say(chat_id, f"I couldn't send {path.name}: {sent.get('reason')}")
             if getattr(self._agent, 'browser_used', False) or WANTS_SCREEN.search(goal):
                 result = await self._send_screen(chat_id, "the screen when the task ended")
                 if not result.get('ok'):
