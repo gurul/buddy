@@ -236,6 +236,11 @@ bridge/.venv/bin/cc-buddy-bridge ears-check   # then say “hey buddy”
 tail -f ~/Library/Logs/cc-buddy-bridge.log
 ```
 
+No StackChan? A stock **Home Assistant Voice PE** can stand in as buddy's lights,
+button, dial and chirps, with the Mac as its ears and voice:
+`./tools/flash_voice_pe.sh`. See [Voice PE build](docs/voice-pe.md), which also covers
+backing up and restoring the stock ESPHome firmware.
+
 Try “hey buddy, what time is it?”, “hey buddy, open Safari”, or “hey buddy, go
 explore.” For the widget and diary app, follow the
 [widget build and signing instructions](docs/stackchan/widget.md) (macOS 14+).
