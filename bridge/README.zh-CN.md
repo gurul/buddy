@@ -22,7 +22,7 @@ buddy 固件官方只跟 Claude for macOS/Windows 桌面端配对。本项目让
 - **关键操作的物理 2FA** —— 全局设 `defaultMode: bypassPermissions`，把真正在意的几个工具丢进 `permissions.ask`。这些操作的 allow/deny 由桌面 buddy 上的 A/B 按键决定。
 - **智能匹配器** —— 平凡的 Bash（`ls`/`cat`/`grep`/...）自动放行；危险的（`rm`/`curl`/`git push`/...）总是询问；其余转给 stick 决策。可通过 TOML 覆盖默认规则。
 - **实时 stick HUD** —— 助手回复经 JSONL tailer 在 ~500 ms 内镜像到 stick（绕过 Stop hook 落盘竞态）。
-- **状态栏组件** —— `cc-buddy-bridge hud` 在终端 prompt 渲染电量 / 加密状态 / **当日 token 数** / **当日预估 USD 花销** / 待处理权限提示；可与 [claude-hud](https://github.com/jarrodwatts/claude-hud) 组合使用。
+- **状态栏组件** —— `cc-buddy-bridge hud` 在终端 prompt 渲染电量 / 加密状态 / **当日 token 数** / **当日预估 USD 花销**；可与 [claude-hud](https://github.com/jarrodwatts/claude-hud) 组合使用。
 - **一行命令安装 + 开机自启** —— `cc-buddy-bridge install --service` 自动选对每个 OS 的后端：macOS 用 launchd、Linux 用 systemd 用户级 unit、Windows 用任务计划程序。
 - **自定义 GIF 角色** —— `cc-buddy-bridge push-character ./pack/` 通过 BLE 上传一整个动画包，自带分块流控。
 - **新版本提示 + 自更新** —— daemon 每天后台轮询一次 GitHub releases；有新版时 hud 多一段 `↑ vX.Y.Z`。`cc-buddy-bridge check-update` 显式查询，`cc-buddy-bridge update` 一键拉新代码 + 重装 + 重启 daemon。轮询用 `CC_BUDDY_BRIDGE_NO_UPDATE_CHECK=1` 关闭。
@@ -158,7 +158,7 @@ hud 调用也带同样的 `--socket`（或者 `export CC_BUDDY_BRIDGE_SOCK=:4900
 
 ### 把 stick 状态显示在 Claude Code 状态栏
 
-`cc-buddy-bridge hud` 输出一行紧凑摘要（电量、加密状态、待处理权限）。把它接到
+`cc-buddy-bridge hud` 输出一行紧凑摘要（电量、加密状态、当日 token 数与花销）。把它接到
 `~/.claude/settings.json`：
 
 ```json
@@ -184,7 +184,6 @@ hud 调用也带同样的 `--socket`（或者 `export CC_BUDDY_BRIDGE_SOCK=:4900
 🐾 🔋 96% 🔒                          # 链路加密、电量充足
 🐾 🔋 96% 🔒 12.3K $0.42              # 当日 token（≥ 1K）与花销（≥ $0.01）
 🐾 🔋 12% 🔒 1.2M $8.50 2run          # 低电量、大用量、有会话在跑
-🐾 ⚠ approve: Bash                    # stick 上有待处理权限提示
 🐾 ∅                                  # stick 已断连（但 daemon 还活着）
 🐾 off                                # daemon 没在跑
 ```

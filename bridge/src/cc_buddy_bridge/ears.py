@@ -203,7 +203,7 @@ class WakeGate:
 
     suppressed(): the daemon's reasons not to wake — the listen key is down
     (the human is dictating), a voice session is already open (buddy would
-    hear itself), a permission card is up. cooldown: one wake per window.
+    hear itself). cooldown: one wake per window.
     """
 
     cooldown_secs: float = DEFAULT_COOLDOWN_SECS

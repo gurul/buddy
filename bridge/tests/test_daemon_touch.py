@@ -71,7 +71,7 @@ def _cfg() -> ExploreConfig:
 def _daemon() -> SimpleNamespace:
     d = SimpleNamespace(
         ble=_Ble(),
-        state=SimpleNamespace(running_count=0, waiting_count=1, pending_count=0,
+        state=SimpleNamespace(running_count=0, waiting_count=1,
                               attention_cwd=lambda: "/work/project"),
         _listen_sent=None,
         _listen_down=False,

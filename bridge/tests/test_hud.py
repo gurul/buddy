@@ -16,18 +16,6 @@ def test_format_disconnected():
     assert format_line(state, ascii_only=True) == "buddy: disc"
 
 
-def test_format_pending_permission_takes_over():
-    state = {
-        "ble_connected": True,
-        "pending_tool": "Bash",
-        "battery_pct": 80,  # ignored because pending dominates
-    }
-    out = format_line(state)
-    assert "approve" in out and "Bash" in out
-    assert "80" not in out
-    assert format_line(state, ascii_only=True) == "buddy: ASK Bash"
-
-
 def test_format_full_state():
     state = {
         "ble_connected": True,

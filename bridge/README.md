@@ -24,7 +24,7 @@ you approve or deny right from the stick's buttons.
 - **Physical 2FA for risky tools** — set `defaultMode: bypassPermissions` everywhere except the desk buddy. A/B buttons on the stick decide allow/deny for the few operations you flagged on `permissions.ask`.
 - **Smart matcher** — auto-allow trivial Bash (`ls`/`cat`/`grep`/...), always-ask risky (`rm`/`curl`/`git push`/...), defer the rest to the stick. TOML-overridable.
 - **Live stick HUD** — assistant replies mirror to the stick within ~500 ms via a JSONL tailer (no Stop-hook flush race).
-- **Statusline** — `cc-buddy-bridge hud` renders battery / encryption / **tokens today** / **estimated USD spend today** / pending prompts in your prompt bar; composes with [claude-hud](https://github.com/jarrodwatts/claude-hud).
+- **Statusline** — `cc-buddy-bridge hud` renders battery / encryption / **tokens today** / **estimated USD spend today** in your prompt bar; composes with [claude-hud](https://github.com/jarrodwatts/claude-hud).
 - **One-command install + autostart** — `cc-buddy-bridge install --service` picks the right backend per OS: launchd (macOS), systemd user unit (Linux), Task Scheduler (Windows).
 - **Custom GIF characters** — `cc-buddy-bridge push-character ./pack/` uploads a folder of frames over BLE with chunked flow control.
 - **Release notifications + self-update** — daemon pings GitHub releases once a day; hud renders `↑ vX.Y.Z` when a newer tag exists. `cc-buddy-bridge check-update` for a one-off check, `cc-buddy-bridge update` to actually pull + reinstall + restart the daemon. Opt out of polling with `CC_BUDDY_BRIDGE_NO_UPDATE_CHECK=1`.
@@ -194,7 +194,7 @@ for all hook scripts).
 ### Show the stick's state in Claude Code's status line
 
 `cc-buddy-bridge hud` prints a compact one-line summary (battery,
-encryption, pending prompts). Plug it into your `~/.claude/settings.json`:
+encryption, tokens and cost today). Plug it into your `~/.claude/settings.json`:
 
 ```json
 {
@@ -222,7 +222,6 @@ Other states the same line goes through:
 🐾 🔋 96% 🔒                          # healthy, encrypted link
 🐾 🔋 96% 🔒 12.3K $0.42              # tokens (≥ 1K) and cost (≥ $0.01) today
 🐾 🔋 12% 🔒 1.2M $8.50 2run          # low battery, busy day, sessions running
-🐾 ⚠ approve: Bash                    # permission prompt waiting on the stick
 🐾 ∅                                  # stick disconnected (but daemon is alive)
 🐾 off                                # daemon not running
 ```

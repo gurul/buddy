@@ -22,9 +22,9 @@ The owner can also send it off by hand: ``cc-buddy-bridge explore`` (IPC
 voice tool ``go_explore``) call ``Explorer.request``, which starts a pan at
 once and marks the explore *manual*: the idle timer no longer applies, so
 a running Claude session or a hook event does not end it. What does end a
-manual explore is a hard sign that the human wants the robot back — a
-permission card, the listen key, a touch on the board, a new wake word, a
-disconnect — or an explicit ``Explorer.dismiss`` (``explore stop``).
+manual explore is a hard sign that the human wants the robot back — the
+listen key, a touch on the board, a new wake word, a disconnect — or an
+explicit ``Explorer.dismiss`` (``explore stop``).
 
 Two halves, kept apart so the schedule and the budget are testable without
 a board, a Mac, or a network (same shape as listen_key.py / vision.py):
@@ -442,14 +442,14 @@ class Explorer:
     RESTING (cycle done, waiting ``cycle_wait_secs`` before the next one).
     The board is in explore mode through both EXPLORING and RESTING: while
     resting the host holds no ``look``, so the firmware looks around the room
-    on its own. Any activity — ``idle_secs`` dropping below ``after_secs``, a
-    card, the listen key, a disconnect — sends it back to OFF from either
-    state, and that is when ``mode explore false`` goes to the board.
+    on its own. Any activity — ``idle_secs`` dropping below ``after_secs``,
+    the listen key, a disconnect — sends it back to OFF from either state,
+    and that is when ``mode explore false`` goes to the board.
 
     ``request`` (the owner asked) enters EXPLORING from OFF or RESTING at
     once and sets ``manual``: while manual, ``idle_secs`` is ignored, so only
-    a card, the listen key, a disconnect or ``dismiss`` ends it. ``manual``
-    clears on every return to OFF.
+    the listen key, a disconnect or ``dismiss`` ends it. ``manual`` clears
+    on every return to OFF.
     """
 
     OFF = "off"
@@ -510,11 +510,9 @@ class Explorer:
         self.manual = False
         self._sampled = False
 
-    def _blocker(self, idle_secs: float, card_pending: bool, listening: bool, connected: bool) -> Optional[str]:
+    def _blocker(self, idle_secs: float, listening: bool, connected: bool) -> Optional[str]:
         if not connected:
             return "board disconnected"
-        if card_pending:
-            return "card pending"
         if listening:
             return "listen key"
         if idle_secs < self.config.after_secs and not self.manual:
@@ -536,7 +534,6 @@ class Explorer:
         self,
         now: float,
         reason: str,
-        card_pending: bool = False,
         listening: bool = False,
         connected: bool = True,
     ) -> list[Action]:
@@ -547,7 +544,7 @@ class Explorer:
         EXPLORING the current pan restarts from its first waypoint (no
         ``Mode``). Raises ``ExploreRefused`` on a hard blocker.
         """
-        blocker = self._blocker(float("inf"), card_pending, listening, connected)
+        blocker = self._blocker(float("inf"), listening, connected)
         if blocker is not None:
             raise ExploreRefused(blocker)
         was_on_board = self.on_board
@@ -568,12 +565,11 @@ class Explorer:
         self,
         now: float,
         idle_secs: float,
-        card_pending: bool,
         listening: bool,
         frame: Optional[Frame] = None,
         connected: bool = True,
     ) -> list[Action]:
-        blocker = self._blocker(idle_secs, card_pending, listening, connected)
+        blocker = self._blocker(idle_secs, listening, connected)
         if self.state == self.OFF:
             if blocker is None and self.config.enabled:
                 return self._start(now, idle_secs)

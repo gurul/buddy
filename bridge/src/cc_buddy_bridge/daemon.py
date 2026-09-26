@@ -963,11 +963,10 @@ class Daemon:
                  "ready" if self._agent_cfg.enabled else "disabled (CC_BUDDY_COMPUTER_CONTROL=0)")
 
     def _wake_suppressed(self) -> bool:
-        """Reasons not to wake: the human is dictating, a conversation is already
-        open, or a permission card is waiting on the board."""
+        """Reasons not to wake: the human is dictating, or a conversation is
+        already open."""
         return (self._listen_down
-                or (self._conversation is not None and not self._conversation.done())
-                or self.state.pending_count > 0)
+                or (self._conversation is not None and not self._conversation.done()))
 
     def _on_wake(self, keyword: str) -> None:
         log.info("ears: heard %r", keyword)
@@ -1626,7 +1625,6 @@ class Daemon:
         actions = self._explorer.tick(
             now,
             idle_secs=self._idle_secs(now),
-            card_pending=self.state.pending_count > 0,
             listening=bool(self._listen_sent),
             frame=frame,
             connected=self.ble.connected,
@@ -1659,15 +1657,15 @@ class Daemon:
     def _show_thought(self, thought: Thought) -> None:
         """Put a thought buddy just had on its own screen, if it earns it.
 
-        The conversation owns the screen while one is open, and a pending
-        permission card outranks anything buddy has to say to itself; in either
-        case the thought is skipped rather than queued, because by the time the
-        screen frees up buddy is looking somewhere else. Everything that gets
+        The conversation owns the screen while one is open, and the listen key
+        outranks anything buddy has to say to itself; in either case the
+        thought is skipped rather than queued, because by the time the screen
+        frees up buddy is looking somewhere else. Everything that gets
         past those is then judged on its own merits by thought_screen.py.
         """
         if not self._explorer.on_board or not self.ble.connected:
             return
-        if self.state.pending_count > 0 or self._listen_down:
+        if self._listen_down:
             return
         if self._conversation is not None and not self._conversation.done():
             return
@@ -1780,11 +1778,10 @@ class Daemon:
 
     async def _request_explore(self, reason: str) -> None:
         """The owner asked (CLI or voice): start a manual explore now.
-        Raises ExploreRefused when a card, the listen key or a disconnect
-        stands in the way."""
+        Raises ExploreRefused when the listen key or a disconnect stands in
+        the way."""
         actions = self._explorer.request(
             time.monotonic(), reason,
-            card_pending=self.state.pending_count > 0,
             listening=bool(self._listen_sent),
             connected=self.ble.connected,
         )
@@ -1937,8 +1934,8 @@ class Daemon:
                 if phase not in ("speaking", "listening", "idle"):
                     return {"ok": False, "error": "audition phase must be speaking, listening, or idle"}
                 if ((self._conversation is not None and not self._conversation.done())
-                        or self.state.pending_count or (self._expression_audition is not None and not self._expression_audition.done())):
-                    return {"ok": False, "error": "wait until the conversation, prompt, or audition ends"}
+                        or (self._expression_audition is not None and not self._expression_audition.done())):
+                    return {"ok": False, "error": "wait until the conversation or audition ends"}
                 previous = self._agent_state
                 self._on_agent_state(phase)
 
@@ -2183,7 +2180,6 @@ class Daemon:
     async def _ipc_get_state(self, req: dict[str, Any]) -> dict[str, Any]:
         # Queried by the `cc-buddy-bridge hud` subcommand (or anyone else
         # who wants a one-shot snapshot). Kept small on purpose.
-        pending = self.state.first_pending()
         return {
             "ok": True,
             "state": {
@@ -2199,14 +2195,11 @@ class Daemon:
                 "cost_cumulative": self.state.cost_cumulative,
                 "cost_today": self.state.cost_today,
                 "update_available": self._update_available,
-                "pending_tool": pending.tool_name if pending else None,
                 "last_entry": self.state.entries[0].text if self.state.entries else "",
             },
         }
 
     async def _ipc_posttooluse(self, req: dict[str, Any]) -> dict[str, Any]:
-        # Clear any lingering pending (defensive; normally cleared in _handle_pretooluse).
-        self.state.permission_resolved(req.get("tool_use_id", ""))
         # A tool ran → any terminal-side permission prompt was answered.
         self.state.input_received(req.get("session_id", ""))
         tool_name = req.get("tool_name")

@@ -80,7 +80,7 @@ def _note_at(actions, level: int, yaw: int, pitch: int) -> bool:
 
 
 def _tick(e: Explorer, now: float, idle: float = IDLE, frame=None, **kw):
-    args = dict(card_pending=False, listening=False, frame=frame, connected=True)
+    args = dict(listening=False, frame=frame, connected=True)
     args.update(kw)
     return e.tick(now, idle, **args)
 
@@ -130,7 +130,6 @@ def test_configured_bad_number_falls_back() -> None:
 def test_starts_only_when_idle_and_unblocked() -> None:
     e = _explorer()
     assert _tick(e, 1.0, idle=599.0) == []
-    assert _tick(e, 2.0, card_pending=True) == []
     assert _tick(e, 3.0, listening=True) == []
     assert _tick(e, 4.0, connected=False) == []
     assert e.state == Explorer.OFF
@@ -147,7 +146,6 @@ def test_disabled_config_never_starts() -> None:
 
 @pytest.mark.parametrize("kw,reason", [
     (dict(idle=0.0), "activity"),
-    (dict(card_pending=True), "card pending"),
     (dict(listening=True), "listen key"),
     (dict(connected=False), "board disconnected"),
 ])
@@ -196,7 +194,6 @@ def test_cycle_end_rests_with_the_board_still_exploring() -> None:
 
 @pytest.mark.parametrize("kw,reason", [
     ({"idle": 0.0}, "activity"),
-    ({"card_pending": True}, "card pending"),
     ({"listening": True}, "listen key"),
     ({"connected": False}, "board disconnected"),
 ])
@@ -354,7 +351,6 @@ def test_manual_explore_survives_rest_and_pans_again() -> None:
 
 
 @pytest.mark.parametrize("kw,reason", [
-    ({"card_pending": True}, "card pending"),
     ({"listening": True}, "listen key"),
     ({"connected": False}, "board disconnected"),
 ])
@@ -368,7 +364,6 @@ def test_hard_blockers_end_a_manual_explore_and_clear_manual(kw, reason) -> None
 
 
 @pytest.mark.parametrize("kw,reason", [
-    ({"card_pending": True}, "card pending"),
     ({"listening": True}, "listen key"),
     ({"connected": False}, "board disconnected"),
 ])
@@ -565,13 +560,13 @@ class _StubBle:
         return True
 
 
-def _daemon(connected: bool = True, running: int = 0, waiting: int = 0, pending: int = 0,
+def _daemon(connected: bool = True, running: int = 0, waiting: int = 0,
             notes: NoteTaker | None = None) -> SimpleNamespace:
     from cc_buddy_bridge.daemon import Daemon
 
     d = SimpleNamespace(
         ble=_StubBle(connected),
-        state=SimpleNamespace(running_count=running, waiting_count=waiting, pending_count=pending),
+        state=SimpleNamespace(running_count=running, waiting_count=waiting),
         _listen_sent=None,
         _explore_cfg=_cfg(),
         _explorer=Explorer(_cfg(), now=0.0, notes_enabled=notes is not None),
