@@ -20,19 +20,26 @@ FQBN="esp32:esp32:m5stack_cores3:PartitionScheme=huge_app,PSRAM=enabled"
 SKETCH=firmware/claude_pet_stackchan
 PLIST="$HOME/Library/LaunchAgents/com.github.cc-buddy-bridge.daemon.plist"
 PORT="${1:-}"
+# The Voice PE controller's USB serial (docs/voice-pe.md), from the environment or the daemon's env file.
+# pyserial: the bridge's venv when there is one, else whatever python3 has.
+PY=bridge/.venv/bin/python3
+[ -x "$PY" ] || PY=python3
+CTL_SERIAL="${CC_BUDDY_CONTROLLER_SERIAL:-$(sed -n 's/^CC_BUDDY_CONTROLLER_SERIAL=//p' "$HOME/.config/cc-buddy-bridge/env" 2>/dev/null | tail -1)}"
 if [ -z "$PORT" ]; then
-  # A glob loop, not `ls … | head`: with `set -e` and pipefail, ls exiting 2
-  # on an unmatched glob takes the whole script down at this line, before the
-  # message below can say why. A board that had not finished re-enumerating
-  # after a reset read as a silent exit 1 (bench 2026-09-08).
-  for dev in /dev/cu.usbmodem*; do
-    [ -e "$dev" ] || continue
-    PORT="$dev"
-    break
-  done
+  # An Espressif node (VID 0x303a) that is not the Voice PE controller: both
+  # are ESP32-S3s, and flashing this firmware onto the controller is wrong.
+  PORT=$(CTL="$CTL_SERIAL" "$PY" -c 'import os, sys
+from serial.tools import list_ports
+skip = os.environ.get("CTL", "").lower()
+hits = sorted(p.device for p in list_ports.comports() if p.vid == 0x303A and "/cu.usbmodem" in p.device
+              and (not skip or (p.serial_number or "").lower() != skip))
+if len(hits) > 1:
+    sys.stderr.write("two Espressif boards and no CC_BUDDY_CONTROLLER_SERIAL: pass the port\n")
+    hits = []
+print(hits[0] if hits else "")' || true)
 fi
 [ -n "$PORT" ] || {
-  echo "no /dev/cu.usbmodem* device found — plugged in, and finished enumerating?" >&2
+  echo "no StackChan /dev/cu.usbmodem* found (Espressif, not the Voice PE) — plugged in, and finished enumerating?" >&2
   exit 1
 }
 

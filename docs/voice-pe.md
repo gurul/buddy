@@ -12,10 +12,19 @@ motors. It acts as buddy's lights, button, dial and chirps. It uses the same
 newline-delimited JSON link and the same `cc-buddy-bridge` daemon as the
 [StackChan](stackchan/build.md).
 
-The **microphone and buddy's voice stay on the Mac**. The daemon's wake word
-listens on the Mac microphone while the board is connected. Replies play on
-the Mac speaker (`CC_BUDDY_VOICE_OUTPUT=audio`), because captions need a
-screen.
+The **microphone and buddy's voice stay on the Mac**. You talk by holding the
+button ([hold to talk](#hold-to-talk)), and buddy answers on the Mac speaker.
+
+The Voice PE runs in one of two setups:
+
+- **Next to the StackChan, as the controller** (the usual setup). The
+  StackChan stays the robot: face, head, camera. The Voice PE is the control.
+  Set its USB serial in `~/.config/cc-buddy-bridge/env` (see
+  [Two boards](#two-boards-the-stackchan-and-the-controller)).
+- **Alone, as the robot.** Leave `CC_BUDDY_CONTROLLER_SERIAL` unset, and the
+  daemon's single serial link picks the Voice PE. Set
+  `CC_BUDDY_VOICE_OUTPUT=audio` so that wake-word replies play on the Mac,
+  because captions need a screen.
 
 ## What it does
 
@@ -34,15 +43,74 @@ screen.
 
 | Control | While a session waits on you | Otherwise |
 |---|---|---|
-| Center button, tap | Presses Enter on the Mac (approve, pick the selected choice) | A curious chirp, nothing sent |
-| Center button, hold 0.7 s | Brings the waiting session's terminal to the front | Nothing |
+| Center button, hold | Talk to buddy after 0.4 s. Let go to send | Talk to buddy at once. Let go to send |
+| Center button, quick tap | Presses Enter on the Mac (approve, pick the selected choice) | Too short to be words, so nothing is sent |
 | Dial | Down / up arrow through the choices (clockwise = down) | Chirp volume, 0–10, shown on the ring |
+
+## Hold to talk
+
+Hold to talk works like **Call buddy** in the Telegram Mini App
+([calling buddy](stackchan/miniapp.md#calling-buddy)), but uses the board's button:
+
+1. Hold the button. The ring turns blue, and the daemon records the **Mac
+   microphone** (`CC_BUDDY_MIC`, the wake word's device).
+2. Let go. The daemon transcribes the press and sends it to **the Telegram
+   chat's brain**, as if you had typed it. The chat's tools all work, and the
+   Telegram chat keeps a written copy. The ring spins violet while buddy thinks.
+3. buddy reads the reply aloud on the **Mac speaker**, and the ring pulses blue.
+   Press again while it speaks to stop it and talk.
+
+The daemon side is `bridge/src/cc_buddy_bridge/desk_call.py`. It runs
+`phone_call.Call` unchanged, with a stand-in for the phone's WebSocket that
+routes the button, the Mac microphone and the Mac speaker. A call starts
+on the first press. It ends 30 s after buddy finishes, and the next press
+starts a new call. While the Mini App is on a call, the button waits. A
+wake-word conversation already has the microphone, so a press during one is
+ignored, and the wake word is off while the button is held. The Telegram
+chat and an OpenAI key must be set up, as they must for Mini App calls.
+
+On the wire, the board sends `{"cmd":"ptt","on":true}` on press and
+`{"cmd":"ptt","on":false}` on release.
 
 The button and dial send keys only while the daemon reports a waiting
 session. The daemon also ignores them during a voice conversation.
 
 Chirps follow buddy's sound setting (`{"cmd":"sound"}`). When sound is off,
 the board is silent.
+
+## Two boards: the StackChan and the controller
+
+Both boards are ESP32-S3s on the same `/dev/cu.usbmodem*` glob, so the
+controller is named by its USB serial number. An ESP32-S3's serial is its
+MAC. List the serials with:
+
+```bash
+bridge/.venv/bin/python -m serial.tools.list_ports -v    # "USB JTAG/serial debug unit", SER=...
+```
+
+Add the settings to `~/.config/cc-buddy-bridge/env`, then restart the daemon:
+
+```
+CC_BUDDY_CONTROLLER_SERIAL=<the Voice PE's serial>
+CC_BUDDY_VOICE=0            # no "hey buddy": you talk by holding the Voice PE's button
+```
+
+The daemon keeps its one robot link (`CC_BUDDY_SERIAL_PORT`) for the
+StackChan, and that glob skips the controller's serial. A second link
+(`bridge/src/cc_buddy_bridge/controller.py`) opens the controller:
+
+- **To the controller**, it copies the heartbeat, the time, the
+  conversation state and the sound setting. So the ring shows the same
+  state as the StackChan, and it catches up after a reconnect or reboot.
+- **From the controller**, only `ptt`, `key` and `focus` reach the daemon.
+  Its acks never reach the robot's status watchdog.
+
+The ring and the StackChan's face both follow the call: listening while you
+hold the button, then thinking, then speaking.
+
+The flash scripts use the same setting. `tools/flash_voice_pe.sh` flashes only
+that serial. `tools/flash_stackchan.sh` skips it. If two Espressif boards are
+present and the setting is missing, both scripts refuse to guess.
 
 ## Hardware
 
@@ -147,10 +215,8 @@ ignores the camera, head, face, caption and character-transfer commands.
 
 - The Voice PE microphones are not used. Streaming them to the daemon would
   need a new audio path over serial.
-- Two ESP32-S3 boards on USB at once (StackChan and Voice PE) would compete
-  for the daemon's single serial port.
-- `CC_BUDDY_VOICE_OUTPUT=audio` applies to every board. Put it back to
-  `captions` when the StackChan is the connected robot.
+- Hold to talk speaks buddy's reply on the Mac speaker, not on the
+  StackChan: the daemon cannot stream speech to a board.
 - The dial's four steps per detent follow the usual encoder layout. They were
   not measured on this unit.
 - Audio starts about 6 s after boot: 3 s for the XMOS, then 2.5 s for the DAC.

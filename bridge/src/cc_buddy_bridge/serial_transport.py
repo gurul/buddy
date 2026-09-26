@@ -117,12 +117,28 @@ def _read_chunk(ser: serial.Serial) -> bytes:
     return first + ser.read(waiting) if waiting else first
 
 
-def _resolve_port(pattern: str) -> Optional[str]:
+USB_SERIAL_PREFIX = "usbsn:"
+
+
+def _resolve_port(pattern: str, skip_serials: frozenset[str] = frozenset()) -> Optional[str]:
     """Expand a glob like /dev/cu.usbmodem* to a concrete port (macOS
     re-enumerates the number when the board changes USB sockets). With
     multiple matches, prefer the node whose USB VID is the ESP32-S3's, and
     say so — silently picking sorted()[0] grabbed whatever enumerated
-    first."""
+    first.
+
+    ``usbsn:<serial>`` names a board by its USB serial number (an ESP32-S3's
+    is its MAC) instead: with two ESP32-S3 boards on the bus — the StackChan
+    and the Voice PE controller (controller.py) — the VID alone cannot tell
+    them apart. A glob skips the nodes whose serial is in ``skip_serials``."""
+    if pattern.startswith(USB_SERIAL_PREFIX):
+        want = pattern[len(USB_SERIAL_PREFIX):].strip().lower()
+        try:
+            from serial.tools import list_ports
+            return next((p.device for p in list_ports.comports()
+                         if (p.serial_number or "").lower() == want and "/cu." in p.device), None)
+        except Exception:  # noqa: BLE001 - IOKit can throw mid-enumeration; try again on the next open
+            return None
     if "*" not in pattern:
         return pattern
     hits = sorted(glob.glob(pattern))
@@ -130,7 +146,13 @@ def _resolve_port(pattern: str) -> Optional[str]:
         return None
     try:
         from serial.tools import list_ports
-        vids = {p.device: p.vid for p in list_ports.comports() if p.device in hits}
+        ports = [p for p in list_ports.comports() if p.device in hits]
+        skip = {s.lower() for s in skip_serials}
+        hits = [h for h in hits
+                if not any(p.device == h and (p.serial_number or "").lower() in skip for p in ports)]
+        if not hits:
+            return None
+        vids = {p.device: p.vid for p in ports if p.device in hits}
     except Exception:  # noqa: BLE001 - IOKit can throw mid-enumeration; fall back to the glob alone
         vids = {}
     s3 = sorted(d for d, vid in vids.items() if vid == _ESP32S3_VID)
@@ -156,8 +178,10 @@ class BuddySerial:
         on_message: IncomingHandler,
         port: str,
         baud: int = 115200,
+        skip_serials: frozenset[str] = frozenset(),
     ) -> None:
         self.on_message = on_message
+        self.skip_serials = skip_serials         # USB serials a glob must not open (_resolve_port)
         # Optional async hook fired when the board's boot banner scrolls past
         # on an already-open link (see _IS_BOOT). Debounced: a boot emits
         # several matching lines back to back.
@@ -243,7 +267,7 @@ class BuddySerial:
         while not self._stop.is_set():
             # Off the loop: with the board off the bus, IOKit's enumeration (list_ports.comports) takes 2-3 s,
             # and on the loop it froze every door, Telegram included (1,543+ stall reports, 2026-09-23/24).
-            port = await asyncio.to_thread(_resolve_port, self.port_pattern)
+            port = await asyncio.to_thread(_resolve_port, self.port_pattern, self.skip_serials)
             if port is None:
                 # Device off the bus: say so, loudly then backing off. The
                 # 52-minute silent log hole of 2026-08-05 04:43 was this path

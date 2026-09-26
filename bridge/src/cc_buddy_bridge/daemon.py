@@ -118,12 +118,30 @@ class Daemon:
             # USB CDC transport (Freenove FNK0104B port): same wire protocol,
             # different pipe. Kept on the .ble attribute so the rest of the
             # daemon doesn't care which transport is live.
+            from .controller import Controller, controller_serial
             from .serial_transport import BuddySerial
-            self.ble = BuddySerial(on_message=self._handle_ble, port=serial_port)
+            # A controller board (controller.py, the Voice PE) is named by its
+            # USB serial; the robot's glob must never open it.
+            ctl_serial = controller_serial()
+            self.ble = BuddySerial(on_message=self._handle_ble, port=serial_port,
+                                   skip_serials=frozenset({ctl_serial}) if ctl_serial else frozenset())
             # A board reboot under an unbroken CH340 link never fires the
             # on-connect resync — replay it when the boot banner scrolls past,
             # or the reborn board keeps "--:--" and "No Claude" indefinitely.
             self.ble.on_boot = self._resync_board
+            self._controller: Optional[Controller] = None
+            if ctl_serial:
+                self._controller = Controller(ctl_serial, self._handle_ble)
+                robot_send = self.ble.send
+
+                async def send_both(obj: dict[str, Any], codec: Optional[str] = None) -> bool:
+                    # Every send to the robot, tee'd: the controller keeps the
+                    # heartbeat, time, conversation state and sound (controller.mirrored).
+                    ok = await robot_send(obj, codec)
+                    await self._controller.mirror(obj)
+                    return ok
+
+                self.ble.send = send_both  # type: ignore[method-assign]
         else:
             self.ble = BuddyBLE(
                 on_message=self._handle_ble,
@@ -356,6 +374,8 @@ class Daemon:
             asyncio.create_task(self._expressions.run(), name="laya-expressions"),
             asyncio.create_task(self.ipc.serve_forever(), name="ipc"),
             asyncio.create_task(self.ble.run(), name="ble"),
+            *([asyncio.create_task(self._controller.run(), name="controller")]
+              if getattr(self, "_controller", None) is not None else []),
             asyncio.create_task(self.jsonl.run(), name="jsonl"),
             asyncio.create_task(self._heartbeat_loop(), name="heartbeat"),
             asyncio.create_task(self._on_ble_connected(), name="on-connect"),
@@ -963,10 +983,28 @@ class Daemon:
                  "ready" if self._agent_cfg.enabled else "disabled (CC_BUDDY_COMPUTER_CONTROL=0)")
 
     def _wake_suppressed(self) -> bool:
-        """Reasons not to wake: the human is dictating, or a conversation is
-        already open."""
+        """Reasons not to wake: the human is dictating, a conversation is
+        already open, or the board's button is held to talk."""
+        desk = getattr(self, "_desk_calls", None)
         return (self._listen_down
-                or (self._conversation is not None and not self._conversation.done()))
+                or (self._conversation is not None and not self._conversation.done())
+                or (desk is not None and desk.held))
+
+    def _desk_calls_get(self):
+        """The board's hold-to-talk calls (desk_call.py), made on the first press: they borrow the Telegram
+        chat as the brain and the phone call's OpenAI voice, and wait while the phone is on a call."""
+        if getattr(self, "_desk_calls", None) is None:
+            from .desk_call import DeskCalls
+            from .phone_call import make_voice
+
+            def phone_busy() -> bool:
+                server = getattr(getattr(self, "_miniapp", None), "server", None)
+                calls = getattr(server, "calls", None)
+                return getattr(calls, "active", None) is not None
+
+            self._desk_calls = DeskCalls(getattr(self, "_telegram", None), make_voice(), self.ble.send,
+                                         mic_device=self._ears_cfg.device, busy=phone_busy)
+        return self._desk_calls
 
     def _on_wake(self, keyword: str) -> None:
         log.info("ears: heard %r", keyword)
@@ -2531,6 +2569,15 @@ class Daemon:
             self._note_activity()
             log.info("explore: called back by a double tap")
             await self._dismiss_explore("double tap")
+            return
+        if cmd == "ptt":
+            # The board's button held to talk (Voice PE, desk_call.py): the Mini App's push-to-talk call, on
+            # the desk. A wake-word conversation already has the mic, so a press during one is ignored.
+            self._note_activity()
+            if self._conversation is not None and not self._conversation.done():
+                log.info("board ptt during a conversation — ignored")
+                return
+            await self._desk_calls_get().press(bool(obj.get("on")))
             return
         if cmd in ("focus", "key"):
             # A touch on the board: the human is here, stop exploring — at

@@ -19,11 +19,24 @@ FQBN="esp32:esp32:esp32s3:FlashSize=16M,PSRAM=opi,PartitionScheme=app3M_fat9M_16
 SKETCH=firmware/buddy_voice_pe
 PLIST="$HOME/Library/LaunchAgents/com.github.cc-buddy-bridge.daemon.plist"
 PORT="${1:-}"
+# The Voice PE controller's USB serial (docs/voice-pe.md), from the environment or the daemon's env file.
+# pyserial: the bridge's venv when there is one, else whatever python3 has.
+PY=bridge/.venv/bin/python3
+[ -x "$PY" ] || PY=python3
+CTL_SERIAL="${CC_BUDDY_CONTROLLER_SERIAL:-$(sed -n 's/^CC_BUDDY_CONTROLLER_SERIAL=//p' "$HOME/.config/cc-buddy-bridge/env" 2>/dev/null | tail -1)}"
 if [ -z "$PORT" ]; then
-  # Several usbmodem nodes are common (hubs, other boards). Pick the one with
-  # Espressif's USB vendor id 0x303a, as the daemon's port picker does.
-  PORT=$(python3 -c 'from serial.tools import list_ports
-print(next((p.device for p in list_ports.comports() if p.vid == 0x303A and "usbmodem" in p.device), ""))' 2>/dev/null || true)
+  # With CC_BUDDY_CONTROLLER_SERIAL set, only that board; else the one
+  # Espressif node (VID 0x303a) — refuse to guess between two (the StackChan
+  # is an ESP32-S3 too).
+  PORT=$(CTL="$CTL_SERIAL" "$PY" -c 'import os, sys
+from serial.tools import list_ports
+want = os.environ.get("CTL", "").lower()
+hits = [p.device for p in list_ports.comports() if p.vid == 0x303A and "/cu.usbmodem" in p.device
+        and (not want or (p.serial_number or "").lower() == want)]
+if len(hits) > 1:
+    sys.stderr.write("two Espressif boards and no CC_BUDDY_CONTROLLER_SERIAL: pass the port\n")
+    hits = []
+print(hits[0] if hits else "")' || true)
 fi
 [ -n "$PORT" ] || {
   echo "no Espressif /dev/cu.usbmodem* found — plugged in, and finished enumerating? (pass the port as the first argument)" >&2

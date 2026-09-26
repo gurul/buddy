@@ -11,8 +11,8 @@
 //   - an answer to {"cmd":"status"}, polled every 60 s
 //
 // Controls:
+//   button hold  talk to buddy, like the Telegram Mini App's call button; let go to send
 //   button tap   while a session waits on you: Enter on the Mac (approve / pick)
-//   button hold  while a session waits on you: raise that session's terminal
 //   dial         while a session waits on you: down / up through the choices
 //   dial         otherwise: chirp volume
 //   mute switch  silences the chirps (the Mac mic is not affected)
@@ -182,9 +182,18 @@ void pollSerial() {
 }
 
 // ---- button ----
-constexpr uint32_t HOLD_MS = 700;
-bool btnDown = false, btnHeld = false;
+// Hold to talk, like the Telegram Mini App's call button: {"cmd":"ptt","on":true} on press,
+// {"cmd":"ptt","on":false} on release; the daemon records the Mac mic in between (desk_call.py).
+// While a session waits on you, a quick tap is Enter instead, and talking starts after TALK_AFTER_MS.
+constexpr uint32_t TALK_AFTER_MS = 400;
+bool btnDown = false, talking = false;
 uint32_t btnDownMs = 0, btnChangeMs = 0;
+
+void startTalking() {
+  talking = true;
+  send("{\"cmd\":\"ptt\",\"on\":true}");
+  Serial.println("[btn] talk");
+}
 
 void pollButton() {
   bool down = digitalRead(SB_PIN_BUTTON) == LOW;
@@ -194,23 +203,23 @@ void pollButton() {
     btnDown = down;
     if (down) {
       btnDownMs = now;
-      btnHeld = false;
-    } else if (!btnHeld) {  // released before the hold fired: a tap
-      Serial.printf("[btn] tap waiting=%u live=%d\n", host.waiting, connected());
-      if (host.waiting > 0 && connected()) {
-        send("{\"cmd\":\"key\",\"name\":\"enter\"}");
-        chirpPlay(CHIRP_OK);
-      } else {
-        chirpPlay(CHIRP_CURIOUS);
+      if (!connected()) {
+        chirpPlay(CHIRP_NO);
+      } else if (host.waiting == 0) {
+        startTalking();
       }
+    } else if (talking) {
+      talking = false;
+      send("{\"cmd\":\"ptt\",\"on\":false}");
+      Serial.println("[btn] done");
+    } else if (host.waiting > 0 && connected()) {  // a quick tap on a waiting prompt
+      send("{\"cmd\":\"key\",\"name\":\"enter\"}");
+      chirpPlay(CHIRP_OK);
+      Serial.println("[btn] enter");
     }
   }
-  if (btnDown && !btnHeld && now - btnDownMs >= HOLD_MS) {
-    btnHeld = true;
-    if (host.waiting > 0 && connected()) {
-      send("{\"cmd\":\"focus\"}");
-      chirpPlay(CHIRP_OK);
-    }
+  if (btnDown && !talking && connected() && host.waiting > 0 && now - btnDownMs >= TALK_AFTER_MS) {
+    startTalking();
   }
 }
 
@@ -261,6 +270,7 @@ void updateRing() {
   chirpSetEnabled(host.sound && !muted);
 
   if (!connected()) return ringSet(LOOK_OFFLINE);
+  if (talking) return ringSet(LOOK_LISTENING);
   if (agentActive()) {
     const char *a = host.agent;
     if (!strcmp(a, "wake") || !strcmp(a, "listening")) return ringSet(LOOK_LISTENING);

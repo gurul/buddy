@@ -88,7 +88,7 @@ async def _drive(bs: BuddySerial, seconds: float) -> None:
 
 def _patch_port(monkeypatch: pytest.MonkeyPatch, opener) -> None:
     monkeypatch.setattr(serial_transport.serial, "Serial", opener)
-    monkeypatch.setattr(serial_transport, "_resolve_port", lambda p: "/dev/fake")
+    monkeypatch.setattr(serial_transport, "_resolve_port", lambda p, skip=frozenset(): "/dev/fake")
 
 
 def test_silence_triggers_reconnect(fast_watchdog: None, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -227,8 +227,8 @@ def test_repeated_silence_arms_rts_pulse(fast_watchdog: None, monkeypatch: pytes
 # ---- port choice: the board, or nothing ------------------------------------------------------
 
 class _Port:
-    def __init__(self, device: str, vid: Any) -> None:
-        self.device, self.vid = device, vid
+    def __init__(self, device: str, vid: Any, serial_number: Any = None) -> None:
+        self.device, self.vid, self.serial_number = device, vid, serial_number
 
 
 def _ports(monkeypatch: pytest.MonkeyPatch, ports: list[_Port]) -> None:
@@ -245,6 +245,27 @@ DOCK = _Port("/dev/cu.usbmodemSN1", 0x291A)
 def test_the_board_is_chosen_among_other_usb_devices(monkeypatch: pytest.MonkeyPatch) -> None:
     _ports(monkeypatch, [CAMERA, BOARD, DOCK])
     assert serial_transport._resolve_port("/dev/cu.usbmodem*") == BOARD.device
+
+
+ROBOT = _Port("/dev/cu.usbmodem31201", 0x303A, "0A:00:00:00:00:01")
+CONTROLLER = _Port("/dev/cu.usbmodem101", 0x303A, "0A:00:00:00:00:02")
+
+
+def test_two_esp32_boards_are_told_apart_by_usb_serial(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The StackChan and the Voice PE controller are both ESP32-S3s (2026-09-26): the robot's glob skips the
+    controller's serial, and the controller is named by its serial, in either case."""
+    _ports(monkeypatch, [CAMERA, CONTROLLER, ROBOT, DOCK])
+    skip = frozenset({"0a:00:00:00:00:02"})
+    assert serial_transport._resolve_port("/dev/cu.usbmodem*") == CONTROLLER.device   # sorted first
+    assert serial_transport._resolve_port("/dev/cu.usbmodem*", skip) == ROBOT.device
+    assert serial_transport._resolve_port("usbsn:0A:00:00:00:00:02") == CONTROLLER.device
+    assert serial_transport._resolve_port("usbsn:0a:00:00:00:00:01") == ROBOT.device
+
+
+def test_with_only_the_controller_on_the_bus_the_robot_waits(monkeypatch: pytest.MonkeyPatch) -> None:
+    _ports(monkeypatch, [CAMERA, CONTROLLER])
+    assert serial_transport._resolve_port("/dev/cu.usbmodem*", frozenset({"0A:00:00:00:00:02"})) is None
+    assert serial_transport._resolve_port("usbsn:00:00:00:00:00:00") is None
 
 
 def test_with_the_board_off_the_bus_a_camera_is_never_opened(monkeypatch: pytest.MonkeyPatch) -> None:
