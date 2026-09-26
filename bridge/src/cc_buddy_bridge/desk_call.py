@@ -277,9 +277,12 @@ class DeskCalls:
             loop.call_soon_threadsafe(link.audio, pcm)
 
         link.talk()
-        await link.set_ring("listening")
+        # The mic opens before the ring's await, in the same step as the press. Each line from the board is
+        # its own task, so the release can run during that send: opened after it, the mic stayed open with the
+        # button up until the call ended (verification/Buddy/DeskCall.lean).
         self.mic = self.mic_factory(self.mic_device, block)
         self.mic.open()
+        await link.set_ring("listening")
 
     def _up(self) -> None:
         if self.mic is not None:

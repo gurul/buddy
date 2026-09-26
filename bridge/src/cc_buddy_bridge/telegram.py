@@ -3549,9 +3549,16 @@ class TelegramInlet:
         await self._say(chat_id, text, title=MEET_TITLE)
 
     # ---- "Call buddy" (phone_call.py): the chat, spoken ----
-    def listen(self, say: Optional[Callable[[str], None]]) -> bool:
+    def listen(self, say: Optional[Callable[[str], None]], owner: Optional[Callable[[str], None]] = None) -> bool:
         """A phone call starts (``say``) or ends (None). While it lasts, what buddy says in the owner's chat is also
-        read out on the call. False when there is no owner chat to be in."""
+        read out on the call. False when there is no owner chat to be in.
+
+        An ending call passes its own reader as ``owner``, and the listener is cleared only if it is still that
+        one. The phone and the desk share this one listener, and a phone call can start while a desk call is on:
+        the desk call's end used to clear the phone call's reader, and the rest of that call was texted, not
+        spoken (verification/Buddy/DeskCall.lean). ``==``, not ``is``: each ``call.say`` is a new bound method."""
+        if say is None and owner is not None and self._call_say != owner:
+            return self._chat_id is not None
         self._call_say = say
         if say is not None and self._chat_id is not None:
             self._spawn(self._warm(), "telegram-call-warm")     # the first answer should not pay a cold cache

@@ -386,10 +386,12 @@ def make_voice(environ: Any = None) -> Optional[Voice]:
 
 class Brain(Protocol):
     """The chat, lent by the daemon (telegram.TelegramInlet): ``hear`` hands it the owner's words as a message;
-    ``listen(say)`` has everything it then says to the owner also passed to ``say`` until ``listen(None)``."""
+    ``listen(say)`` has everything it then says to the owner also passed to ``say`` until ``listen(None)``.
+    ``listen(None, owner=say)`` clears it only while ``say`` is still the listener."""
 
     def hear(self, text: str) -> None: ...
-    def listen(self, say: Optional[Callable[[str], None]]) -> bool: ...
+    def listen(self, say: Optional[Callable[[str], None]],
+               owner: Optional[Callable[[str], None]] = None) -> bool: ...
 
 
 CheckOwner = Callable[[str], Optional[int]]
@@ -592,7 +594,9 @@ class Call:
                 elif kind == "end":
                     return "you hung up"
         finally:
-            self.brain.listen(None)
+            # Only this call's own reader: another call may have taken the chat since (a phone call started
+            # during a desk call), and its reader must outlive this call (verification/Buddy/DeskCall.lean).
+            self.brain.listen(None, owner=self.say)
             pending = [t for t in (*self.tasks, self.reading, self.opening) if t is not None and not t.done()]
             for task in pending:
                 task.cancel()

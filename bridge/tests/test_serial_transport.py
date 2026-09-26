@@ -330,3 +330,17 @@ def test_port_enumeration_never_blocks_the_event_loop(fast_watchdog: None, monke
     assert threads, "the enumerator was never called"
     assert all(t is not loop_thread for t in threads), "comports() ran on the event loop's thread"
     assert worst < 0.15, f"a loop task was held back {worst:.2f} s by the port enumeration"
+
+
+def test_when_the_usb_list_fails_a_skip_is_never_guessed_past(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Buddy/PortPick.lean's gap: comports() raising skipped the skip filter and fell back to the glob's first
+    node, which can be the controller. With a skip set, the robot waits for the next open instead."""
+    from serial.tools import list_ports
+
+    def broken() -> list[Any]:
+        raise OSError("IOKit mid-enumeration")
+
+    monkeypatch.setattr(serial_transport.glob, "glob", lambda pattern: [CONTROLLER.device, ROBOT.device])
+    monkeypatch.setattr(list_ports, "comports", broken)
+    assert serial_transport._resolve_port("/dev/cu.usbmodem*", frozenset({"0A:00:00:00:00:02"})) is None
+    assert serial_transport._resolve_port("/dev/cu.usbmodem*") == CONTROLLER.device   # no skip: as before

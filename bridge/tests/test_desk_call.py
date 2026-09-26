@@ -16,8 +16,9 @@ class Brain:
     def __init__(self, reply: str = "It is **three** o'clock.") -> None:
         self.reply, self.heard, self.say = reply, [], None
 
-    def listen(self, say) -> bool:
-        self.say = say
+    def listen(self, say, owner=None) -> bool:
+        if say is not None or owner is None or self.say == owner:    # as TelegramInlet.listen
+            self.say = say
         return True
 
     def hear(self, text: str) -> None:

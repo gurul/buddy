@@ -99,6 +99,8 @@ async def test_state_is_sent_while_connected_and_replayed_on_connect() -> None:
     ctl.link.sent.clear()
     await ctl.link.on_boot()
     assert ctl.link.sent == [controller.SILENT, HEARTBEAT, {"cmd": "agent", "state": "speaking"}]
+    task.cancel()
+    await asyncio.gather(task, return_exceptions=True)
 
 
 @run
@@ -111,7 +113,5 @@ async def test_the_beeps_are_the_robots_alone() -> None:
     await ctl.mirror({"cmd": "sound", "on": True})
     assert {"cmd": "sound", "on": True} not in ctl.link.sent
     assert ctl.link.sent[0] == {"cmd": "sound", "on": False}
-    task.cancel()
-    await asyncio.gather(task, return_exceptions=True)
     task.cancel()
     await asyncio.gather(task, return_exceptions=True)

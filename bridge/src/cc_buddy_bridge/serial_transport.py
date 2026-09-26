@@ -154,6 +154,10 @@ def _resolve_port(pattern: str, skip_serials: frozenset[str] = frozenset()) -> O
             return None
         vids = {p.device: p.vid for p in ports if p.device in hits}
     except Exception:  # noqa: BLE001 - IOKit can throw mid-enumeration; fall back to the glob alone
+        if skip_serials:
+            # Without the serials there is no telling the robot from the controller (Buddy/PortPick.lean):
+            # wait for the next open rather than guess, which could open the controller as the robot.
+            return None
         vids = {}
     s3 = sorted(d for d, vid in vids.items() if vid == _ESP32S3_VID)
     if s3:

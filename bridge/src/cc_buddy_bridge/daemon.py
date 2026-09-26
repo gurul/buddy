@@ -174,6 +174,7 @@ class Daemon:
         # identity.py enrols the owner only while it is down. Written on the
         # loop thread, read on the vision executor thread (a bool: no lock).
         self._listen_down = False
+        self._ptt_held = False          # the board's hold-to-talk button, by its last ptt edge
         # Owner identity: the prints live in memory; the file is loaded and
         # the Vision describer resolved in run(), like the detector.
         self._identity: Optional[FaceIdentity] = None
@@ -984,11 +985,13 @@ class Daemon:
 
     def _wake_suppressed(self) -> bool:
         """Reasons not to wake: the human is dictating, a conversation is
-        already open, or the board's button is held to talk."""
-        desk = getattr(self, "_desk_calls", None)
+        already open, or the board's button is held to talk. The button is
+        the board's last ptt edge, not the desk call's ``held``: a call that
+        ends mid-hold drops ``held``, and a press during a conversation never
+        reaches the desk (verification/Buddy/DeskCall.lean)."""
         return (self._listen_down
                 or (self._conversation is not None and not self._conversation.done())
-                or (desk is not None and desk.held))
+                or getattr(self, "_ptt_held", False))
 
     def _desk_calls_get(self):
         """The board's hold-to-talk calls (desk_call.py), made on the first press: they borrow the Telegram
@@ -2595,12 +2598,16 @@ class Daemon:
             return
         if cmd == "ptt":
             # The board's button held to talk (Voice PE, desk_call.py): the Mini App's push-to-talk call, on
-            # the desk. A wake-word conversation already has the mic, so a press during one is ignored.
+            # the desk. A wake-word conversation already has the mic, so a press during one is ignored. A
+            # release always goes through: dropped, it left the mic of a press made before the conversation
+            # open (verification/Buddy/DeskCall.lean).
             self._note_activity()
-            if self._conversation is not None and not self._conversation.done():
+            on = bool(obj.get("on"))
+            self._ptt_held = on
+            if on and self._conversation is not None and not self._conversation.done():
                 log.info("board ptt during a conversation — ignored")
                 return
-            await self._desk_calls_get().press(bool(obj.get("on")))
+            await self._desk_calls_get().press(on)
             return
         if cmd in ("focus", "key"):
             # A touch on the board: the human is here, stop exploring — at
