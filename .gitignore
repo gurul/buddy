@@ -53,3 +53,6 @@ docs/launch-video/reference/launch-video.mp4
 
 # lean build output
 verification/.lake/
+
+# Firecrawl CLI output (scraped pages are third-party text; never committed)
+.firecrawl/
