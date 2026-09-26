@@ -215,10 +215,3 @@ def test_history_does_not_grow_without_bound() -> None:
     for i in range(300):
         s.offer(i * 2.0, f"Remark {i} concerning item {i} and nothing else at all.", {f"t{i}"}, **GOOD)
     assert len(s.shown) <= max(s.history, s.per_hour * 8)
-
-
-def test_reset_forgets_what_was_shown() -> None:
-    s = _screen()
-    s.offer(0.0, VENT, {"vent"}, **GOOD)
-    s.reset()
-    assert s.offer(1.0, VENT, {"vent"}, **GOOD)

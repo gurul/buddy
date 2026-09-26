@@ -235,51 +235,6 @@ def load_config(path: Path | None = None) -> MatcherConfig:
     )
 
 
-# The subset of always_ask that is outright destructive or privileged —
-# these render with a hot border and a stiffer approve on the stick, so
-# muscle memory can't flick away `rm -rf` as casually as `git push`.
-DEFAULT_DESTRUCTIVE: tuple[str, ...] = (
-    r"^sudo( |$)",
-    r"^su( |$)",
-    r"^rm( |$)",
-    r"^rmdir( |$)",
-    r"^dd( |$)",
-    r"^shred( |$)",
-    r"^mkfs\b",
-    r"^git reset --hard",
-    r"^git clean( |$)",
-    r"^git push\b.*( -f| --force)",
-    r"^git branch -D( |$)",
-    r"^git filter-(branch|repo)",
-    r"^find\b.*-delete\b",
-    r"^kill(all)?( |$)",
-    r"^pkill( |$)",
-)
-_DESTRUCTIVE_RX: tuple[re.Pattern[str], ...] = tuple(
-    re.compile(p) for p in DEFAULT_DESTRUCTIVE
-)
-
-
-def is_destructive(command: str) -> bool:
-    """Whether a command warrants the card's hot (harder-to-approve) tier."""
-    return bool(command) and any(rx.search(command) for rx in _DESTRUCTIVE_RX)
-
-
-def derive_always_pattern(command: str) -> str:
-    """Pattern for a stick "always" grant: the command's first two words,
-    the same shape as the built-in rules ("git push origin main" →
-    "^git\\ push( |$)"). One word if the command is bare or the second
-    token is a flag — "ls -la" should grant ls, not pin the exact flags.
-    Everything is re.escape()d, so shell metacharacters match literally.
-    """
-    words = command.strip().split()[:2]
-    if not words:
-        return r"^$"
-    if len(words) == 2 and words[1].startswith("-"):
-        words = words[:1]
-    return "^" + re.escape(" ".join(words)) + r"( |$)"
-
-
 # Characters the shell reads as structure: a separator, a pipe, a redirection,
 # a substitution, a grouping, a quote or an escape. A command holding one can
 # run more than its first word, and quotes can hide a flag from the word check

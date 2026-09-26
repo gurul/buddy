@@ -15,7 +15,6 @@ branch, mid-rebase, or has a dirty tree, we say so and step away.
 
 from __future__ import annotations
 
-import logging
 import os
 import subprocess
 import sys
@@ -23,8 +22,6 @@ from pathlib import Path
 from typing import Optional
 
 from .version_check import check
-
-log = logging.getLogger(__name__)
 
 
 def package_repo_root() -> Optional[Path]:

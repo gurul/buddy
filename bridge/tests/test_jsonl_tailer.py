@@ -40,7 +40,7 @@ def test_record_is_today_handles_z_suffix():
     assert _record_is_today(ts, _today_key())
 
 
-# ---- last_assistant_content ----
+# ---- initial sweep ----
 
 def _write_jsonl(path: Path, records: list[dict]) -> None:
     path.write_text(
@@ -59,41 +59,6 @@ def _sync_sweep(root: Path) -> JSONLTailer:
     tailer = JSONLTailer(cb, roots=[root])
     asyncio.run(tailer._initial_sweep())
     return tailer
-
-
-def test_last_assistant_content_captured(tmp_path: Path):
-    jsonl = tmp_path / "sess.jsonl"
-    _write_jsonl(jsonl, [
-        {"type": "user", "message": {"role": "user", "content": "hi"}},
-        {"type": "assistant", "message": {
-            "role": "assistant",
-            "content": [{"type": "text", "text": "hello"}],
-            "usage": {"output_tokens": 2},
-        }},
-        {"type": "user", "message": {"role": "user", "content": "bye"}},
-        {"type": "assistant", "message": {
-            "role": "assistant",
-            "content": [{"type": "text", "text": "goodbye"}],
-            "usage": {"output_tokens": 3},
-        }},
-    ])
-    tailer = _sync_sweep(tmp_path)
-    content = tailer.last_assistant_content(str(jsonl))
-    assert content == [{"type": "text", "text": "goodbye"}]
-
-
-def test_last_assistant_content_none_for_unknown_path(tmp_path: Path):
-    tailer = _sync_sweep(tmp_path)
-    assert tailer.last_assistant_content("/nowhere.jsonl") is None
-
-
-def test_last_assistant_content_ignores_user_messages(tmp_path: Path):
-    jsonl = tmp_path / "u.jsonl"
-    _write_jsonl(jsonl, [
-        {"type": "user", "message": {"role": "user", "content": "hi"}},
-    ])
-    tailer = _sync_sweep(tmp_path)
-    assert tailer.last_assistant_content(str(jsonl)) is None
 
 
 def test_cost_accumulates_alongside_tokens(tmp_path: Path):
@@ -120,8 +85,8 @@ def test_cost_accumulates_alongside_tokens(tmp_path: Path):
     assert tailer._today_cost_per_file.get(str(jsonl), 0.0) == 0.0
 
 
-def test_last_assistant_content_handles_missing_content(tmp_path: Path):
-    """An assistant record without a content array shouldn't crash or overwrite prior content."""
+def test_assistant_record_without_content_does_not_crash(tmp_path: Path):
+    """An assistant record without a content array shouldn't crash; its tokens still count."""
     jsonl = tmp_path / "s.jsonl"
     _write_jsonl(jsonl, [
         {"type": "assistant", "message": {
@@ -136,5 +101,4 @@ def test_last_assistant_content_handles_missing_content(tmp_path: Path):
         }},
     ])
     tailer = _sync_sweep(tmp_path)
-    content = tailer.last_assistant_content(str(jsonl))
-    assert content == [{"type": "text", "text": "first"}]
+    assert tailer._tokens_per_file[str(jsonl)] == 2

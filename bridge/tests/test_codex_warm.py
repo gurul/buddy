@@ -40,9 +40,8 @@ def test_take_hands_the_warm_agent_this_tasks_callbacks() -> None:
         cb = object()
         agent = pool.take(cb, cb)
         assert agent is Fake.made[0] and agent.on_event is cb and agent.ask_user is cb
-        assert pool.warm_takes == 1 and pool.cold_takes == 0
         cold = pool.take(cb, cb)                          # none ready now: a new cold agent
-        assert cold is not agent and not cold.warmed and pool.cold_takes == 1
+        assert cold is not agent and not cold.warmed and len(Fake.made) == 2
     asyncio.run(go())
 
 

@@ -58,13 +58,13 @@ from .transcripts import (
     SEARCH_DAYS_BACK,
     VOICE_CHARS,
     Transcripts,
+    configured,
     match,
     render,
 )
 
 log = logging.getLogger(__name__)
 
-MEMORY_DEFAULT = False                         # owner, 2026-09-23: off in code, on in the owner's env
 FORGET_TTL_SECS = 600.0                        # a forget token lives ten minutes
 MAX_PENDING_TOKENS = 16
 RECENT_CHARS = VOICE_CHARS                     # recent_conversation: the other channel, newest kept
@@ -82,14 +82,9 @@ _STAR_DATE = re.compile(r"\s*\((\d{4}-\d{2}-\d{2})\)\s*$")
 _FRONTMATTER_END = re.compile(r"\n---[ \t]*(?:\n|\Z)")
 
 
-def _on(raw: Any) -> bool:
-    return str(raw or "").strip().lower() in ("1", "true", "yes", "on")
-
-
 def enabled(environ: Any = None) -> bool:
     """``CC_BUDDY_MEMORY=1`` turns memory on; the older ``CC_BUDDY_RECORDS=1`` still does."""
-    env = os.environ if environ is None else environ
-    return _on(env.get("CC_BUDDY_MEMORY")) or _on(env.get("CC_BUDDY_RECORDS")) or MEMORY_DEFAULT
+    return configured(environ).enabled
 
 
 def _records_mod() -> Any:
@@ -143,7 +138,6 @@ RECENT_CONVERSATION = _tool(
 
 TOOLS = (MEMORY_SEARCH, MEMORY_READ, FORGET_PREVIEW, FORGET_APPLY)
 VOICE_TOOLS = TOOLS + (RECENT_CONVERSATION,)
-TOOL_NAMES = tuple(t["name"] for t in VOICE_TOOLS)
 
 
 # ---- markdown line removal (archive and meeting notes) --------------------------------------------

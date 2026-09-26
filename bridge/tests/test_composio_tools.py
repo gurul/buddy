@@ -42,12 +42,6 @@ class FakeResult:
         return {"data": self.data, "error": self.error, "log_id": self.log_id}
 
 
-class FakeToolkit:
-    def __init__(self, slug: str, active: bool) -> None:
-        self.slug, self.name = slug, slug.title()
-        self.connection = type("Conn", (), {"is_active": active})()
-
-
 class FakeSession:
     def __init__(self, session_id: str, execute: Any = None) -> None:
         self.session_id = session_id
@@ -62,13 +56,6 @@ class FakeSession:
         if isinstance(self._execute, Exception):
             raise self._execute
         return self._execute if self._execute is not None else FakeResult({"items": [1, 2]})
-
-    def toolkits(self) -> Any:
-        return type("Page", (), {"items": [FakeToolkit("gmail", True), FakeToolkit("googlecalendar", False)]})()
-
-    def authorize(self, toolkit: str) -> Any:
-        return type("Req", (), {"redirect_url": f"https://connect.example/{toolkit}",
-                                "wait_for_connection": lambda self, timeout=None: None})()
 
 
 class FakeSessions:
@@ -161,11 +148,6 @@ def test_the_session_is_the_owners_and_is_reused(tmp_path: Path) -> None:
     assert fourth.sessions.used == ["trs_new_1"] and fourth.sessions.created == ["telegram-7"]
     assert b4.session_id == "trs_new_1" and json.loads(cfg.state_path.read_text())["session_id"] == "trs_new_1"
 
-    # Toolkits and connect links pass through the session.
-    assert b4.toolkits() == [("gmail", True), ("googlecalendar", False)]
-    assert b4.connect_link("gmail") == "https://connect.example/gmail"
-    assert b4.wait_for("gmail", timeout=1) is True
-
 
 def test_read_only_slugs_run_and_consequential_slugs_ask_first() -> None:
     assert is_read_only("GMAIL_FETCH_EMAILS") and is_read_only("GITHUB_LIST_REPOSITORY_ISSUES")
@@ -252,7 +234,7 @@ def test_execute_never_raises(tmp_path: Path, caplog: Any) -> None:
     # Not started: a reason, not an exception.
     idle = ComposioBridge(cfg, client_factory=FakeClient)
     assert idle.execute("COMPOSIO_SEARCH_TOOLS", {}) == {"ok": False, "reason": "composio is not started"}
-    assert idle.tools() == [] and idle.names == frozenset() and idle.toolkits() == []
+    assert idle.tools() == [] and idle.names == frozenset()
 
     # A good result is a plain dict the model can read, with ok and the log id.
     ok = ComposioBridge(cfg, client_factory=FakeClient)
@@ -284,22 +266,6 @@ def test_execute_never_raises(tmp_path: Path, caplog: Any) -> None:
     odd.start()
     out = odd.execute("COMPOSIO_GET_TOOL_SCHEMAS", {})
     assert out == {"data": {"when": "/x"}, "log_id": "l", "ok": True}
-
-    # wait_for and connect_link on a broken session do not raise either.
-    class Broken(FakeSession):
-        def authorize(self, toolkit: str) -> Any:
-            raise ConnectionError("down")
-
-    class BrokenSessions(FakeSessions):
-        def create(self, *, user_id: str) -> FakeSession:
-            return Broken("trs_broken")
-
-    class BrokenClient:
-        sessions = BrokenSessions()
-
-    b = ComposioBridge(_cfg(tmp_path / "b"), client_factory=BrokenClient)
-    b.start()
-    assert b.wait_for("gmail", timeout=0.1) is False
 
 
 @pytest.mark.parametrize("slug,read", [

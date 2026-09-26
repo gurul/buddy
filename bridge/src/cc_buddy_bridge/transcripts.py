@@ -78,7 +78,6 @@ DEFAULT_MEMORY_DIR = "~/.config/cc-buddy-bridge/memory"
 TRANSCRIPTS_SUBDIR = "transcripts"
 MEETINGS_SUBDIR = "meetings"                   # <root>/meetings/<date>/*.md: notes buddy was asked to take
 DAY_START_HOUR = 4                             # 04:00: the night belongs to the evening before
-TG_CHARS = 32000                               # today, in the Telegram prompt
 VOICE_CHARS = 4000                             # today, in the Live voice prompt (latency-bound)
 BACKEND_CHARS = 16000                          # today, in the voice backend's prompt
 DAY_TEXT_CHARS = 100_000                       # one whole day, for the nightly dream
@@ -236,7 +235,6 @@ class ConvInfo:
     started: datetime
     ended: datetime
     closed: bool
-    n_owner: int
 
 
 def _aware(dt: datetime) -> datetime:
@@ -526,8 +524,7 @@ class Transcripts:
             talk = [_parse_ts(r["ts"]) for r in rows if r["kind"] != "close"] or [_parse_ts(r["ts"]) for r in rows]
             out.append(ConvInfo(
                 conv=conv, ch=rows[0]["ch"], started=min(talk), ended=max(talk),
-                closed=any(r["kind"] == "close" for r in rows),
-                n_owner=sum(1 for r in rows if r["who"] == "owner" and r["kind"] == "say")))
+                closed=any(r["kind"] == "close" for r in rows)))
         out.sort(key=lambda c: c.started)
         return out
 

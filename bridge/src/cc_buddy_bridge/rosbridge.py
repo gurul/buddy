@@ -106,10 +106,6 @@ class RosbridgeServer:
     def url(self) -> str:
         return f"ws://{self.host}:{self.port}"
 
-    @property
-    def clients(self) -> int:
-        return len(self._clients)
-
     # -- one client --
     async def _handle(self, conn: ServerConnection) -> None:
         client = _Client(conn, self.queue_size, self._clock)

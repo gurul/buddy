@@ -1,4 +1,4 @@
-"""ComputerAgent with the browser lane (CC_BUDDY_BROWSER_LANE): a web goal goes to buddy's own browser, is
+"""ComputerAgent with the browser lane (CC_BUDDY_BROWSER_ATTACH): a web goal goes to the owner's Chrome, is
 planned once, and never touches the Mac reflexes; a Mac goal never touches the browser."""
 
 from __future__ import annotations

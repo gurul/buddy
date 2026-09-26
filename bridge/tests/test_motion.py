@@ -11,15 +11,10 @@ from __future__ import annotations
 import pytest
 
 from cc_buddy_bridge.motion import (
-    CYCLES_MAX,
     KEEP,
     KEYS,
     MAX_KEYS,
     OSC,
-    PERIOD_MAX_MS,
-    PERIOD_MIN_MS,
-    PRESETS,
-    command_for,
     describe,
     keys_command,
     osc_command,
@@ -27,10 +22,15 @@ from cc_buddy_bridge.motion import (
     stop_command,
 )
 
+# What the firmware will accept (firmware/claude_pet_stackchan/src/motion.h:54,60);
+# the board re-checks all of it.
+PERIOD_MIN_MS, PERIOD_MAX_MS = 650, 8000
+CYCLES_MAX = 12
+
 
 def test_every_preset_makes_one_wire_line_of_the_right_shape() -> None:
-    for name in PRESETS:
-        cmd = command_for(name)
+    for name in sorted(set(OSC) | set(KEYS)):
+        cmd = osc_command(name) if name in OSC else keys_command(name)
         assert cmd["cmd"] == "move"
         assert cmd["kind"] in ("osc", "keys")
         if cmd["kind"] == "keys":

@@ -445,7 +445,6 @@ MEET_TOOLS: list[dict[str, Any]] = [
      "parameters": {"type": "object", "properties": {}, "additionalProperties": False}},
 ]
 MEET_TOOL_NAMES = frozenset(t["name"] for t in MEET_TOOLS)
-WEB_SEARCH_TOOL: dict[str, Any] = {"type": "web_search"}   # OpenAI's hosted search: the fallback without an OpenRouter key
 
 DEFAULT_CAPTION_CPS = PagerConfig().read_cps
 
@@ -467,9 +466,6 @@ class VoiceConfig:
 def configured(environ: Any = None) -> VoiceConfig:
     env = os.environ if environ is None else environ
     web = (env.get("CC_BUDDY_LIVE_WEB_SEARCH") or "1").strip().lower() not in ("0", "false", "no", "off")
-    if env.get("CC_BUDDY_REALTIME_MODEL"):
-        log.warning("voice: CC_BUDDY_REALTIME_MODEL is a Realtime-era name and is ignored; "
-                    "set CC_BUDDY_LIVE_MODEL instead")
     model = (env.get("CC_BUDDY_LIVE_MODEL") or DEFAULT_MODEL).strip() or DEFAULT_MODEL
     backend = (env.get("CC_BUDDY_LIVE_BACKEND_MODEL") or DEFAULT_BACKEND_MODEL).strip() or DEFAULT_BACKEND_MODEL
     effort = (env.get("CC_BUDDY_LIVE_BACKEND_EFFORT") or DEFAULT_BACKEND_EFFORT).strip().lower()

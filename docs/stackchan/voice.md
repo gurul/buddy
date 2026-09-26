@@ -148,7 +148,7 @@ are per machine:
 |---|---|
 | Keyword model (19 MB, once) | `mkdir -p ~/.config/cc-buddy-bridge/models && curl -L https://github.com/k2-fsa/sherpa-onnx/releases/download/kws-models/sherpa-onnx-kws-zipformer-gigaspeech-3.3M-2024-01-01.tar.bz2 \| tar xj -C ~/.config/cc-buddy-bridge/models` |
 | **Microphone** for the daemon's python | macOS attributes the grant to the interpreter binary: System Settings → Privacy & Security → Microphone → add the resolved venv python (`cc-buddy-bridge ears-check` prints it, and the daemon warns `ears: the microphone has been silent for 10 s` when the grant is missing) |
-| **Accessibility** + **Screen Recording** for the same python | needed by the desktop worker to click and to screenshot. At startup the daemon checks both **as launchd sees them** (a check from your terminal reports the terminal's grant, not the daemon's), logs `agent: computer control will refuse to start — … not granted to <python>` with the fix, and asks macOS to show the Screen Recording dialog for that binary — click *Open System Settings* there, turn the entry on, restart the daemon. Until then a task says out loud that it cannot see the screen yet |
+| **Accessibility** + **Screen Recording** for the same python | needed by the desktop worker to click and to screenshot. Until both are granted, a task says out loud that it cannot see the screen yet |
 | `OPENAI_API_KEY` | in `~/.config/cc-buddy-bridge/env` (mode 600) — the wake word works without it, the conversation does not |
 
 Check the ears end to end:
@@ -326,7 +326,6 @@ Buddy uses a fresh lookup for current time instead of reusing its start time.
 | `CC_BUDDY_PLAN_EXEC` | `0` | `1`: plan once, execute with no planner turn between steps ([routing.md](routing.md#plan-once-execute-with-jev)) |
 | `CC_BUDDY_DECIDER` | `unset` | the decider behind `model`: `jev` is the only value (TypeSafe's hosted model, `jev.py`; it is sent the window title and the menu's labels, and is never loaded in `keyword` mode). Unset, `model` mode stays off. The local Laya decider was removed from the lane on 2026-09-24 |
 | `CC_BUDDY_FAST_LANE_STYLE` | `jev` | how `model` mode words its question to the decider: `jev` (the style Jev scored best with), `compact` or `hinted` |
-| `CC_BUDDY_LOCAL_VERIFY` | `shadow` | the worker's local verdict on a final answer, logged beside the model's (`shadow`) or skipped (`off`); never acted on. It needs a local decider, and none is loaded since the Laya click lane was removed, so today it logs an error |
 
 ## What buddy remembers of talking with you
 
@@ -598,15 +597,6 @@ mentions `delegate` when the lane is on, so a planner without the helper never r
 - **Accurate OCR for clicks.** `click_text` polls accurate OCR directly. Fast OCR can
   miss a label that `screen_text` already read; previously that meant a three-second
   timeout and another model turn. `wait_for` retains its fast polling path.
-- **A shadow verifier.** The worker's `verify` operation asks a local model one yes/no
-  question — does the screen (frontmost app, title, fast OCR) show what the final message
-  claims? — and the agent runs it concurrently with the model's own check, then logs
-  `{p_true, summary, ms}` beside `{valid, guidance}` under `verify.local`. It is **never
-  acted on**: `CC_BUDDY_LOCAL_VERIFY=shadow` (default) logs it, `off` skips it, and an
-  `on` that short-circuits the model needs ≥ 50 logged pairs to calibrate against first
-  (deferred). A hung verify times out after 5 s and never restarts the worker. It only ever
-  ran on the local Laya checkpoint; since that left the lane (2026-09-24) no local decider is
-  loaded, it answers an error, and a hosted decider is never handed the screen's text.
 
 ### The eval, and why it ships off
 
@@ -681,8 +671,6 @@ settled) and `--live-delegate Calendar "switch to week view" --done-when Week`.
 
 ### Deferred
 
-- `CC_BUDDY_LOCAL_VERIFY=on` — letting the local verdict short-circuit the model's check
-  needs ≥ 50 logged pairs and a committed calibration.
 - Ending a task on `done_when` without the planner's final sentence.
 - Re-planning asynchronously while the lane runs; OCR candidates for apps with a broken
   Accessibility tree; page links beyond the same document (`allow_page_links` is off).

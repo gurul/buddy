@@ -217,6 +217,3 @@ class ThoughtScreen:
         if len(self.shown) > keep:
             del self.shown[:-keep]
         return True
-
-    def reset(self) -> None:
-        self.shown.clear()

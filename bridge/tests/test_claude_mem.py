@@ -15,7 +15,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 import pytest
 
 from cc_buddy_bridge import claude_mem
-from cc_buddy_bridge.claude_mem import ClaudeMemMirror, ClaudeMemSink, health, recall, to_memory, worker_url
+from cc_buddy_bridge.claude_mem import ClaudeMemMirror, ClaudeMemSink, recall, to_memory, worker_url
 from cc_buddy_bridge.memory_bus import MemoryBus
 
 # A real /api/search body, captured from the worker on 2026-09-15 (v13.24.23).
@@ -59,9 +59,7 @@ class FakeWorker:
 
             def do_GET(self):
                 outer.requests.append(("GET", self.path, None))
-                if self.path == "/health":
-                    self._json(200, {"status": "ok"})
-                elif self.path.startswith("/api/search?"):
+                if self.path.startswith("/api/search?"):
                     self._json(200, REAL_SEARCH_BODY)
                 elif self.path.startswith("/api/observation/"):
                     ident = int(self.path.rsplit("/", 1)[1])
@@ -270,12 +268,6 @@ def test_recall_clamps_limit() -> None:
                "limit=1" in [p for m, p, _ in worker.requests if p.startswith("/api/search?")][-1]
 
 
-def test_health_reports_the_worker() -> None:
-    with FakeWorker() as worker:
-        assert health(worker.url) is True
-    assert health(_closed_port_url(), timeout=0.5) is False
-
-
 # ---- the mirror ---------------------------------------------------------------------------
 
 def _obs(ident: int, project: str, title: str) -> dict:
@@ -364,10 +356,19 @@ def test_mirror_survives_a_dead_worker(caplog) -> None:
 
 # ---- live ---------------------------------------------------------------------------------
 
+def _worker_up(url: str) -> bool:
+    """True when the worker answers /health with status ok."""
+    try:
+        with urllib.request.urlopen(url.rstrip("/") + "/health", timeout=2.0) as resp:
+            return json.loads(resp.read()).get("status") == "ok"
+    except Exception:  # noqa: BLE001
+        return False
+
+
 @pytest.mark.live
 def test_live_save_then_recall_by_title() -> None:
     LIVE_URL = worker_url()                              # resolved only when the live test is asked for
-    if not health(LIVE_URL):
+    if not _worker_up(LIVE_URL):
         pytest.skip("claude-mem worker is not running")
     stamp = time.strftime("%Y%m%d-%H%M%S")
     title = f"buddy live probe {stamp}"

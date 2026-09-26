@@ -19,8 +19,6 @@ from cc_buddy_bridge.second_brain import (
     Include,
     PackDef,
     active_projects,
-    apply_triage,
-    archive,
     capture,
     classify_capture,
     compile_pack,
@@ -267,10 +265,6 @@ def test_file_note_moves_updates_status_and_handles_clashes(vault: Path) -> None
     again = capture(vault, "a thought about buddy", now=NOW)
     new2 = file_note(vault, again.path, "03-projects/buddy")
     assert new2 == "03-projects/buddy/2026-09-21-1830-a-thought-about-buddy-2.md"
-    # renamed on the way
-    third = capture(vault, "a thought about buddy", now=NOW)
-    assert file_note(vault, third.path, "05-resources", new_name="Buddy Thoughts") == "05-resources/buddy-thoughts.md"
-    assert "05-resources/buddy-thoughts.md" in [h.path for h in search(vault, "buddy thoughts")]
 
 
 def test_file_note_rejects_unknown_folder_and_escapes(vault: Path) -> None:
@@ -283,34 +277,6 @@ def test_file_note_rejects_unknown_folder_and_escapes(vault: Path) -> None:
     with pytest.raises(ValueError):
         file_note(vault, "01-inbox/missing.md", "05-resources")
     assert (vault / res.path).exists()
-
-
-def test_archive_keeps_substructure_and_never_overwrites(vault: Path) -> None:
-    res = capture(vault, "old thought", now=NOW)
-    first = archive(vault, res.path)
-    assert first == "09-archive/01-inbox/2026-09-21-1830-old-thought.md"
-    assert "status: archived" in (vault / first).read_text()
-    res2 = capture(vault, "old thought", now=NOW)
-    assert archive(vault, res2.path) == "09-archive/01-inbox/2026-09-21-1830-old-thought-2.md"
-    with pytest.raises(ValueError):
-        archive(vault, first)
-
-
-def test_apply_triage_files_archives_and_refuses_without_raising(vault: Path) -> None:
-    a = capture(vault, "for buddy", now=NOW).path
-    b = capture(vault, "noise", now=NOW).path
-    out = apply_triage(vault, [
-        {"path": a, "into": "03-projects/buddy"},
-        {"path": b, "archive": True},
-        {"path": "01-inbox/missing.md", "into": "05-resources"},
-        {"path": a, "into": "nowhere"},
-        {"into": "05-resources"},
-        "not a dict",  # type: ignore[list-item]
-    ])
-    assert out[0] == f"{a} -> 03-projects/buddy/2026-09-21-1830-for-buddy.md"
-    assert out[1] == f"{b} -> 09-archive/01-inbox/2026-09-21-1830-noise.md"
-    assert "refused" in out[2] and "refused" in out[3] and "refused" in out[4] and "refused" in out[5]
-    assert inbox(vault) == []
 
 
 # ---- context packs -------------------------------------------------------------------------------

@@ -37,7 +37,7 @@ structure S where
   active : Bool        -- self._response_active (:815)
   wanted : Bool        -- self._response_wanted (:816)
   deferred : Bool      -- self._state_after_captions is not None (:800); no task runs, so it is "listening"
-  busy : Bool          -- self._pager.busy (caption_pager.py:169)
+  busy : Bool          -- self._pager.busy (caption_pager.py:168)
   replyOpen : Bool     -- self._reply_open (:819)
   turnOpen : Bool      -- self._turns.speaker == "assistant" (text is non-empty whenever it is)
   inflight : Bool      -- ghost: a backend response is really running

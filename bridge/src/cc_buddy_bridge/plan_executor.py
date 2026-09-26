@@ -46,7 +46,6 @@ from .fast_lane import editable_pool, is_search_field, jev_context, run_delegate
 from .plan_contract import Expect, Plan, PlanStep
 from .typed_ask import JEV_STEP_GATES, StepAnswer, StepGates
 
-EFFECTS = ("confirmed", "unverifiable", "suspected_noop", "refused")
 STATUSES = ("complete", "partial", "none", "needs_human", "checkpoint", "unavailable")
 EXPECT_WAIT_SECS = 2.5
 EXPECT_POLL_SECS = 0.4
@@ -59,7 +58,7 @@ SHELL_APPS = frozenset({"terminal", "warp", "iterm", "iterm2", "ghostty", "kitty
 class Entry:
     index: int                     # 1-based, the plan's numbering
     step: str                      # PlanStep.describe()
-    effect: str                    # EFFECTS
+    effect: str                    # confirmed | unverifiable | suspected_noop | refused
     how: str = ""                  # keyword | keyword+jev | jev | code | helper
     note: str = ""                 # the lane's own line, or why nothing was applied
     ms: float = 0.0
@@ -261,7 +260,7 @@ def run_plan(plan: Plan, *, senses: Any, effectors: Any, asker: Optional[Callabl
             app = (frontmost_app() or "").casefold()
             if step.text_source == "composed" and app in SHELL_APPS and i not in ok:
                 return stop("needs_human", i, "composed text into a shell", f'type "{step.text}" into {app}')
-            field_c, how, why = _pick_field(step, senses, asker, step_gates, clock, after_click=clicked)
+            field_c, how, why = _pick_field(step, senses, asker, step_gates, after_click=clicked)
             if field_c is None:
                 entry.note = why
                 out.ledger.append(entry)
@@ -375,7 +374,7 @@ def _named_field(step: PlanStep, pool: Sequence[Any]) -> Optional[Any]:
 
 
 def _pick_field(step: PlanStep, senses: Any, asker: Optional[Callable[..., StepAnswer]], gates: StepGates,
-                clock: Callable[[], float], after_click: bool = False) -> tuple[Any, str, str]:
+                after_click: bool = False) -> tuple[Any, str, str]:
     """(the editable candidate to type into, who picked it, "" | why not). A lone field is code's pick.
     Among several, code PROPOSES the field the step names (its label, _named_field) or, right after the plan
     clicked a field, the focused one; Jev is asked as on a click and can REFUSE: the proposal is typed into

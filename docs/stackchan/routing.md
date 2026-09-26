@@ -495,10 +495,9 @@ reasoning effort `gpt-6-astra` accepts.
 
 The lane's ceiling on the Mac is the Accessibility tree over web content:
 nameless buttons, stale frames, coordinate clicks. `browser_lane.py` gives web
-goals a better body. Playwright drives **buddy's own Chromium** (a persistent
-profile at `~/.config/cc-buddy-bridge/browser`, headed so you and the phone's
-screenshot see it, signed in once by you), and the page supplies the
-candidates: every visible control with its role, accessible name, state and
+goals a better body. Playwright drives **your own Chrome** in attach mode
+([above](#controlling-your-logged-in-chrome-attach-mode)), and the page
+supplies the candidates: every visible control with its role, accessible name, state and
 box, from one JavaScript evaluate. Controls above or below the viewport are
 collected too, after the on-screen ones, and are scrolled into view before a
 click or a type. A click lands on the element, not on a
@@ -516,9 +515,7 @@ label the human's yes covers for the current click, set by the executor) and
 `clear_consent`: before a click or a type, a cookie or consent notice is
 dismissed with a button that refuses or closes. A button the sensitive table
 knows ("Accept", "Agree", "OK") is never pressed there, so a notice that only
-offers to agree stays up and the step stops at `dialog_open`. It
-never attaches to your Chrome: that needs a debugging port, a consent prompt
-per session, and your live cookies under the daemon.
+offers to agree stays up and the step stops at `dialog_open`.
 
 ```
 goal ── is_web_goal? (a URL, a site, "the browser", or the router's search) ──▶ browser lane
@@ -543,10 +540,7 @@ under 3 s including launch, every step `confirmed` by its oracle; a sensitive
 control (`Place Order`) stopped for the human and a yes let exactly that
 through.
 
-Ships **off**. No evaluation set of recorded page snapshots exists yet; the
-same `fastlane_eval.py` replay applies once one is recorded (a page snapshot
-is a `Snapshot`, so the fixture format is unchanged). Install:
-`pip install -e ".[browser]"` then `python -m playwright install chromium`.
+Install: `pip install -e ".[browser]"` then `python -m playwright install chromium`.
 
 ### Choosing the browser planner model
 
@@ -639,9 +633,6 @@ then `report --out-dir DIR`.
 | `CC_BUDDY_PLAN_EXEC` | `0` | `1`: the planner plans once and `plan_executor.py` walks the plan with no planner turn between steps or at the end ([above](#plan-once-execute-with-jev)). Uses Jev for grounding when a route is configured, the keyword gate alone otherwise |
 | `CC_BUDDY_PLAN_EXEC_REASONING` | `low` | the plan call's reasoning effort |
 | `CC_BUDDY_DECIDER` | `unset` | the lane's model in `model` mode: `jev` is the only value; unset, `model` mode stays off. laya is not in the click path any more (removed 2026-09-24); it still drives the eye expressions and is scored by the routing evals |
-| `CC_BUDDY_BROWSER_LANE` | `0` | `1`: web goals go to buddy's own Chromium through Playwright ([above](#the-browser-lane-playwright-as-the-hands-jev-as-the-judge)); Jev grounds each step when `CC_BUDDY_JEV_STEP=1` and a route is configured, the keyword gate alone otherwise |
-| `CC_BUDDY_BROWSER_PROFILE` | `~/.config/cc-buddy-bridge/browser` | the persistent Chromium profile (sign in here once) |
-| `CC_BUDDY_BROWSER_HEADLESS` | `0` | `1` hides the window (benches); you should see it |
 | `CC_BUDDY_EXPLORE` | `0` | `1`: buddy starts exploring on its own after ten idle minutes. Off: exploring is explicit only ("go explore", a text, `cc-buddy-bridge explore`) — owner decision, 2026-09-21 |
 
 Every routing decision is in the task's run log (`{"route": …}`, `{"reflex": …}`, `{"lane_first": …}`),

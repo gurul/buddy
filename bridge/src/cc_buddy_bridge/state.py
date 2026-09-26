@@ -4,16 +4,16 @@ from __future__ import annotations
 
 import time
 from dataclasses import dataclass
-from datetime import datetime, timezone
 from typing import Optional
 
-# Claude Code Notification kinds (the hook's ``notification_type``) that mean a
-# session is blocked on the human. Daemon log counts: idle_prompt 566,
+# Claude Code Notification kinds (the hook's ``notification_type``):
+# permission_prompt and elicitation_dialog mean a session is blocked on the
+# human, and any kind not in NON_WAITING_NOTIFICATION_KINDS counts as waiting
+# (notification_waits). Daemon log counts: idle_prompt 566,
 # permission_prompt 155, auth_success 19, idle 2, elicitation_response 1. The
 # owner's rule (firmware main.cpp derive()): Claude idle -> the pet sleeps; a
 # session blocked on a permission -> attention. So an idle reminder must not
 # light the attention pose over a live voice conversation.
-WAITING_NOTIFICATION_KINDS = frozenset({"permission_prompt", "elicitation_dialog"})
 # Kinds that are news, not a request: they do not mark the session waiting.
 NON_WAITING_NOTIFICATION_KINDS = frozenset({
     "idle_prompt", "idle", "auth_success", "elicitation_response",
@@ -81,7 +81,6 @@ class State:
         self.entries: list[Entry] = []
         self.tokens_cumulative: int = 0
         self.tokens_today: int = 0
-        self.tokens_day_key: str = _today_key()
         # USD cost estimates derived from the same usage records that feed
         # tokens_*. See pricing.py. Displayed in the statusline.
         self.cost_cumulative: float = 0.0
@@ -120,34 +119,6 @@ class State:
 
     # ---- permission lifecycle ----
 
-    def permission_pending(
-        self,
-        session_id: str,
-        tool_use_id: str,
-        tool_name: str,
-        hint: str,
-        cwd: str = "",
-    ) -> PendingPermission:
-        # Fall back to the session's registered cwd when the hook didn't carry
-        # one (synthetic prompts, older hook versions).
-        if not cwd:
-            sess = self.sessions.get(session_id)
-            cwd = getattr(sess, "cwd", None) or ""
-        p = PendingPermission(
-            tool_use_id=tool_use_id,
-            tool_name=tool_name,
-            hint=hint,
-            session_id=session_id,
-            cwd=cwd,
-            issued_at=time.monotonic(),
-        )
-        s = self.sessions.get(session_id)
-        if s is None:
-            s = Session(session_id=session_id, started_at=time.time())
-            self.sessions[session_id] = s
-        s.pending = p
-        return p
-
     def permission_resolved(self, tool_use_id: str) -> Optional[PendingPermission]:
         """Clear the pending permission with this tool_use_id across any session. Returns it."""
         for s in self.sessions.values():
@@ -155,12 +126,6 @@ class State:
                 p = s.pending
                 s.pending = None
                 return p
-        return None
-
-    def find_pending_by_id(self, tool_use_id: str) -> Optional[PendingPermission]:
-        for s in self.sessions.values():
-            if s.pending is not None and s.pending.tool_use_id == tool_use_id:
-                return s.pending
         return None
 
     def first_pending(self) -> Optional[PendingPermission]:
@@ -260,9 +225,6 @@ class State:
         cost_today: float = 0.0,
     ) -> None:
         """Called by the JSONL tailer after recomputing from transcript files."""
-        day = _today_key()
-        if day != self.tokens_day_key:
-            self.tokens_day_key = day
         self.tokens_cumulative = cumulative
         self.tokens_today = today
         self.cost_cumulative = cost_cumulative
@@ -326,7 +288,3 @@ class State:
             rows.append((rank, name, row))
         rows.sort(key=lambda r: (r[0], r[1]))
         return [r[2] for r in rows[:cap]]
-
-
-def _today_key() -> str:
-    return datetime.now(tz=timezone.utc).astimezone().strftime("%Y-%m-%d")

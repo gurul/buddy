@@ -26,11 +26,8 @@ from before the move is never reported as the view at the new pose.
 from __future__ import annotations
 
 import asyncio
-import logging
 import time
 from typing import Any, Awaitable, Callable, Optional
-
-log = logging.getLogger(__name__)
 
 YAW_MAX = 120                # body.cpp YAW_MAX
 PITCH_MIN, PITCH_MAX = 5, 85  # body.cpp PITCH_MIN / PITCH_MAX
@@ -109,7 +106,6 @@ class Head:
         self.yaw: float = 0.0
         self.pitch: float = float(PITCH_LEVEL)
         self.pose_at = float("-inf")     # when the board last echoed its pose
-        self.moves: list[dict[str, Any]] = []
         # Told of every pose this class commands, with its hold: an asked-for pose (move_head, look_around,
         # find) owns the head, and the conversation's follower (follow.py) stands down for that long.
         self.on_move: Optional[Callable[[float], None]] = None
@@ -137,7 +133,6 @@ class Head:
         ok = await self.send(cmd)
         if not ok:
             return {"ok": False, "reason": "the move did not reach the robot"}
-        self.moves.append(cmd)
         self.yaw, self.pitch = float(y), float(p)
         if self.on_move is not None:
             self.on_move(hold)

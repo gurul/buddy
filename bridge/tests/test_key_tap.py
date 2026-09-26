@@ -16,13 +16,10 @@ from cc_buddy_bridge.key_tap import KEY_RETURN, KeyTapper
 
 class FakePoster:
     def __init__(self) -> None:
-        self.events: list[tuple[int, bool, int]] = []
-        self.sources: list[bool] = []   # True = HID source
+        self.events: list[tuple[int, bool]] = []
 
-    def __call__(self, keycode: int, down: bool, flags: int,
-                 hold: bool = True) -> None:
-        self.events.append((keycode, down, flags))
-        self.sources.append(hold)
+    def __call__(self, keycode: int, down: bool) -> None:
+        self.events.append((keycode, down))
 
 
 def _tapper(trusted: bool = True) -> tuple[KeyTapper, FakePoster]:
@@ -34,7 +31,7 @@ def _tapper(trusted: bool = True) -> tuple[KeyTapper, FakePoster]:
 def test_tap_enter_presses_and_releases() -> None:
     k, p = _tapper()
     assert k.tap("enter")
-    assert p.events == [(KEY_RETURN, True, 0), (KEY_RETURN, False, 0)]
+    assert p.events == [(KEY_RETURN, True), (KEY_RETURN, False)]
 
 
 def test_tap_refuses_unknown_key() -> None:
@@ -49,8 +46,8 @@ def test_tap_next_prev_map_to_arrows() -> None:
     assert k.tap("next")
     assert k.tap("prev")
     assert p.events == [
-        (KEY_DOWN_ARROW, True, 0), (KEY_DOWN_ARROW, False, 0),
-        (KEY_UP_ARROW, True, 0), (KEY_UP_ARROW, False, 0),
+        (KEY_DOWN_ARROW, True), (KEY_DOWN_ARROW, False),
+        (KEY_UP_ARROW, True), (KEY_UP_ARROW, False),
     ]
 
 
@@ -79,9 +76,33 @@ def test_enter_can_be_switched_to_keypad(monkeypatch) -> None:
     assert _enter_keycode() == KEY_KEYPAD_ENTER
 
 
-def test_taps_use_the_null_event_source() -> None:
+def test_taps_use_the_null_event_source(monkeypatch) -> None:
     """Regression: Return built from a real HID source was swallowed by Warp's
-    global key handling and never reached the focused app. Taps use NULL."""
-    k, p = _tapper()
-    k.tap("enter")
-    assert p.sources == [False, False]
+    global key handling and never reached the focused app. Taps use NULL;
+    CC_BUDDY_KEY_SOURCE=hid forces the real source."""
+    import sys
+    import types
+
+    import cc_buddy_bridge.key_tap as kt
+
+    hid = object()
+    sources: list[object] = []
+    quartz = types.SimpleNamespace(
+        kCGEventSourceStateHIDSystemState=1,
+        kCGHIDEventTap=0,
+        CGEventSourceCreate=lambda state: hid,
+        CGEventCreateKeyboardEvent=lambda src, keycode, down: sources.append(src) or (keycode, down),
+        CGEventPost=lambda tap, ev: None,
+    )
+    monkeypatch.setattr(sys, "platform", "darwin")
+    monkeypatch.setitem(sys.modules, "Quartz", quartz)
+    monkeypatch.delenv("CC_BUDDY_KEY_METHOD", raising=False)
+
+    monkeypatch.delenv("CC_BUDDY_KEY_SOURCE", raising=False)
+    assert KeyTapper(poster=kt._quartz_poster()).tap("enter")
+    assert sources == [None, None]
+
+    sources.clear()
+    monkeypatch.setenv("CC_BUDDY_KEY_SOURCE", "hid")
+    assert KeyTapper(poster=kt._quartz_poster()).tap("enter")
+    assert sources == [hid, hid]

@@ -160,7 +160,6 @@ def write(path: Path, text: str, mode: int = 0o600) -> Path:
 # ---- the switch --------------------------------------------------------------------------------
 
 def test_enabled_is_off_by_default_and_on_with_memory_or_the_legacy_records_switch() -> None:
-    assert mem.MEMORY_DEFAULT is False
     assert enabled({}) is False
     assert enabled({"CC_BUDDY_MEMORY": "0"}) is False
     assert enabled({"CC_BUDDY_MEMORY": "1"}) is True

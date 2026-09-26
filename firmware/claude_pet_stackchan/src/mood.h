@@ -18,8 +18,6 @@
 // following MiRo / Nutty: eyes, LED colour and pulse, head tempo, chirp.
 //
 // Pure C++: no Arduino, no randomness, no clock — the caller passes dt.
-// The same rules live in bridge/src/cc_buddy_bridge/mood_model.py and the
-// two are compared on a scripted trace (host harness, see the bridge tests).
 #include <stdint.h>
 
 enum MoodKind : uint8_t {

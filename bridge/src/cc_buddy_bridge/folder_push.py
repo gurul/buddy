@@ -16,7 +16,7 @@ import base64
 import json
 import logging
 from pathlib import Path
-from typing import Any, Awaitable, Callable, Optional
+from typing import Any, Optional
 
 log = logging.getLogger(__name__)
 
@@ -31,9 +31,6 @@ MAX_TOTAL_BYTES = 1_800_000
 # so give each ack a generous window.
 ACK_TIMEOUT_FAST = 5.0   # file, chunk, file_end
 ACK_TIMEOUT_SLOW = 15.0  # char_begin (filesystem wipe), char_end (manifest parse + reload)
-
-
-ProgressCallback = Callable[[int, int], Awaitable[None]]
 
 
 def _enumerate_files(folder: Path) -> list[Path]:
@@ -71,8 +68,6 @@ def _pack_name(folder: Path) -> str:
 async def push_character(
     daemon,  # type: ignore[no-untyped-def]  — avoid circular import
     folder_path: str,
-    *,
-    on_progress: Optional[ProgressCallback] = None,
 ) -> dict[str, Any]:
     """Send ``folder_path`` to the connected stick. Returns a summary dict."""
     folder = Path(folder_path).expanduser().resolve()
@@ -114,8 +109,6 @@ async def push_character(
                 await _send_expect(daemon, {"cmd": "chunk", "d": b64},
                                    "chunk", timeout=ACK_TIMEOUT_FAST, n=file_bytes)
                 bytes_pushed += len(piece)
-                if on_progress is not None:
-                    await on_progress(bytes_pushed, total_bytes)
 
         await _send_expect(daemon, {"cmd": "file_end"},
                            "file_end", timeout=ACK_TIMEOUT_FAST)
@@ -141,20 +134,15 @@ async def _send_expect(daemon, payload: dict, ack_type: str, *, timeout: float,
     before this coroutine resumes from the send, and an ack with no waiter is
     dropped (verification/Buddy/Serial.lean, C). ``n`` is the ack's expected
     "n" field, so a late ack from an earlier request cannot answer this one.
-    A daemon without expect_ack (test stubs) falls back to waiting after the send.
     """
-    expect = getattr(daemon, "expect_ack", None)
-    waiter = expect(ack_type, n) if expect is not None else None
+    waiter = daemon.expect_ack(ack_type, n)
     try:
         ok = await daemon.ble.send(payload)
         if not ok:
             raise RuntimeError(f"ble write failed for cmd:{payload.get('cmd')}")
-        if waiter is None:
-            ack = await daemon.wait_for_ack(ack_type, timeout=timeout)
-        else:
-            ack = await daemon.wait_for_ack(ack_type, timeout=timeout, waiter=waiter)
+        ack = await daemon.wait_for_ack(ack_type, timeout=timeout, waiter=waiter)
     finally:
-        if waiter is not None and not waiter.done():
+        if not waiter.done():
             waiter.cancel()
     if not ack.get("ok"):
         err = ack.get("error") or "no detail"

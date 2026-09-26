@@ -248,8 +248,6 @@ def test_configured_defaults_and_env() -> None:
                     "CC_BUDDY_VOICE_IDLE_SECS": "45"})
     assert c.model == "gpt-live-1-preview" and c.voice == "cedar" and c.idle_timeout_secs == 45.0
     assert c.backend_model == "gpt-5-mini" and c.backend_effort == "minimal"
-    # the Realtime-era name is ignored, not silently honoured
-    assert configured({"CC_BUDDY_REALTIME_MODEL": "gpt-realtime-2.1"}).model == "gpt-live-1"
     assert configured({"CC_BUDDY_LIVE_BACKEND_EFFORT": "turbo"}).backend_effort == "low"
     assert configured({"CC_BUDDY_VOICE_IDLE_SECS": "1"}).idle_timeout_secs == 5.0     # floor
 
@@ -765,7 +763,7 @@ def test_session_config_captions_vs_audio() -> None:
 
 def test_progress_events_become_caption_pages_while_working() -> None:
     """A task's helper sentences ("opened Safari") show on the robot as pages, at most
-    one per progress_min_gap_secs, only when no reply page is up."""
+    one per PROGRESS_MIN_GAP_SECS, only when no reply page is up."""
     from cc_buddy_bridge.computer_agent import AgentEvent as Ev
 
     clock = {"now": 0.0}

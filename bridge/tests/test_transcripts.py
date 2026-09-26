@@ -60,7 +60,7 @@ def test_configured_is_off_by_default_and_on_with_memory_or_the_legacy_records_s
     assert configured({"CC_BUDDY_RECORDS": "1"}).enabled is True       # the older switch still turns it on
     assert configured({"CC_BUDDY_MEMORY": "0", "CC_BUDDY_RECORDS": "0"}).enabled is False
     assert configured({"CC_BUDDY_MEMORY_DIR": "/x/mem"}).root == Path("/x/mem/transcripts")
-    assert (tx.DAY_START_HOUR, tx.TG_CHARS, tx.VOICE_CHARS, tx.BACKEND_CHARS) == (4, 32000, 4000, 16000)
+    assert (tx.DAY_START_HOUR, tx.VOICE_CHARS, tx.BACKEND_CHARS) == (4, 4000, 16000)
 
 
 def test_a_disabled_store_writes_and_reads_nothing(tmp_path: Path) -> None:
@@ -320,7 +320,7 @@ def test_conversations_are_read_whole_across_the_day_boundary(tmp_path: Path) ->
     convs = t.conversations("2026-09-21")
     assert [c.conv for c in convs] == [tg, late]
     info = convs[1]
-    assert info == ConvInfo(conv=late, ch="voice", started=at(22, 3, 58), ended=at(22, 4, 2), closed=True, n_owner=1)
+    assert info == ConvInfo(conv=late, ch="voice", started=at(22, 3, 58), ended=at(22, 4, 2), closed=True)
     assert convs[0].closed is False
     assert t.conversations("2026-09-22") == []                   # filed under the day it began, once
     assert [ln["text"] for ln in t.conv_lines(late)] == ["still up", "me too", ""]

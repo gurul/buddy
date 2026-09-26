@@ -25,7 +25,12 @@ class StubDaemon:
         self.sent: list[dict] = []
         self.ble = _StubBle(self)
 
-    async def wait_for_ack(self, ack_type: str, timeout: float = 5.0) -> dict:
+    def expect_ack(self, ack_type: str, n: int | None = None) -> asyncio.Future:
+        fut = asyncio.get_running_loop().create_future()
+        fut.set_result(None)
+        return fut
+
+    async def wait_for_ack(self, ack_type: str, timeout: float = 5.0, *, waiter=None) -> dict:
         # Fulfil the protocol: for chunk acks we return a running byte counter.
         if ack_type == "chunk":
             return {"ack": "chunk", "ok": True, "n": self._chunk_count() * CHUNK_SIZE}

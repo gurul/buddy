@@ -36,9 +36,7 @@ The voice session (voice_agent.py) is the human's handle on a run:
 Every run writes an action log (code, text outputs, asks, final answer —
 never the screenshots) under ~/.config/cc-buddy-bridge/agent-runs/. Since the
 fast lane (fast_lane.py) each exec result also logs the worker's local timing
-dict, and the final-answer check logs the local shadow verdict (the worker's
-`verify` operation, run concurrently with the model's check, never acted on:
-CC_BUDDY_LOCAL_VERIFY=off|shadow) beside the model's.
+dict.
 """
 
 from __future__ import annotations
@@ -78,9 +76,6 @@ DEFAULT_VERIFY_REASONING_EFFORT = "low"
 PROGRESS_SKIP_PREFIXES = ("Traceback", "exec_py", "{", "[", "frontmost:", "screen_text:", "found ", "zoom of")
 DEFAULT_RUNS_DIR = "~/.config/cc-buddy-bridge/agent-runs"
 WORKER_LINE_LIMIT = 32 * 1024 * 1024
-LOCAL_VERIFY_MODES = ("off", "shadow")     # "on" (short-circuiting the model's check) is deferred: needs calibration
-DEFAULT_LOCAL_VERIFY = "shadow"
-VERIFY_WORKER_TIMEOUT_SECS = 5.0
 LANE_FIRST_TIMEOUT_SECS = 12.0             # ≤ 4 clicks × (snapshot 0.4 + click 0.2 + settle 1.0 + snapshot 0.4) + slack
 OUTLINE_TIMEOUT_SECS = 4.0                 # one AX snapshot (0.04–0.43 s measured) plus slack
 RUN_PLAN_TIMEOUT_SECS = 45.0               # plan_executor.MAX_WALL_SECS (30) + an app launch's wait
@@ -298,8 +293,6 @@ class AgentConfig:
     verify_reasoning_effort: str = DEFAULT_VERIFY_REASONING_EFFORT
     max_secs: float = DEFAULT_MAX_SECS
     api_timeout_secs: float = DEFAULT_API_TIMEOUT_SECS
-    progress_min_gap_secs: float = 1.5             # the voice session's caption pacing for progress lines
-    local_verify: str = DEFAULT_LOCAL_VERIFY       # off | shadow: the worker's local verdict, logged only
     fast_lane: bool = FAST_LANE_DEFAULT            # the delegate helper in the prompt and the tool text
     lane_decide: str = DEFAULT_DECIDE              # keyword | model: who picks a lane step (fast_lane.DECIDE_MODES)
     lane_first: bool = LANE_FIRST_DEFAULT          # the router runs before the planner's first turn (lane_router.py)
@@ -343,11 +336,6 @@ def configured(environ: Any = None) -> AgentConfig:
         except ValueError:
             log.warning("agent: CC_BUDDY_AGENT_MAX_TURNS=%r is not an integer; using %d", raw_turns, turns)
     runs = Path((env.get("CC_BUDDY_AGENT_RUNS_DIR") or DEFAULT_RUNS_DIR)).expanduser()
-    local_verify = (env.get("CC_BUDDY_LOCAL_VERIFY") or DEFAULT_LOCAL_VERIFY).strip().lower() or DEFAULT_LOCAL_VERIFY
-    if local_verify not in LOCAL_VERIFY_MODES:
-        log.warning("agent: CC_BUDDY_LOCAL_VERIFY=%r is not one of %s; using shadow", local_verify,
-                    "|".join(LOCAL_VERIFY_MODES))
-        local_verify = "shadow"
     raw_lane = (env.get("CC_BUDDY_FAST_LANE") or "").strip().lower()
     fast_lane = FAST_LANE_DEFAULT if not raw_lane else raw_lane not in ("0", "false", "no", "off")
     lane_decide = (env.get("CC_BUDDY_FAST_LANE_DECIDE") or "").strip().lower()
@@ -363,7 +351,7 @@ def configured(environ: Any = None) -> AgentConfig:
     raw_plan = (env.get("CC_BUDDY_PLAN_EXEC") or "").strip().lower()
     plan_exec = PLAN_EXEC_DEFAULT if not raw_plan else raw_plan in ("1", "true", "yes", "on")
     return AgentConfig(
-        local_verify=local_verify, fast_lane=fast_lane, lane_decide=lane_decide, lane_first=lane_first,
+        fast_lane=fast_lane, lane_decide=lane_decide, lane_first=lane_first,
         reflexes=reflexes, router_model=router_model, plan_exec=plan_exec,
         plan_exec_effort=_effort(env, "CC_BUDDY_PLAN_EXEC_REASONING", DEFAULT_PLAN_EXEC_EFFORT),
         enabled=enabled, model=model, max_turns=turns, runs_dir=runs,
@@ -405,7 +393,7 @@ class WorkerClient:
         self.ready: dict[str, Any] = {}
         self.restarts = 0
         self.last_timing: Optional[dict[str, Any]] = None   # the worker's local ms per sense, from the last reply
-        self._grace = 0.0                                   # extra seconds the next request may wait (stale verify)
+        self._grace = 0.0                                   # extra seconds the next request may wait (stale reply)
         self._id = 0
         self._lock = asyncio.Lock()
 
@@ -437,34 +425,9 @@ class WorkerClient:
     async def execute(self, code: str) -> list[dict[str, Any]]:
         return await self._request({"operation": "execute", "code": code}, timeout=self.timeout_secs)
 
-    async def verify(self, goal: str, claim: str, timeout: float = VERIFY_WORKER_TIMEOUT_SECS) -> dict[str, Any]:
-        """The worker's local shadow verdict: {"p_true", "summary", "ms"} or {"error": …}.
-
-        A slow or hung verify returns {"error": "timeout"} and never restarts the
-        worker — the model's own check is the one that matters; its stale reply is
-        skipped by id when the next request reads the pipe, and that next request
-        gets VERIFY_WORKER_TIMEOUT_SECS of extra patience so a merely slow verdict
-        cannot push it past its own deadline and into a restart.
-        """
-        if self.proc is None or self.proc.stdin is None or self.proc.stdout is None:
-            return {"error": "desktop worker is not running"}
-        try:
-            msg = await self._exchange({"operation": "verify", "goal": goal, "claim": claim}, timeout)
-        except asyncio.TimeoutError:
-            self._grace = VERIFY_WORKER_TIMEOUT_SECS
-            return {"error": "timeout"}
-        except (OSError, ValueError) as e:
-            return {"error": f"{type(e).__name__}: {e}"[:200]}
-        if msg is None:
-            return {"error": "the desktop helper stopped"}
-        verdict = msg.get("verify")
-        if not isinstance(verdict, dict):
-            return {"error": "no verdict in the worker reply"}
-        return verdict
-
     async def lane_first(self, goal: str, timeout: float = LANE_FIRST_TIMEOUT_SECS) -> dict[str, Any]:
         """The router's attempt at the goal (desktop_worker.lane_first): RouteResult.to_dict(), or
-        {"status": "unavailable", "reason": …}. Like verify it never restarts the worker: a slow or
+        {"status": "unavailable", "reason": …}. It never restarts the worker: a slow or
         failed route means the planner does the task, and a stale reply is skipped by id."""
         if self.proc is None or self.proc.stdin is None or self.proc.stdout is None:
             return {"status": "unavailable", "reason": "desktop worker is not running"}
@@ -510,7 +473,7 @@ class WorkerClient:
 
     async def _exchange(self, body: dict[str, Any], timeout: float) -> Optional[dict[str, Any]]:
         """One request, the reply with the matching id (stale replies from a timed-out
-        verify are skipped). None when the child closed the pipe; asyncio.TimeoutError past
+        request are skipped). None when the child closed the pipe; asyncio.TimeoutError past
         `timeout` — the lock is held throughout so requests never interleave."""
         assert self.proc is not None and self.proc.stdin is not None and self.proc.stdout is not None
         async with self._lock:
@@ -767,7 +730,7 @@ class ComputerAgent:
         ask_user: Optional[Callable[[str], Awaitable[str]]] = None,
         clock: Callable[[], float] = time.monotonic,
         sleep: Callable[[float], Awaitable[None]] = asyncio.sleep,
-        browser: Any = None,                        # browser_lane.BrowserLane, when CC_BUDDY_BROWSER_LANE is on
+        browser: Any = None,                        # browser_lane.BrowserLane, when CC_BUDDY_BROWSER_ATTACH is on
     ) -> None:
         self.create_response = create_response
         self.worker_factory = worker_factory
@@ -1430,38 +1393,10 @@ class ComputerAgent:
             return None
         return "I couldn't confirm that on screen. " + claim
 
-    async def _shadow_verify(self, goal: str, claim: str, worker: Any) -> dict[str, Any]:
-        """The worker's local verdict, for the log only. Its own try: a worker without
-        `verify`, a timeout or any error becomes {"error": …} and never touches the answer."""
-        t0 = self._clock()
-        try:
-            result = await asyncio.wait_for(worker.verify(goal, claim), timeout=VERIFY_WORKER_TIMEOUT_SECS + 1.0)
-        except asyncio.CancelledError:
-            raise
-        except Exception as e:  # noqa: BLE001 — shadow only; logged, never raised
-            log.error("agent: local shadow verify failed (%s: %s)", type(e).__name__, e)
-            return {"error": type(e).__name__, "secs": round(self._clock() - t0, 2)}
-        if not isinstance(result, dict):
-            return {"error": "bad reply", "secs": round(self._clock() - t0, 2)}
-        return {**result, "secs": round(self._clock() - t0, 2)}
-
-    async def _shadow_result(self, shadow: Optional[asyncio.Task]) -> Optional[dict[str, Any]]:
-        if shadow is None:
-            return None
-        try:
-            return await shadow
-        except asyncio.CancelledError:
-            return {"error": "cancelled"}
-
     async def _verify(self, goal: str, claim: str, turn: int, worker: Any) -> Optional[dict[str, Any]]:
         t0 = self._clock()
-        shadow: Optional[asyncio.Task] = None
         try:
             items = await self._interruptible(worker.observe())
-            if self.config.local_verify == "shadow":
-                # Started right after the fresh capture, gathered after the model's answer:
-                # it costs the log a field, not the human a second of wait.
-                shadow = asyncio.ensure_future(self._shadow_verify(goal, claim, worker))
             images = [o for o in items if o.get("type") == "input_image"][:1]
             req: dict[str, Any] = {
                 "model": self.config.model,
@@ -1479,21 +1414,13 @@ class ComputerAgent:
             response = await self._interruptible(self._create(req, turn))
             verdict = _verdict(response)
         except Cancelled:
-            if shadow is not None:
-                shadow.cancel()
             raise
         except Exception as e:  # noqa: BLE001 — a broken check must not eat the answer
             log.warning("agent: final-answer check failed (%s); letting the answer through", e)
             entry: dict[str, Any] = {"error": type(e).__name__}
-            local = await self._shadow_result(shadow)
-            if local is not None:
-                entry["local"] = local
             self._log({"turn": turn, "verify": entry})
             return None
         entry = {**verdict, "secs": round(self._clock() - t0, 2)}
-        local = await self._shadow_result(shadow)
-        if local is not None:
-            entry["local"] = local
         self._log({"turn": turn, "verify": entry})
         return verdict
 
@@ -1552,10 +1479,7 @@ def desktop_grants(prompt: bool = False) -> dict[str, Any]:
     """Accessibility and Screen Recording as macOS sees THIS process.
 
     TCC credits the responsible process: run from a terminal that is a
-    terminal's grant, under launchd it is the python binary's. The daemon
-    calls this at startup with prompt=True so the Screen Recording dialog
-    appears for the right binary (bench 2026-09-06: the worker failed with
-    "Screen Recording is not granted" although a shell check said True).
+    terminal's grant, under launchd it is the python binary's.
     """
     out: dict[str, Any] = {"python": os.path.realpath(sys.executable), "accessibility": None, "screen": None}
     if sys.platform != "darwin":
@@ -1578,20 +1502,6 @@ def desktop_grants(prompt: bool = False) -> dict[str, Any]:
     except Exception as e:  # noqa: BLE001
         out["screen_error"] = str(e)
     return out
-
-
-def log_desktop_grants(prompt: bool = True) -> dict[str, Any]:
-    g = desktop_grants(prompt=prompt)
-    missing = [k for k in ("accessibility", "screen") if g.get(k) is False]
-    if missing:
-        names = {"accessibility": "Accessibility", "screen": "Screen & System Audio Recording"}
-        log.warning("agent: computer control will refuse to start — %s not granted to %s. System Settings > "
-                    "Privacy & Security > %s: add that binary (+ then Cmd+Shift+G to paste the path) and turn it on, "
-                    "then restart the daemon.", " and ".join(names[m] for m in missing), g["python"],
-                    " / ".join(names[m] for m in missing))
-    else:
-        log.info("agent: desktop grants ok (Accessibility, Screen Recording) for %s", g["python"])
-    return g
 
 
 # ---- the real Responses client --------------------------------------------------------

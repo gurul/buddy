@@ -16,7 +16,7 @@ from cc_buddy_bridge.fast_lane import (
 
 ROOT = Path(__file__).resolve().parents[2]
 VOICE = ROOT / "docs" / "stackchan" / "voice.md"
-KNOBS = ("CC_BUDDY_FAST_LANE", "CC_BUDDY_FAST_LANE_STYLE", "CC_BUDDY_LOCAL_VERIFY",
+KNOBS = ("CC_BUDDY_FAST_LANE", "CC_BUDDY_FAST_LANE_STYLE",
          "CC_BUDDY_LANE_FIRST", "CC_BUDDY_FAST_LANE_DECIDE", "CC_BUDDY_DECIDER")
 
 
@@ -35,7 +35,7 @@ def test_voice_doc_names_every_knob_status_and_the_helper() -> None:
     for status in STATUSES:
         assert re.search(rf"^{status}:", section, re.M), status
     assert "delegate(objective" in section and "`delegate`" in text
-    for word in ("confirm", "escalate", "approve", "done_when", "shadow", "timing", "settle"):
+    for word in ("confirm", "escalate", "approve", "done_when", "timing", "settle"):
         assert word in section, word
 
 
@@ -43,7 +43,6 @@ def test_documented_defaults_match_the_shipped_constants() -> None:
     text = VOICE.read_text(encoding="utf-8")
     assert _knob_row(text, "CC_BUDDY_FAST_LANE") == ("1" if FAST_LANE_DEFAULT else "0")
     assert _knob_row(text, "CC_BUDDY_FAST_LANE_STYLE") == DEFAULT_STYLE
-    assert _knob_row(text, "CC_BUDDY_LOCAL_VERIFY") == "shadow"
     assert _knob_row(text, "CC_BUDDY_LANE_FIRST") == ("1" if LANE_FIRST_DEFAULT else "0")
     assert _knob_row(text, "CC_BUDDY_FAST_LANE_DECIDE") == DEFAULT_DECIDE
     assert _knob_row(text, "CC_BUDDY_DECIDER") == "unset"

@@ -14,7 +14,6 @@ from cc_buddy_bridge.photos import (
     photo_line,
     prune,
     relative_path,
-    resolve,
     save,
     usage,
 )
@@ -90,14 +89,6 @@ def test_pruning_removes_the_day_directory_it_empties(tmp_path: Path) -> None:
 def test_prune_on_an_empty_shelf_is_a_noop(tmp_path: Path) -> None:
     assert prune(tmp_path, _cfg()) == []
     assert usage(tmp_path) == (0, 0)
-
-
-def test_resolve_finds_a_kept_photo_and_refuses_to_leave_the_shelf(tmp_path: Path) -> None:
-    rel = save(tmp_path, WHEN, 42, JPEG, _cfg())
-    assert resolve(tmp_path, rel) == (tmp_path / rel)
-    assert resolve(tmp_path, "photos/../../etc/passwd") is None
-    assert resolve(tmp_path, "photos/2026-09-06/gone.jpg") is None
-    assert resolve(tmp_path, "") is None
 
 
 def test_configured_reads_the_env_and_falls_back_on_junk(caplog) -> None:

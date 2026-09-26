@@ -390,8 +390,8 @@ Tiers 1–2 are on by default in that worker. Tier 3 and the planner-delegated f
 now drives only the eye expressions (the `[laya]` extra). **Hosted Jev** can also
 drive narrowly scoped launch routing and spoken head moves. Clicks use accurate OCR
 directly, and a finished screen wait is reused for the reply screenshot. The
-**browser lane** (`browser_lane.py`, off by default; `CC_BUDDY_BROWSER_LANE=0`) drives
-buddy's own Chromium with Playwright; attach mode reuses it for your own Chrome.
+**browser lane** (`browser_lane.py`) drives your own Chrome with Playwright in attach
+mode (`CC_BUDDY_BROWSER_ATTACH=1`).
 
 See [routing](docs/stackchan/routing.md) for switches and measured evaluations, and
 [voice and computer control](docs/stackchan/voice.md) for worker details.

@@ -48,6 +48,7 @@ from pathlib import Path
 from typing import Any, Awaitable, Callable, Optional, Protocol
 
 from . import spend
+from .notes import _items
 
 log = logging.getLogger(__name__)
 
@@ -453,10 +454,6 @@ Write the notes a competent person would write:
 Every list may be empty; do not pad one. Output the JSON the schema asks for."""
 
 
-class Summarizer(Protocol):
-    def __call__(self, transcript: str) -> dict[str, Any]: ...
-
-
 def make_summarizer(environ: Any = None) -> Optional[Callable[[str], dict[str, Any]]]:
     env = os.environ if environ is None else environ
     key = (env.get("OPENAI_API_KEY") or "").strip()
@@ -478,12 +475,6 @@ def make_summarizer(environ: Any = None) -> Optional[Callable[[str], dict[str, A
         return json.loads((resp.output_text or "").strip() or "{}")
 
     return summarize
-
-
-def _items(value: Any, cap: int = 20) -> list[str]:
-    if not isinstance(value, list):
-        return []
-    return [" ".join(str(v).split()) for v in value[:cap] if str(v).strip()]
 
 
 def line_text(ln: Line) -> str:

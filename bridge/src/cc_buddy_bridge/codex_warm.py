@@ -49,7 +49,6 @@ class WarmCodex:
         self._ready: Any = None
         self._warming: Optional[asyncio.Task] = None
         self._jobs: set[asyncio.Task] = set()
-        self.warm_takes = self.cold_takes = 0
 
     def _spawn(self, coro: Any) -> asyncio.Task:
         task = asyncio.ensure_future(coro)
@@ -81,11 +80,9 @@ class WarmCodex:
         agent, self._ready = self._ready, None
         if agent is not None and agent.warm(self.max_age):
             agent.on_event, agent.ask_user = on_event, ask_user
-            self.warm_takes += 1
             return agent
         if agent is not None:
             self._spawn(agent.discard())
-        self.cold_takes += 1
         return self._factory(on_event=on_event, ask_user=ask_user)
 
     async def refresh_loop(self, every: float = REFRESH_SECS) -> None:

@@ -674,7 +674,7 @@ buddy, go explore"* sends the robot off to look around the room right away
 | `CC_BUDDY_WAKE_WORD` | `hey buddy` | any short English phrase (tokenised at startup, no training) |
 | `CC_BUDDY_WAKE_THRESHOLD` | `0.25` | lower = more sensitive |
 | `CC_BUDDY_MIC` | default input | input device name substring |
-| `CC_BUDDY_REALTIME_MODEL` / `CC_BUDDY_VOICE_NAME` / `CC_BUDDY_VOICE_IDLE_SECS` | `gpt-realtime-2.1-mini` / `marin` / `20` | the conversation |
+| `CC_BUDDY_LIVE_MODEL` / `CC_BUDDY_VOICE_NAME` / `CC_BUDDY_VOICE_IDLE_SECS` | `gpt-live-1` / `marin` / `20` | the conversation |
 | `CC_BUDDY_COMPUTER_CONTROL` / `CC_BUDDY_AGENT_MODEL` / `CC_BUDDY_AGENT_MAX_TURNS` | on / `gpt-6-astra` / `25` | computer use; action logs under `~/.config/cc-buddy-bridge/agent-runs/` |
 
 ## Idle explorer and the diary

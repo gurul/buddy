@@ -18,7 +18,6 @@ def test_publish_reaches_exact_and_prefix_subscribers_only() -> None:
     event = bus.publish("/buddy/memory/lesson", {"action": "hint"})
     assert event.time == 1.0 and event.msg == {"action": "hint"}
     assert got == [("exact", {"action": "hint"}), ("prefix", {"action": "hint"})]
-    assert bus.published == 1
 
 
 def test_unsubscribe_stops_delivery() -> None:

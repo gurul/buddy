@@ -3,7 +3,6 @@ from cc_buddy_bridge.ble import _utf8_safe_chunks
 from cc_buddy_bridge.protocol import (
     LineAssembler,
     build_heartbeat,
-    build_turn_event,
     encode,
     sanitize_for_stick,
 )
@@ -40,56 +39,6 @@ def test_heartbeat_drops_completed_after_pulse_expires():
     assert "completed" not in hb
 
 
-def test_heartbeat_with_pending():
-    s = State()
-    s.session_start("x")
-    s.permission_pending("x", "tid_1", "Bash", "rm -rf /tmp/foo")
-    s.turn_begin("x")
-    hb = build_heartbeat(s)
-    assert hb["total"] == 1
-    assert hb["running"] == 1
-    assert hb["waiting"] == 1
-    assert hb["msg"] == "approve: Bash"
-    assert hb["prompt"]["id"] == "tid_1"
-    assert hb["prompt"]["tool"] == "Bash"
-    assert hb["prompt"]["hint"].startswith("rm -rf")
-    assert hb["prompt"]["queued"] == 0
-    # Freshly issued: ttl is within a second of the full window.
-    assert 298 <= hb["prompt"]["ttl"] <= 300
-
-
-def test_heartbeat_queued_counts_other_sessions():
-    s = State()
-    s.session_start("a")
-    s.session_start("b")
-    s.session_start("c")
-    s.permission_pending("a", "tid_a", "Bash", "git push")
-    s.permission_pending("b", "tid_b", "Bash", "rm -rf x")
-    s.permission_pending("c", "tid_c", "Read", "/etc/hosts")
-    hb = build_heartbeat(s)
-    # Oldest pending is the card; two more wait behind it.
-    assert hb["prompt"]["id"] == "tid_a"
-    assert hb["prompt"]["queued"] == 2
-
-
-def test_heartbeat_ttl_decreases_with_age():
-    s = State()
-    s.session_start("x")
-    p = s.permission_pending("x", "tid_1", "Bash", "git push")
-    p.issued_at -= 120  # pretend it has been waiting two minutes
-    hb = build_heartbeat(s)
-    assert 178 <= hb["prompt"]["ttl"] <= 180
-
-
-def test_heartbeat_ttl_clamps_at_zero():
-    s = State()
-    s.session_start("x")
-    p = s.permission_pending("x", "tid_1", "Bash", "git push")
-    p.issued_at -= 10_000
-    hb = build_heartbeat(s)
-    assert hb["prompt"]["ttl"] == 0
-
-
 def test_heartbeat_entries_formatted():
     s = State()
     s.add_entry("hello world", at=0)  # epoch 0 → local HH:MM
@@ -111,18 +60,6 @@ def test_heartbeat_entries_on_wire_are_oldest_first():
     assert hb["entries"][0].endswith(" oldest")
     assert hb["entries"][1].endswith(" middle")
     assert hb["entries"][2].endswith(" newest")
-
-
-def test_turn_event_size_cap():
-    huge = [{"type": "text", "text": "x" * 5000}]
-    assert build_turn_event("assistant", huge) is None
-
-
-def test_turn_event_ok():
-    evt = build_turn_event("assistant", [{"type": "text", "text": "hi"}])
-    assert evt is not None
-    assert evt["evt"] == "turn"
-    assert evt["role"] == "assistant"
 
 
 def test_encode_terminates_with_newline():
@@ -220,25 +157,11 @@ def test_sanitize_empty_string():
     assert sanitize_for_stick("") == ""
 
 
-def test_heartbeat_sanitizes_prompt_hint():
-    s = State()
-    s.session_start("x")
-    s.permission_pending("x", "tid_1", "Bash", "echo '🎮 emoji here'")
-    hb = build_heartbeat(s)
-    assert "🎮" not in hb["prompt"]["hint"]
-
-
 def test_heartbeat_sanitizes_entries():
     s = State()
     s.add_entry("got 🐾 paw")
     hb = build_heartbeat(s)
     assert "🐾" not in hb["entries"][0]
-
-
-def test_turn_event_sanitizes_nested_content():
-    evt = build_turn_event("assistant", [{"type": "text", "text": "done 🎉"}])
-    assert evt is not None
-    assert "🎉" not in evt["content"][0]["text"]
 
 
 # ---- codec-aware encoding (CJK firmware variant) ----
@@ -352,48 +275,3 @@ def test_build_heartbeat_no_codec_strips_cjk():
     snap = build_heartbeat(s, codec=None)
     assert "你好世界" not in snap["entries"][0]
     assert "?" in snap["entries"][0]
-
-
-def test_heartbeat_risk_hot_for_destructive_bash():
-    s = State()
-    s.session_start("x")
-    s.permission_pending("x", "tid_1", "Bash", "rm -rf /tmp/foo")
-    hb = build_heartbeat(s)
-    assert hb["prompt"]["risk"] == "hot"
-
-
-def test_heartbeat_no_risk_for_mundane_bash():
-    s = State()
-    s.session_start("x")
-    s.permission_pending("x", "tid_1", "Bash", "git push origin main")
-    hb = build_heartbeat(s)
-    assert "risk" not in hb["prompt"]
-
-
-def test_heartbeat_no_risk_for_read():
-    s = State()
-    s.session_start("x")
-    s.permission_pending("x", "tid_1", "Read", "rm -rf")  # path, not a command
-    hb = build_heartbeat(s)
-    assert "risk" not in hb["prompt"]
-
-
-def test_heartbeat_detail_only_when_hint_truncates():
-    s = State()
-    s.session_start("x")
-    s.permission_pending("x", "tid_1", "Bash", "short command")
-    hb = build_heartbeat(s)
-    assert "detail" not in hb["prompt"]
-
-
-def test_heartbeat_detail_carries_long_tail():
-    s = State()
-    s.session_start("x")
-    long_cmd = "python3 -m scripts.deploy --env production --confirm && echo done && rm -rf build/artifacts/staging"
-    s.permission_pending("x", "tid_1", "Bash", long_cmd)
-    hb = build_heartbeat(s)
-    assert len(hb["prompt"]["hint"].encode()) <= 60
-    detail = hb["prompt"]["detail"]
-    assert len(detail.encode()) <= 180
-    assert detail.startswith("python3 -m scripts.deploy")
-    assert "rm -rf build" in detail

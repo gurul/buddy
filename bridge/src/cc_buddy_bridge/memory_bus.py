@@ -116,7 +116,6 @@ class MemoryBus:
         self._lock = threading.Lock()
         self._next_id = 1
         self._clock = clock
-        self.published = 0
         self.dropped = 0
 
     # -- wiring --
@@ -159,7 +158,6 @@ class MemoryBus:
             for pattern, subs in self._subs.items():
                 if pattern.endswith("*") and pattern != topic and topic.startswith(pattern[:-1]):
                     targets.extend(subs)
-            self.published += 1
         loop = self._loop
         if loop is not None and not loop.is_closed():
             try:

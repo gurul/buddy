@@ -26,14 +26,12 @@ import asyncio
 import base64
 import contextlib
 import hashlib
-import io
 import json
 import logging
 import os
 import re
 import struct
 import time
-import wave
 from typing import Any, Awaitable, Callable, Iterator, Optional, Protocol
 
 from . import spend
@@ -185,16 +183,6 @@ class WebSocket:
 
 # ---- the speech on both ends ---------------------------------------------------------------------
 
-def to_wav(pcm: bytes, rate: int = SAMPLE_RATE) -> bytes:
-    buf = io.BytesIO()
-    with wave.open(buf, "wb") as w:
-        w.setnchannels(1)
-        w.setsampwidth(2)
-        w.setframerate(rate)
-        w.writeframes(pcm)
-    return buf.getvalue()
-
-
 _MARKS = re.compile(r"[*_`#>|~]+|\[([^\]]*)\]\([^)]*\)")
 
 
@@ -247,7 +235,6 @@ class LiveEars:
         self.order: list[str] = []
         self.done: dict[str, str] = {}
         self.changed = asyncio.Event()
-        self.commit_at = 0
         self.commit_resolved = True
         self.broken = False
         self.fed = 0
@@ -333,7 +320,9 @@ class OpenAIVoice:
         self.or_key, self.or_model, self.or_voice = "", DEFAULT_OR_TTS_MODEL, DEFAULT_OR_TTS_VOICE
 
     def transcribe(self, pcm: bytes) -> str:
-        resp = self._client.audio.transcriptions.create(file=("call.wav", to_wav(pcm), "audio/wav"),
+        from .notes import to_wav
+
+        resp = self._client.audio.transcriptions.create(file=("call.wav", to_wav(pcm, SAMPLE_RATE), "audio/wav"),
                                                         model=self.stt_model)
         spend.record_transcription(spend.CALLS, self.stt_model, resp, seconds=len(pcm) / BYTES_PER_SEC)
         return (getattr(resp, "text", "") or "").strip()

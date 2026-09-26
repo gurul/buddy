@@ -312,7 +312,7 @@ def test_reply_chaining_demotes_last_page() -> None:
 
 def test_reset_drops_queue_and_clears() -> None:
     pager = CaptionPager()
-    assert pager.reset(0.0) == [] and pager.next_deadline() is None
+    assert pager.reset(0.0) == []
     pager.begin_reply(0.0)
     pager.update(0.0, "Ten past three.", True)
     assert [type(e) for e in pager.poll(0.0)] == [ShowPage]
@@ -320,7 +320,7 @@ def test_reset_drops_queue_and_clears() -> None:
     pager.update(0.3, "And a queued reply.", True)
     assert pager.poll(1.0) == []
     assert pager.reset(1.0) == [Clear()]
-    assert pager.busy is False and pager.next_deadline() is None and pager.poll(5.0) == []
+    assert pager.busy is False and pager.poll(5.0) == []
     pager.update(6.0, "Fresh start ", False)
     ev = pager.poll(6.0)
     assert len(ev) == 1 and isinstance(ev[0], ShowPage) and ev[0].page == 0 and ev[0].chirp is True
@@ -339,25 +339,6 @@ def test_overflow_truncates_with_ellipsis(caplog: pytest.LogCaptureFixture) -> N
     assert len(pages) == 6
     assert pages[-1][-1].endswith("…") and len(pages[-1][-1]) <= 17
     assert sum(1 for r in caplog.records if "longer than 6 pages" in r.getMessage()) == 1
-
-
-def test_next_deadline() -> None:
-    pager = CaptionPager()
-    assert pager.next_deadline() is None
-    pager.begin_reply(0.0)
-    assert pager.next_deadline() is None                    # no text yet
-    pager.update(0.0, "Ten past three.", True)
-    assert pager.next_deadline() == 0.0                     # a first show is pending
-    pager.poll(0.0)
-    assert pager.next_deadline() == pytest.approx(6.0)      # the last-page clear
-    pager.reset(0.0)
-    pager.update(1.0, "Ten ", False)
-    pager.poll(1.0)
-    pager.update(1.05, "Ten past ", False)
-    assert pager.next_deadline() == pytest.approx(1.15)     # a refill pending, throttled
-    assert pager.poll(1.1) == []
-    assert len(pager.poll(1.15)) == 1
-    assert pager.next_deadline() is None                    # still filling, nothing pending
 
 
 def test_geometry_matches_firmware() -> None:
@@ -386,11 +367,11 @@ def test_tool_only_response_while_a_page_is_held_does_not_strand_it() -> None:
     pg.update(0.1, "Ten past three.", True)
     shows = pg.poll(0.1)
     assert shows and shows[-1].final is True
-    clear_alone = pg.next_deadline()
+    clear_alone = pg._clear_at(0, 0)
     pg.begin_reply(0.5)                      # a second response starts (tool call only)
-    assert pg.next_deadline() != clear_alone or not pg.replies[-1].pages   # the held page is no longer "last"
+    assert not pg._is_last_overall(0, 0)   # the held page is no longer "last"
     pg.end_reply(0.6)                        # ... and ends with no text
-    assert len(pg.replies) == 1 and pg.next_deadline() == clear_alone
+    assert len(pg.replies) == 1 and pg._is_last_overall(0, 0) and pg._clear_at(0, 0) == clear_alone
     events = pg.poll(clear_alone + 0.01)
     assert any(isinstance(e, Clear) for e in events)
     assert not pg.busy
@@ -406,7 +387,7 @@ def test_last_page_clear_waits_for_the_freeze_dwell() -> None:
     pg.poll(0.1)                                              # shown at 0.1
     pg.update(5.0, "One two three four five six", True)       # final text lands late, still one page
     pg.poll(5.0)
-    deadline = pg.next_deadline()
+    deadline = pg._clear_at(0, 0)
     assert deadline is not None
     # invariants: never before the final text has been readable for last_page_extra, and never
     # before the hold a page of that length earns from the moment it was last (re)shown

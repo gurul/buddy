@@ -160,10 +160,6 @@ def is_installed() -> bool:
     return PLIST_PATH.exists()
 
 
-def is_widget_installed() -> bool:
-    return WIDGET_PLIST_PATH.exists()
-
-
 def is_loaded() -> bool:
     """True iff launchctl reports the agent currently loaded."""
     if shutil.which("launchctl") is None:

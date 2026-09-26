@@ -73,9 +73,9 @@ def scrub (m : Nat → Bool) (l : List Line) : List Line := l.filter (fun x => !
 def step (fixed : Bool) (m : Nat → Bool) (s : St) : Ev → St
   -- transcripts.py `append`: said after the redaction ⇒ new input
   | .say w => { s with tx := s.tx ++ [(w, decide (1 ≤ s.fpc))] }
-  -- memory.py:440 `self.transcripts.redact(pending.query)`
+  -- memory.py:434 `self.transcripts.redact(pending.query)`
   | .fRedact => if s.fpc = 0 then { s with tx := scrub m s.tx, fpc := 1 } else s
-  -- memory.py:444 `rec.forget_lines(self.cfg, pred)`; records.py:1086-1110 under `_locked`: `_bump`
+  -- memory.py:438 `rec.forget_lines(self.cfg, pred)`; records.py:1086-1110 under `_locked`: `_bump`
   -- (fix, records.py:1088) + scrub + commit "forget: N lines". Before the fix the bump did not exist;
   -- a counter nobody reads changes nothing, so the same step models both.
   | .fRecords =>
@@ -83,11 +83,11 @@ def step (fixed : Bool) (m : Nat → Bool) (s : St) : Ev → St
         let r := scrub m s.recs
         { s with recs := r, git := s.git ++ r, gen := s.gen + 1, fpc := 2 }
       else s
-  -- memory.py:451 `forget_matching(pred)` → mem0_memory.py:462-485, one hold of `_lock`: bump + list +
+  -- memory.py:445 `forget_matching(pred)` → mem0_memory.py:462-485, one hold of `_lock`: bump + list +
   -- delete (fix). Before: memory.py:449-450 `find` then `forget` (see the assumptions).
   | .fIndex =>
       if s.fpc = 2 then { s with idx := scrub m s.idx, igen := s.igen + 1, fpc := 3 } else s
-  -- memory.py:468 `rec.squash_history(repo)`: the tree becomes the only commit
+  -- memory.py:462 `rec.squash_history(repo)`: the tree becomes the only commit
   | .fSquash => if s.fpc = 3 then { s with git := s.recs, fpc := 4 } else s
   -- dream.py:218 `records.forgets_pinned(self.cfg)` (fix); before the fix the night just began
   | .dPin => { s with dpin := s.gen, dbuf := [] }

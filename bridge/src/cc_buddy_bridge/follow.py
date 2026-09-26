@@ -107,16 +107,6 @@ Sender = Callable[[dict[str, Any]], Awaitable[bool]]
 Publisher = Callable[[str, dict[str, Any]], Any]
 
 
-@dataclass(frozen=True)
-class Sighting:
-    """One face in one frame, as vision.FaceResult gives it."""
-
-    bx: int
-    by: int
-    size: int
-    conf: int
-
-
 @dataclass
 class Track:
     """The person being followed, in absolute head angles."""

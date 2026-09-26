@@ -66,9 +66,9 @@ TAPPABLE = {
     "prev": KEY_UP_ARROW,
 }
 
-# poster signature: (keycode, down, flags_mask, is_hold=True) -> None
-# is_hold selects the event source; see _quartz_poster.
-Poster = Callable[..., None]
+# poster signature: (keycode, down) -> None
+# CC_BUDDY_KEY_SOURCE selects the event source; see _quartz_poster.
+Poster = Callable[[int, bool], None]
 
 
 def _quartz_poster() -> Optional[Poster]:
@@ -93,9 +93,6 @@ def _quartz_poster() -> Optional[Poster]:
 
     # Source choice is load-bearing and app-dependent:
     #
-    # * Modifier HOLDS want the real HIDSystemState source — events built with
-    #   a NULL source carry no keyboard state, and dictation apps watching for
-    #   a held modifier ignore them.
     # * Plain TAPS want the NULL source. With a real source, Warp's global key
     #   handling swallowed Return before it reached the focused terminal app —
     #   the dictated text sat in the prompt unsent. NULL-source Return worked
@@ -105,11 +102,9 @@ def _quartz_poster() -> Optional[Poster]:
     # app ever needs the opposite.
     force_hid = (os.environ.get("CC_BUDDY_KEY_SOURCE") or "").strip().lower() == "hid"
 
-    def post(keycode: int, down: bool, flags: int, hold: bool = True) -> None:
+    def post(keycode: int, down: bool) -> None:
         ev = Quartz.CGEventCreateKeyboardEvent(
-            src if (hold or force_hid) else None, keycode, down)
-        if flags:
-            Quartz.CGEventSetFlags(ev, flags)
+            src if force_hid else None, keycode, down)
         Quartz.CGEventPost(Quartz.kCGHIDEventTap, ev)
 
     return post
@@ -120,7 +115,7 @@ def _check_accessibility(prompt: bool = False) -> bool:
 
     ``prompt`` shows the system "would like to control this computer" dialog —
     pass it at most ONCE per daemon life. Prompting on every failed attempt
-    re-pops the dialog on every hold, which is indistinguishable from the grant
+    re-pops the dialog on every tap, which is indistinguishable from the grant
     not working and trains the user to dismiss it.
     """
     try:
@@ -137,8 +132,8 @@ def _check_accessibility(prompt: bool = False) -> bool:
         # Can't check — post anyway; if trust is missing the events are
         # silently dropped, and the log line below is the only breadcrumb.
         log.warning(
-            "voice: ApplicationServices unavailable — cannot verify "
-            "Accessibility permission; if dictation never starts, grant it "
+            "key: ApplicationServices unavailable — cannot verify "
+            "Accessibility permission; if swipe-to-key does nothing, grant it "
             "to the daemon's python in System Settings > Privacy & Security")
         return True
 
@@ -257,11 +252,11 @@ class KeyTapper:
                      "ok" if ok else "FAILED")
             return ok
 
-        self._poster(key, True, 0, False)
+        self._poster(key, True)
         # Hold briefly. A down/up in the same microsecond is not a keypress any
         # human could produce, and apps that debounce or sample input on a
         # frame boundary drop it entirely.
         time.sleep(0.03)
-        self._poster(key, False, 0, False)
+        self._poster(key, False)
         log.info("key: tapped %s", name)
         return True

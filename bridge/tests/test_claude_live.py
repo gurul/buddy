@@ -76,7 +76,6 @@ def _state(now: float) -> State:
                           ("new", "/Users/g/fresh", 5), ("asks", "/Users/g/asks", 900), ("bare", None, 900)):
         state.session_start(sid, cwd=cwd)
         state.sessions[sid].started_at = now - age
-    state.permission_pending("asks", "tu1", "Bash", "rm -rf build")
     return state
 
 
@@ -84,9 +83,9 @@ def test_the_picker_drops_dead_sessions_and_forgets_them() -> None:
     now = 1_800_000_000.0
     state = _state(now)
     got = claude_live.picker_sessions(state, {"/Users/g/repo"}, now=now)
-    # newest first; the new one (grace) and the one with a pending permission are kept whatever the probe says
-    assert got == ["/Users/g/fresh", "/Users/g/repo", "/Users/g/asks"]
-    assert "dead" not in state.sessions and "bare" in state.sessions
+    # newest first; the new one (grace) is kept whatever the probe says
+    assert got == ["/Users/g/fresh", "/Users/g/repo"]
+    assert "dead" not in state.sessions and "asks" not in state.sessions and "bare" in state.sessions
 
 
 def test_a_blind_probe_keeps_every_session() -> None:

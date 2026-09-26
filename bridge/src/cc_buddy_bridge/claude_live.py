@@ -121,7 +121,7 @@ def picker_sessions(state: Any, live: Optional[set[str]] = None, *,
     for s in sessions:
         if not s.cwd:
             continue                                 # no folder: never in the picker, and nothing to judge by
-        if alive(s.cwd, live) or s.pending is not None or at - s.started_at < GRACE_SECS:
+        if alive(s.cwd, live) or at - s.started_at < GRACE_SECS:
             keep.append(s.cwd)
             continue
         state.session_end(s.session_id)

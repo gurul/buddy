@@ -1,6 +1,6 @@
 """decider.py against a scripted predict: the one-question contract, every answer
 rejection rule, the head-budget trim, the three prompt styles, the overflow flag,
-the noul shadow judge, the available flag and the predict lock."""
+the available flag and the predict lock."""
 
 from __future__ import annotations
 
@@ -15,7 +15,6 @@ from cc_buddy_bridge.decider import (
     STYLES,
     Choice,
     Decider,
-    Judgement,
     instruction_tokens,
     render_instructions,
     render_option,
@@ -238,33 +237,6 @@ def test_decider_sends_its_style_and_the_question_id_is_pick() -> None:
         assert q["pick"]["instructions"] == render_instructions(style, "switch to week view", MENU)
 
 
-# ---- judge (shadow verifier) ------------------------------------------------------------
-
-def test_judge_maps_noul_and_criteria() -> None:
-    d, p = _decider({"answers": {"judge": {"type": "noul", "noul": 0.83, "confidence": 0.83}},
-                     "usage": {"input_tokens": 50}})
-    j = d.judge("Is the goal visibly achieved?", {"goal": "g", "seen": "Week selected"},
-                criteria={"true": "yes", "false": "no"})
-    assert isinstance(j, Judgement) and j.p_true == pytest.approx(0.83) and not j.error and j.ms > 0
-    state, questions = p.calls[0]
-    assert state == {"goal": "g", "seen": "Week selected"}
-    assert questions == {"judge": {"type": "noul", "instructions": "Is the goal visibly achieved?",
-                                   "criteria": {"true": "yes", "false": "no"}}}
-    d, p = _decider({"answers": {"judge": {"noul": 0.2}}})
-    assert d.judge("q", {}).p_true == pytest.approx(0.2)
-    assert p.calls[0][1]["judge"] == {"type": "noul", "instructions": "q"}     # no criteria key when none given
-
-
-def test_judge_error_paths_never_raise() -> None:
-    d, _ = _decider(raise_first=RuntimeError("boom"))
-    j = d.judge("q", {})
-    assert j.p_true == 0.0 and j.error == "predict raised RuntimeError: boom"
-    for result in ({}, {"answers": {"judge": {"noul": 1.5}}}, {"answers": {"judge": {"noul": "x"}}}, "no"):
-        d, _ = _decider(result)
-        j = d.judge("q", {})
-        assert j.p_true == 0.0 and j.error
-
-
 # ---- the available flag ------------------------------------------------------------------
 
 def test_a_bare_decider_is_not_available_until_a_loader_warms_it() -> None:
@@ -280,14 +252,13 @@ def test_predict_runs_under_the_lock() -> None:
 
     def predict(state, questions):
         seen.append(holder["d"]._lock.locked())
-        return _answer("1", PROBS_OK) if "pick" in questions else {"answers": {"judge": {"noul": 0.5}}}
+        return _answer("1", PROBS_OK)
 
     d = Decider(predict)
     holder["d"] = d
     assert isinstance(d._lock, type(threading.Lock()))
     d.choose("go", app="A", context="", options=MENU)
-    d.judge("q", {})
-    assert seen == [True, True] and not d._lock.locked()
+    assert seen == [True] and not d._lock.locked()
 
 
 # ---- render_option: the one wording the lane and the eval share ----------------------------

@@ -273,7 +273,6 @@ class ComposioBridge:
         self._client: Any = None
         self._session: Any = None
         self._tools: list[dict[str, Any]] = []
-        self._requests: dict[str, Any] = {}
 
     @property
     def started(self) -> bool:
@@ -343,40 +342,3 @@ class ComposioBridge:
             return {"ok": False, "reason": f"{type(e).__name__}: {_clip(str(e), 200)}"}
         out.setdefault("ok", not out.get("error"))
         return out
-
-    def toolkits(self) -> list[tuple[str, bool]]:
-        """(toolkit slug, connected) for the toolkits the session knows. The slug is what connect_link takes."""
-        if self._session is None:
-            return []
-        page = self._session.toolkits()
-        out: list[tuple[str, bool]] = []
-        for item in getattr(page, "items", None) or []:
-            slug = str(getattr(item, "slug", None) or getattr(item, "name", "") or "").lower()
-            connection = getattr(item, "connection", None)
-            active = bool(getattr(connection, "is_active", False)) if connection is not None else False
-            if slug:
-                out.append((slug, active))
-        return out
-
-    def connect_link(self, toolkit: str) -> str:
-        """The Connect Link for an app: the owner opens it, signs in, and the session gains the account."""
-        if self._session is None:
-            raise RuntimeError("composio is not started")
-        req = self._session.authorize(toolkit)
-        self._requests[toolkit] = req
-        return str(getattr(req, "redirect_url", "") or "")
-
-    def wait_for(self, toolkit: str, timeout: Optional[float] = None) -> bool:
-        """Block until the owner finishes connecting the app, or the timeout passes. Never raises."""
-        req = self._requests.get(toolkit)
-        try:
-            if req is None:
-                if self._session is None:
-                    return False
-                req = self._session.authorize(toolkit)
-                self._requests[toolkit] = req
-            req.wait_for_connection(timeout=timeout if timeout is not None else self.config.timeout_secs)
-        except Exception as e:  # noqa: BLE001
-            log.warning("composio: waiting for %s: %s", toolkit, type(e).__name__)
-            return False
-        return True

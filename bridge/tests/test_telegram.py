@@ -262,10 +262,18 @@ class Rig:
             await asyncio.sleep(0)
 
         lent: dict[str, Any] = dict(agent_factory=factory, brief=lambda: "", on_state=self.states.append,
-                                    on_closed=self.closed.append, clock=lambda: self.now["t"], wall=lambda: NOW,
+                                    clock=lambda: self.now["t"], wall=lambda: NOW,
                                     sleep=no_sleep, screen=lambda: None)
         lent.update(kw)
         self.inlet = TelegramInlet(config, api, create, **lent)
+        real_close = self.inlet._close_chat
+
+        def close_and_keep() -> None:
+            if self.inlet.turns:
+                self.closed.append(list(self.inlet.turns))
+            real_close()
+
+        self.inlet._close_chat = close_and_keep
 
 
 MEMORY_TOOL_SCHEMAS: list[dict[str, Any]] = [
@@ -499,10 +507,11 @@ def test_words_and_the_token_never_reach_the_log(caplog: pytest.LogCaptureFixtur
         inlet = TelegramInlet(CFG, api, create, wall=lambda: NOW, sleep=lambda s: asyncio.sleep(0))
         await asyncio.wait_for(inlet.run(), timeout=5)   # ends by itself on the 409
         await api.close()
-        assert inlet.stopped_reason == "409" and len(create.requests) == 1
+        assert len(create.requests) == 1
 
     with caplog.at_level(logging.DEBUG):
         asyncio.run(go())
+    assert "answered 409" in caplog.text
     text = caplog.text
     # The controls: the capture is live, httpx really did log request lines, and the drop line is there.
     assert "HTTP Request" in text and "<token>" in text
@@ -1399,7 +1408,7 @@ def test_a_network_error_backs_off_and_polling_resumes() -> None:
     rig = Rig(api, FakeCreate(say("Yep!")), sleep=nap)
     run_rig(rig)
     assert naps == [1.0, 2.0, 4.0, 1.0]                   # doubles, and a good poll resets it
-    assert api.sent == [(OWNER, "Yep!")] and rig.inlet.stopped_reason is None
+    assert api.sent == [(OWNER, "Yep!")]
 
 
 def test_a_slow_turn_does_not_stop_the_next_poll() -> None:
@@ -1433,8 +1442,9 @@ def test_a_bad_token_or_a_second_poller_stops_the_inlet(caplog: pytest.LogCaptur
         with caplog.at_level(logging.ERROR):
             caplog.clear()
             asyncio.run(asyncio.wait_for(rig.inlet.run(), timeout=2))
-        assert rig.inlet.stopped_reason == str(code) and api.polls == 1
-        assert len([r for r in caplog.records if r.levelno == logging.ERROR]) == 1
+        assert api.polls == 1
+        errors = [r for r in caplog.records if r.levelno == logging.ERROR]
+        assert len(errors) == 1 and f"answered {code}" in errors[0].getMessage()
 
 
 # ---- G11: memory ------------------------------------------------------------------------------
@@ -4486,7 +4496,7 @@ def test_a_turn_is_written_to_the_transcript_as_it_happens(tmp_path: Path) -> No
     assert _rows(memory, closes=True) == [("owner", "say", "hello there"), ("buddy", "say", "Hi!"),
                                           ("system", "close", "")]
     assert {ln["conv"] for ln in lines} == {lines[0]["conv"]} and {ln["ch"] for ln in lines} == {"telegram"}
-    assert rig.closed == [[("user", "hello there"), ("buddy", "Hi!")]]    # on_closed, when lent, still runs
+    assert rig.closed == [[("user", "hello there"), ("buddy", "Hi!")]]    # the history as the chat closed
     # the control: with no memory lent nothing is minted or written
     rig = Rig(FakeApi([update("hello there")]), FakeCreate(say("Hi!")))
     run_rig(rig)
@@ -4530,9 +4540,7 @@ def test_what_claude_says_in_the_relay_is_in_the_transcript(tmp_path: Path) -> N
 def test_an_idle_close_writes_the_close_marker_first_and_the_next_text_opens_a_new_conversation(
         tmp_path: Path) -> None:
     memory = FakeMemory(tmp_path)
-    kinds_at_close: list[list[str]] = []
-    rig = Rig(FakeApi(), FakeCreate(say("One."), say("Two.")), memory=memory,
-              on_closed=lambda turns: kinds_at_close.append([ln["kind"] for ln in memory.said()]))
+    rig = Rig(FakeApi(), FakeCreate(say("One."), say("Two.")), memory=memory)
 
     async def go() -> tuple[str, str]:
         await rig.inlet._turn(_in("the first text", 1))
@@ -4543,11 +4551,11 @@ def test_an_idle_close_writes_the_close_marker_first_and_the_next_text_opens_a_n
         rig.now["t"] = 601.0
         rig.inlet._close_quiet_chat()
         assert rig.inlet._conv is None and rig.inlet.turns == []
+        assert [ln["kind"] for ln in memory.said()] == ["say", "say", "close"]
         await rig.inlet._turn(_in("the second text", 2))
         return first, rig.inlet._conv
 
     first, second = asyncio.run(go())
-    assert kinds_at_close == [["say", "say", "close"]]    # the marker is on disk before on_closed runs
     assert first and second and first != second
     assert [ln["conv"] for ln in memory.said()] == [first] * 3 + [second] * 2
     # the RAM history is gone, but the words are not: the closed chat is in the next turn's today block

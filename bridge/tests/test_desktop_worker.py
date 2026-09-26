@@ -337,47 +337,6 @@ def test_reply_carries_timing_with_helpers() -> None:
     assert "timing" not in dw.execute("log(1)", _ns())                     # no helpers: no timing
 
 
-class _FakeDecider:
-    def __init__(self, p_true: float = 0.8, error: str = "") -> None:
-        self.p_true, self.error = p_true, error
-        self.calls: list[tuple] = []
-
-    def judge(self, question: str, state: dict, criteria=None):
-        self.calls.append((question, state, criteria))
-        return SimpleNamespace(p_true=self.p_true, ms=1.0, error=self.error)
-
-
-def test_verify_operation_answers_from_the_local_decider_and_is_never_terminal(monkeypatch) -> None:
-    decider = _FakeDecider(0.83)
-    h, ns, _clock, _s = _bench([_still()], decider=decider)
-    out: list[dict] = []
-    monkeypatch.setattr(dw, "emit", out.append)
-    dw.serve(ns, iter([json.dumps({"id": 1, "operation": "verify", "goal": "week view", "claim": "It shows the week."}) + "\n",
-                       json.dumps({"id": 2, "operation": "verify", "goal": "x"}) + "\n",
-                       json.dumps({"id": 3, "operation": "execute", "code": "log('still serving')"}) + "\n"]), h)
-    assert out[0]["id"] == 1 and out[0]["verify"]["p_true"] == 0.83 and out[0]["verify"]["ms"] >= 0
-    assert out[0]["verify"]["summary"].startswith("Calendar — 'x'")
-    [(question, state, criteria)] = decider.calls
-    assert state["goal"] == "week view" and state["claim"] == "It shows the week." and state["app"] == "Calendar"
-    assert set(criteria) == {"false", "true"} and "claim" in question
-    assert out[1] == {"id": 2, "verify": {"error": "verify needs string goal and claim"}}
-    assert out[2]["output"][0] == {"type": "input_text", "text": "still serving"}   # a bad verify is not terminal
-
-
-def test_verify_without_a_decider_or_with_a_broken_one_reports_an_error() -> None:
-    h, _ns_, _c, _s = _bench([_still()])
-    assert h.local_verify("g", "c") == {"error": "no local decider (fast lane off)"}
-    h2, _ns2, _c2, _s2 = _bench([_still()], decider=_FakeDecider(error="predict failed"))
-    assert h2.local_verify("g", "c")["error"] == "predict failed"
-
-    class Boom:
-        def judge(self, *a, **k):
-            raise RuntimeError("no metal device")
-    h3, _ns3, _c3, _s3 = _bench([_still()], decider=Boom())
-    assert h3.local_verify("g", "c")["error"] == "RuntimeError: no metal device"
-    assert dw.verify({"goal": "g", "claim": "c"}, None) == {"verify": {"error": "no helpers in this worker"}}
-
-
 # ---- the fast lane's worker wiring ------------------------------------------------------------
 
 def test_start_fast_lane_loads_in_a_thread_and_reports_status() -> None:
@@ -517,15 +476,12 @@ def test_decider_backend_selects_jev_only_on_the_model_path(monkeypatch) -> None
     # keyword mode: the gate decides, so a hosted model is not loaded at all — nothing leaves the Mac
     h, _ns, _c, _s = _bench([_still()])
     assert dw.start_fast_lane(h, base, thread=False) == "ready (keyword gate)"
-    assert loads == [] and h.decider is None and h.decider_remote is True
+    assert loads == [] and h.decider is None
     # model mode: Jev loads through jev.load, in the style it scored best with
     h2, _ns2, _c2, _s2 = _bench([_still()])
     status = dw.start_fast_lane(h2, {**base, "CC_BUDDY_FAST_LANE_DECIDE": "model"}, thread=False)
     assert status.startswith("ready (load 1 ms, warm 250 ms, style jev)") and h2.decider is not None
     assert loads == [{"style": "jev", "route": "openrouter"}]
-    # and the shadow verifier never hands a hosted model the screen's text
-    assert h2.local_verify("goal", "claim") == {
-        "error": "the decider is remote; the shadow verifier only runs on a local model"}
 
 
 # ---- the outline and run_plan operations (plan once, execute: plan_executor.py) -----------------------

@@ -18,10 +18,7 @@ import socket as _socket
 import sys
 from typing import Any, Optional
 
-from ..ipc import default_spec, make_transport
-
-# Back-compat for existing imports.
-DEFAULT_SOCKET_PATH = default_spec()
+from ..ipc import make_transport
 
 # How long a hook is willing to wait for the daemon before giving up.
 # PreToolUse overrides this to a much larger value for the BLE round-trip.

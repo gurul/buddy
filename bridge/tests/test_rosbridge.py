@@ -52,10 +52,10 @@ def test_subscribe_then_bus_publish_reaches_the_client() -> None:
                 await asyncio.sleep(0.05)
                 bus.publish("/buddy/state", {"state": "wake"})
                 assert await _recv(ws) == {"op": "publish", "topic": "/buddy/state", "msg": {"state": "wake"}}
-                assert server.clients == 1 and server.stats["sent"] == 1
+                assert len(server._clients) == 1 and server.stats["sent"] == 1
         finally:
             await server.stop()
-        assert server.clients == 0
+        assert len(server._clients) == 0
     _run(go())
 
 
@@ -100,7 +100,7 @@ def test_unsubscribe_stops_delivery_and_disconnect_clears_the_bus() -> None:
                     await _recv(ws, 0.2)
             await asyncio.sleep(0.1)
             assert sum(len(v) for v in bus._subs.values()) == 0
-            assert server.clients == 0
+            assert len(server._clients) == 0
         finally:
             await server.stop()
     _run(go())

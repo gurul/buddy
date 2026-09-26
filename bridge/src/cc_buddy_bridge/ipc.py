@@ -35,8 +35,7 @@ from typing import Any, Awaitable, Callable, Optional, Protocol
 
 log = logging.getLogger(__name__)
 
-# Platform defaults. The public DEFAULT_SOCKET_PATH name stays for back-compat
-# even though the value is now a transport spec, not always a filesystem path.
+# Platform defaults.
 DEFAULT_UNIX_PATH = "/tmp/cc-buddy-bridge.sock"
 DEFAULT_TCP_HOST = "127.0.0.1"
 DEFAULT_TCP_PORT = 48765
@@ -221,9 +220,6 @@ def make_transport(spec: Optional[str] = None) -> Transport:
     return parse_spec(chosen)
 
 
-DEFAULT_SOCKET_PATH = default_spec()
-
-
 # Handler signature: async (request_dict) -> response_dict.
 Handler = Callable[[dict[str, Any]], Awaitable[dict[str, Any]]]
 
@@ -243,11 +239,6 @@ class IPCServer:
     @property
     def address(self) -> str:
         """Transport-specific address string for logs / errors."""
-        return self._transport.address
-
-    # Back-compat alias: existing callers / tests may still read .socket_path.
-    @property
-    def socket_path(self) -> str:
         return self._transport.address
 
     async def start(self) -> None:

@@ -11,24 +11,14 @@ import time
 from datetime import datetime
 from typing import Any, Optional
 
-from .matchers import is_destructive
 from .state import State
 
 # Nordic UART Service UUIDs (standard)
-NUS_SERVICE_UUID = "6e400001-b5a3-f393-e0a9-e50e24dcca9e"
 NUS_RX_UUID = "6e400002-b5a3-f393-e0a9-e50e24dcca9e"  # central → peripheral (we write)
 NUS_TX_UUID = "6e400003-b5a3-f393-e0a9-e50e24dcca9e"  # peripheral → central (we notify)
 
 # How often we send a keepalive heartbeat if nothing else changed (seconds).
 HEARTBEAT_KEEPALIVE = 10.0
-
-# How long the daemon waits for a stick decision before falling back to
-# Claude Code's terminal prompt. Lives here (not daemon.py) because the wire
-# `prompt.ttl` field is derived from it, so protocol and policy stay in sync.
-PERMISSION_WAIT_SECS = 300.0
-
-# Size cap for turn events per REFERENCE.md (4KB after UTF-8 encoding).
-TURN_EVENT_MAX_BYTES = 4096
 
 # Max UTF-8 bytes for the text portion of each entry (before the "HH:MM " prefix).
 # CJK characters are 3 bytes each, so 60 bytes ≈ 20 CJK chars or 60 ASCII chars.
@@ -61,13 +51,12 @@ def build_heartbeat(state: State, msg: Optional[str] = None, codec: Optional[str
     the top of its wrapped buffer. We keep ``state.entries`` newest-first
     internally because that's cheaper to prepend to — reverse on serialize.
     """
-    pending = state.first_pending()
     snapshot: dict[str, Any] = {
         "total": state.total,
         "running": state.running_count,
         "waiting": state.waiting_count,
-        "msg": sanitize_for_stick(msg if msg is not None else _default_msg(state, pending), codec),
-        "entries": [sanitize_for_stick(_format_entry(e.at, e.text, codec), codec) for e in reversed(state.entries)],
+        "msg": sanitize_for_stick(msg if msg is not None else _default_msg(state), codec),
+        "entries": [sanitize_for_stick(_format_entry(e.at, e.text), codec) for e in reversed(state.entries)],
         "tokens": state.tokens_cumulative,
         "tokens_today": state.tokens_today,
         # Per-agent rows for the landscape monitor build. Firmware ignores the
@@ -83,58 +72,7 @@ def build_heartbeat(state: State, msg: Optional[str] = None, codec: Optional[str
     # this field onto recentlyCompleted, picked up by main.cpp:derive.
     if state.is_celebrating:
         snapshot["completed"] = True
-    if pending is not None:
-        import os
-        snapshot["prompt"] = {
-            "id": pending.tool_use_id,  # tool_use_id is ASCII by construction
-            "tool": sanitize_for_stick(pending.tool_name, codec),
-            "hint": sanitize_for_stick(truncate_utf8_bytes(pending.hint, 60), codec),
-            # cwd basename: which session is asking. The full path stays
-            # host-side; the card only needs the repo name.
-            "sess": sanitize_for_stick(os.path.basename(pending.cwd or "") or "?", codec),
-            # How many MORE prompts wait behind this one — the card renders
-            # them as a peeking deck so a queue is visible at a glance.
-            "queued": max(0, state.pending_count - 1),
-            # Seconds until the daemon gives up and falls back to the
-            # terminal. The card counts down locally between heartbeats.
-            "ttl": max(0, int(PERMISSION_WAIT_SECS - (time.monotonic() - pending.issued_at))),
-        }
-        # Destructive/privileged Bash commands render hot: red border and a
-        # stiffer approve threshold on the stick.
-        if pending.tool_name == "Bash" and is_destructive(pending.hint):
-            snapshot["prompt"]["risk"] = "hot"
-        # When the 60-byte hint truncates the command, ship a longer detail
-        # tail — the text-first card shows it full screen by default. 720
-        # bytes fills the card's ~21x36-char text area and must stay inside
-        # the firmware's promptDetail[724] and its 2048-byte line buffer.
-        if len(pending.hint.encode("utf-8")) > 60:
-            snapshot["prompt"]["detail"] = sanitize_for_stick(
-                truncate_utf8_bytes(pending.hint, 720), codec)
     return snapshot
-
-
-def build_turn_event(role: str, content: list[dict[str, Any]]) -> Optional[dict[str, Any]]:
-    """Build a one-shot turn event. Returns None if it would exceed TURN_EVENT_MAX_BYTES.
-
-    Recursively sanitizes string values inside the content array so the stick
-    doesn't receive glyphs its bitmap font can't render (which, empirically,
-    crashes the firmware)."""
-    evt = {"evt": "turn", "role": role, "content": _sanitize_content(content)}
-    encoded = json.dumps(evt, separators=(",", ":"), ensure_ascii=False).encode("utf-8")
-    if len(encoded) > TURN_EVENT_MAX_BYTES:
-        return None
-    return evt
-
-
-def _sanitize_content(obj: Any) -> Any:
-    """Deep-copy helper that sanitizes every string leaf."""
-    if isinstance(obj, str):
-        return sanitize_for_stick(obj)
-    if isinstance(obj, list):
-        return [_sanitize_content(x) for x in obj]
-    if isinstance(obj, dict):
-        return {k: _sanitize_content(v) for k, v in obj.items()}
-    return obj
 
 
 def build_time_sync() -> dict[str, Any]:
@@ -142,14 +80,6 @@ def build_time_sync() -> dict[str, Any]:
     now = int(time.time())
     offset = int(datetime.now().astimezone().utcoffset().total_seconds())  # type: ignore[union-attr]
     return {"time": [now, offset]}
-
-
-def build_owner(name: str) -> dict[str, Any]:
-    return {"cmd": "owner", "name": name}
-
-
-def build_name(device_name: str) -> dict[str, Any]:
-    return {"cmd": "name", "name": device_name}
 
 
 def encode(obj: dict[str, Any], codec: Optional[str] = None) -> bytes:
@@ -309,13 +239,10 @@ def sanitize_for_stick(text: str, codec: Optional[str] = None) -> str:
 
 # ---- internals ----
 
-def _format_entry(at: float, text: str, codec: Optional[str] = None) -> str:
+def _format_entry(at: float, text: str) -> str:
     """Format an entry for the wire: ``HH:MM text``. REFERENCE.md shows
-    ``10:42 git push``. The codec argument is reserved for callers that
-    want a codec-aware variant later; it's accepted-but-unused right now
-    because the firmware does its own pixel-aware wrap on incoming lines.
+    ``10:42 git push``.
     """
-    del codec  # unused; the wrap renderer handles long lines downstream.
     hhmm = datetime.fromtimestamp(at).strftime("%H:%M")
     text = text.replace("\n", " ").strip()
     return f"{hhmm} {truncate_utf8_bytes(text, ENTRY_MAX_BYTES)}"
@@ -342,9 +269,7 @@ def truncate_utf8_bytes(text: str, max_bytes: int) -> str:
     return encoded[:end].decode("utf-8") + "…"
 
 
-def _default_msg(state: State, pending) -> str:
-    if pending is not None:
-        return f"approve: {pending.tool_name}"
+def _default_msg(state: State) -> str:
     if state.running_count > 0:
         return f"{state.running_count} running"
     if state.total > 0:

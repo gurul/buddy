@@ -10,6 +10,7 @@ from pathlib import Path
 
 import httpx
 import pytest
+from initdata import sign_init_data
 
 from cc_buddy_bridge import miniapp, spend
 from cc_buddy_bridge.miniapp import (
@@ -19,7 +20,6 @@ from cc_buddy_bridge.miniapp import (
     SpendLedger,
     check_init_data,
     cost_usd,
-    sign_init_data,
 )
 
 TOKEN = "123456:TEST-token"

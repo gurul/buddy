@@ -59,7 +59,7 @@ from pathlib import Path
 from typing import Any, Callable, Optional, Protocol, Union
 
 from . import spend
-from .vision import Frame, encode_gray_png
+from .vision import Frame, _clamp, encode_gray_png
 
 log = logging.getLogger(__name__)
 
@@ -224,10 +224,6 @@ Action = Union[Mode, Look, Note, Rest]
 
 class ExploreRefused(Exception):
     """``Explorer.request`` cannot start: the reason is the message."""
-
-
-def _clamp(v: float, lo: int, hi: int) -> int:
-    return max(lo, min(hi, int(round(v))))
 
 
 def build_look_cmd(yaw: float, pitch: float, hold_ms: int = LOOK_HOLD_MS) -> dict[str, Any]:
@@ -414,10 +410,6 @@ class ChangeDetector:
         if cur is None or len(cur) != len(ref):
             return None
         return mean_abs_diff(cur, ref)
-
-    def changed(self, key: int, frame: Frame) -> bool:
-        d = self.measure(key, frame)
-        return d is None or d > self.threshold
 
     def keep(self, key: int, frame: Frame) -> None:
         cur = self.thumb(frame)

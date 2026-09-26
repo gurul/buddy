@@ -466,7 +466,7 @@ async def run_one(task: Task, model: str, env: dict[str, str], state: FixtureSta
     from cc_buddy_bridge.browser_lane import BrowserLane, BrowserLaneConfig
 
     profile = Path(tempfile.mkdtemp(prefix="buddy-eval-profile-"))
-    lane = BrowserLane(BrowserLaneConfig(enabled=True, profile=profile, headless=True, attach=False),
+    lane = BrowserLane(BrowserLaneConfig(profile=profile, headless=True, attach=False),
                        step_asker=step_asker)
     calls: list[dict[str, Any]] = []
     asks: list[str] = []

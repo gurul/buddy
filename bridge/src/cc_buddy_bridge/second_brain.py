@@ -34,7 +34,7 @@ Four decisions, all code:
    handful of prefix rules (``classify_capture``), not a model call: a capture that
    waits on a model is a capture the owner stops making.
 3. **The agent can edit with a saved previous version; it never deletes files.** Filing changes ``status:`` and
-   moves the file; archiving moves it under ``09-archive/`` with its path kept; a
+   moves the file (``09-archive/`` is one of the folders it files into); a
    name clash gets ``-2``, ``-3``. Edits require the revision just read and keep undo history.
    ``read_note`` refuses any path that leaves the root or enters ``.obsidian/``.
 4. **Workflows are prompts compiled from the vault, and the model is the caller's.**
@@ -897,32 +897,14 @@ def _move(root: Path, src: Path, dest_dir: Path, name: str, status: str) -> str:
     return _rel(root, dest)
 
 
-def file_note(root: Path, rel_path: str, into: str, *, new_name: Optional[str] = None) -> str:
+def file_note(root: Path, rel_path: str, into: str) -> str:
     """Move a note into a PARA folder, mark it ``status: filed``, return its new relative path."""
     src = _resolve(root, rel_path)
     if not src.is_file() or src.suffix != ".md":
         raise ValueError("no such note")
     dest_dir = _destination(root, into)
-    name = src.name
-    if new_name:
-        stem = slugify(Path(new_name).stem)
-        name = f"{stem}.md"
-    new_rel = _move(root, src, dest_dir, name, "filed")
+    new_rel = _move(root, src, dest_dir, src.name, "filed")
     log.info("second brain: filed %s into %s", src.name, _rel(root, dest_dir))
-    return new_rel
-
-
-def archive(root: Path, rel_path: str) -> str:
-    """Move a note under ``09-archive/`` with its sub-path kept, mark it ``status: archived``."""
-    src = _resolve(root, rel_path)
-    if not src.is_file():
-        raise ValueError("no such note")
-    rel = Path(_rel(root, src))
-    if rel.parts[0] == ARCHIVE_DIR:
-        raise ValueError("already archived")
-    dest_dir = Path(root) / ARCHIVE_DIR / rel.parent
-    new_rel = _move(root, src, dest_dir, src.name, "archived")
-    log.info("second brain: archived %s", src.name)
     return new_rel
 
 
@@ -1104,26 +1086,6 @@ def workflow_prompt(root: Path, name: str, *, extra: str = "", now: Optional[dat
     elif name == "distill-chat":
         parts.append("<transcript>\n(no transcript was supplied: ask the owner to paste it)\n</transcript>")
     return "\n\n".join(parts)
-
-
-def apply_triage(root: Path, decisions: list[dict[str, Any]]) -> list[str]:
-    """Carry out a triage answer: each decision files or archives one note. Never deletes; refusals are lines."""
-    out: list[str] = []
-    for d in decisions or []:
-        if not isinstance(d, dict) or not d.get("path"):
-            out.append("refused: a decision needs a path")
-            continue
-        path = str(d["path"])
-        try:
-            if d.get("archive"):
-                out.append(f"{path} -> {archive(root, path)}")
-            elif d.get("into"):
-                out.append(f"{path} -> {file_note(root, path, str(d['into']))}")
-            else:
-                out.append(f"{path}: refused: neither into nor archive")
-        except (ValueError, OSError) as e:
-            out.append(f"{path}: refused: {e}")
-    return out
 
 
 # ---- the text brain's tools ----------------------------------------------------------------------

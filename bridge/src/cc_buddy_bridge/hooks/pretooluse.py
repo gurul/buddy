@@ -17,7 +17,8 @@ import sys
 from ._client import post, read_hook_input
 
 # Hard upper bound for how long this hook blocks. Must be < the `timeout` we
-# set in settings.json and < daemon's PERMISSION_WAIT_SECS. 5 minutes is plenty
+# set in settings.json (330 s) and > the daemon's permission wait
+# (telegram.DEFAULT_PERMISSION_TIMEOUT_SECS, 240 s). 5 minutes is plenty
 # of human reaction time and still leaves headroom.
 BLOCK_TIMEOUT_SECS = 320.0
 

@@ -1,8 +1,5 @@
-import time
-
 from cc_buddy_bridge.state import (
     NON_WAITING_NOTIFICATION_KINDS,
-    WAITING_NOTIFICATION_KINDS,
     State,
     notification_waits,
 )
@@ -30,25 +27,6 @@ def test_turn_running_count():
     assert s.running_count == 1
 
 
-def test_permission_pending_and_resolve():
-    s = State()
-    s.session_start("x")
-    p = s.permission_pending("x", "tid_1", "Bash", "rm -rf /tmp/foo")
-    assert s.waiting_count == 1
-    assert s.first_pending() is p
-    resolved = s.permission_resolved("tid_1")
-    assert resolved is p
-    assert s.waiting_count == 0
-    assert s.first_pending() is None
-
-
-def test_permission_pending_on_unknown_session_auto_creates():
-    s = State()
-    s.permission_pending("zzz", "tid_X", "Bash", "cmd")
-    assert s.waiting_count == 1
-    assert "zzz" in s.sessions
-
-
 def test_entries_newest_first_and_capped():
     s = State()
     for i in range(20):
@@ -73,25 +51,6 @@ def test_tokens_setter_with_cost():
     s.set_tokens(1000, 200, cost_cumulative=12.34, cost_today=2.50)
     assert s.cost_cumulative == 12.34
     assert s.cost_today == 2.50
-
-
-def test_first_pending_picks_oldest():
-    s = State()
-    s.session_start("a")
-    s.session_start("b")
-    p_a = s.permission_pending("a", "t1", "Bash", "cmd1")
-    time.sleep(0.01)
-    s.permission_pending("b", "t2", "Edit", "cmd2")
-    assert s.first_pending() is p_a
-
-
-def test_attention_cwd_prefers_pending_permission():
-    s = State()
-    s.session_start("a", cwd="/repos/alpha")
-    s.session_start("b", cwd="/repos/beta")
-    s.needs_input("b")
-    s.permission_pending("a", "tid_1", "Bash", "git push", cwd="/repos/alpha")
-    assert s.attention_cwd() == "/repos/alpha"
 
 
 def test_attention_cwd_falls_back_to_newest_needs_input():
@@ -153,12 +112,12 @@ def test_notification_kind_unknown_waits():
 
 
 def test_notification_kind_sets_are_exact_and_disjoint():
-    assert WAITING_NOTIFICATION_KINDS == {"permission_prompt", "elicitation_dialog"}
+    waiting = {"permission_prompt", "elicitation_dialog"}
     assert NON_WAITING_NOTIFICATION_KINDS == {
         "idle_prompt", "idle", "auth_success", "elicitation_response",
     }
-    assert not WAITING_NOTIFICATION_KINDS & NON_WAITING_NOTIFICATION_KINDS
-    assert all(notification_waits(k) for k in WAITING_NOTIFICATION_KINDS)
+    assert not waiting & NON_WAITING_NOTIFICATION_KINDS
+    assert all(notification_waits(k) for k in waiting)
     assert not any(notification_waits(k) for k in NON_WAITING_NOTIFICATION_KINDS)
 
 

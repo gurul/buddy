@@ -10,11 +10,12 @@ from pathlib import Path
 from typing import Any
 
 import pytest
+from initdata import sign_init_data
 from websockets.asyncio.client import connect
 from websockets.exceptions import InvalidStatus
 
 from cc_buddy_bridge import miniapp, phone_call
-from cc_buddy_bridge.miniapp import MiniAppConfig, MiniAppServer, SpendLedger, check_init_data, sign_init_data
+from cc_buddy_bridge.miniapp import MiniAppConfig, MiniAppServer, SpendLedger, check_init_data
 
 TOKEN = "123456:TEST-token"
 OWNER = 4242

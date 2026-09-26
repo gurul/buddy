@@ -88,7 +88,7 @@ from . import (
 )
 from . import telegram_format as fmt
 from .agent_contract import AgentEvent
-from .telegram_format import MAX_MESSAGE_CHARS, plain  # noqa: F401 — the names other modules and tests use
+from .telegram_format import MAX_MESSAGE_CHARS, plain  # the names other modules and tests use
 
 if TYPE_CHECKING:                     # typing only: telegram.py imports cleanly without the memory facade
     from .memory import Memory
@@ -110,7 +110,7 @@ DEFAULT_IDLE_CLOSE_SECS = 600.0     # a chat this quiet is over: its RAM history
 HISTORY_TURNS = 24                  # turns of the chat the model is shown
 HISTORY_HIDDEN_KINDS = ("relay", "command")   # transcript kinds kept out of the model's history (_note)
 CHANNEL = "telegram"                # this door's name in the transcript (transcripts.CHANNELS)
-TODAY_CHARS = 32000                 # today's transcript in the instructions (transcripts.TG_CHARS)
+TODAY_CHARS = 32000                 # today's transcript in the instructions
 THINK_CONTEXT_CHARS = 6000          # the owner's profile and today, for think_hard (think.CONTEXT_MAX_CHARS)
 TOOL_LINE_CHARS = 1500              # one tool result in the transcript, at most
 PROMPT_CACHE_KEY = "buddy-telegram"  # every turn shares one prefix: route them to the same cache
@@ -1483,8 +1483,6 @@ class TelegramInlet:
                           it happens, the profile and today's transcript are in the prompt, its tools are
                           offered and "remember that" stars through it. None: no capture, no memory tools,
                           and the prompt a memory-less chat has always had
-    * ``on_closed``     — turns -> None, optional: called with the RAM history when a quiet chat closes.
-                          Kept for compatibility; memory no longer needs it (the transcript has every turn)
     * ``apps``          — composio_tools.ComposioBridge: the owner's apps by API (Gmail read only, the
                           calendar writable, everything else asked first), or None
     * ``vault``         — second_brain.VaultConfig: the owner's own notes, todos and journals as a local
@@ -1535,7 +1533,6 @@ class TelegramInlet:
                  on_photo: Optional[Callable[[str], Awaitable[dict[str, Any]]]] = None,
                  thinker: Optional[Callable[..., Awaitable[dict[str, Any]]]] = None,
                  on_state: Callable[[str], None] = lambda state: None,
-                 on_closed: Optional[Callable[[list[tuple[str, str]]], None]] = None,
                  memory: Optional[Memory] = None, apps: Any = None, vault: Any = None,
                  watcher: Optional[watch.Watcher] = None,
                  meeter: Optional[meet.Meeter] = None,
@@ -1567,7 +1564,6 @@ class TelegramInlet:
         self._on_photo = on_photo
         self._thinker = thinker
         self._on_state = on_state
-        self._on_closed = on_closed
         self._apps = apps                                  # composio_tools.ComposioBridge, or None
         self._maker: Any = None                            # apps_maker.ChatMaker once the Mini App runs, or None
         self._app_policy = composio_tools.toolkit_policy()
@@ -1668,7 +1664,6 @@ class TelegramInlet:
         self._seen_marks: set[int] = set()
         self._jobs: set[asyncio.Task] = set()
         self._dropped_ids: set[int] = set()
-        self.stopped_reason: Optional[str] = None
         # "typing…" per chat: why it is shown (a buddy turn, think_hard, a relayed line) and how many more
         # ticks each reason is worth. One loop per chat sends it while any reason is left (_typing_loop).
         self._typing: dict[int, dict[str, int]] = {}
@@ -1707,7 +1702,6 @@ class TelegramInlet:
                     updates = await self.api.get_updates(offset)
                 except BotApiError as e:
                     if e.code in FATAL_CODES:
-                        self.stopped_reason = f"{e.code}"
                         log.error("telegram: stopped — the Bot API answered %s (%s). 401/404 is a wrong "
                                   "CC_BUDDY_TELEGRAM_TOKEN; 409 is another program polling the same bot.",
                                   e.code, e.description)
@@ -3172,19 +3166,14 @@ class TelegramInlet:
     def _close_chat(self) -> None:
         """The chat is over (ten quiet minutes, or the daemon stopping): the transcript gets its close marker
         and the RAM history is cleared. Nothing is handed anywhere: the words are already on disk, and the
-        nightly dream reads them from there. ``on_closed``, when lent, still gets the history."""
-        turns, self.turns, self._turn_kinds, self._last_turn_at = self.turns, [], [], None
+        nightly dream reads them from there."""
+        self.turns, self._turn_kinds, self._last_turn_at = [], [], None
         conv, self._conv = self._conv, None
         if conv is not None and self._memory is not None:
             try:
                 self._memory.transcripts.close(CHANNEL, conv)
             except Exception as e:  # noqa: BLE001
                 log.warning("telegram: close marker not written (%s)", type(e).__name__)
-        if turns and self._on_closed is not None:
-            try:
-                self._on_closed(turns)
-            except Exception:  # noqa: BLE001
-                log.exception("telegram: on_closed failed")
 
     def _history(self) -> list[dict[str, Any]]:
         return [message_item("user" if who == "user" else "assistant", text)

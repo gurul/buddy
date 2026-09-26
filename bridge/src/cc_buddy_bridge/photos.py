@@ -180,20 +180,6 @@ def _rmdir_if_empty(day_dir: Path) -> None:
         pass
 
 
-def resolve(notes_dir: Path, rel_path: str) -> Optional[Path]:
-    """The absolute path of a recorded photo, or None when it is gone or the
-    relative path tries to leave the photos directory."""
-    if not rel_path:
-        return None
-    root = photos_root(notes_dir).resolve()
-    try:
-        path = (notes_dir / rel_path).resolve()
-        path.relative_to(root)
-    except (OSError, ValueError):
-        return None
-    return path if path.is_file() else None
-
-
 def usage(notes_dir: Path) -> tuple[int, int]:
     """(count, total bytes) of the photos on the shelf."""
     files = all_photos(notes_dir)

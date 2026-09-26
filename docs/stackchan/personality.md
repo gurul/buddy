@@ -64,20 +64,12 @@ are written to the PY32 expander.
 eyelid openness 0.55 + 0.4·a; blink interval 1.5 s/(1 + a); saccade tempo
 2 s/(1 + 1.5·a); LED hue from valence (orange − / green + / cyan calm-positive),
 saturation 0.4 + 0.5·|v|, brightness 0.3 + 0.6·(a + 1)/2, pulse 0.25 / 0.5 /
-2.5 Hz; look-around amplitude 30 + 15·a degrees, tempo 1 + 0.6·a. One chirp per
+2.5 Hz; look-around amplitude 65 + 45·a degrees (clamped 25..110), tempo 1 + 0.6·a. One chirp per
 kind change, at most one every 8 s.
 
 **Where it shows.** Only while exploring, and never over the
 listening pose, the attention state, or an agent phase. The engine integrates all
 the time, so a startle right before a conversation is still felt afterwards.
-
-**Reference model and parity.** `bridge/src/cc_buddy_bridge/mood_model.py` is a
-line-for-line Python port; `tests/test_mood_model.py` checks the behaviour
-(curious → relax, startle with cool-down, affection once per visit, bored then
-lonely, clamped appraisal, one chirp per change) and a parity harness compiles
-`mood.cpp` on the host with clang and runs both on a 40-minute scripted trace
-(9,600 steps, max |Δv| < 1e-3, zero kind mismatches on the last run). Change a
-constant in one file and the other.
 
 ## 2. Agent phases (`{"cmd":"agent","state":…}`)
 

@@ -46,7 +46,7 @@ async def run_lane(goals: list[str]) -> list[dict]:
 
     load_env_file()
     env = {**os.environ, "CC_BUDDY_JEV_STEP": "1"}
-    lane = BrowserLane(BrowserLaneConfig(enabled=True, attach=True), step_asker=make_step_asker(env))
+    lane = BrowserLane(BrowserLaneConfig(attach=True), step_asker=make_step_asker(env))
     create = ca.make_response_creator()
     out = []
     try:

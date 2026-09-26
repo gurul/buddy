@@ -220,4 +220,4 @@ def test_configured_reads_the_memory_dir_and_expands_the_paths() -> None:
 def test_the_legacy_locations_are_the_migrations_source() -> None:
     assert legacy_store({}) == Path(os.path.expanduser("~/.config/cc-buddy-bridge/debrief"))
     assert legacy_store({"CC_BUDDY_DEBRIEF_DIR": "~/x/debrief"}) == Path(os.path.expanduser("~/x/debrief"))
-    assert legacy_mem0({}) == Path(os.path.expanduser("~/.config/cc-buddy-bridge/mem0"))
+    assert legacy_mem0() == Path(os.path.expanduser("~/.config/cc-buddy-bridge/mem0"))

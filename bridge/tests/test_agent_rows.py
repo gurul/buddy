@@ -53,23 +53,6 @@ def test_states_and_current_tool():
     assert "t" not in rows["i"]  # no tool yet → key omitted, not empty string
 
 
-def test_pending_permission_and_needs_input_both_read_as_waiting():
-    st = State()
-    _session(st, "perm", cwd="/tmp/perm")
-    _session(st, "notif", cwd="/tmp/notif")
-    st.permission_pending("perm", "tu1", "Edit", "rm -rf /tmp/x", cwd="/tmp/perm")
-    st.needs_input("notif")
-    assert {r["n"]: r["s"] for r in st.agent_rows()} == {"perm": "wait", "notif": "wait"}
-
-
-def test_pending_tool_wins_over_last_tool_for_a_waiting_row():
-    st = State()
-    _session(st, "s1", cwd="/tmp/repo")
-    st.note_tool("s1", "Bash")
-    st.permission_pending("s1", "tu1", "Edit", "hint", cwd="/tmp/repo")
-    assert st.agent_rows()[0]["t"] == "Edit"
-
-
 def test_ordering_is_waiting_then_running_then_idle():
     st = State()
     _session(st, "i", cwd="/tmp/zzz-idle")

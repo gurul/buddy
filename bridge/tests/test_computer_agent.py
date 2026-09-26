@@ -611,7 +611,7 @@ def test_verifier_failure_lets_the_answer_through(tmp_path: Path) -> None:
     assert asyncio.run(a.run("play spotify")) == "Spotify is playing."
     logged = [json.loads(ln) for ln in a.run_log.read_text().splitlines()]
     [entry] = [ln["verify"] for ln in logged if "verify" in ln]
-    assert entry["error"] == "RuntimeError" and entry["local"]["error"] == "AttributeError"   # FakeWorker has no verify
+    assert entry == {"error": "RuntimeError"}
 
 
 def test_verifier_request_shape(tmp_path: Path) -> None:
@@ -633,28 +633,19 @@ def test_verifier_request_shape(tmp_path: Path) -> None:
     assert image == IMAGE                                                  # a FRESH observe screenshot
 
 
-# ---- the fast lane's log fields: worker timing and the local shadow verdict --------------
+# ---- the fast lane's log fields: worker timing -------------------------------------------
 
 class TimedWorker(FakeWorker):
-    """A FakeWorker that reports a timing dict and answers verify after `verify_secs`."""
+    """A FakeWorker that reports a timing dict."""
 
-    def __init__(self, results=None, verify_secs: float = 0.0, verify_result: dict | None = None) -> None:
+    def __init__(self, results=None) -> None:
         super().__init__(results)
         self.last_timing: dict | None = None
-        self.verify_secs = verify_secs
-        self.verify_result = verify_result or {"p_true": 0.91, "summary": "Spotify — 'Spotify'; 12 lines", "ms": 6.0}
-        self.verified: list[tuple[str, str]] = []
 
     async def execute(self, code: str) -> list[dict]:
         out = await super().execute(code)
         self.last_timing = {"capture": 37.0, "settle": 330.0, "exec": 402.5}
         return out
-
-    async def verify(self, goal: str, claim: str) -> dict:
-        self.verified.append((goal, claim))
-        if self.verify_secs:
-            await asyncio.sleep(self.verify_secs)
-        return dict(self.verify_result)
 
 
 def test_loop_logs_worker_timing(tmp_path: Path) -> None:
@@ -665,91 +656,6 @@ def test_loop_logs_worker_timing(tmp_path: Path) -> None:
     logged = [json.loads(ln) for ln in a.run_log.read_text().splitlines()]
     [entry] = [ln for ln in logged if "result" in ln]
     assert entry["timing"] == {"capture": 37.0, "settle": 330.0, "exec": 402.5}
-
-
-def test_shadow_verify_logged_beside_verdict(tmp_path: Path) -> None:
-    client = FakeClient([_response("r1", _call("exec_py", "c1", code="pyautogui.press('space')")),
-                         _response("r2", _message("Spotify is playing.")),
-                         _verdict("v1", True)])
-    worker = TimedWorker({"pyautogui.press('space')": ACTED})
-    a, _ = _agent(client, worker, tmp_path)
-    assert asyncio.run(a.run("play spotify")) == "Spotify is playing."
-    assert worker.verified == [("play spotify", "Spotify is playing.")]
-    logged = [json.loads(ln) for ln in a.run_log.read_text().splitlines()]
-    [entry] = [ln["verify"] for ln in logged if "verify" in ln]
-    assert entry["valid"] is True and entry["local"]["p_true"] == 0.91 and "secs" in entry["local"]
-    assert entry["local"]["summary"].startswith("Spotify")
-    # off: no verify request, no "local" field
-    client = FakeClient([_response("r1", _call("exec_py", "c1", code="pyautogui.press('space')")),
-                         _response("r2", _message("Spotify is playing.")),
-                         _verdict("v1", True)])
-    worker = TimedWorker({"pyautogui.press('space')": ACTED})
-    cfg = AgentConfig(runs_dir=tmp_path / "runs2", local_verify="off")
-    a, _ = _agent(client, worker, tmp_path, config=cfg)
-    asyncio.run(a.run("play spotify"))
-    assert worker.verified == []
-    logged = [json.loads(ln) for ln in a.run_log.read_text().splitlines()]
-    [entry] = [ln["verify"] for ln in logged if "verify" in ln]
-    assert "local" not in entry
-
-
-def test_shadow_verify_is_concurrent(tmp_path: Path) -> None:
-    """The shadow runs while the model's check is in flight: it adds under 50 ms to the wall time
-    of _verify. The positive control measures the same two waits run one after the other."""
-    import time as _time
-
-    class SlowClient(FakeClient):
-        async def __call__(self, request: dict) -> dict:
-            await asyncio.sleep(0.15)
-            return await super().__call__(request)
-
-    async def wall(local_verify: str) -> float:
-        client = SlowClient([_verdict("v1", True)])
-        worker = TimedWorker(verify_secs=0.15)
-        cfg = AgentConfig(runs_dir=tmp_path / "runs", local_verify=local_verify)
-        a, _ = _agent(client, worker, tmp_path, config=cfg)
-        a._open_log("g")
-        t0 = _time.monotonic()
-        verdict = await a._verify("g", "claim", 1, worker)
-        assert verdict == {"valid": True, "guidance": ""}
-        return _time.monotonic() - t0
-
-    async def sequential() -> float:
-        worker = TimedWorker(verify_secs=0.15)
-        client = SlowClient([_verdict("v1", True)])
-        t0 = _time.monotonic()
-        await worker.verify("g", "claim")
-        await client({})
-        return _time.monotonic() - t0
-
-    async def go() -> None:
-        off = await wall("off")
-        shadow = await wall("shadow")
-        seq = await sequential()
-        assert shadow - off < 0.05, (off, shadow)
-        assert seq >= 0.28 and shadow < seq - 0.1, (shadow, seq)        # the control: sequential is ~2x
-    asyncio.run(go())
-
-
-def test_missing_worker_verify_is_logged_not_fatal(tmp_path: Path, caplog) -> None:
-    client = FakeClient([_response("r1", _call("exec_py", "c1", code="pyautogui.press('space')")),
-                         _response("r2", _message("Spotify is playing.")),
-                         _verdict("v1", True)])
-    a, _ = _agent(client, FakeWorker({"pyautogui.press('space')": ACTED}), tmp_path)   # no verify attribute
-    with caplog.at_level("ERROR"):
-        assert asyncio.run(a.run("play spotify")) == "Spotify is playing."
-    assert "local shadow verify failed (AttributeError" in caplog.text
-    logged = [json.loads(ln) for ln in a.run_log.read_text().splitlines()]
-    [entry] = [ln["verify"] for ln in logged if "verify" in ln]
-    assert entry["valid"] is True and entry["local"]["error"] == "AttributeError"
-
-
-def test_local_verify_knob(caplog) -> None:
-    assert configured({}).local_verify == "shadow"
-    assert configured({"CC_BUDDY_LOCAL_VERIFY": "off"}).local_verify == "off"
-    with caplog.at_level("WARNING"):
-        assert configured({"CC_BUDDY_LOCAL_VERIFY": "on"}).local_verify == "shadow"
-    assert "CC_BUDDY_LOCAL_VERIFY='on'" in caplog.text
 
 
 def test_worker_ready_line_is_logged(tmp_path: Path, caplog) -> None:

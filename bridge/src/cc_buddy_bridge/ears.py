@@ -261,7 +261,6 @@ class Ears:
 
         self._ring = WakeRing()
         self.last_wake_audio = b""
-        self.blocks = 0
         self.last_rms = 0.0
 
     # -- subscribers (the voice session) --
@@ -284,7 +283,6 @@ class Ears:
         import numpy as np
 
         now = self._clock() if now is None else now
-        self.blocks += 1
         self.last_rms = rms_int16(block_int16)
         self._watch_silence(now)
         if self._subs:

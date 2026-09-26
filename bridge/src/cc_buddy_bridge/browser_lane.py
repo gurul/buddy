@@ -24,8 +24,8 @@ runs unchanged on top of it. Nothing about approval is reimplemented here.
                                                                                    ▼ Playwright clicks, expect
                                                             complete → one sentence · partial → today's loop
 
-The browser is buddy's own: a persistent Chromium profile under ``~/.config/cc-buddy-bridge/browser``,
-headed so the owner (and the phone's screenshot) sees it, signed in once by the owner.
+Production drives the owner's own Chrome (ATTACH MODE, below). The lane can also run buddy's own persistent
+Chromium profile under ``~/.config/cc-buddy-bridge/browser``; only tools and benches use that.
 
 ATTACH MODE (owner, 2026-09-23: "i want buddy to be able to control logged in browser, that's the most
 important"). With ``CC_BUDDY_BROWSER_ATTACH=1`` the lane drives the owner's own running Chrome, signed in
@@ -39,8 +39,7 @@ that tab and disconnects: the owner's browser, windows and tabs are never closed
 everywhere: a sensitive control (buy, send, delete, pay…) stops the plan for the owner's yes.
 
 Playwright's sync API must stay on the thread that created it, so the lane owns one worker thread and
-everything runs there; the daemon awaits it. It ships OFF (``BROWSER_LANE_DEFAULT``): its evaluation set
-(recorded page snapshots, tools/browser_lane_eval.py) does not exist yet.
+everything runs there; the daemon awaits it.
 """
 
 from __future__ import annotations
@@ -61,7 +60,6 @@ from .ax_candidates import Candidate, Snapshot, is_sensitive
 
 log = logging.getLogger(__name__)
 
-BROWSER_LANE_DEFAULT = False
 DEFAULT_PROFILE = "~/.config/cc-buddy-bridge/browser"
 DEFAULT_CHROME_DIR = "~/Library/Application Support/Google/Chrome"   # the owner's Chrome user data directory
 READ_WAIT_SECS = 6.0                 # page_text: how long a still-growing page may take to settle
@@ -196,7 +194,6 @@ ROLE_WORDS = {"link": "link", "button": "button", "checkbox": "checkbox", "radio
 
 @dataclass(frozen=True)
 class BrowserLaneConfig:
-    enabled: bool = BROWSER_LANE_DEFAULT
     profile: Path = Path(DEFAULT_PROFILE).expanduser()
     headless: bool = False
     attach: bool = False                          # drive the owner's running Chrome (see ATTACH MODE)
@@ -206,22 +203,17 @@ class BrowserLaneConfig:
 
 
 def configured(environ: Any = None) -> BrowserLaneConfig:
-    """``CC_BUDDY_BROWSER_LANE=1`` turns it on; ``CC_BUDDY_BROWSER_PROFILE`` moves the profile;
-    ``CC_BUDDY_BROWSER_HEADLESS=1`` hides the window (tests and benches — the owner should see it);
-    ``CC_BUDDY_BROWSER_ATTACH=1`` drives the owner's running Chrome instead (``CC_BUDDY_CHROME_DIR`` moves
-    where its ``DevToolsActivePort`` is looked for)."""
+    """``CC_BUDDY_BROWSER_ATTACH=1`` drives the owner's running Chrome (``CC_BUDDY_CHROME_DIR`` moves where its
+    ``DevToolsActivePort`` is looked for; ``CC_BUDDY_CHROME_DEBUG_PORT`` is the fallback port;
+    ``CC_BUDDY_CHROME_PROFILE`` names the Google account whose Chrome profile to work in)."""
     env = os.environ if environ is None else environ
-    switch = (env.get("CC_BUDDY_BROWSER_LANE") or ("1" if BROWSER_LANE_DEFAULT else "0")).strip().lower()
-    profile = Path((env.get("CC_BUDDY_BROWSER_PROFILE") or "").strip() or DEFAULT_PROFILE).expanduser()
-    headless = (env.get("CC_BUDDY_BROWSER_HEADLESS") or "0").strip().lower() in ("1", "true", "yes", "on")
     attach = (env.get("CC_BUDDY_BROWSER_ATTACH") or "0").strip().lower() in ("1", "true", "yes", "on")
     chrome_dir = Path((env.get("CC_BUDDY_CHROME_DIR") or "").strip() or DEFAULT_CHROME_DIR).expanduser()
     try:
         debug_port = int(str(env.get("CC_BUDDY_CHROME_DEBUG_PORT") or DEFAULT_DEBUG_PORT))
     except ValueError:
         debug_port = DEFAULT_DEBUG_PORT
-    return BrowserLaneConfig(enabled=switch in ("1", "true", "yes", "on"), profile=profile, headless=headless,
-                             attach=attach, chrome_dir=chrome_dir, debug_port=debug_port,
+    return BrowserLaneConfig(attach=attach, chrome_dir=chrome_dir, debug_port=debug_port,
                              chrome_profile=(env.get("CC_BUDDY_CHROME_PROFILE") or "").strip().lower())
 
 
@@ -829,20 +821,3 @@ def make_step_asker(environ: Any = None) -> Any:
         return None
     seconds = jev.timeout_from_env(env)
     return partial(ask_jev_step, jev.make_predict(url, key, model, timeout_s=seconds), clock=time.perf_counter)
-
-
-def make_lane(config: BrowserLaneConfig, environ: Any = None) -> Optional[BrowserLane]:
-    """The real lane, or None (with one log line) when it is off or Playwright is missing."""
-    if not config.enabled:
-        return None
-    try:
-        import playwright  # noqa: F401 — the import is the check
-    except ImportError as e:
-        log.warning("browser lane: playwright is not installed (%s); off. `pip install -e \".[browser]\"` and "
-                    "`python -m playwright install chromium`", e)
-        return None
-    lane = BrowserLane(config, step_asker=make_step_asker(environ))
-    where = (f"the owner's own Chrome (attach, via {config.chrome_dir}/DevToolsActivePort)" if config.attach
-             else f"buddy's own Chromium profile at {config.profile}")
-    log.info("browser lane: on — %s%s", where, "" if lane._step_asker is None else "; Jev grounds each step")
-    return lane

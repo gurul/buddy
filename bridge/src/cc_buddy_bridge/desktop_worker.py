@@ -33,11 +33,9 @@ the frontmost app and whether the screen changed since the previous call.
 Text-only calls (screen_text, find_text) stay cheap: no image.
 
 `{"operation": "observe"}` is `execute("observe()")`: the first turn's picture.
-`{"operation": "verify", "goal": …, "claim": …}` runs the local shadow verifier
-(helpers.local_verify) and replies `{"verify": {"p_true", "summary", "ms"}}` or
-`{"verify": {"error": …}}` — never a terminal error. With helpers, every reply
-also carries `"timing": {…}` in ms (capture, resize, encode, ocr, ax, settle,
-act, decide, exec) so the agent's run log shows where local time goes.
+With helpers, every reply also carries `"timing": {…}` in ms (capture, resize,
+encode, ocr, ax, settle, act, decide, exec) so the agent's run log shows where
+local time goes.
 `python -m cc_buddy_bridge.desktop_worker --release` posts a key-up for every
 key code and a mouse-up for every button, in a fresh process, so the daemon
 can release anything a killed worker left held.
@@ -257,9 +255,6 @@ def start_fast_lane(helpers: Any, env: Any, loader: Any = None, thread: bool = T
     decide, first = lane_modes(env)
     backend = decider_backend(env)
     helpers.lane_decide = decide
-    # Every decider the worker can load is hosted (jev.py). It may answer the lane's one choice question;
-    # it never gets the shadow verifier's state (up to 40 OCR lines of the whole screen) for a log-only value.
-    helpers.decider_remote = True
     helpers.lane_first_on = bool(first) and sys.platform == "darwin"
     router = "; router on" if helpers.lane_first_on else ""
     if not enabled:
@@ -357,19 +352,6 @@ def run_plan(req: dict[str, Any], helpers: Any) -> dict[str, Any]:
     return {"run_plan": result, "timing": dict(helpers.timing_ms())}
 
 
-def verify(req: dict[str, Any], helpers: Any) -> dict[str, Any]:
-    """The `verify` operation: the local shadow verdict on the agent's final claim."""
-    goal, claim = req.get("goal"), req.get("claim")
-    if not isinstance(goal, str) or not isinstance(claim, str) or not claim.strip():
-        return {"verify": {"error": "verify needs string goal and claim"}}
-    if helpers is None:
-        return {"verify": {"error": "no helpers in this worker"}}
-    try:
-        return {"verify": helpers.local_verify(goal[:2000], claim[:2000])}
-    except Exception as e:  # noqa: BLE001 — a shadow verdict never becomes a protocol error
-        return {"verify": {"error": f"{type(e).__name__}: {e}"[:200]}}
-
-
 def lane_first(req: dict[str, Any], helpers: Any) -> dict[str, Any]:
     """The `lane_first` operation: the router's attempt at the goal before any planner call
     (lane_router.RouteResult.to_dict(), plus the worker's timing). Never a terminal error: a
@@ -410,9 +392,6 @@ def serve(namespace: dict[str, Any], stream: Any, helpers: Any = None) -> None:
             terminal = result.get("error")
             emit({"id": rid, **result})
             continue
-        if isinstance(req, dict) and req.get("operation") == "verify":
-            emit({"id": rid, **verify(req, helpers)})
-            continue
         if isinstance(req, dict) and req.get("operation") == "lane_first":
             emit({"id": rid, **lane_first(req, helpers)})
             continue
@@ -423,7 +402,7 @@ def serve(namespace: dict[str, Any], stream: Any, helpers: Any = None) -> None:
             emit({"id": rid, **run_plan(req, helpers)})
             continue
         if not isinstance(req, dict) or req.get("operation") != "execute":
-            emit({"id": rid, "error": {"code": "unsupported", "message": "only execute, observe, verify, "
+            emit({"id": rid, "error": {"code": "unsupported", "message": "only execute, observe, "
                                        "lane_first, outline and run_plan are supported"}})
             continue
         code = req.get("code")

@@ -176,7 +176,6 @@ class Decision:
     threshold: float
     accepted: bool
     why: str                       # match | mismatch | too_short | no_seed | embed_failed | bypass | lenient | first_turn
-    embed_ms: float = 0.0
 
 
 @dataclass
@@ -226,7 +225,7 @@ class SpeakerGate:
     def enrol_seed(self, pcm: bytes) -> bool:
         """The audio before the wake word fired. False, and an open gate, when it holds no usable voice."""
         speech = trim_to_speech(pcm, self.config.speech_rms, self._block_bytes)
-        vector = self._embed(speech)[0] if speech else None
+        vector = self._embed(speech) if speech else None
         if vector is None:
             self.stats.opened = self.stats.opened or "no seed"
             return False
@@ -336,12 +335,10 @@ class SpeakerGate:
         self._segment, self._held, self._verdict = [], [], None
 
     # -- judging --
-    def _embed(self, pcm: bytes) -> tuple[Optional[Sequence[float]], float]:
+    def _embed(self, pcm: bytes) -> Optional[Sequence[float]]:
         if self.embedder is None or not pcm:
-            return None, 0.0
-        t0 = time.perf_counter()
-        vector = self.embedder.embed(pcm)
-        return vector, (time.perf_counter() - t0) * 1000.0
+            return None
+        return self.embedder.embed(pcm)
 
     def _judge(self, secs: float, final: bool, commit: bool = True) -> Optional[bool]:
         """True forward, False silence, None "not convinced yet" (only when `commit` is False)."""
@@ -353,25 +350,25 @@ class SpeakerGate:
                 # the same speaker going on after a breath: a halting voice, the owner's or the TV's
                 return self._decide(secs, state, None, 0.0, bool(self._last_verdict), "continues")
             return self._decide(secs, state, None, 0.0, True, "lenient" if self.lenient else "too_short")
-        vector, ms = self._embed(b"".join(self._segment))
+        vector = self._embed(b"".join(self._segment))
         if vector is None or self._centroid is None:
-            return self._decide(secs, state, None, 0.0, True, "embed_failed", ms)
+            return self._decide(secs, state, None, 0.0, True, "embed_failed")
         unit = _unit(vector)
         score = cosine(unit, self._centroid)
         first_turn = state == "provisional" and self._segment_started - self._woke_at <= cfg.first_turn_secs
         if state == "provisional":
             if first_turn or score >= cfg.t_loose:
                 self._adapt(unit, score, self._voiced * BLOCK_SECS, True)
-            return self._decide(secs, state, score, cfg.t_loose, True, "first_turn" if first_turn else "enrolling", ms)
+            return self._decide(secs, state, score, cfg.t_loose, True, "first_turn" if first_turn else "enrolling")
         threshold = cfg.t_accept
         accepted = score >= threshold
         if not accepted and not commit and not self.lenient:
             return None
         if not accepted and self.lenient and secs < 1.5:
-            return self._decide(secs, state, score, threshold, True, "lenient", ms)
+            return self._decide(secs, state, score, threshold, True, "lenient")
         if accepted:
             self._adapt(unit, score, self._voiced * BLOCK_SECS, False)
-        return self._decide(secs, state, score, threshold, accepted, "match" if accepted else "mismatch", ms)
+        return self._decide(secs, state, score, threshold, accepted, "match" if accepted else "mismatch")
 
     def _rejudge(self, secs: float) -> bool:
         """As a segment goes on: the last `window_secs` against the centroid. Two low scores in a row stop a
@@ -381,12 +378,12 @@ class SpeakerGate:
         if self.state == "provisional":
             # Still enrolling: keep forwarding, and keep folding the owner's first sentence in as it goes on.
             if self._segment_started - self._woke_at <= cfg.first_turn_secs:
-                vector, _ms = self._embed(b"".join(self._segment[-int(cfg.rescore_secs / BLOCK_SECS):]))
+                vector = self._embed(b"".join(self._segment[-int(cfg.rescore_secs / BLOCK_SECS):]))
                 if vector is not None and self._centroid is not None:
                     self._adapt(_unit(vector), 1.0, cfg.rescore_secs, True)
             return True
         window = self._segment[-int(cfg.window_secs / BLOCK_SECS):]
-        vector, ms = self._embed(b"".join(window))
+        vector = self._embed(b"".join(window))
         if vector is None or self._centroid is None:
             return bool(self._verdict)
         unit = _unit(vector)
@@ -397,10 +394,10 @@ class SpeakerGate:
             if keep and score >= cfg.t_accept:
                 self._adapt(unit, score, cfg.rescore_secs, False)
             if not keep:
-                self._decide(secs, self.state, score, cfg.t_drop, False, "mismatch", ms)
+                self._decide(secs, self.state, score, cfg.t_drop, False, "mismatch")
             return keep
         if score >= cfg.t_accept:
-            self._decide(secs, self.state, score, cfg.t_accept, True, "match", ms)
+            self._decide(secs, self.state, score, cfg.t_accept, True, "match")
             return True
         return False
 
@@ -415,11 +412,11 @@ class SpeakerGate:
         self._centroid = _unit([(c * have + u * secs) for c, u in zip(self._centroid, unit, strict=True)])
         self.stats.enrolled_secs = min(cfg.enrol_cap_secs, have + secs)
 
-    def _decide(self, secs: float, state: str, score: Optional[float], threshold: float, accepted: bool, why: str,
-                ms: float = 0.0) -> bool:
+    def _decide(self, secs: float, state: str, score: Optional[float], threshold: float, accepted: bool,
+                why: str) -> bool:
         d = Decision(at=self._clock() - self._woke_at, secs=round(secs, 2), state=state,
                      score=None if score is None else round(score, 3), threshold=threshold, accepted=accepted,
-                     why=why, embed_ms=round(ms, 1))
+                     why=why)
         self.stats.decisions.append(d)
         log.info("voice gate[%s]: %s %.1f s %s score=%s cut=%.2f (%s, enrolled %.1f s)", self.config.mode, state,
                  secs, "forward" if accepted else "silence", "-" if score is None else f"{score:.2f}", threshold,

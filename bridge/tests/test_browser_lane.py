@@ -17,7 +17,6 @@ from cc_buddy_bridge import browser_lane as bl
 from cc_buddy_bridge.browser_lane import (
     BrowserLane,
     BrowserLaneConfig,
-    configured,
     is_web_goal,
     outline_lines,
     snapshot_from_page,
@@ -88,17 +87,13 @@ def served_url(tmp_path: Path):
 
 
 def lane_for(tmp_path: Path, **kw: Any) -> BrowserLane:
-    cfg = BrowserLaneConfig(enabled=True, profile=tmp_path / "profile", headless=True)
+    cfg = BrowserLaneConfig(profile=tmp_path / "profile", headless=True)
     return BrowserLane(cfg, **kw)
 
 
 # ---- pure ------------------------------------------------------------------------------------
 
-def test_it_ships_off_and_web_goals_are_decided_by_code() -> None:
-    assert bl.BROWSER_LANE_DEFAULT is False
-    assert configured({}).enabled is False
-    on = configured({"CC_BUDDY_BROWSER_LANE": "1", "CC_BUDDY_BROWSER_HEADLESS": "1"})
-    assert on.enabled is True and on.headless is True and on.profile == Path(bl.DEFAULT_PROFILE).expanduser()
+def test_web_goals_are_decided_by_code() -> None:
     for web in ("open google news and show me the top headline", "go to https://example.com", "search the web for ramen",
                 "look up the weather", "open amazon", "on github open my pull requests", "in the browser open bbc"):
         assert is_web_goal(web), web

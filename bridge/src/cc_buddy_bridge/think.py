@@ -65,7 +65,7 @@ Thinker = Callable[..., Awaitable[dict[str, Any]]]     # (question, context="") 
 @dataclass(frozen=True)
 class ThinkConfig:
     enabled: bool = True
-    model: str = ""                 # "" → the voice backend's model
+    model: str = DEFAULT_MODEL
     effort: str = DEFAULT_EFFORT
     timeout_secs: float = DEFAULT_TIMEOUT_SECS
     search: websearch.SearchConfig = field(default_factory=websearch.SearchConfig)
@@ -75,7 +75,7 @@ def configured(environ: Any = None, backend_model: str = "") -> ThinkConfig:
     """``CC_BUDDY_THINK=0`` turns it off; ``CC_BUDDY_THINK_MODEL`` / ``_EFFORT`` tune it."""
     env = os.environ if environ is None else environ
     enabled = (env.get("CC_BUDDY_THINK") or "1").strip().lower() not in ("0", "false", "no", "off")
-    model = (env.get("CC_BUDDY_THINK_MODEL") or "").strip() or DEFAULT_MODEL or backend_model
+    model = (env.get("CC_BUDDY_THINK_MODEL") or "").strip() or DEFAULT_MODEL
     effort = (env.get("CC_BUDDY_THINK_EFFORT") or DEFAULT_EFFORT).strip().lower()
     if effort not in EFFORTS:
         log.warning("think: CC_BUDDY_THINK_EFFORT=%r is not a reasoning effort; using %s", effort, DEFAULT_EFFORT)
@@ -200,9 +200,6 @@ def make_thinker(config: ThinkConfig, environ: Any = None) -> Optional[Thinker]:
     env = os.environ if environ is None else environ
     if not config.enabled:
         log.info("think: off (CC_BUDDY_THINK=0) — hard questions get the fast backend only")
-        return None
-    if not config.model:
-        log.warning("think: no model configured — hard questions get the fast backend only")
         return None
     key = (env.get("OPENAI_API_KEY") or "").strip()
     if not key:

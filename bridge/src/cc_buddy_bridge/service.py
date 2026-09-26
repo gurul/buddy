@@ -83,11 +83,6 @@ def is_installed() -> bool:
     return backend is not None and backend.is_installed()
 
 
-def is_notes_widget_installed() -> bool:
-    backend = _backend()
-    return backend is not None and getattr(backend, "is_widget_installed", lambda: False)()
-
-
 def is_loaded() -> bool:
     backend = _backend()
     return backend is not None and backend.is_loaded()

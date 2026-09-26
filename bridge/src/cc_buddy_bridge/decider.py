@@ -23,10 +23,8 @@ How an option is worded decides more than the style (select fixtures, 73 cases,
 "title: …" context scored 0.603. The lane, the planner's outline and the evals all render
 through `render_option`.
 
-`judge()` asks ONE `noul` question for the shadow verifier (desktop_helpers.local_verify),
-which is logged beside the planner's verdict and never trusted, and which never hands a
-hosted decider the screen's text. A lock serializes every predict, because the worker
-loads on one thread and serves on another.
+A lock serializes every predict, because the worker loads on one thread and serves on
+another.
 """
 
 from __future__ import annotations
@@ -78,13 +76,6 @@ class Choice:
     k: int = 0
     overflow: bool = False             # the state was right-truncated (usage.input_tokens == max_len)
     dropped_for_budget: int = 0        # options removed by the head-budget trim before predict
-    error: str = ""
-
-
-@dataclass(frozen=True)
-class Judgement:
-    p_true: float
-    ms: float
     error: str = ""
 
 
@@ -273,22 +264,3 @@ class Decider:
         return Choice(chosen, p_top=p_top, margin=max(0.0, margin),
                       confidence=confidence if confidence is not None else 0.0, probabilities=clean,
                       ms=ms, input_tokens=input_tokens, k=k, overflow=overflow, dropped_for_budget=dropped)
-
-    # -- the shadow verifier --
-    def judge(self, question: str, state: Any, criteria: Optional[Mapping[str, str]] = None) -> Judgement:
-        """One `noul` question: p_true in [0, 1]. Shadow only — logged, never acted on."""
-        q: dict[str, Any] = {"type": "noul", "instructions": question}
-        if criteria:
-            q["criteria"] = dict(criteria)
-        t0 = self._clock()
-        try:
-            with self._lock:
-                result = self._predict(state, {"judge": q})
-        except Exception as e:  # noqa: BLE001 — shadow: an error is a logged value, not a failure
-            return Judgement(0.0, (self._clock() - t0) * 1000.0, f"predict raised {type(e).__name__}: {e}"[:200])
-        ms = (self._clock() - t0) * 1000.0
-        answer = (result.get("answers") or {}).get("judge") if isinstance(result, dict) else None
-        p_true = _finite_unit(answer.get("noul")) if isinstance(answer, dict) else None
-        if p_true is None:
-            return Judgement(0.0, ms, "predict returned no noul probability")
-        return Judgement(p_true, ms)

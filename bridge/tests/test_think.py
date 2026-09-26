@@ -88,9 +88,8 @@ def test_configured_defaults_to_astra_at_high_effort() -> None:
     assert configured({"CC_BUDDY_THINK": "0"}, backend_model="m").enabled is False
 
 
-def test_make_thinker_is_none_without_a_key_a_model_or_when_off() -> None:
+def test_make_thinker_is_none_without_a_key_or_when_off() -> None:
     assert make_thinker(ThinkConfig(model="m"), {}) is None                                  # no key
-    assert make_thinker(ThinkConfig(model=""), {"OPENAI_API_KEY": "k"}) is None              # no model
     assert make_thinker(ThinkConfig(enabled=False, model="m"), {"OPENAI_API_KEY": "k"}) is None
     thinker = make_thinker(ThinkConfig(model="m"), {"OPENAI_API_KEY": "k"})
     assert thinker is not None and thinker.config.model == "m"

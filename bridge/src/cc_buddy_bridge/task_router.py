@@ -65,10 +65,6 @@ REFLEX_DEFAULT: bool = True
 # more"; the bare launches were 16 of 16. That slice was picked after the fact, so it got its own
 # unseen holdout before this constant was allowed to change.
 REFLEX_LAUNCH_DEFAULT: bool = True      # holdout 3: 19 bare launches fired, 19 right, 0 unsafe
-REFLEX_POLICIES = ("off", "launch", "all")
-
-TIERS = ("reflex", "lane", "astra")
-KINDS = ("launch", "search", "quit", "quit_all", "lane", "astra")
 
 # Wording that means "this can cost the human something": only the planner, with ask_user, may act.
 CONSEQUENTIAL = re.compile(

@@ -150,7 +150,7 @@ turn; it never goes to `think_hard`. The other three workflows still do.
 |---|---|---|---|
 | "plan my day" | `daily-plan` (on Telegram: the rundown) | vision, todos, the last three journal days, five most recently touched project notes, plus today's calendar read by the text brain | the one most important thing, up to three more, time blocks around the day's events, one line of notice |
 | "weekly review" | `weekly-review` | todos (ticked ones included), vision, eight journal days, projects, recent events | wins, misses, learnings, next week's P0/P1, stale projects |
-| "triage my inbox" | `triage-inbox` | every inbox note, the project and area names | JSON decisions: where each note goes, todos to add, questions. `apply_triage` carries them out; never deletes |
+| "triage my inbox" | `triage-inbox` | every inbox note, the project and area names | JSON decisions: where each note goes, todos to add, questions, texted back to you. Nothing moves until you ask; then the text brain files each note you name with `file_note` (never deletes) |
 | "distill this" + a pasted transcript | `distill-chat` | the transcript, the project and area names | title, gist, decisions, action items, insights, open questions, where it belongs |
 
 ## Context packs

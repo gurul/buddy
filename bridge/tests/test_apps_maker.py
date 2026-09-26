@@ -18,6 +18,7 @@ from typing import Any
 
 import httpx
 import pytest
+from initdata import sign_init_data
 
 from cc_buddy_bridge import apps_maker
 from cc_buddy_bridge.app_check import CheckReport
@@ -38,7 +39,7 @@ from cc_buddy_bridge.apps_maker import (
     slugify,
     static_issues,
 )
-from cc_buddy_bridge.miniapp import MiniAppConfig, MiniAppServer, SpendLedger, cost_usd, sign_init_data
+from cc_buddy_bridge.miniapp import MiniAppConfig, MiniAppServer, SpendLedger, cost_usd
 
 TOKEN = "123456:TEST-token"
 OWNER = 4242

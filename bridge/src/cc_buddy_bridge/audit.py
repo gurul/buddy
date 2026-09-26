@@ -20,7 +20,7 @@ Fields:
   source    how we arrived at the decision:
               "auto_allow" — matcher short-circuited to allow
               "stick"      — user pressed A/B on the buddy
-              "timeout"    — stick didn't respond within PERMISSION_WAIT_SECS
+              "timeout"    — no answer within telegram.DEFAULT_PERMISSION_TIMEOUT_SECS
               "defer"      — bridge returned no opinion (Claude Code's flow ran)
               "telegram_relay" — the Claude relay is on: allowed without asking
               "jev_shadow" — a second line: Jev's risk verdict for a relayed command, logged only

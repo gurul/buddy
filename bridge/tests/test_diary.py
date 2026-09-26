@@ -305,7 +305,7 @@ def test_stars_are_read_from_highlights_and_fed_to_the_prompt(tmp_path: Path) ->
                                         "★ the blue mug is mine to watch\nnot a star\n", encoding="utf-8")
     m = Memory(notes)
     m.load()
-    assert m.highlights == ["my human waters the plant on Sundays — starred 2026-09-01", "the blue mug is mine to watch"]
+    assert m.load_highlights() == ["my human waters the plant on Sundays — starred 2026-09-01", "the blue mug is mine to watch"]
     ctx = build_context(m, datetime(2026, 9, 6, 10, 0), 0, 45, set())
     assert "STARRED BY MY HUMAN" in ctx and "★ the blue mug is mine to watch" in ctx
     # buddy never writes to highlights.md itself

@@ -412,7 +412,6 @@ class Helpers:
         self._focused_element = focused_element or ax_focused_element
         self.fast_lane_status = "off"           # what the worker reports: off | loading | ready (…) | failed: …
         self.lane_decide = "keyword"            # fast_lane.DECIDE_MODES: who picks a step (the worker sets it from env)
-        self.decider_remote = False             # a hosted decider (jev.py): never handed the shadow verifier's state
         self.step_asker: Any = None             # typed_ask.ask_jev_step bound to a predict (the worker sets it), or None
         self.lane_first_on = False              # the router (lane_router.py) may run before the planner
         self._run = run
@@ -933,34 +932,6 @@ class Helpers:
             self.log(line)
         return result.to_dict()
 
-    def local_verify(self, goal: str, claim: str, max_lines: int = 40) -> dict[str, Any]:
-        """The shadow verifier: one local noul over the frontmost app, its title and the fast OCR
-        of the screen — {"p_true", "summary", "ms"} or {"error"}. Logged beside the model's
-        verdict (computer_agent._verify), never acted on: CC_BUDDY_LOCAL_VERIFY=on is deferred
-        until ≥ 50 shadow verdicts exist to calibrate it against."""
-        decider = self.decider
-        if decider is None:
-            return {"error": "no local decider (fast lane off)"}
-        if self.decider_remote:
-            return {"error": "the decider is remote; the shadow verifier only runs on a local model"}
-        t0 = self._clock()
-        try:
-            front = self._front()
-            lines = [ln["text"] for ln in self._lines(None, "fast")[:max_lines]]
-            state = {"goal": goal, "claim": claim, "app": front.get("app", ""), "title": front.get("title", ""),
-                     "screen_text": lines}
-            judged = decider.judge(
-                "Does the screen now show the state the agent claims?", state,
-                {"false": "the screen does not show the claimed state, or something else is in front",
-                 "true": "the screen shows the state the claim describes"})
-        except Exception as e:  # noqa: BLE001 — a shadow that fails is logged, never raised into the reply
-            return {"error": f"{type(e).__name__}: {e}"[:200], "ms": round((self._clock() - t0) * 1000, 1)}
-        if judged.error:
-            return {"error": judged.error, "ms": round((self._clock() - t0) * 1000, 1)}
-        summary = f"{state['app']} — {state['title']!r}; {len(lines)} lines"
-        return {"p_true": round(float(judged.p_true), 4), "summary": summary,
-                "ms": round((self._clock() - t0) * 1000, 1)}
-
     def context_line(self) -> str:
         front = self._front()
         w_pts, h_pts = self._size()
@@ -1091,13 +1062,11 @@ class _LaneAdapter:
         self._thumb0: Any = None                    # the screen at the latest snapshot
         self._thumb_before: Any = None              # the screen at the snapshot before that: the step's start
         self._snapshot: Any = None
-        self._seq = 0
 
     # -- senses --
     def snapshot(self) -> Any:
         from .ax_candidates import ax_snapshot
 
-        self._seq += 1
         t0 = self.h._clock()
         try:
             snap = ax_snapshot(None, screen=self.h._size())

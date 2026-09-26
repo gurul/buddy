@@ -16,7 +16,7 @@ Scope: Research the actual checkpoint and training code, build a reproducible lo
   EVIDENCE: exit=0; shell=/bin/sh; cwd=/Users/gurucharan/Documents/personal/buddy; path=07a05fc4f0d2/21 entries; output=CONFIRMATION_REPLAY_OK | EMOTION_EVIDENCE_OK
 
 - [x] G4: Changed Python files pass lint and the existing affect and decider regression tests pass.
-  CHECK: bridge/.venv/bin/ruff check bridge/src/cc_buddy_bridge/emotion_policy.py bridge/tools/emotion_eval.py bridge/tools/emotion_head_tune.py bridge/tools/emotion_confirm.py bridge/tests/test_emotion_policy.py && bridge/.venv/bin/python -m pytest -q bridge/tests/test_mood_model.py bridge/tests/test_decider.py && echo EMOTION_REGRESSION_OK
+  CHECK: bridge/.venv/bin/ruff check bridge/src/cc_buddy_bridge/emotion_policy.py bridge/tools/emotion_eval.py bridge/tools/emotion_head_tune.py bridge/tools/emotion_confirm.py bridge/tests/test_emotion_policy.py && bridge/.venv/bin/python -m pytest -q bridge/tests/test_decider.py && echo EMOTION_REGRESSION_OK
   EXPECT: EMOTION_REGRESSION_OK
   EVIDENCE: exit=0; shell=/bin/sh; cwd=/Users/gurucharan/Documents/personal/buddy; path=07a05fc4f0d2/21 entries; output=42 passed in 0.04s | EMOTION_REGRESSION_OK
 

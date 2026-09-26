@@ -70,6 +70,7 @@ from .explore import (
     frame_image,
     normalise,
 )
+from .thought_screen import tag_overlap as jaccard
 from .vision import Frame
 
 log = logging.getLogger(__name__)
@@ -316,12 +317,6 @@ def words(text: str) -> set[str]:
     return set(_WORD.findall(text.lower()))
 
 
-def jaccard(a: set[str], b: set[str]) -> float:
-    if not a or not b:
-        return 0.0
-    return len(a & b) / len(a | b)
-
-
 class Memory:
     """The memory stream (JSONL) and the profile (Markdown) on disk."""
 
@@ -330,7 +325,6 @@ class Memory:
         self.wall = wall
         self.records: list[Record] = []
         self.profile = DEFAULT_PROFILE
-        self.highlights: list[str] = []
         self.last_reflection_day: Optional[str] = None
         self.importance_since_reflection = 0
         self._loaded = False
@@ -359,7 +353,6 @@ class Memory:
                     t = t[1:].strip()
                     if t:
                         out.append(t)
-        self.highlights = out
         return out
 
     def load(self) -> None:
@@ -379,7 +372,6 @@ class Memory:
             text = self.profile_path.read_text(encoding="utf-8").strip()
             if text:
                 self.profile = text
-        self.load_highlights()
         meta = self.notes_dir / "reflection.json"
         if meta.exists():
             try:

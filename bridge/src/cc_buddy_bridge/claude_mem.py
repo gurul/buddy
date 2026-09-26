@@ -38,7 +38,6 @@ import re
 import socket
 import threading
 import time
-import urllib.error
 import urllib.parse
 import urllib.request
 from pathlib import Path
@@ -364,12 +363,3 @@ class ClaudeMemMirror:
                "text": _clip(str(obs.get("narrative") or obs.get("text") or ""))}
         self.bus.publish(MIRROR_TOPIC, msg)
         self.stats["mirrored"] += 1
-
-
-def health(url: Optional[str] = None, timeout: float = 2.0) -> bool:
-    """True when the worker answers /health with status ok."""
-    try:
-        data = _get((url or worker_url()).rstrip("/") + "/health", timeout)
-        return isinstance(data, dict) and data.get("status") == "ok"
-    except Exception:  # noqa: BLE001
-        return False

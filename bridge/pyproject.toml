@@ -73,8 +73,8 @@ dependencies = [
 
 [project.optional-dependencies]
 dev = ["pytest>=8.0", "ruff>=0.6"]
-# The browser lane (browser_lane.py): Playwright drives buddy's own Chromium for web goals. 1.63.0 current
-# per PyPI, 2026-09-21, Python >=3.10. Imported lazily; the daemon runs without it. Install with
+# The browser lane (browser_lane.py): Playwright drives the owner's Chrome (attach mode) for web goals.
+# 1.63.0 current per PyPI, 2026-09-21, Python >=3.10. Imported lazily; the daemon runs without it. Install with
 # `pip install -e ".[browser]"` then `python -m playwright install chromium` (~95 MB).
 browser = ["playwright>=1.63,<2"]
 # The watcher's Chrome-like read (watch.py tls_request): libcurl that shakes hands as Chrome does, for shops that

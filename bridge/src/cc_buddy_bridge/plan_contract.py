@@ -26,7 +26,6 @@ from typing import Any, Optional
 
 KINDS = ("open_app", "open_url", "click", "type", "press_key", "checkpoint")
 EXPECT_KINDS = ("text_visible", "title_contains", "app_frontmost")
-TEXT_SOURCES = ("utterance", "composed")
 KEYS = ("return", "escape", "tab", "space", "up", "down", "left", "right", "delete")
 MAX_STEPS = 8
 MAX_TEXT_CHARS = 400

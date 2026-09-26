@@ -45,9 +45,6 @@ log = logging.getLogger(__name__)
 # 127 on an axis means "leave this one alone" (motion::KEEP).
 KEEP = 127
 MAX_KEYS = 8
-# What the firmware will accept; the board re-checks all of it.
-PERIOD_MIN_MS, PERIOD_MAX_MS = 350, 4000
-CYCLES_MAX = 12
 SPEED_MIN, SPEED_MAX = 0.5, 2.0
 
 # One bout each. Amplitudes in degrees about the centre, periods in ms.
@@ -82,9 +79,6 @@ KEYS: dict[str, list[list[int]]] = {
     "lean_peek": [[0, -70, 50, 200], [1800, -78, 58, 150], [3200, -78, 58, 150], [3400, 0, 45, 900]],
     "home": [[0, 0, 45, 400]],
 }
-
-PRESETS = tuple(sorted(set(OSC) | set(KEYS)))
-
 
 def _clamp(v: float, lo: float, hi: float) -> float:
     return lo if v < lo else (hi if v > hi else v)
@@ -161,13 +155,6 @@ def keys_command(preset: Optional[str] = None,
 
 def stop_command() -> dict[str, Any]:
     return {"cmd": "move", "kind": "stop"}
-
-
-def command_for(preset: str, speed: float = 1.0, **kw: Any) -> dict[str, Any]:
-    """A preset by name, whichever shape it is."""
-    if preset in OSC:
-        return osc_command(preset, speed=speed, **kw)
-    return keys_command(preset)
 
 
 def predict(command: dict[str, Any]) -> dict[str, Any]:

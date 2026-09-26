@@ -96,7 +96,7 @@ def legacy_store(environ: Any = None) -> Path:
     return Path((env.get("CC_BUDDY_DEBRIEF_DIR") or "").strip() or LEGACY_STORE).expanduser()
 
 
-def legacy_mem0(environ: Any = None) -> Path:  # noqa: ARG001 - the same shape as legacy_store
+def legacy_mem0() -> Path:
     """Where the retired mem0 index lived, before it moved under the memory root."""
     return Path(LEGACY_MEM0).expanduser()
 

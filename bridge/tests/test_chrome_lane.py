@@ -149,7 +149,7 @@ def test_a_dead_connection_is_replaced_on_the_next_connect() -> None:
 
     from cc_buddy_bridge.browser_lane import BrowserLane, BrowserLaneConfig
 
-    lane = BrowserLane(BrowserLaneConfig(enabled=True, attach=True))
+    lane = BrowserLane(BrowserLaneConfig(attach=True))
     events = []
     lane._context, lane._browser = object(), SimpleNamespace(is_connected=lambda: False)
     lane._close = lambda: (events.append("closed"), setattr(lane, "_context", None), setattr(lane, "_browser", None))

@@ -15,9 +15,8 @@ Two halves, kept apart so the state machine is testable without a Mac:
 * ``start_listen_key`` — Quartz. A listen-only CGEventTap for flagsChanged
   runs on its own daemon thread and marshals flags to the asyncio loop.
 
-Synthetic Option presses posted by key_tap.py (swipe-to-key
-push-to-talk) hit the same tap. That is intended: the board shows the same
-listening pose whether the hold came from the keyboard or the pet.
+key_tap.py (swipe-to-key) only taps Return and the arrow keys; it no
+longer holds Option, so no synthetic modifier reaches this tap.
 
 The tap needs macOS Input Monitoring for the daemon's python. Without it
 CGEventTapCreate returns None; we log one warning naming the fix and the

@@ -162,7 +162,6 @@ class CaptionPager:
         self._cur_shown = False                # False while cur waits for its first line (no blank page)
         self.last_refill_at = float("-inf")
         self.last_sent: Optional[ShowPage] = None
-        self._last_update_at: Optional[float] = None
 
     # -- public state --
     @property
@@ -196,7 +195,6 @@ class CaptionPager:
             return                                   # a stray delta after the done: keep the final text
         reply.text = text
         reply.final = final
-        self._last_update_at = now
         self._repaginate(reply, now)
         if final and not reply.pages:
             self._drop_empty_tail()                  # a reply with nothing to show (tool call only)
@@ -224,28 +222,12 @@ class CaptionPager:
             if isinstance(e, Clear):
                 return events
 
-    def next_deadline(self) -> Optional[float]:
-        """When poll() next acts: None when idle or waiting for text."""
-        if not self.replies:
-            return None
-        r, p = self.cur
-        reply = self.replies[r]
-        if not self._cur_shown:
-            return self._last_update_at if p < len(reply.pages) else None
-        frozen_at = reply.t_frozen[p]
-        if self._page_changed(reply, p):
-            return frozen_at if frozen_at is not None else self.last_refill_at + self.cfg.refill_interval_secs
-        if frozen_at is None:
-            return None
-        return self._clear_at(r, p) if self._is_last_overall(r, p) else self._deadline(r, p)
-
     # -- internals --
     def _drop_all(self) -> None:
         self.replies = []
         self.cur, self._cur_shown = (0, 0), False
         self.last_refill_at = float("-inf")
         self.last_sent = None
-        self._last_update_at = None
 
     def _drop_empty_tail(self) -> None:
         """The newest reply is final with no pages: forget it. If it was the page

@@ -11,14 +11,15 @@ import json
 from pathlib import Path
 
 from cc_buddy_bridge import follow as fo
-from cc_buddy_bridge.follow import PresenceMap, Sighting, SpeakerFollower
+from cc_buddy_bridge.follow import PresenceMap, SpeakerFollower
+from cc_buddy_bridge.vision import FaceResult
 
 
-def face_at(true_yaw: float, true_pitch: float, pose_yaw: float, pose_pitch: float, size: int = 22, conf: int = 90) -> Sighting:
+def face_at(true_yaw: float, true_pitch: float, pose_yaw: float, pose_pitch: float, size: int = 22, conf: int = 90) -> FaceResult:
     """The box a face at (true_yaw, true_pitch) makes in a frame taken at the given pose."""
     bx = (true_yaw - pose_yaw) / 33.0 * 100.0
     by = -(true_pitch - pose_pitch) / 24.75 * 100.0
-    return Sighting(bx=int(round(max(-100, min(100, bx)))), by=int(round(max(-100, min(100, by)))), size=size, conf=conf)
+    return FaceResult(bx=int(round(max(-100, min(100, bx)))), by=int(round(max(-100, min(100, by)))), size=size, conf=conf)
 
 
 class Bench:
@@ -149,7 +150,7 @@ def test_weak_or_tiny_faces_are_not_people() -> None:
     b.phase("listening")
     for _ in range(8):
         b.t += 0.25
-        asyncio.run(b.f.on_faces([Sighting(70, 0, 20, 20), Sighting(-70, 0, 2, 95)], 0.0, 45.0))
+        asyncio.run(b.f.on_faces([FaceResult(70, 0, 20, 20), FaceResult(-70, 0, 2, 95)], 0.0, 45.0))
     assert b.sent == [] and b.f.track is None
 
 
@@ -338,7 +339,7 @@ def test_it_never_looks_behind_itself_and_survives_a_dead_link_the_switch_and_th
     assert fo.presence_path({"CC_BUDDY_PRESENCE_FILE": "/tmp/p.json"}) == Path("/tmp/p.json")
     none = Bench()
     none.phase("listening")
-    asyncio.run(none.f.on_faces([Sighting(60, 0, 20, 90)], None, None))    # a frame without its pose cannot be placed
+    asyncio.run(none.f.on_faces([FaceResult(60, 0, 20, 90)], None, None))    # a frame without its pose cannot be placed
     assert none.sent == []
 
     def broken(topic, msg):

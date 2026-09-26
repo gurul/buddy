@@ -308,17 +308,17 @@ def test_mean_abs_diff() -> None:
 
 def test_change_detector_first_visit_then_threshold() -> None:
     d = ChangeDetector(threshold=12.0)
-    assert d.measure(0, _frame(50)) is None and d.changed(0, _frame(50))
+    assert d.measure(0, _frame(50)) is None
     d.keep(0, _frame(50))
-    assert d.measure(0, _frame(55)) == 5.0 and not d.changed(0, _frame(55))
-    assert d.changed(0, _frame(70))
-    assert d.changed(1, _frame(50))          # a different waypoint has its own memory
+    assert d.measure(0, _frame(55)) == 5.0 <= d.threshold
+    assert d.measure(0, _frame(70)) > d.threshold
+    assert d.measure(1, _frame(50)) is None          # a different waypoint has its own memory
 
 
 def test_change_detector_undecodable_counts_as_changed() -> None:
     d = ChangeDetector(thumb=lambda f: None)
     d.keep(0, _frame(50))
-    assert d.changed(0, _frame(50))
+    assert d.measure(0, _frame(50)) is None
 
 
 def test_frame_thumb_jpeg_without_imageio_is_none(monkeypatch) -> None:

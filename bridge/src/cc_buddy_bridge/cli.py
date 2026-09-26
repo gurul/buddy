@@ -244,12 +244,10 @@ def main(argv: list[str] | None = None) -> int:
     )
     p_push.add_argument("path", help="Path to the character folder")
 
-    p_update = sub.add_parser(
+    sub.add_parser(
         "check-update",
         help="Check GitHub for a newer cc-buddy-bridge release (forces refresh)",
     )
-    p_update.add_argument("--no-cache", action="store_true",
-                          help="Ignore cache; always hit the network (default already does)")
 
     p_upgrade = sub.add_parser(
         "update",

@@ -44,14 +44,14 @@ def test_attach_is_off_unless_asked(tmp_path: Path) -> None:
 
 
 def test_attach_without_remote_debugging_says_how_to_switch_it_on(tmp_path: Path) -> None:
-    lane = BrowserLane(BrowserLaneConfig(enabled=True, attach=True, chrome_dir=tmp_path))
+    lane = BrowserLane(BrowserLaneConfig(attach=True, chrome_dir=tmp_path))
     with pytest.raises(AttachError, match="chrome://inspect/#remote-debugging"):
         lane._ensure()
 
 
 def test_closing_in_attach_mode_closes_only_buddys_tab_never_the_owners_browser() -> None:
     calls: list[str] = []
-    lane = BrowserLane(BrowserLaneConfig(enabled=True, attach=True))
+    lane = BrowserLane(BrowserLaneConfig(attach=True))
     lane._browser = SimpleNamespace(close=lambda: calls.append("browser.close"))
     lane._context = SimpleNamespace(close=lambda: calls.append("context.close"))
     lane._pw = SimpleNamespace(stop=lambda: calls.append("playwright.stop"))
@@ -97,7 +97,7 @@ def test_live_attach_to_a_standin_chrome_works_in_its_own_tab_and_leaves_the_own
         owners = tabs()
 
         async def go() -> str:
-            lane = BrowserLane(BrowserLaneConfig(enabled=True, attach=True, chrome_dir=tmp_path / "ud"))
+            lane = BrowserLane(BrowserLaneConfig(attach=True, chrome_dir=tmp_path / "ud"))
             try:
                 await lane.open_url(page.as_uri())
                 assert len(tabs()) == len(owners) + 1                       # buddy's own new tab
@@ -154,7 +154,7 @@ class _GrowingPage:
 
 
 def _lane_on(page: _GrowingPage, monkeypatch) -> BrowserLane:
-    lane = BrowserLane(BrowserLaneConfig(enabled=True))
+    lane = BrowserLane(BrowserLaneConfig())
     monkeypatch.setattr(lane, "_ensure", lambda: SimpleNamespace(page=page))
     monkeypatch.setattr(bl, "READ_POLL_SECS", 0.0)
     return lane
@@ -228,7 +228,7 @@ def _by_cookie(url: str, header: str, timeout: float) -> str:
 
 
 def _attached(*contexts: Any, fetch: Any = _by_cookie) -> BrowserLane:
-    lane = BrowserLane(BrowserLaneConfig(enabled=True, attach=True))
+    lane = BrowserLane(BrowserLaneConfig(attach=True))
     lane._browser = SimpleNamespace(contexts=list(contexts))
     lane._fetch_accounts = fetch
     return lane
@@ -321,7 +321,7 @@ def test_a_lost_tab_in_the_owners_chrome_is_replaced_by_a_new_one_never_theirs()
 
     owners = [Page("owner's inbox"), Page("owner's bank")]
     ctx = SimpleNamespace(pages=owners, new_page=lambda: opened.append("new") or Page("buddy's new tab"))
-    lane = BrowserLane(BrowserLaneConfig(enabled=True, attach=True))
+    lane = BrowserLane(BrowserLaneConfig(attach=True))
     lane._browser, lane._context = SimpleNamespace(), ctx
     lane._page = SimpleNamespace(page=Page("buddy's old tab", alive=False))
     got = lane._ensure()

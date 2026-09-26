@@ -25,10 +25,6 @@ from .claude_home import transcript_roots
 
 log = logging.getLogger(__name__)
 
-# Kept as the single-home default for callers that want one root; the daemon
-# passes the full list from claude_home.transcript_roots() instead.
-TRANSCRIPT_ROOT = Path.home() / ".claude" / "projects"
-
 # Callback: async (tokens_cumulative, tokens_today, cost_cumulative, cost_today, entries) -> None.
 # Cost values are USD estimates; see pricing.py.
 TokensCallback = Callable[[int, int, float, float, list[tuple[float, str]]], Awaitable[None]]
@@ -64,9 +60,6 @@ class JSONLTailer:
         # at parse time, so changing pricing.py rates only affects new records.
         self._cost_per_file: dict[str, float] = {}
         self._today_cost_per_file: dict[str, float] = {}
-        # file path → last parsed assistant content array. Used by the daemon to
-        # emit a `turn` event over BLE when the Stop hook fires.
-        self._last_assistant_content: dict[str, list] = {}
         # file path → set of assistant uuids we've already emitted so that the
         # initial sweep on daemon startup doesn't re-fire the callback for
         # every historical assistant message.
@@ -221,12 +214,10 @@ class JSONLTailer:
         if not isinstance(msg, dict):
             return
 
-        # Track the latest assistant content for turn-event emission.
+        # A new assistant record with text fires the live callback.
         if msg.get("role") == "assistant":
             content = msg.get("content")
             if isinstance(content, list):
-                self._last_assistant_content[path] = content
-
                 # Fire live callback the moment a NEW assistant text record lands.
                 # Must happen after the initial sweep (we don't want to replay
                 # history on daemon startup) and only once per record uuid.
@@ -272,11 +263,6 @@ class JSONLTailer:
         # Entries aren't implemented via tailer yet — hook events feed them directly.
         # Keeping the signature for future expansion.
         await self.on_update(cumulative, today, cost_cumulative, cost_today, [])
-
-    def last_assistant_content(self, transcript_path: str) -> list | None:
-        """Return the most recently parsed assistant content array for a transcript,
-        or None if we haven't seen an assistant message in it yet."""
-        return self._last_assistant_content.get(transcript_path)
 
 
 def _today_key() -> str:
