@@ -1,6 +1,7 @@
 // StackChan Notes helper — a Dock-less (LSUIElement) menu-bar app that mirrors
 // the bridge daemon's diary files into the App Group container the widget
-// reads, and hosts the diary window the widget opens (stackchan://diary).
+// reads, and hosts the windows the widget opens: the chat (stackchan://chat)
+// and the diary (stackchan://diary).
 // It is deliberately NOT sandboxed so it can read ~/.config/cc-buddy-bridge/notes.
 
 import AppKit
@@ -29,6 +30,13 @@ struct StackChanNotesApp: App {
         .windowResizability(.contentMinSize)
         .defaultSize(width: 720, height: 560)
         .handlesExternalEvents(matching: ["diary"])
+        // The chat (ChatView.swift): buddy's conversation, like Telegram, with a reply box.
+        Window("buddy chat", id: "chat") {
+            ChatView()
+        }
+        .windowResizability(.contentMinSize)
+        .defaultSize(width: 520, height: 760)
+        .handlesExternalEvents(matching: ["chat"])
         Window("Buddy Learning", id: "learning") {
             LearningDashboardView()
         }
@@ -52,7 +60,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     func application(_ application: NSApplication, open urls: [URL]) {
         if urls.contains(where: { $0.scheme == "stackchan" }) {
             NSApp.activate(ignoringOtherApps: true)
-            log.info("opening the diary from a URL")
+            log.info("opening a window from a URL")
         }
     }
 
@@ -130,6 +138,11 @@ private struct MenuContent: View {
                 .disabled(power.switching)
         }
         Divider()
+        Button("Open chat") {
+            NSApp.activate(ignoringOtherApps: true)
+            openWindow(id: "chat")
+        }
+        .keyboardShortcut("t")
         Button("Open diary") {
             NSApp.activate(ignoringOtherApps: true)
             openWindow(id: "diary")

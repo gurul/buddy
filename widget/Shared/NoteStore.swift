@@ -26,6 +26,8 @@ enum AppGroup {
     static let fileName = "notes.json"
     /// Tapping the widget opens this in the helper app (Info.plist CFBundleURLTypes).
     static let diaryURL = URL(string: "stackchan://diary")!
+    /// The chat window (ChatView.swift in the helper): where tapping the diary widget goes.
+    static let chatURL = URL(string: "stackchan://chat")!
 
     static var containerURL: URL? {
         FileManager.default.containerURL(forSecurityApplicationGroupIdentifier: id)

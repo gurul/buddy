@@ -36,6 +36,7 @@
 		C5E75211933FE3BC9561E881 /* OFL-grandstander.txt in Resources */ = {isa = PBXBuildFile; fileRef = AE8E1E7CB4B022226B3E252A /* OFL-grandstander.txt */; };
 		CFE88E9336BF933D0AD55E57 /* Grandstander-Black.ttf in Resources */ = {isa = PBXBuildFile; fileRef = C3D3F3D6F1CF428CD102AD73 /* Grandstander-Black.ttf */; };
 		D35F18441A4006EDB359D15D /* GochiHand-Regular.ttf in Resources */ = {isa = PBXBuildFile; fileRef = 2FE44DF443242C51DA997F4B /* GochiHand-Regular.ttf */; };
+		DB632A0B89CDC8DFCE15AE06 /* ChatView.swift in Sources */ = {isa = PBXBuildFile; fileRef = A697B4AC84C9CDFBFDDDAEF4 /* ChatView.swift */; };
 		DB91CAC4866F15A5FDD08E58 /* StackChanNotesWidget.swift in Sources */ = {isa = PBXBuildFile; fileRef = AF59CC6778284ED3133132CE /* StackChanNotesWidget.swift */; };
 		DEAB1480AB60FD974DD14619 /* OFL-gochihand.txt in Resources */ = {isa = PBXBuildFile; fileRef = 57D43F8C648A32C3F67687C1 /* OFL-gochihand.txt */; };
 		E0582D238DF5F2AB2DA07ED5 /* OFL-grandstander.txt in Resources */ = {isa = PBXBuildFile; fileRef = AE8E1E7CB4B022226B3E252A /* OFL-grandstander.txt */; };
@@ -82,6 +83,7 @@
 		90B0C584761D23A8F5B381DC /* StackChanNotesWidget.appex */ = {isa = PBXFileReference; explicitFileType = "wrapper.app-extension"; includeInIndex = 0; path = StackChanNotesWidget.appex; sourceTree = BUILT_PRODUCTS_DIR; };
 		9CAF58838BD7BD34C55C270A /* StackChanNotesApp.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = StackChanNotesApp.swift; sourceTree = "<group>"; };
 		A61A26D12B528429303C1AD1 /* Info.plist */ = {isa = PBXFileReference; lastKnownFileType = text.plist; path = Info.plist; sourceTree = "<group>"; };
+		A697B4AC84C9CDFBFDDDAEF4 /* ChatView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ChatView.swift; sourceTree = "<group>"; };
 		AE8E1E7CB4B022226B3E252A /* OFL-grandstander.txt */ = {isa = PBXFileReference; lastKnownFileType = text; path = "OFL-grandstander.txt"; sourceTree = "<group>"; };
 		AF59CC6778284ED3133132CE /* StackChanNotesWidget.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = StackChanNotesWidget.swift; sourceTree = "<group>"; };
 		C3D3F3D6F1CF428CD102AD73 /* Grandstander-Black.ttf */ = {isa = PBXFileReference; lastKnownFileType = file; path = "Grandstander-Black.ttf"; sourceTree = "<group>"; };
@@ -159,6 +161,7 @@
 			children = (
 				FF97E4D3AD70892D4607419A /* BuddyDaemon.swift */,
 				387A8B1402D0F827CEDD1038 /* BuddyService.swift */,
+				A697B4AC84C9CDFBFDDDAEF4 /* ChatView.swift */,
 				F62C19E6D654259E691D6474 /* DiaryView.swift */,
 				7D9ED287F21568518C44885F /* Info.plist */,
 				8D991EA2CD7ADE334CFD65C9 /* NotesMirror.swift */,
@@ -306,6 +309,7 @@
 				16A8EA1C124984DBD1E9E49B /* BuddyDaemon.swift in Sources */,
 				9D29263BD007A6F4D857F9EA /* BuddyPower.swift in Sources */,
 				85E0095C45F238556BAE6518 /* BuddyService.swift in Sources */,
+				DB632A0B89CDC8DFCE15AE06 /* ChatView.swift in Sources */,
 				1AFEE56DD21647A645159D29 /* DiaryView.swift in Sources */,
 				61576D5572BCCEA5587116ED /* NoteStore.swift in Sources */,
 				7F505FC43B317BECFBCF1ED1 /* NotesMirror.swift in Sources */,

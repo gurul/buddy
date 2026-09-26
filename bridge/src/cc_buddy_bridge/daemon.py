@@ -2206,6 +2206,20 @@ class Daemon:
             self._set_sound(action == "on")
         return {"ok": True, "sound": "on" if self._sound.on else "off", "connected": self.ble.connected}
 
+    async def _ipc_chat(self, req: dict[str, Any]) -> dict[str, Any]:
+        """The chat window's reply box (widget/StackChanNotes/ChatView.swift): typed words, handled as a
+        Telegram text from the owner, so they reach the same brain with every tool. The transcript records
+        them and the replies, which is where the window reads the conversation from. The socket is 0600:
+        only the owner's own programs can speak as the owner here."""
+        text = str(req.get("text") or "").strip()[:CHAT_MAX_CHARS]
+        tg = getattr(self, "_telegram", None)
+        if tg is None or getattr(tg, "_chat_id", None) is None:
+            return {"ok": False, "error": "buddy's Telegram chat isn't running, or no owner has texted it yet"}
+        if not text:
+            return {"ok": False, "error": "nothing to send"}
+        tg.hear(text)
+        return {"ok": True}
+
     async def _ipc_mic(self, req: dict[str, Any]) -> dict[str, Any]:
         # `cc-buddy-bridge mic [on|off|status]`, and the menu-bar app's switch.
         action = req.get("action")
@@ -2817,6 +2831,8 @@ class Daemon:
             self._ack_waiters = [w for w in self._ack_waiters if w[2] is not fut]
 
 
+CHAT_MAX_CHARS = 4000     # a Telegram message is at most 4096 characters
+
 # Daemon._handle_ipc's dispatch table: event name -> handler (called as handler(daemon, req)).
 IPC_HANDLERS: dict[str, Any] = {
     "expressions": Daemon._ipc_expressions,
@@ -2840,6 +2856,7 @@ IPC_HANDLERS: dict[str, Any] = {
     "unpair": Daemon._ipc_unpair,
     "sound": Daemon._ipc_sound,
     "mic": Daemon._ipc_mic,
+    "chat": Daemon._ipc_chat,
     "get_state": Daemon._ipc_get_state,
     "posttooluse": Daemon._ipc_posttooluse,
     "notification": Daemon._ipc_notification,

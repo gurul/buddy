@@ -8,8 +8,31 @@ by [xcodegen](https://github.com/yonaskolb/XcodeGen).
 **The widget** is a dark card: buddy's name, its current feeling (emoji, label and
 a colour dot — hue from valence, brightness from arousal, the same mapping as the
 robot's LEDs), then the newest thoughts, each with its time and a thin colour bar
-for the feeling it was written in; the large size adds what changed. **Tap it**
-(`stackchan://diary`) and the helper opens the diary window:
+for the feeling it was written in; the large size adds what changed, and the
+extra-large size shows twice the thoughts. **Tap it** (`stackchan://chat`) and the
+helper opens the chat window.
+
+## The chat window
+
+The chat window shows buddy's conversation with you, like the Telegram chat. Your
+messages are on the right, buddy's are on the left, and voice lines are marked 🎙.
+It includes what you text on Telegram and what you say with the Voice PE's hold to
+talk. Type in the box at the bottom and press Return: the words go to the same brain
+as a Telegram text, with every tool. buddy answers in the window, and in Telegram
+as usual. The window is also in the menu, as *Open chat* (⌘T).
+
+The window reads buddy's transcripts in place
+(`~/.config/cc-buddy-bridge/memory/transcripts/<day>.jsonl`, the last three days)
+and checks them every 1.5 s. It never copies them: the owner's rule (2026-09-23)
+keeps the words out of backed-up folders, and the widget's App Group container is
+one. So the widget shows buddy's thoughts, not the chat. The reply box sends
+`{"evt":"chat","text":…}` on the daemon's socket (`/tmp/cc-buddy-bridge.sock`,
+mode 0600, so only your own programs can use it). The Telegram chat must be set up,
+and you must have texted buddy there once, so it knows which chat is yours.
+
+## The diary window
+
+The helper's menu opens the diary window (*Open diary*, ⌘D, or `stackchan://diary`):
 
 | Tab | What |
 |---|---|
@@ -20,7 +43,6 @@ for the feeling it was written in; the large size adds what changed. **Tap it**
 | Profile | ★ never forget (the starred layer), then buddy's ROOM / HUMAN / SELF / RULES blocks |
 | Dreams | the nightly insights per day, with the ★ candidates buddy proposed |
 
-The menu-bar item has *Open diary* (⌘D) as well.
 
 ## What it is
 
@@ -35,7 +57,8 @@ Both share the App Group `SJ8BKXTNUS.com.github.cc-buddy-bridge` (macOS App
 Groups are prefixed with the Team ID, which is the `OU` of the "Apple
 Development" signing certificate).
 
-Sizes: small shows 2 thoughts, medium 4, large 9 with a "changed:" line. Empty
+Sizes: small shows 2 thoughts, medium 4, large 9 with a "changed:" line, and
+extra large twice the cards of large. Empty
 state: *Nothing noticed yet — buddy explores when Claude is idle.*
 
 ## The two provenances

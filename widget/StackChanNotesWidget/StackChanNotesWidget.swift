@@ -8,8 +8,9 @@
 //
 // The diary widget shows buddy's name and current feeling, a debt of buddy's own
 // if it has one, and the newest thoughts as cards whose offset shadow is the
-// colour of the feeling they were written in. Tapping it opens the diary window
-// in the helper app (stackchan://diary). The learning widget shows the saved
+// colour of the feeling they were written in, in four sizes up to extra large.
+// Tapping it opens the chat window in the helper app (stackchan://chat); the
+// diary window is in the helper's menu. The learning widget shows the saved
 // lessons and opens the learning dashboard (stackchan://learning).
 
 import AppIntents
@@ -91,11 +92,11 @@ struct StackChanNotesWidget: Widget {
         StaticConfiguration(kind: Self.kind, provider: NotesProvider()) { entry in
             NotesView(entry: entry)
                 .containerBackground(for: .widget) { NotesCardBackground() }
-                .widgetURL(AppGroup.diaryURL)
+                .widgetURL(AppGroup.chatURL)
         }
         .configurationDisplayName("buddy's diary")
-        .description("What buddy noticed around your desk, and how it felt. Tap to open the diary.")
-        .supportedFamilies([.systemSmall, .systemMedium, .systemLarge])
+        .description("What buddy noticed around your desk, and how it felt. Tap to chat with buddy.")
+        .supportedFamilies([.systemSmall, .systemMedium, .systemLarge, .systemExtraLarge])
     }
 }
 
@@ -152,6 +153,7 @@ struct NotesView: View {
         switch family {
         case .systemSmall: 1
         case .systemMedium: debt == nil ? 3 : 2
+        case .systemExtraLarge: max(1, 6 - (debt == nil ? 0 : 1) - (lead == nil ? 0 : 1))
         default: max(1, 3 - (debt == nil ? 0 : 1) - (lead == nil ? 0 : 1))
         }
     }
