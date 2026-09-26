@@ -231,17 +231,20 @@ def test_a_mem0_without_the_expected_clients_is_left_alone(_spend_ledger_in_tmp:
 def test_a_lesson_turn_and_its_reference_search_are_metered(_spend_ledger_in_tmp: Path, monkeypatch) -> None:
     import urllib.request
 
+    from cc_buddy_bridge import watch
     from cc_buddy_bridge.learning import search as lsearch
     from cc_buddy_bridge.learning.tutor import LiveTutor
 
-    replies = {"https://api.exa.ai/search": {"results": [], "costDollars": {"total": 0.005}},
-               "https://api.openai.com/v1/responses": {
+    monkeypatch.setattr(watch, "http_request", lambda url, **kw: (200, json.dumps(
+        {"success": True, "creditsUsed": 4, "data": {"web": []}})))
+    replies = {"https://api.openai.com/v1/responses": {
                    "usage": {"input_tokens": M, "output_tokens": 0},
                    "output": [{"type": "message", "content": [{"type": "output_text", "text": "{}"}]}]}}
     monkeypatch.setattr(urllib.request, "urlopen",
                         lambda req, timeout=0: Resp(json.dumps(replies[req.full_url]).encode()))
     monkeypatch.setenv("OPENAI_API_KEY", "sk-test")
-    monkeypatch.setenv("EXA_API_KEY", "exa-test")
+    monkeypatch.setenv("FIRECRAWL_API_KEY", "fc-test")
+    monkeypatch.setenv("CC_BUDDY_FIRECRAWL_USD", "0.004")
     monkeypatch.delenv("CC_BUDDY_LEARNING_PROVIDER", raising=False)
     monkeypatch.delenv("CC_BUDDY_LEARNING_MODEL", raising=False)
     lsearch.search_problems("fractions", "grade 5")
@@ -250,8 +253,9 @@ def test_a_lesson_turn_and_its_reference_search_are_metered(_spend_ledger_in_tmp
                              "events": [], "stuck": False})
     except ValueError:
         pass                                                       # the fake reply is not a lesson; it was metered
-    exa, turn = lines(_spend_ledger_in_tmp)
-    assert (exa["p"], exa["f"], exa["usd"], exa["src"]) == ("exa", "lessons", 0.005, "reported")
+    search, turn = lines(_spend_ledger_in_tmp)
+    assert (search["p"], search["f"], search["usd"], search["note"]) == ("firecrawl", "lessons", pytest.approx(0.016),
+                                                                         "4 credits")
     assert (turn["f"], turn["m"], turn["usd"]) == ("lessons", "gpt-6-astra", pytest.approx(10.0))
 
 
