@@ -232,14 +232,16 @@ class ReflexFirstAgent:
                  quitter: Callable[[str], Any] = quit_app,
                  quit_everything: Optional[Callable[[], Any]] = None,
                  make_auto: Optional[Callable[[], Any]] = None,
-                 route_body: Optional[Callable[[str], Awaitable[str]]] = None) -> None:
+                 route_body: Optional[Callable[[str], Awaitable[str]]] = None,
+                 bodies: Optional[dict[str, Callable[[], Any]]] = None) -> None:
         self._make_inner, self._inner, self._on_event = make_inner, None, on_event
         self._apps, self._asker, self._opener, self._enabled = apps, asker, opener, enabled
         self._on_done, self.provider = on_done, provider
         self._quit_asker, self._quitter = quit_asker, quitter
         self._quit_everything = quit_everything or (lambda: quit_all(quit_keep()))
-        # browser_router.py: with an isolated body wired in, Jev picks the body for a task the reflex declined
-        self._make_auto, self._route_body = make_auto, route_body
+        # route_body names the body for a task the reflex declined: a name in ``bodies`` (e.g. "firecrawl",
+        # browser_router.py), any other non-Codex name the one ``make_auto`` body (the Chrome lane), else Codex
+        self._make_auto, self._route_body, self._bodies = make_auto, route_body, dict(bodies or {})
         self.body = "codex"
         self._reflex_running = False
         self._cancel_reason: Optional[str] = None
@@ -250,15 +252,16 @@ class ReflexFirstAgent:
         return self._reflex_running or bool(getattr(self._inner, "running", False))
 
     async def _choose_body(self, goal: str) -> Any:
-        """Codex, unless an isolated body is wired in and the router sends this task there. Never raises."""
-        if self._make_auto is not None and self._route_body is not None:
+        """Codex, unless another body is wired in and the router sends this task there. Never raises."""
+        if (self._make_auto is not None or self._bodies) and self._route_body is not None:
             try:
                 body = await self._route_body(goal)
             except Exception as e:  # noqa: BLE001 — a router that fails keeps the task with Codex
                 log.warning("app-reflex: the body router failed (%s); Codex takes it", type(e).__name__)
                 body = "codex"
-            if body and body != "codex":
-                agent = self._make_auto()
+            make = self._bodies.get(body) or (self._make_auto if body and body != "codex" else None)
+            if make is not None:
+                agent = make()
                 self.body = body
                 self.provider = str(getattr(agent, "provider", "") or body)
                 log.info("app-reflex: %s takes this task", self.provider)

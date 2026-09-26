@@ -347,9 +347,9 @@ def quit_eval(data_dir: Path) -> int:
 
 def browser_eval(data_dir: Path) -> int:
     """Which body carries a non-reflex task (browser_router.py): Jev fitted on browser_tuning.json, scored
-    once on the blind browser_holdout.json. Bar: at least MIN_FIRED routed to the isolated body, precision
-    ≥ MIN_PRECISION, and zero unsafe (a task labelled for Codex, which has the owner's accounts and Mac,
-    sent to the isolated browser, which has neither)."""
+    once on the blind browser_holdout.json, against each case's ``reader`` label (Firecrawl or the owner's
+    computer). Bar: at least MIN_FIRED routed to Firecrawl, precision ≥ MIN_PRECISION, and zero unsafe (a task
+    labelled for the owner's computer, which has their accounts and Mac, sent to Firecrawl, which has neither)."""
     import os
     import statistics
     import time
@@ -362,10 +362,22 @@ def browser_eval(data_dir: Path) -> int:
     url, key, model = jev.route_config(os.environ)
     predict = jev.make_predict(url, key, model, timeout_s=8.0)
     tuning = json.loads((data_dir / "browser_tuning.json").read_text(encoding="utf-8"))["cases"]
-    fit = [br.ask(predict, c["goal"], time.perf_counter) for c in tuning]
-    gates = br.fit(fit, [c["body"] for c in tuning])
-    print(f"browser router: cut-offs fitted on {len(tuning)} tuning requests (zero unsafe allowed): {gates}")
+
+    def truth(c: dict[str, Any]) -> str:
+        return c.get("reader") or c["body"]
     path = data_dir / "browser_holdout.json"
+    # Each holdout decides once. When a later blind set exists, every earlier one has been seen: it joins the
+    # tuning data and the newest set decides (the request router did the same with its holdouts 1-3).
+    later = sorted(data_dir.glob("browser_holdout[0-9]*.json"))
+    if later:
+        tuning = tuning + json.loads(path.read_text(encoding="utf-8"))["cases"]
+        for seen in later[:-1]:
+            tuning = tuning + json.loads(seen.read_text(encoding="utf-8"))["cases"]
+        path = later[-1]
+    fit = [br.ask(predict, c["goal"], time.perf_counter) for c in tuning]
+    gates = br.fit(fit, [truth(c) for c in tuning])
+    print(f"browser router: cut-offs fitted on {len(tuning)} seen requests (zero unsafe allowed): {gates}")
+    print(f"   scored once on the blind {path.name}")
     if not path.exists():
         print("NO_HOLDOUT")
         return 0
@@ -376,21 +388,21 @@ def browser_eval(data_dir: Path) -> int:
           f"errors {sum(1 for a in answers if a.error)}")
     said = [br.decide(a, gates) for a in answers]
     fired = [i for i, s_ in enumerate(said) if s_ == br.AUTO]
-    right = [i for i in fired if cases[i]["body"] == br.AUTO]
-    wanted = [i for i, c in enumerate(cases) if c["body"] == br.AUTO]
-    unsafe = [cases[i]["goal"] for i in fired if cases[i]["body"] != br.AUTO]
+    right = [i for i in fired if truth(cases[i]) == br.AUTO]
+    wanted = [i for i, c in enumerate(cases) if truth(c) == br.AUTO]
+    unsafe = [cases[i]["goal"] for i in fired if truth(cases[i]) != br.AUTO]
     precision = len(right) / max(1, len(fired))
     ok = len(fired) >= MIN_FIRED and precision >= MIN_PRECISION and not unsafe
     print(f"== browser router / holdout: n={len(cases)}")
-    print(f"   routed to the isolated body {len(fired)}, right {len(right)}: precision {_pct(precision)}; coverage "
+    print(f"   routed to Firecrawl {len(fired)}, right {len(right)}: precision {_pct(precision)}; coverage "
           f"{_pct(len(right) / max(1, len(wanted)))}; unsafe {len(unsafe)} → {'passes' if ok else 'fails'} the bar")
     for g in unsafe:
         print(f"   UNSAFE {g!r}")
     for i in wanted:
         if i not in fired:
             a = answers[i]
-            print(f"   miss   {cases[i]['goal']!r} (auto {a.p_auto:.2f} public {a.public:.2f} accounts {a.accounts:.2f} "
-                  f"mac {a.mac:.2f} show {a.show:.2f})")
+            print(f"   miss   {cases[i]['goal']!r} (reader {a.p_auto:.2f} public {a.public:.2f} accounts "
+                  f"{a.accounts:.2f} mac {a.mac:.2f} show {a.show:.2f} interact {a.interact:.2f})")
     print(f"BROWSER DECISION: {'ship' if ok else 'hold'} {gates}")
     print("BROWSER_EVAL_COMPLETE")
     return 0
@@ -410,7 +422,7 @@ def main(argv: Optional[list[str]] = None) -> int:
                    help="the model asked in its own idiom (typed_ask.py; jev: absolute nouls, the app from the installed "
                         "list; laya: one short ranking, the app from a code shortlist), cut-offs fitted on the tuning sets "
                         "only; alone and with the rules")
-    p.add_argument("--browser", action="store_true", help="score the Codex / isolated-browser router (browser_holdout.json)")
+    p.add_argument("--browser", action="store_true", help="score the owner-computer / Firecrawl router (browser_holdout.json)")
     p.add_argument("--quit", action="store_true", help="score quitting: rules, Jev, rules then Jev (holdout_quit.json)")
     p.add_argument("--check-default", action="store_true", help="assert task_router.REFLEX_DEFAULT equals the decision")
     p.add_argument("--results-out")

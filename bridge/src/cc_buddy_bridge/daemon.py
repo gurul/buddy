@@ -1232,7 +1232,7 @@ class Daemon:
                                             quit_asker=app_reflex.jev_quit_asker(),
                                             enabled=app_reflex.reflexes_on(),
                                             on_done=warm.kick if warm is not None else (lambda: None),
-                                            **Daemon._chrome_body(self, make_inner, on_event, ask_user))
+                                            **Daemon._bodies(self, make_inner, on_event, ask_user))
         self._active_agent = agent
         return agent
 
@@ -1331,6 +1331,42 @@ class Daemon:
         chat = getattr(inlet, "_chat_id", None) if inlet is not None else None
         if inlet is not None and chat is not None:
             await inlet._say(chat, text)
+
+    def _bodies(self, make_inner: Any, on_event: Any, ask_user: Any) -> dict[str, Any]:
+        """ReflexFirstAgent's bodies beside Codex, and the one router that picks between them: Jev first
+        (browser_router.py: Firecrawl for a public-web reading task, web_reader.py), then the Chrome lane's rule
+        for a web goal, else Codex. {} when neither extra body is on: every task stays Codex's."""
+        from . import web_reader
+
+        chrome = Daemon._chrome_body(self, make_inner, on_event, ask_user)
+        reader_on = web_reader.configured().enabled
+        reader_route = Daemon._reader_route(self) if reader_on else None
+        if reader_route is None:
+            return chrome
+        chrome_route = chrome.get("route_body")
+
+        async def route_body(goal: str) -> str:
+            try:
+                body = await asyncio.to_thread(reader_route, goal)
+            except Exception as e:  # noqa: BLE001 — a router that fails keeps the task on the owner's computer
+                log.warning("web reader: the Jev router failed (%s)", type(e).__name__)
+                body = "codex"
+            if body == "firecrawl":
+                return body
+            return await chrome_route(goal) if chrome_route is not None else "codex"
+
+        return {**chrome, "route_body": route_body,
+                "bodies": {"firecrawl": lambda: web_reader.WebReaderAgent(make_inner, on_event, ask_user)}}
+
+    def _reader_route(self) -> Any:
+        """browser_router's Jev router, made once (None without a Jev route: every task stays where it was)."""
+        if not hasattr(self, "_reader_router"):
+            from . import browser_router
+
+            self._reader_router = browser_router.jev_router()
+            if self._reader_router is None:
+                log.info("web reader: no Jev route (CC_BUDDY_JEV_ROUTE); Firecrawl takes no tasks")
+        return self._reader_router
 
     def _chrome_body(self, make_inner: Any, on_event: Any, ask_user: Any) -> dict[str, Any]:
         """The Chrome lane as ReflexFirstAgent's second body, for web goals (browser_lane.is_web_goal: a URL, a

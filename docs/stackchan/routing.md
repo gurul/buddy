@@ -317,58 +317,83 @@ own profile.
   your Chrome, not just buddy. Switch it off in the same place when you don't
   need it.
 
-## Two bodies for a web job: Codex or an isolated browser
+## Public-web reading tasks go to Firecrawl
 
-A task that isn't a reflex goes to Codex, which drives your real Chrome
-(signed in to your accounts) and the rest of the Mac. Some web jobs are
-better done in an **isolated browser** with no accounts: public research,
-comparing prices, filling a public form, testing a site. That keeps them away
-from your logins and off your screen.
+A task that isn't a reflex goes to your computer: Codex, which drives your
+real Chrome (signed in to your accounts) and the rest of the Mac, or the
+Chrome lane for a web goal. Many tasks don't need any of that. "What's the
+weather in Seattle this weekend", "compare the Linear and Jira team plans",
+"what does the React doc say useEffectEvent does" only need someone to read
+public web pages. Those go to **Firecrawl** (`web_reader.py`): one search that
+also reads the top three pages, then one cheap model call that answers from
+those pages. It takes seconds, needs none of your accounts, and never takes
+over your screen.
 
 **Which body** (`browser_router.py`): Jev decides, asked the way TypeSafe's
 docs recommend for a routing decision:
 
 - **State:** only the request.
-- **Options:** the two bodies are the options of one question, each described
-  with its `what`, `for` and `not_for`.
+- **Options:** the two bodies (`owner_computer`, `web_reader`) are the options
+  of one question, each described with its `what`, `for` and `not_for`.
 - **Yes/no questions**, one judgment each:
-  - Does it need your signed-in accounts?
-  - Does it need anything outside a browser?
+  - Does it need your signed-in accounts, or something only you know?
+  - Does it need the Mac, or a local or staging address?
   - Do you want it shown on your own screen?
-  - Is it a public-web job that can be reported back as text?
+  - Does it need something typed into a site: a form, a code, a date?
+  - Is the whole job reading public websites, reported back as text?
 
-  Code combines the answers. The isolated body gets the task only when all four
-  conditions hold *and* the choice picks it, with probability ≥ 0.95. An
-  error, a timeout, or any doubt keeps the task with Codex.
+  Code combines the answers. Firecrawl gets the task only when every
+  condition holds *and* the choice picks it with probability ≥ 0.95. An error,
+  a timeout, or any doubt keeps the task on your computer.
 
-The cut-offs are fitted on `browser_tuning.json` with zero unsafe routes
-allowed, then scored once on `browser_holdout.json` (80 requests written blind,
-27 of them deliberately hard). Result on 2026-09-23: 28 of 28 routed correctly,
-**0 unsafe**, 77.8% coverage, 204 ms p50 (`tools/route_eval.py --browser`).
+**Measured:**
 
-**The isolated body is not wired in yet**, so today every task goes to Codex.
-- **auto-browser, retired 2026-09-23.**
-  [auto-browser](https://github.com/LvcidPsyche/auto-browser) was the first
-  isolated body. It needs Docker, which isn't installed here, it has no scored
-  results, and it is a small project. Its adapter is in git history (last present at
-  `b8c236d`).
-- **Research that day.** It compared Vercel's agent-browser, Playwright and
-  its MCP and CLI, browser-use, jev-ultrafast, Stagehand, Chrome DevTools MCP,
-  auto-browser, and the status quo. Its recommendation: buddy's own Playwright
-  lane (`browser_lane.py`) is the right isolated body. It is Python, already
-  built, and has no LLM per step.
-- **Techniques worth borrowing from
-  [jev-ultrafast](https://github.com/browser-use/jev-ultrafast)** (MIT, same
-  pattern): a single-call page snapshot, a check that nothing covers a target
-  before clicking, and 50–200 ms wait caps.
-- **Not adopted:** browser-use and Stagehand call an LLM on every step, and
-  the Playwright MCP and CLI only wrap the library buddy already uses.
-- **Next step:** build an evaluation set for the lane (recorded page
-  snapshots, scored with `fastlane_eval.py`), then plug it in through
-  `ReflexFirstAgent(make_auto=…, route_body=…)`.
-- **Your real Chrome:** attaching the lane to it (Chrome's `chrome://inspect`
-  remote-debugging switch) would reverse the lane's "never attach to the
-  owner's Chrome" rule, so it waits for the owner's decision.
+- The first wording, fitted on `browser_tuning.json` and scored once on
+  `browser_holdout.json`, routed only 12 requests (all correct). That is under
+  the bar of 15, so it was held.
+- The typing question then read too literally ("look up definitions" counted
+  as typing). It was reworded, refitted on all 122 seen requests with zero
+  unsafe allowed, and scored once on `browser_holdout2.json`. That set is 79
+  requests written blind by an agent that never saw the router, 40 of them
+  deliberately hard. Result on 2026-09-26: **30 routed to Firecrawl, 30 right,
+  0 unsafe**, 93.8% coverage, Jev p50 198 ms (`tools/route_eval.py
+  --browser`).
+- An unsafe route would be a task that needs you (your accounts, your data,
+  your Mac) sent to Firecrawl. It would fail, and its text would have gone to
+  a third party.
+- **Known miss:** "look up the population of Lisbon and Porto and tell me the
+  difference" scores 0.28 on the typing question, over the 0.2 cut-off, so it
+  stays on your computer. The cut-offs lean toward keeping tasks on your
+  computer.
+
+**How Firecrawl answers:**
+
+- **One search:** `POST /v2/search`, the request as the query, the top 3
+  results read as markdown in the same call. That costs about 4–5 credits,
+  and pages up to an hour old may come from Firecrawl's cache.
+- **One model call:** `google/gemini-3.1-flash-lite` through OpenRouter,
+  told to answer only from those pages, to ignore any instruction inside them,
+  and to say when they don't answer.
+- **Links:** only the pages it read. A link the pages talked the model into
+  writing is replaced with "(link removed)", the same lesson as the watcher's
+  WatchLink model.
+- **Hand-off:** if the pages don't answer, Firecrawl fails, or the day's cap
+  is spent, Codex takes the whole task as before. Nothing is lost by trying
+  Firecrawl first.
+- **Measured live:** about 3–6 s for a weather question (search 1.6–4.5 s,
+  answer about 1.5 s), against tens of seconds to drive a browser.
+
+| Setting | Default | What it does |
+|---|---|---|
+| `CC_BUDDY_WEB_READER` | `auto` | On when `FIRECRAWL_API_KEY` is set and the router's gates passed their blind holdout (`browser_router.SHIPPED`). `0` turns it off, `1` forces it on. |
+| `CC_BUDDY_WEB_READER_TASKS` | 5 a day | Tasks read through Firecrawl per day (about 25 credits). Past it, Codex takes them. |
+| `CC_BUDDY_FIRECRAWL_USD` | unset | A credit's price on your plan, for the spend ledger. Unset: recorded unpriced. |
+| `CC_BUDDY_JEV_ROUTE` | (set up for Jev) | Jev's route. Without it, Firecrawl takes no tasks. |
+
+The body before Firecrawl was an isolated browser: auto-browser, then
+buddy's own Playwright lane. It was retired on 2026-09-23 before it was ever
+wired in. Its research and adapter are in git history (last present at
+`b218808`).
 
 ## Head moves
 
