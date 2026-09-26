@@ -67,7 +67,28 @@ so a condition that already holds on the first background check does fire.
 
 ## How a page is read
 
-A page goes to the cheapest reader that answers:
+First the page is fetched. Some shops refuse a plain Python request no matter
+what its headers say, because its TLS handshake is Python's rather than the
+Chrome its user agent claims. If the plain read gets a 401 or 403, or no answer
+within 20 s, buddy fetches the page once more with **`curl_cffi`**, which is
+libcurl built to shake hands the way Chrome does. A page that needed this goes
+straight to it on every later check. The check interval is unchanged: this
+fetch costs no more than a plain one. A 429 is never retried this way. It's a
+request to slow down, and buddy honours it. This needs
+`pip install -e ".[tls]"`. `CC_BUDDY_WATCH_TLS=0` turns it off.
+
+Measured on 2026-09-26 from a home connection:
+
+| Site | Plain read | Read as Chrome would |
+|---|---|---|
+| LEGO | 403 | $849.99, from its own data, in about 1 s |
+| Best Buy | No answer in 20 s | $84.99, from its own data, in about 2 s |
+
+The same test showed Scrapling, which wraps `curl_cffi` with extra headers,
+being blocked by StubHub and Walmart. Both read fine with `curl_cffi` alone,
+so buddy uses `curl_cffi` without Scrapling.
+
+Then the page goes to the cheapest reader that answers:
 
 1. **The page's own structured data.** No model call. This covers:
    - JSON-LD offers (`price`, `lowPrice`, `availability`). The lowest price is
@@ -110,8 +131,27 @@ A page goes to the cheapest reader that answers:
    check, at most every 15 minutes. This step needs Playwright and its Chromium
    (`pip install -e ".[browser]"` then `python -m playwright install chromium`).
    `CC_BUDDY_WATCH_BROWSER=0` turns it off.
-4. **Search.** A page that refuses both a plain read (HTTP 401/403) and the
-   browser (a bot check the vision model recognises) is watched by web search
+4. **Firecrawl** (paid, off without a key). A page that refuses every reader
+   on this Mac is read through Firecrawl's hosted browser and proxies. A plain
+   read and the Chrome-like read got a 401/403, and the browser got a 401/403
+   or a bot check. Once a page has needed Firecrawl, it goes straight there on
+   every later check, at most hourly. Firecrawl returns the raw page, which is
+   read like any other: its own data first, then its text by the cheap model.
+   - Each read costs one Firecrawl credit, and buddy makes at most
+     `CC_BUDDY_WATCH_FIRECRAWL_CALLS` a day (default 30, which is Firecrawl's
+     free 1,000 credits a month).
+   - Firecrawl serves pages from a cache up to two days old by default. buddy
+     asks for a fresh read every time (`maxAge: 0`).
+   - A credit is recorded in the spend ledger as unpriced unless you set
+     `CC_BUDDY_FIRECRAWL_USD` to your plan's price per credit.
+   - Firecrawl's own problems never move a watch to search: a bad key, no
+     credits left, or its rate limit. They count as ordinary failures, and
+     "I can't read X" tells you. Only the page's own 401/403, which Firecrawl
+     reports, moves the watch on.
+
+   Set `FIRECRAWL_API_KEY` in `~/.config/cc-buddy-bridge/env`.
+   `CC_BUDDY_WATCH_FIRECRAWL=0` turns it off.
+5. **Search.** A page that refuses all of the above is watched by web search
    from then on, at most hourly.
 
 Measured on 2026-09-25 (`tools/watch_smoke.py`):
@@ -167,6 +207,7 @@ How often a watch may be checked, at least:
 | Quote | 1 min |
 | Page | 5 min |
 | Page read in the browser | 15 min |
+| Page read through Firecrawl | 1 h |
 | Ticketmaster | 5 min |
 | Search | 1 h |
 
@@ -209,6 +250,22 @@ send only `Mozilla/5.0`.
 
   Proxies from the environment are ignored, since they would make the check
   moot.
+- **The Chrome-like read** (`tls_request`) keeps the same guarantees:
+  - Every hop is checked with `check_url`.
+  - Each hop's name is resolved once, and every answer must be public.
+  - libcurl is pinned to the checked address with `RESOLVE`, so it never makes
+    a second lookup that could be rebound.
+  - After the exchange, the address libcurl reports it used must be the pinned
+    one.
+  - Redirects are followed by buddy, never by libcurl, so each hop is checked
+    the same way.
+  - The rest matches the plain read: no proxy from the environment, http and
+    https only, one deadline for the whole answer, and the same size cap.
+
+  Live check: plain addresses and public names that point at the LAN are
+  refused, such as a `nip.io` name for the cloud metadata address and a public
+  redirector bounced to `127.0.0.1` or `10.0.0.1`. The same redirector pointed
+  at a public page is followed.
 - **The browser**: it runs in a child process with a hard deadline, and the
   whole process group is killed past it, so a page whose script spins can't
   hold the watcher.

@@ -82,7 +82,10 @@ The [Telegram door](docs/stackchan/telegram.md) is **off by default**. With it o
   Seattle go on sale", or `/watch VOO below 500`. buddy checks on a schedule
   through one rate limiter and texts you when it happens. It reads a page's own
   price data first, then its text, then the page in a headless browser with a
-  vision model looking at it. Bare `/watch` lists the watches. See
+  vision model looking at it. A shop that refuses Python is read again with
+  Chrome's TLS handshake (`curl_cffi`). A site that refuses every local reader
+  can be read through Firecrawl if you give it a key. Bare `/watch` lists the
+  watches. See
   [watching](docs/stackchan/watch.md).
 - **Takes calls from your phone.** **Call buddy** in the Mini App is push to talk into
   the same brain you text, so a call can do everything a text can. Replies are spoken,

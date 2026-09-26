@@ -77,6 +77,10 @@ dev = ["pytest>=8.0", "ruff>=0.6"]
 # per PyPI, 2026-09-21, Python >=3.10. Imported lazily; the daemon runs without it. Install with
 # `pip install -e ".[browser]"` then `python -m playwright install chromium` (~95 MB).
 browser = ["playwright>=1.63,<2"]
+# The watcher's Chrome-like read (watch.py tls_request): libcurl that shakes hands as Chrome does, for shops that
+# refuse Python's TLS (LEGO 403, Best Buy no answer; measured 2026-09-26). 0.16.3 current per PyPI, 2026-09-26,
+# MIT, Python >=3.10; wheels bundle their own libcurl. Imported lazily; `pip install -e ".[tls]"`.
+tls = ["curl_cffi>=0.16,<0.17"]
 # Memory by meaning (mem0_memory.py): mem0's open-source library, self-hosted (local Qdrant on disk + a SQLite
 # history), OpenAI for extraction and embeddings. 2.2.0 current per PyPI, 2026-09-23, Apache-2.0, Python >=3.10.
 # Its PostHog telemetry is forced off before import. Imported lazily; `pip install -e ".[mem0]"`.

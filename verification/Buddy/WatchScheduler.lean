@@ -541,7 +541,8 @@ theorem fixed_replays_counterexamples :
   machine takes `refusedLadder` as a step that changes nothing and `failed` for the rest. Each machine
   allows its events in any order, which covers every sequence the combined code can produce.
 
-  `page` is `w.kind == "page"`; `browser` is `self.config.browser` (fixed for the process). The notice
+  `page` is `w.kind == "page"`; `browser` is `self.config.browser` and `tls` is `self.config.tls` and `fc` is
+  `_crawl_on()` (all fixed for the process; the Chrome-like read and the Firecrawl rung were added 2026-09-26). The notice
   machine assumes `self.notify` is set, as the daemon sets it before the loop starts (daemon.py:394); a
   "tell" is the `_tell` call, whether or not Telegram then delivers it. -/
 
@@ -549,35 +550,46 @@ namespace Ladder
 
 inductive Via where
   | plain      -- ""
+  | tls        -- "tls": read as Chrome would (curl_cffi); `_fetch_page` goes straight there
   | browser    -- "browser": rendered, then seen (:1286-1287 goes straight there)
+  | firecrawl  -- "firecrawl": read() goes to _read_crawled, the paid reader; never rendered
   | search     -- "search": read(): `w.via == "search"` goes to _read_search
   deriving DecidableEq, Repr
 
 def Via.rank : Via → Nat
   | .plain => 0
-  | .browser => 1
-  | .search => 2
+  | .tls => 1
+  | .browser => 2
+  | .firecrawl => 3
+  | .search => 4
 
-/-- A ghost count, saturated: `c3` is three or more. -/
+/-- A ghost count, saturated: `c5` is five or more. -/
 inductive Cnt where
-  | c0 | c1 | c2 | c3
+  | c0 | c1 | c2 | c3 | c4 | c5
   deriving DecidableEq, Repr
 
 def Cnt.succ : Cnt → Cnt
   | .c0 => .c1
   | .c1 => .c2
   | .c2 => .c3
-  | .c3 => .c3
+  | .c3 => .c4
+  | .c4 => .c5
+  | .c5 => .c5
 
 def Cnt.val : Cnt → Nat
   | .c0 => 0
   | .c1 => 1
   | .c2 => 2
   | .c3 => 3
+  | .c4 => 4
+  | .c5 => 5
 
 inductive Ev where
   | ok           -- a reading, via unchanged
+  | okTls        -- _fetch_page: the plain read was refused (401/403) or never answered and the Chrome-like read
+                 -- answered: "" becomes "tls" (whatever the rest of the read then finds)
   | okRendered   -- _read_page's rendered read answered (:1296-1301): "" becomes "browser"
+  | crawlOff     -- read(): a "firecrawl" watch while Firecrawl is off (the key removed) goes to search
   | refused      -- a FetchError 401/403 (the site, or the vision model's bot check, :1352-1354)
   deriving DecidableEq, Repr
 
@@ -590,47 +602,56 @@ structure St where
 def moveTo (s : St) (v : Via) : St :=
   { via := v, moves := s.moves.succ, back := s.back || !decide (s.via.rank < v.rank) }
 
-def step (page browser : Bool) (s : St) : Ev → St
+def step (page browser tls fc : Bool) (s : St) : Ev → St
   | .ok => s
+  -- `_fetch_page`: only with `self.config.tls`, only from ""; a "tls" watch reads that way already.
+  | .okTls => if page && tls && s.via == .plain then moveTo s .tls else s
   -- :1296 `if self.config.browser:` and :1286 (a "browser" watch never reaches this path).
-  | .okRendered => if page && browser && s.via == .plain then moveTo s .browser else s
+  | .okRendered => if page && browser && (s.via == .plain || s.via == .tls) then moveTo s .browser else s
   -- :1436 `e.status in (401, 403) and w.kind == "page" and w.via != "search"`;
-  -- :1439 `nxt = "browser" if self.config.browser and w.via == "" else "search"`. Otherwise an error.
+  -- `nxt = "browser" if self.config.browser and w.via in ("", "tls") else "firecrawl" if self._crawl_on() and
+  -- w.via in ("", "tls", "browser") else "search"`. Otherwise an error (Firecrawl's own refusals carry `host`,
+  -- so they are errors, never moves).
+  | .crawlOff => if !fc && s.via == .firecrawl then moveTo s .search else s
   | .refused => if page && s.via != .search then
-        moveTo s (if browser && s.via == .plain then .browser else .search)
+        moveTo s (if browser && (s.via == .plain || s.via == .tls) then .browser
+                  else if fc && s.via != .firecrawl then .firecrawl else .search)
       else s
 
-/-- The property: via only goes up, so it changes at most twice. -/
-def Spec (s : St) : Bool := !s.back && s.moves != .c3
+/-- The property: via only goes up, so it changes at most four times. -/
+def Spec (s : St) : Bool := !s.back && s.moves != .c5
 
 def Inv (s : St) : Bool := Spec s && decide (s.moves.val ≤ s.via.rank)
 
 end Ladder
 
 open Ladder in
-theorem ladder_inv_step (page browser : Bool) (s : St) (e : Ev) : Ladder.Inv s = true → Ladder.Inv (Ladder.step page browser s e) = true := by
+theorem ladder_inv_step (page browser tls fc : Bool) (s : St) (e : Ev) :
+    Ladder.Inv s = true → Ladder.Inv (Ladder.step page browser tls fc s e) = true := by
   rcases s with ⟨v, m, b⟩
-  cases v <;> cases m <;> cases b <;> cases e <;> cases page <;> cases browser <;> decide
+  cases v <;> cases m <;> cases b <;> cases e <;> cases page <;> cases browser <;> cases tls <;> cases fc <;> decide
 
 open Ladder in
-def Ladder.run (page browser : Bool) (evs : List Ev) : St := evs.foldl (step page browser) {}
+def Ladder.run (page browser tls fc : Bool) (evs : List Ev) : St := evs.foldl (step page browser tls fc) {}
 
 open Ladder in
-theorem ladder_inv_run (page browser : Bool) (evs : List Ev) :
-    ∀ s : St, Ladder.Inv s = true → Ladder.Inv (evs.foldl (Ladder.step page browser) s) = true := by
+theorem ladder_inv_run (page browser tls fc : Bool) (evs : List Ev) :
+    ∀ s : St, Ladder.Inv s = true → Ladder.Inv (evs.foldl (Ladder.step page browser tls fc) s) = true := by
   induction evs with
   | nil => intro s h; exact h
-  | cons e rest ih => intro s h; exact ih _ (ladder_inv_step page browser s e h)
+  | cons e rest ih => intro s h; exact ih _ (ladder_inv_step page browser tls fc s e h)
 
 /-- Property 3, for the current code, over every sequence of checks: the via ladder only goes up ("" ->
-"browser" -> "search", or "" -> "search"), so it moves at most twice. A move is the only way a check is due
-again at once (:1443) without an error's backoff, so a refusing site gets at most two such immediate
-re-checks; each check is one `read`, which by the code makes at most four requests ("": the fetch, the
-page-text model, the render and the vision model, :1288-1301; "browser": the render and the vision model;
+"tls" -> "browser" -> "firecrawl" -> "search", with any rung skipped), so it moves at most four times. The
+move to "tls" happens inside a read and never makes a check due again; a refusal's move is the only way a check
+is due again at once (:1443) without an error's backoff, so a refusing site gets at most three such immediate
+re-checks (`add` allows exactly three); each check is one `read`, which by the code makes at most five requests
+("": the fetch, the Chrome-like fetch, the page-text model, the render and the vision model, :1288-1301; "tls":
+one fewer; "browser": the render and the vision model; "firecrawl": one Firecrawl call and the page-text model;
 "search": one model call, :1380-1392). -/
-theorem ladder_code_invariant (page browser : Bool) (evs : List Ladder.Ev) :
-    Ladder.Spec (Ladder.run page browser evs) = true := by
-  have h := ladder_inv_run page browser evs {} (by decide)
+theorem ladder_code_invariant (page browser tls fc : Bool) (evs : List Ladder.Ev) :
+    Ladder.Spec (Ladder.run page browser tls fc evs) = true := by
+  have h := ladder_inv_run page browser tls fc evs {} (by decide)
   unfold Ladder.Inv at h
   simp only [Bool.and_eq_true] at h
   exact h.1

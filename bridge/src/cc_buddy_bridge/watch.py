@@ -82,7 +82,8 @@ PRICE_CONDITIONS = ("below", "above", "drop_pct", "rise_pct")
 # page from someone's shop; a search costs money.
 # Ticketmaster's Discovery API allows 5000 calls a day at 5 a second (developer.ticketmaster.com, 2026-09-25).
 FLOOR_SECS = {"quote": 60, "page": 300, "search": 3600, "ticketmaster": 300,
-              "browser": 900}                     # a page that needs headless Chromium: a render is seconds of CPU
+              "browser": 900,                     # a page that needs headless Chromium: a render is seconds of CPU
+              "firecrawl": 3600}                  # a paid read: one Firecrawl credit each
 DEFAULT_EVERY_SECS = {"quote": 900, "page": 1800, "search": 6 * 3600, "ticketmaster": 1800}
 MAX_EVERY_SECS = 7 * 24 * 3600
 MAX_PERIOD_HOURS = 24 * 366          # a watch window or a pause, at most a year
@@ -100,6 +101,7 @@ DEFAULT_HOST_GAP_SECS = 20.0         # between two requests to one host
 BACKOFF_BASE_SECS = 60.0             # a host's first backoff after a 429/503 with no Retry-After
 BACKOFF_MAX_SECS = 3600.0
 DEFAULT_MODEL_CALLS_PER_DAY = 48     # page fallbacks and searches together
+DEFAULT_FIRECRAWL_CALLS_PER_DAY = 30  # Firecrawl's free plan: 1,000 credits a month (firecrawl.dev/pricing, 2026-09-26)
 FIRST_CHECK_WAIT_SECS = 25.0         # watch_add waits this long for the limiter before queueing the first check
 
 TIMEOUT_SECS = 20.0
@@ -119,6 +121,8 @@ TM_HOST = "app.ticketmaster.com"
 TM_EVENT_URL = re.compile(r"^https?://(?:www\.)?ticketmaster\.[a-z.]+/(?:.*?/)?event/([A-Za-z0-9]{6,40})(?:[/?#]|$)", re.I)
 OPENROUTER_URL = websearch.URL
 OPENROUTER_HOST = "openrouter.ai"
+FIRECRAWL_URL = "https://api.firecrawl.dev/v2/scrape"      # docs.firecrawl.dev/api-reference/endpoint/scrape
+FIRECRAWL_HOST = "api.firecrawl.dev"
 DEFAULT_MODEL = websearch.DEFAULT_MODEL   # a cheap non-OpenAI model through OpenRouter (websearch.py's reasoning)
 
 # schema.org availability, as the last path segment. What can be bought or booked now counts as available.
@@ -144,6 +148,10 @@ class WatchConfig:
     model: str = DEFAULT_MODEL
     ticketmaster: bool = False                           # TICKETMASTER_API_KEY is set (read again at each call)
     browser: bool = False                                # Playwright is installed: render JS pages, read screenshots
+    tls: bool = False                                    # curl_cffi is installed: retry a refused page as Chrome would
+    firecrawl: bool = False                              # FIRECRAWL_API_KEY is set (read again at each call)
+    firecrawl_calls_per_day: int = DEFAULT_FIRECRAWL_CALLS_PER_DAY
+    firecrawl_usd: Optional[float] = None                # per credit, from the owner's plan; None: recorded unpriced
     vision_model: str = DEFAULT_MODEL                     # reads a rendered page's screenshot (image input)
     search: websearch.SearchConfig = field(default_factory=websearch.SearchConfig)
 
@@ -172,10 +180,35 @@ def _browser_on(env: Any) -> bool:
     return have
 
 
+def _tls_on(env: Any) -> bool:
+    """CC_BUDDY_WATCH_TLS = 1 | 0 | auto (the default: on when curl_cffi is importable)."""
+    raw = (env.get("CC_BUDDY_WATCH_TLS") or "auto").strip().lower()
+    if raw in ("0", "false", "no", "off"):
+        return False
+    have = tls_available()
+    if raw in ("1", "true", "yes", "on") and not have:
+        log.warning("watch: CC_BUDDY_WATCH_TLS is on but curl_cffi is not installed (pip install -e \".[tls]\"); off")
+    return have
+
+
+def _price_per_credit(env: Any) -> Optional[float]:
+    """CC_BUDDY_FIRECRAWL_USD: one Firecrawl credit's price on the owner's plan ($0 free, about $0.004 Hobby,
+    $0.005 an extra credit, firecrawl.dev/pricing 2026-09-26). Unset or unreadable: None, recorded unpriced."""
+    raw = (env.get("CC_BUDDY_FIRECRAWL_USD") or "").strip()
+    try:
+        usd = float(raw) if raw else None
+    except ValueError:
+        log.warning("watch: CC_BUDDY_FIRECRAWL_USD=%r is not a number; Firecrawl reads recorded unpriced", raw)
+        return None
+    return usd if usd is not None and 0 <= usd <= 1 else None
+
+
 def configured(environ: Any = None) -> WatchConfig:
     """``CC_BUDDY_WATCH`` (on unless 0/false/off), ``CC_BUDDY_WATCH_FILE``, the limiter's ``_RATE`` (per minute),
     ``_BURST``, ``_HOST_GAP`` (seconds) and ``_MODEL_CALLS`` (per day), ``_MODEL`` for the page fallback and
-    searches and the page reader, ``_VISION_MODEL`` for screenshots, ``_BROWSER`` for headless Chromium."""
+    searches and the page reader, ``_VISION_MODEL`` for screenshots, ``_BROWSER`` for headless Chromium, ``_TLS`` for the
+    Chrome-like retry, ``_FIRECRAWL`` (with ``FIRECRAWL_API_KEY``) and ``_FIRECRAWL_CALLS`` (per day) for the paid
+    reader, and ``CC_BUDDY_FIRECRAWL_USD`` for what one Firecrawl credit costs on the owner's plan."""
     env = os.environ if environ is None else environ
     switch = (env.get("CC_BUDDY_WATCH") or ("1" if WATCH_DEFAULT else "0")).strip().lower()
     model = (env.get("CC_BUDDY_WATCH_MODEL") or DEFAULT_MODEL).strip()
@@ -193,7 +226,12 @@ def configured(environ: Any = None) -> WatchConfig:
         host_gap_secs=_number(env, "CC_BUDDY_WATCH_HOST_GAP", DEFAULT_HOST_GAP_SECS, 0, 3600),
         model_calls_per_day=int(_number(env, "CC_BUDDY_WATCH_MODEL_CALLS", DEFAULT_MODEL_CALLS_PER_DAY, 0, 10000)),
         model=model, ticketmaster=bool((env.get("TICKETMASTER_API_KEY") or "").strip()),
-        browser=_browser_on(env), vision_model=vision, search=websearch.configured(env))
+        browser=_browser_on(env), tls=_tls_on(env), vision_model=vision, search=websearch.configured(env),
+        firecrawl=bool((env.get("FIRECRAWL_API_KEY") or "").strip())
+        and (env.get("CC_BUDDY_WATCH_FIRECRAWL") or "1").strip().lower() not in ("0", "false", "no", "off"),
+        firecrawl_calls_per_day=int(_number(env, "CC_BUDDY_WATCH_FIRECRAWL_CALLS", DEFAULT_FIRECRAWL_CALLS_PER_DAY,
+                                            0, 10000)),
+        firecrawl_usd=_price_per_credit(env))
 
 
 # ---- the rate limiter -------------------------------------------------------------------------
@@ -967,6 +1005,158 @@ def _exchange(opener: Any, req: Any, timeout: float, deadline: float, fired: thr
         return status, body.decode("utf-8", errors="replace")
 
 
+# ---- the Chrome-like read (curl_cffi) ------------------------------------------------------------
+# Some shops refuse http_request whatever its headers say: its TLS handshake is Python's, not the Chrome its user
+# agent claims (LEGO answers 403; Best Buy never answers, 20 s). curl_cffi is libcurl built to shake hands as
+# Chrome does. Measured 2026-09-26 from this Mac: LEGO, Best Buy, Walmart and StubHub product pages all read in
+# 1-2 s, where http_request got 403 or a timeout on LEGO and Best Buy (Scrapling, which wraps curl_cffi, blocked
+# StubHub and Walmart with its extra headers, so buddy uses curl_cffi alone). A page GET only, never an API call.
+TLS_IMPERSONATE = "chrome"
+TLS_MAX_HOPS = 5                     # redirects followed, each one checked
+TLS_REDIRECTS = (301, 302, 303, 307, 308)
+TOO_LONG = "the site took too long to answer"
+
+
+def tls_available() -> bool:
+    return importlib.util.find_spec("curl_cffi") is not None
+
+
+def _pin(host: str, port: int) -> str:
+    """One lookup; every answer public, or the host is refused; the first answer is the address used. The
+    connection is then pinned to it (libcurl's RESOLVE), so there is no second lookup to rebind (WatchSsrf)."""
+    try:
+        infos = socket.getaddrinfo(host, port, 0, socket.SOCK_STREAM)
+    except (socket.gaierror, UnicodeError, OSError):
+        raise FetchError("that link goes to a private or unknown address") from None
+    addrs = [str(i[4][0]).split("%", 1)[0] for i in infos]
+    try:
+        if not addrs or not all(_ip_public(ipaddress.ip_address(a)) for a in addrs):
+            raise FetchError("that link goes to a private or unknown address")
+    except ValueError:
+        raise FetchError("that link goes to a private or unknown address") from None
+    return addrs[0]
+
+
+def tls_request(url: str, *, timeout: float = TIMEOUT_SECS) -> tuple[int, str]:
+    """One page GET with Chrome's TLS fingerprint: (status, body as text). The same guards as http_request, by
+    other means: every hop is check_url'd and pinned to the address its one lookup checked, redirects are
+    followed here (never by libcurl) so each is checked the same way, no proxy from the environment, a deadline
+    for the whole answer (libcurl's own total timeout), http(s) only, and a body past MAX_BYTES refused. After
+    the exchange the address libcurl says it used must be the pinned one. Raises FetchError."""
+    try:
+        from curl_cffi import CurlOpt
+        from curl_cffi import requests as cffi
+    except ImportError:
+        raise FetchError("the Chrome-like reader is not installed") from None
+    deadline = time.monotonic() + timeout
+    for hop in range(TLS_MAX_HOPS + 1):
+        why = check_url(url)
+        if why:
+            raise FetchError(why if hop == 0 else f"redirected somewhere not allowed ({why})")
+        scheme, host, port = _origin(url)
+        ip = _pin(host, port)
+        left = deadline - time.monotonic()
+        if left <= 0:
+            raise FetchError(TOO_LONG)
+        opts = {CurlOpt.RESOLVE: [f"{host}:{port}:{ip}".encode()], CurlOpt.NOPROXY: b"*",
+                CurlOpt.PROTOCOLS_STR: b"http,https", CurlOpt.REDIR_PROTOCOLS_STR: b"http,https",
+                CurlOpt.MAXFILESIZE: MAX_BYTES}
+        chunks: list[bytes] = []
+        try:
+            with cffi.Session(impersonate=TLS_IMPERSONATE, trust_env=False, curl_options=opts) as s:
+                r = s.get(url, allow_redirects=False, timeout=left, stream=True, proxy=None,
+                          headers={"Accept-Language": "en-US,en;q=0.9"})
+                try:
+                    size = 0
+                    for chunk in r.iter_content():
+                        size += len(chunk)
+                        if size > MAX_BYTES:
+                            raise FetchError("the page is too big to read")
+                        if time.monotonic() > deadline:
+                            raise FetchError(TOO_LONG)
+                        chunks.append(chunk)
+                    status, headers, used = r.status_code, r.headers, str(getattr(r, "primary_ip", "") or "")
+                finally:
+                    r.close()
+        except FetchError:
+            raise
+        except cffi.exceptions.Timeout:
+            raise FetchError(TOO_LONG) from None
+        except Exception as e:  # noqa: BLE001 — libcurl's errors (refused, reset, too big) are the site's, never ours
+            if "curl: (63)" in str(e):               # CURLE_FILESIZE_EXCEEDED: a Content-Length past MAXFILESIZE
+                raise FetchError("the page is too big to read") from None
+            if time.monotonic() >= deadline:
+                raise FetchError(TOO_LONG) from None
+            raise FetchError("the site could not be reached") from None
+        try:
+            same = ipaddress.ip_address(used.strip("[]")) == ipaddress.ip_address(ip)
+        except ValueError:
+            same = False
+        if not same:
+            raise FetchError("that link goes to a private or unknown address")
+        if status in TLS_REDIRECTS and headers.get("location"):
+            url = urllib.parse.urljoin(url, str(headers.get("location")))
+            continue
+        if not 200 <= status < 300:
+            raise FetchError(f"the site answered HTTP {status}", status, _retry_after(headers))
+        body = b"".join(chunks)
+        charset = "utf-8"
+        m = re.search(r"charset=([\w.:-]+)", str(headers.get("content-type") or ""), re.I)
+        if m:
+            charset = m.group(1)
+        try:
+            return status, body.decode(charset, errors="replace")
+        except (LookupError, UnicodeError, TypeError):
+            return status, body.decode("utf-8", errors="replace")
+    raise FetchError("the site redirected too many times")
+
+
+def tls_worth(e: FetchError) -> bool:
+    """A plain read the Chrome-like read may get past: the site's own refusal (401/403) or a site that never
+    answered. Never a rate limit (429 is honoured, not dodged), a missing page, or OpenRouter's refusal."""
+    return not e.host and (e.status in (401, 403) or (e.status == 0 and e.reason == TOO_LONG))
+
+
+def firecrawl(url: str, *, timeout: float = 70.0) -> tuple[int, str]:
+    """The page's raw HTML as Firecrawl's hosted browser (with its own proxies) fetched it: (status, html). A paid
+    read, one credit, for pages that refuse every local reader. Fresh every time: Firecrawl answers from a cache
+    up to two days old unless told not to (``maxAge``), and a watch is about now. The request goes through
+    http_request, so its guards hold; Firecrawl's own refusals (a bad key, no credits, its rate limit) carry
+    ``host`` and so never move a watch down the ladder, while the page's own 401/403, which Firecrawl reports as
+    ``metadata.statusCode``, does. Raises FetchError."""
+    key = (os.environ.get("FIRECRAWL_API_KEY") or "").strip()
+    if not key:
+        raise FetchError("Firecrawl is not set up on this computer (FIRECRAWL_API_KEY)", host=FIRECRAWL_HOST)
+    why = check_url(url)
+    if why:
+        raise FetchError(why)
+    body = {"url": url, "formats": ["rawHtml"], "onlyMainContent": False, "maxAge": 0, "storeInCache": False,
+            "blockAds": True, "proxy": "auto", "timeout": int(max(1.0, timeout - 10) * 1000)}
+    try:
+        _, text = http_request(FIRECRAWL_URL, data=json.dumps(body).encode("utf-8"), timeout=timeout, headers={
+            "Authorization": f"Bearer {key}", "Content-Type": "application/json", "Accept": "application/json"})
+    except FetchError as e:
+        raise FetchError(f"Firecrawl: {e.reason}", e.status, e.retry_after, host=FIRECRAWL_HOST) from None
+    try:
+        payload = json.loads(text)
+    except ValueError:
+        raise FetchError("Firecrawl sent an unreadable answer", host=FIRECRAWL_HOST) from None
+    data = payload.get("data") if isinstance(payload, dict) else None
+    if not isinstance(data, dict) or payload.get("success") is False:
+        raise FetchError("Firecrawl could not read the page", host=FIRECRAWL_HOST)
+    meta = data.get("metadata") if isinstance(data.get("metadata"), dict) else {}
+    try:
+        status = int(meta.get("statusCode") or 200)
+    except (TypeError, ValueError):
+        status = 200
+    if not 200 <= status < 300:
+        raise FetchError(f"the site answered HTTP {status}", status)
+    html = data.get("rawHtml") or data.get("html") or ""
+    if not isinstance(html, str) or not html.strip():
+        raise FetchError("Firecrawl returned an empty page", host=FIRECRAWL_HOST)
+    return status, html
+
+
 # An overlay between the browser and the item (LEGO's "You are about to enter LEGO.com  [Continue]", 2026-09-25).
 # The render is a throwaway, signed-out context, so a button that only closes or continues is safe to press;
 # one that agrees, signs up, subscribes or pays never is. Cookie notices go through browser_lane's own rule
@@ -1469,7 +1659,8 @@ class Watch:
     ends_at: float = 0.0                 # the watch is removed at this time, and the owner told; 0: no end
     last_note: str = ""
     last_url: str = ""
-    via: str = ""                        # "browser" (rendered, then seen) or "search" when a page refuses a plain read
+    via: str = ""                        # "tls" (read as Chrome would), "browser" (rendered, then seen) or "search"
+    #                                      when a page refuses a plain read
     ref: str = ""                        # ticketmaster: the attraction id the keyword resolved to
     ref_at: float = 0.0                  # when it was looked up
     digest: str = ""                     # the page text the last model reading was made from (a hash)
@@ -1520,9 +1711,9 @@ class Watch:
                 setattr(w, f.name, v)
         w.label = " ".join(w.label.split())[:80] or w.target[:80]
         w.errors, w.checks, w.fired = (max(0, min(x, 10**6)) for x in (w.errors, w.checks, w.fired))
-        if w.via not in ("", "browser", "search"):
+        if w.via not in ("", "tls", "browser", "firecrawl", "search"):
             w.via = ""
-        floor = FLOOR_SECS["browser"] if w.via == "browser" else FLOOR_SECS[w.kind]
+        floor = FLOOR_SECS[w.via] if w.via in ("browser", "firecrawl") else FLOOR_SECS[w.kind]
         w.every_secs = max(floor, min(MAX_EVERY_SECS, w.every_secs or DEFAULT_EVERY_SECS[w.kind]))
         return w
 
@@ -1842,7 +2033,9 @@ class Watcher:
                  sleep: Callable[[float], Awaitable[None]] = asyncio.sleep,
                  rng: Optional[random.Random] = None, limiter: Optional[RateLimiter] = None,
                  offload: bool = True, resolve: Callable[[str], bool] = _public,
-                 render: Callable[..., tuple[str, bytes]] = render) -> None:
+                 render: Callable[..., tuple[str, bytes]] = render,
+                 tls: Optional[Callable[..., tuple[int, str]]] = None,
+                 crawl: Optional[Callable[..., tuple[int, str]]] = None) -> None:
         self.config = config
         self.notify = notify
         self._fetch, self._ask = fetch, ask
@@ -1855,6 +2048,9 @@ class Watcher:
         self._resolve = resolve                       # check_url's public-address test (a fake in tests)
         self._resend_at = 0.0                         # pending alerts are not resent before this
         self._render = render                         # headless Chromium (a fake in tests)
+        self._tls = tls if config.tls else None       # the Chrome-like read (tls_request; a fake in tests)
+        self._crawl = crawl                           # the paid reader (firecrawl; a fake in tests)
+        self._crawls: dict[str, int] = {}             # local day -> Firecrawl reads (a day stepped back onto keeps its count)
         self._lock = asyncio.Lock()                   # one check at a time: the loop's or a first check's
         self._wake = asyncio.Event()
         self._last_id = 0                             # the highest wN ever handed out (saved): an id is never reused
@@ -1944,6 +2140,14 @@ class Watcher:
     # -- reading one watch --
     async def read(self, w: Watch) -> Reading:
         """One reading, or FetchError. The caller has already been let through the limiter for ``host(w)``."""
+        if w.kind == "page" and w.via == "firecrawl":
+            if self._crawl_on():
+                return await self._read_crawled(w)
+            # Firecrawl was turned off (the key removed) after this page needed it: the next rung, not an error
+            # forever. Still forward on the ladder (WatchScheduler.lean, `crawlOff`).
+            log.info("watch: %s needed Firecrawl, which is off now; watching it by search", w.id)
+            w.via = "search"
+            w.every_secs = max(w.every_secs, FLOOR_SECS["search"])
         if w.kind == "quote":
             return await self._read_quote(w)
         if w.kind == "search" or w.via == "search":
@@ -2006,7 +2210,7 @@ class Watcher:
             if self._missing(w, seen):
                 raise FetchError(NOT_STATED.get(w.condition, "the page does not show a price"))
             return seen
-        _, page = await self._call(self._fetch, w.target)
+        page = await self._fetch_page(w)
         # Parsing a page is CPU work on up to MAX_BYTES of someone else's markup: never on the event loop.
         r = await self._call(self._from_html, w, page)
         if not self._missing(w, r):
@@ -2026,6 +2230,53 @@ class Watcher:
         # Every reader ran and none found what the condition needs: a failed read, counted like any other, so
         # the owner hears "I can't read X" rather than "no reading yet" forever (review, 2026-09-25).
         raise FetchError(NOT_STATED.get(w.condition, "the page does not show a price"))
+
+    def _crawl_on(self) -> bool:
+        return self.config.firecrawl and self._crawl is not None
+
+    async def _read_crawled(self, w: Watch) -> Reading:
+        """A page every local reader was refused, as Firecrawl fetched it: its structured data (free), then its
+        text by the cheap model, as for a plain read. Capped per day (one credit each)."""
+        if not self._crawl_on():
+            raise FetchError("Firecrawl is not set up on this computer (FIRECRAWL_API_KEY)")
+        held = self.limiter.backed_off(FIRECRAWL_HOST)
+        if held > 0:
+            raise FetchError(f"Firecrawl asked me to wait {held:.0f} s", host=FIRECRAWL_HOST)
+        day = self.limiter._day(self._clock())
+        if self._crawls.get(day, 0) >= self.config.firecrawl_calls_per_day:
+            raise FetchError(f"today's Firecrawl reads are used up ({self.config.firecrawl_calls_per_day}; "
+                             "CC_BUDDY_WATCH_FIRECRAWL_CALLS)", host=FIRECRAWL_HOST)
+        self._crawls[day] = self._crawls.get(day, 0) + 1
+        for old in sorted(self._crawls)[:-7]:
+            self._crawls.pop(old, None)
+        _, page = await self._call(self._crawl, w.target)
+        spend.record("firecrawl", "scrape", spend.WATCH, self.config.firecrawl_usd, note="1 credit")
+        r = await self._call(self._from_html, w, page)
+        if self._missing(w, r) and w.condition != "appears":
+            r = self._merge(r, await self._ask_text(w, await self._call(main_text, page)))
+        if self._missing(w, r):
+            raise FetchError(NOT_STATED.get(w.condition, "the page does not show a price"))
+        if r.source not in ("text", "model"):
+            r.source = "firecrawl"
+        return r
+
+    async def _fetch_page(self, w: Watch) -> str:
+        """The page's HTML: a plain read, else (refused or never answered) the Chrome-like read, which a page that
+        needed it once (``via == "tls"``) goes straight to. Its refusal goes on down the ladder in check()."""
+        tls = self._tls if self.config.tls else None
+        if w.via != "tls" or tls is None:
+            try:
+                _, page = await self._call(self._fetch, w.target)
+                return page
+            except FetchError as e:
+                if tls is None or not tls_worth(e):
+                    raise
+                log.info("watch: %s refused a plain read (%s); reading it as Chrome would", w.id, e.reason)
+        _, page = await self._call(tls, w.target)
+        if w.via != "tls":
+            w.via = "tls"                            # straight to the Chrome-like read from now on
+            log.info("watch: %s reads as Chrome would; from now on", w.id)
+        return page
 
     def _from_html(self, w: Watch, page: str) -> Reading:
         r = structured(page)
@@ -2170,7 +2421,8 @@ class Watcher:
                 # browser too (most ticket sites) is watched by search from then on. Only the site's own refusal
                 # moves a watch down the ladder: OpenRouter's (e.host) says nothing about the page. A phrase
                 # cannot be watched by search, so an "appears" watch stops at the browser and counts the refusal.
-                nxt = "browser" if self.config.browser and w.via == "" else "search"
+                nxt = ("browser" if self.config.browser and w.via in ("", "tls") else
+                       "firecrawl" if self._crawl_on() and w.via in ("", "tls", "browser") else "search")
                 if not (nxt == "search" and w.condition == "appears"):
                     log.info("watch: %s refused a read (HTTP %s); trying it by %s", host, e.status, nxt)
                     w.via = nxt
@@ -2400,7 +2652,8 @@ class Watcher:
         return {"id": w.id, "label": w.label, "kind": w.kind, "watching_for": describe(w), "now": now_line(w),
                 "every": _every_words(w.every_secs), "alerts_sent": w.fired,
                 **({"via": "search (the site refuses automated reads)"} if w.via == "search" else
-           {"via": "browser (rendered and looked at)"} if w.via == "browser" else {}),
+           {"via": "browser (rendered and looked at)"} if w.via == "browser" else
+           {"via": "Firecrawl (a paid reader; the site refuses this Mac)"} if w.via == "firecrawl" else {}),
                 **({"problem": w.last_error} if w.errors else {}),
                 **({"paused": _when(w.paused_until) if w.paused_until else "until resumed"} if w.paused else {}),
                 **({"ends": _when(w.ends_at)} if w.ends_at else {})}
@@ -2506,10 +2759,11 @@ class Watcher:
                 return out
             try:
                 await self.check(w, shown=True)
-                for _ in range(2):
+                for _ in range(3):
                     if w.checks or not w.via or self.limiter.ready_in(self.host(w)) > 0:
                         break
-                    # the page refused a plain read: its first reading comes from the browser or the search, now
+                    # the page refused a plain read: its first reading comes from the browser, Firecrawl or the
+                    # search, now (one re-check per rung moved down: tls -> browser -> firecrawl -> search)
                     self.limiter.take(self.host(w))
                     await self.check(w, shown=True)
             except FetchError as e:
@@ -2533,6 +2787,9 @@ class Watcher:
                 out["note"] = "that site refuses automated reads, so it is watched by web search instead"
             elif w.via == "browser":
                 out["note"] = "that page only shows its price in a browser, so buddy renders it and looks at it"
+            elif w.via == "firecrawl":
+                out["note"] = ("that site refuses reads from this Mac, so buddy reads it through Firecrawl "
+                               "(one paid credit a check, at most hourly)")
             if w.last_note:
                 out["detail"] = w.last_note
             met = (w.condition in ("below", "above", "available", "appears") and not w.armed)
@@ -2546,7 +2803,8 @@ class Watcher:
             return "I'm not watching anything. Text me something like \"tell me when AAPL drops below 300\"."
         lines = []
         for w in self.watches:
-            extra = {"search": " (by search)", "browser": " (seen in a browser)"}.get(w.via, "")
+            extra = {"search": " (by search)", "browser": " (seen in a browser)",
+                     "firecrawl": " (through Firecrawl)"}.get(w.via, "")
             problem = f" (can't read it: {w.last_error})" if w.errors >= TELL_AFTER_ERRORS else ""
             state = (f" · paused until {_when(w.paused_until)}" if w.paused and w.paused_until
                      else " · paused" if w.paused else "")
@@ -2673,7 +2931,7 @@ def make_watcher(config: Optional[WatchConfig] = None) -> Optional[Watcher]:
     if not cfg.enabled:
         log.info("watch: off (CC_BUDDY_WATCH)")
         return None
-    return Watcher(cfg)
+    return Watcher(cfg, tls=tls_request, crawl=firecrawl)
 
 
 if __name__ == "__main__" and len(sys.argv) > 1 and sys.argv[1] == "--render":

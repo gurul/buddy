@@ -39,6 +39,10 @@
   addresses), and no global IPv6 address at all when the interfaces cannot be read. The proxy carries one request
   per plain-http connection (a kept-alive connection used to carry the next request to the first server). A
   render past its deadline is killed with every process under it: Chromium runs in a process group of its own.
+  The Chrome-like read (`tls_request`, curl_cffi, 2026-09-26) is a `fetch` of the fixed kind: `_pin` resolves
+  once and refuses unless every answer is public, libcurl is pinned to that address (CURLOPT_RESOLVE, so it makes
+  no lookup of its own), its reported primary IP must equal the pin, and buddy follows each redirect itself as a
+  new hop through the same check. So the model's `Fix.step` for `fetch` covers it unchanged.
 -/
 namespace Buddy.WatchSsrf
 
