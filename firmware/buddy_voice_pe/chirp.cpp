@@ -24,6 +24,13 @@ size_t len = 0;
 uint32_t phase = 0;
 float amp = 0.65f;
 
+struct Req {
+  ChirpKind kind;
+  uint16_t hz;    // tone only
+  uint16_t ms;    // tone only
+  float level;    // tone only, 0..1 of full scale
+};
+
 QueueHandle_t queue = nullptr;
 volatile bool enabled = true;
 volatile uint8_t volume = 6;  // 0..10
@@ -125,6 +132,23 @@ void build(ChirpKind kind) {
   }
 }
 
+// Diagnostic: a sine at 48 kHz straight to the bus, no 16 kHz step.
+void writeTone(uint16_t hz, uint16_t ms, float level) {
+  int16_t chunk[480];
+  uint32_t total = (uint32_t)ms * 48;
+  float ph = 0, inc = TWO_PI * hz / 48000.0f;
+  for (uint32_t done = 0; done < total;) {
+    uint32_t n = total - done > 480 ? 480 : total - done;
+    for (uint32_t j = 0; j < n; j++) {
+      chunk[j] = (int16_t)(sinf(ph) * 32767.0f * level);
+      ph += inc;
+      if (ph > TWO_PI) ph -= TWO_PI;
+    }
+    sbI2sSpeakerWriteMono(chunk, n);
+    done += n;
+  }
+}
+
 void writeUpsampled() {
   int16_t chunk[96 * 3];
   size_t i = 0;
@@ -145,20 +169,32 @@ void writeUpsampled() {
   for (int k = 0; k < 6; k++) sbI2sSpeakerWriteMono(silence, 480);
 }
 
+void play(const Req &r) {
+  if (r.kind == CHIRP_TONE) {
+    writeTone(r.hz, r.ms, r.level);
+  } else {
+    build(r.kind);
+    writeUpsampled();
+  }
+}
+
 void task(void *) {
   for (;;) {
-    ChirpKind kind;
-    if (xQueueReceive(queue, &kind, portMAX_DELAY) != pdTRUE) continue;
-    if (!enabled || volume == 0) continue;
-    build(kind);
-    digitalWrite(SB_PIN_AMP_ENABLE, HIGH);
-    writeUpsampled();
+    Req r;
+    if (xQueueReceive(queue, &r, portMAX_DELAY) != pdTRUE) continue;
+    bool tone = r.kind == CHIRP_TONE;
+    if (!tone && (!enabled || volume == 0)) continue;
+    uint32_t e0, b0, e1, b1;
+    sbI2sSpeakerStats(&e0, &b0);
+    uint32_t t0 = millis();
+    play(r);
     // Play what arrived meanwhile before the amplifier goes off.
-    while (enabled && xQueueReceive(queue, &kind, 0) == pdTRUE) {
-      build(kind);
-      writeUpsampled();
+    while (xQueueReceive(queue, &r, 0) == pdTRUE) {
+      if (r.kind == CHIRP_TONE || enabled) play(r);
     }
-    digitalWrite(SB_PIN_AMP_ENABLE, LOW);
+    sbI2sSpeakerStats(&e1, &b1);
+    Serial.printf("[chirp] played in %lu ms: %lu bytes to i2s, %lu write errors, amp=%d\n", millis() - t0,
+                  (unsigned long)(b1 - b0), (unsigned long)(e1 - e0), digitalRead(SB_PIN_AMP_ENABLE));
   }
 }
 
@@ -167,10 +203,8 @@ void task(void *) {
 void chirpBegin() {
   buf = (int16_t *)heap_caps_malloc(MAX_SAMPLES * sizeof(int16_t), MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
   if (!buf) buf = (int16_t *)malloc(MAX_SAMPLES * sizeof(int16_t));
-  queue = xQueueCreate(4, sizeof(ChirpKind));
-  // sbCodecBegin() leaves the amplifier on; keep it off while idle so the
-  // speaker does not hiss.
-  digitalWrite(SB_PIN_AMP_ENABLE, LOW);
+  queue = xQueueCreate(4, sizeof(Req));
+  // The amplifier stays on, as in ESPHome: switching it per phrase clicks.
   if (buf && queue) xTaskCreatePinnedToCore(task, "chirp", 4096, nullptr, 2, nullptr, 0);
   Serial.printf("[chirp] %s\n", (buf && queue) ? "ready" : "FAILED");
 }
@@ -181,5 +215,16 @@ void chirpSetVolume(uint8_t level) { volume = level > 10 ? 10 : level; }
 
 void chirpPlay(ChirpKind kind) {
   if (!queue || !enabled || volume == 0) return;
-  xQueueSend(queue, &kind, 0);
+  Req r{kind, 0, 0, 0};
+  xQueueSend(queue, &r, 0);
+}
+
+void chirpTone(uint16_t hz, uint16_t ms, float level) {
+  if (!queue) return;
+  Req r{CHIRP_TONE, hz, ms, level};
+  xQueueSend(queue, &r, 0);
+}
+
+void chirpForceAmp(bool on) {
+  digitalWrite(SB_PIN_AMP_ENABLE, on ? HIGH : LOW);
 }

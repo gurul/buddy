@@ -19,6 +19,7 @@
 #include <Arduino.h>
 #include <ArduinoJson.h>
 #include <Preferences.h>
+#include <Wire.h>
 
 #include "chirp.h"
 #include "ring.h"
@@ -125,6 +126,36 @@ void handleLine(const char *line) {
       !strcmp(cmd, "unpair")) {
     return ack(cmd);
   }
+  // Audio bring-up diagnostics, sent by hand (docs/voice-pe.md#audio-diagnostics).
+  if (!strcmp(cmd, "tone")) {
+    chirpTone(doc["hz"] | 440, doc["ms"] | 1000, doc["level"] | 0.5f);
+    return;
+  }
+  if (!strcmp(cmd, "amp")) {
+    chirpForceAmp(doc["on"] | false);
+    Serial.printf("[amp] forced %s\n", (doc["on"] | false) ? "on" : "off");
+    return;
+  }
+  if (!strcmp(cmd, "dac")) {
+    // {"cmd":"dac","page":0,"reg":65,"val":0}: val omitted = read only.
+    uint8_t page = doc["page"] | 0, reg = doc["reg"] | 0;
+    Wire.beginTransmission(0x18);
+    Wire.write(0x00);
+    Wire.write(page);
+    bool ok = Wire.endTransmission() == 0;
+    if (!doc["val"].isNull()) {
+      Wire.beginTransmission(0x18);
+      Wire.write(reg);
+      Wire.write((uint8_t)(doc["val"].as<int>()));
+      ok = ok && Wire.endTransmission() == 0;
+    }
+    Wire.beginTransmission(0x18);
+    Wire.write(reg);
+    ok = ok && Wire.endTransmission(false) == 0;
+    int v = (Wire.requestFrom(0x18, 1) == 1) ? Wire.read() : -1;
+    Serial.printf("[dac] page %u reg 0x%02X = 0x%02X (i2c %s)\n", page, reg, v & 0xFF, ok && v >= 0 ? "ok" : "FAIL");
+    return;
+  }
   // cam, snap, face, look, move, mode, expression, emote, caption, char_*:
   // this board has no camera, motors or screen.
 }
@@ -165,6 +196,7 @@ void pollButton() {
       btnDownMs = now;
       btnHeld = false;
     } else if (!btnHeld) {  // released before the hold fired: a tap
+      Serial.printf("[btn] tap waiting=%u live=%d\n", host.waiting, connected());
       if (host.waiting > 0 && connected()) {
         send("{\"cmd\":\"key\",\"name\":\"enter\"}");
         chirpPlay(CHIRP_OK);

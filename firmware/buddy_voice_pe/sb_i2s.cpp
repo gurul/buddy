@@ -10,6 +10,8 @@ namespace {
 
 i2s_chan_handle_t micChannel = nullptr;
 i2s_chan_handle_t speakerChannel = nullptr;
+uint32_t speakerWriteErrors = 0;   // buddy diagnostic: writes that timed out or failed
+uint32_t speakerBytesWritten = 0;
 
 i2s_std_config_t slaveConfig(uint32_t sampleRate, i2s_data_bit_width_t bits, i2s_slot_mode_t slotMode) {
   i2s_std_config_t cfg = {};
@@ -83,11 +85,18 @@ void sbI2sSpeakerWriteMono(const int16_t *samples, size_t count) {
     }
     size_t written = 0;
     if (i2s_channel_write(speakerChannel, frames, n * 2 * sizeof(int32_t), &written, pdMS_TO_TICKS(500)) != ESP_OK) {
+      speakerWriteErrors++;
       return;  // No clock from the XMOS. Drop the sound, do not block.
     }
+    speakerBytesWritten += written;
     samples += n;
     count -= n;
   }
+}
+
+void sbI2sSpeakerStats(uint32_t *errors, uint32_t *bytes) {
+  *errors = speakerWriteErrors;
+  *bytes = speakerBytesWritten;
 }
 
 #else  // The ESP32 is the I2S clock master.

@@ -59,6 +59,13 @@ constexpr RegWrite kStage2[] = {
 };
 // AIC3204_STAGE2_END
 
+int readReg(uint8_t reg) {
+  Wire.beginTransmission(kAic3204Address);
+  Wire.write(reg);
+  if (Wire.endTransmission(false) != 0) return -1;
+  return Wire.requestFrom(kAic3204Address, (uint8_t)1) == 1 ? Wire.read() : -1;
+}
+
 bool writeReg(uint8_t reg, uint8_t value) {
   Wire.beginTransmission(kAic3204Address);
   Wire.write(reg);
@@ -94,12 +101,35 @@ bool sbCodecBegin() {
   digitalWrite(SB_PIN_XMOS_RESET, LOW);
 
   Wire.begin(SB_PIN_I2C_SDA, SB_PIN_I2C_SCL);
-  if (!writeAll(kStage1)) {
-    return false;
-  }
-  delay(2500);
-  if (!writeAll(kStage2)) {
-    return false;
+
+  // buddy (bench 2026-09-26): wait for the XMOS to boot before touching the
+  // DAC, as ESPHome's voice_kit does (3 s). Configured straight after the
+  // reset, the DAC came up with NDAC/MDAC off, 16-bit I2S and page 1 at its
+  // defaults: the XMOS boot wiped the writes, and the speaker stayed silent.
+  delay(3000);
+
+  // Read the clock dividers and output power back, and redo the whole
+  // sequence if the DAC lost them.
+  for (int attempt = 1; attempt <= 3; attempt++) {
+    if (!writeAll(kStage1)) {
+      return false;
+    }
+    delay(2500);
+    if (!writeAll(kStage2)) {
+      return false;
+    }
+    int ndac = readReg(0x0B), iface = readReg(0x1B);
+    writeReg(0x00, 0x01);
+    int outPower = readReg(0x09);
+    writeReg(0x00, 0x00);
+    if (ndac == 0x82 && iface == 0x30 && outPower == 0x3C) {
+      break;
+    }
+    Serial.printf("AIC3204 lost its setup (NDAC 0x%02X, iface 0x%02X, out 0x%02X), attempt %d; redoing it.\n",
+                  ndac & 0xFF, iface & 0xFF, outPower & 0xFF, attempt);
+    if (attempt == 3) {
+      return false;
+    }
   }
 
   int8_t volume = static_cast<int8_t>(constrain(SB_CODEC_VOLUME_STEPS, -127, 48));

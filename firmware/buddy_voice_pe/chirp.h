@@ -3,7 +3,7 @@
 // StackChan ones (firmware/claude_pet_stackchan/src/chirp.cpp, after Marcelo
 // Larios' R2D2 Sound Generator, BSD); only the output path differs: a
 // FreeRTOS task renders each phrase at 16 kHz and writes it, upsampled x3, to
-// the 48 kHz AIC3204 bus. The amplifier is on only while a phrase plays.
+// the 48 kHz AIC3204 bus. The amplifier stays on, as in ESPHome.
 #include <stdint.h>
 
 enum ChirpKind : uint8_t {
@@ -15,6 +15,7 @@ enum ChirpKind : uint8_t {
   CHIRP_NO,          // descending boop: error
   CHIRP_CURIOUS,     // two rising notes: button pressed with nothing waiting
   CHIRP_TICK,        // one short blip: dial step
+  CHIRP_TONE,        // diagnostic sine, see chirpTone()
 };
 
 // Starts the audio task. Call after sbCodecBegin() and sbI2sSpeakerBegin().
@@ -24,3 +25,8 @@ void chirpSetEnabled(bool on);
 void chirpSetVolume(uint8_t level);
 // Queues a phrase. Dropped when the queue is full or chirps are off.
 void chirpPlay(ChirpKind kind);
+
+// Diagnostics ({"cmd":"tone"} / {"cmd":"amp"}). A tone plays even when
+// chirps are off, and logs "[chirp] played ..." with the I2S write result.
+void chirpTone(uint16_t hz, uint16_t ms, float level);
+void chirpForceAmp(bool on);

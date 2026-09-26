@@ -49,16 +49,19 @@ the board is silent.
 | Part | Detail |
 |---|---|
 | Core | ESP32-S3, 16 MB flash, 8 MB octal PSRAM, native USB-Serial/JTAG (`/dev/cu.usbmodem*`, VID 0x303a PID 0x1001) |
-| Audio | XMOS XU316 is the I2S clock master. The TI AIC3204 DAC is on I2C 0x18, and GPIO 47 enables the amplifier. The amplifier is on only while a chirp plays |
+| Audio | XMOS XU316 is the I2S clock master. The TI AIC3204 DAC is on I2C 0x18, and GPIO 47 enables the amplifier. The amplifier stays on, as in ESPHome. Switching it for each chirp made an audible click |
 | LEDs | 12 WS2812 on GPIO 21, power enable on GPIO 45 |
 | Button | GPIO 0, active low. This is also the boot strap pin |
 | Dial | Quadrature on GPIO 16 / 18 |
 | Mute switch | GPIO 3, HIGH = microphones cut |
 
-`sb_i2s.*` and `sb_codec.*` are copied unchanged from
-`~/Documents/personal/homeboxV0` (commit `9c8a4f8`). In that repository,
-`scripts/check-pins.mjs` and `scripts/check-aic3204.mjs` compare them against
-the upstream ESPHome firmware. `sb_config.h` carries the same pin values.
+`sb_i2s.*` and `sb_codec.*` come from `~/Documents/personal/homeboxV0`
+(commit `9c8a4f8`). In that repository, `scripts/check-pins.mjs` and
+`scripts/check-aic3204.mjs` compare them against the upstream ESPHome
+firmware. This copy has two changes, both from the first run on a real
+board. `sb_codec.cpp` waits 3 s after the XMOS reset, reads the DAC back,
+and redoes the setup if the DAC lost it. `sb_i2s.cpp` counts failed
+speaker writes for the diagnostics below. `sb_config.h` carries the same pin values.
 The chirp recipes are the StackChan ones. Each phrase is rendered at 16 kHz
 and written x3 to the 48 kHz bus.
 
@@ -105,6 +108,26 @@ stalled every stub-flasher read ("Serial data stream stopped"). They read
 cleanly with `esptool --no-stub`. Read in 1 MB pieces, retry a failing
 piece with `--no-stub`, then check the joined image with `verify-flash`.
 
+## Audio diagnostics
+
+Stop the daemon, which holds the port, then send these lines at 115200 baud:
+
+| Line | Effect |
+|---|---|
+| `{"cmd":"tone","hz":660,"ms":2000,"level":0.6}` | Plays a sine even while chirps are off. Prints `[chirp] played in … ms: N bytes to i2s, E write errors` |
+| `{"cmd":"dac","page":0,"reg":11}` | Reads one AIC3204 register. Add `"val":N` to write it first |
+| `{"cmd":"amp","on":true}` | Sets the amplifier enable pin |
+
+For a working setup, page 0 register 0x0B (NDAC) reads `0x82`, 0x1B (the
+audio interface) reads `0x30`, and page 1 register 0x09 (output power)
+reads `0x3C`.
+
+**First bench run, 2026-09-26.** Every tone reached the I2S bus with zero
+write errors, but nothing played. The DAC had NDAC and MDAC off, 16-bit I2S,
+and page 1 at its reset defaults. The writes made straight after the XMOS
+reset were lost while the XMOS booted. The speaker played after those
+registers were rewritten. The fix is the 3 s wait and the readback check.
+
 ## The link
 
 The daemon does not check which board is attached (`serial_transport.py`,
@@ -130,3 +153,4 @@ ignores the camera, head, face, caption and character-transfer commands.
   `captions` when the StackChan is the connected robot.
 - The dial's four steps per detent follow the usual encoder layout. They were
   not measured on this unit.
+- Audio starts about 6 s after boot: 3 s for the XMOS, then 2.5 s for the DAC.

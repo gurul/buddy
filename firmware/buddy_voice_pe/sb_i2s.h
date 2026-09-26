@@ -17,3 +17,6 @@ size_t sbI2sMicRead(int32_t *buffer, size_t bytes);
 bool sbI2sSpeakerBegin();
 // Writes 16-bit mono samples to both speaker channels. Blocks until done.
 void sbI2sSpeakerWriteMono(const int16_t *samples, size_t count);
+
+// buddy diagnostic (Voice PE build only): speaker writes that failed, and bytes written.
+void sbI2sSpeakerStats(uint32_t *errors, uint32_t *bytes);
