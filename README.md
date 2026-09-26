@@ -236,6 +236,13 @@ bridge/.venv/bin/cc-buddy-bridge ears-check   # then say “hey buddy”
 tail -f ~/Library/Logs/cc-buddy-bridge.log
 ```
 
+A stock **Home Assistant Voice PE** can sit next to the robot as its controller:
+hold its button to talk to buddy (like Call buddy in the Telegram Mini App), tap it
+to approve a waiting prompt, and turn its dial through the choices. Its light ring
+shows what buddy is doing. It can also stand in for the robot on its own. See the
+[Voice PE build](docs/voice-pe.md), which also covers backing up and restoring the
+stock ESPHome firmware.
+
 Try “hey buddy, what time is it?”, “hey buddy, open Safari”, or “hey buddy, go
 explore.” For the widget and diary app, follow the
 [widget build and signing instructions](docs/stackchan/widget.md) (macOS 14+).

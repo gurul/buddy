@@ -1,0 +1,339 @@
+// buddy on a Home Assistant Voice Preview Edition.
+//
+// The Voice PE has no screen, camera or motors, so this board is buddy's
+// lights, button, dial and chirps. It speaks the same newline-delimited JSON
+// as firmware/claude_pet_stackchan over the native USB-Serial/JTAG port and
+// drops the commands it cannot carry out (cam, look, move, face, caption...).
+// The microphone and buddy's voice stay on the Mac. See docs/voice-pe.md.
+//
+// What the daemon needs from any board (bridge serial_transport.py, daemon.py):
+//   - some bytes at least every 20 s: the [alive] line below, every 5 s
+//   - an answer to {"cmd":"status"}, polled every 60 s
+//
+// Controls:
+//   button hold  talk to buddy, like the Telegram Mini App's call button; let go to send
+//   button tap   while a session waits on you: Enter on the Mac (approve / pick)
+//   dial         while a session waits on you: down / up through the choices
+//   dial         otherwise: chirp volume
+//   mute switch  silences the chirps (the Mac mic is not affected)
+#include <Arduino.h>
+#include <ArduinoJson.h>
+#include <Preferences.h>
+#include <Wire.h>
+
+#include "chirp.h"
+#include "ring.h"
+#include "sb_codec.h"
+#include "sb_config.h"
+#include "sb_i2s.h"
+
+#ifndef BUDDY_GIT_SHA
+#define BUDDY_GIT_SHA "dev"
+#endif
+
+namespace {
+
+// ---- state the daemon sends ----
+struct Host {
+  uint8_t total = 0, running = 0, waiting = 0;
+  bool completed = false;
+  uint32_t completedAtMs = 0;
+  bool listening = false;          // {"cmd":"listen","on":..}
+  char agent[12] = "idle";         // {"cmd":"agent","state":..}
+  uint32_t agentAtMs = 0;
+  bool sound = true;               // {"cmd":"sound","on":..}
+  uint32_t lastLiveMs = 0;         // last valid JSON line
+} host;
+
+Preferences prefs;
+uint8_t volume = 6;
+
+bool connected() { return host.lastLiveMs != 0 && millis() - host.lastLiveMs <= 30000; }
+
+void send(const char *line) {
+  Serial.print(line);
+  Serial.print('\n');
+}
+
+void sendStatus() {
+  // No "sec" (no BLE here), no "bat" (USB powered) and no "sys.fsTotal"
+  // (no LittleFS): the daemon only reads those keys when present.
+  char b[200];
+  snprintf(b, sizeof(b),
+           "{\"ack\":\"status\",\"ok\":true,\"n\":0,\"data\":{\"name\":\"buddy\",\"owner\":\"\","
+           "\"board\":\"voice-pe\",\"snd\":%s,\"sys\":{\"up\":%lu,\"heap\":%u}}}",
+           host.sound ? "true" : "false", millis() / 1000, ESP.getFreeHeap());
+  send(b);
+}
+
+void ack(const char *what) {
+  char b[64];
+  snprintf(b, sizeof(b), "{\"ack\":\"%s\",\"ok\":true,\"n\":0}", what);
+  send(b);
+}
+
+// ---- incoming lines ----
+void onAgent(const char *state) {
+  if (strcmp(state, host.agent) == 0) return;
+  strlcpy(host.agent, state, sizeof(host.agent));
+  host.agentAtMs = millis();
+  if (!strcmp(state, "wake")) chirpPlay(CHIRP_WAKE);
+  else if (!strcmp(state, "listening")) chirpPlay(CHIRP_LISTEN);
+  else if (!strcmp(state, "asking")) chirpPlay(CHIRP_ATTENTION);
+  else if (!strcmp(state, "done")) chirpPlay(CHIRP_HAPPY);
+  else if (!strcmp(state, "error")) chirpPlay(CHIRP_NO);
+}
+
+void onHeartbeat(JsonDocument &doc) {
+  uint8_t waitingBefore = host.waiting;
+  host.total = doc["total"] | 0;
+  host.running = doc["running"] | 0;
+  host.waiting = doc["waiting"] | 0;
+  bool completed = doc["completed"] | false;
+  if (completed && !host.completed) {
+    chirpPlay(CHIRP_HAPPY);
+    host.completedAtMs = millis();
+  }
+  host.completed = completed;
+  if (host.waiting > waitingBefore) chirpPlay(CHIRP_ATTENTION);
+}
+
+void handleLine(const char *line) {
+  if (line[0] != '{') return;
+  JsonDocument doc;
+  if (deserializeJson(doc, line)) return;
+  host.lastLiveMs = millis();
+
+  const char *cmd = doc["cmd"];
+  if (!cmd) {
+    if (doc["total"].is<int>()) onHeartbeat(doc);
+    return;  // {"time":[..]} and others: liveness only
+  }
+  if (!strcmp(cmd, "status")) return sendStatus();
+  if (!strcmp(cmd, "agent")) return onAgent(doc["state"] | "idle");
+  if (!strcmp(cmd, "listen")) {
+    bool on = doc["on"] | false;
+    if (on && !host.listening) chirpPlay(CHIRP_LISTEN);
+    host.listening = on;
+    return;
+  }
+  if (!strcmp(cmd, "sound")) {
+    host.sound = doc["on"] | true;
+    prefs.putBool("sound", host.sound);
+    return ack("sound");
+  }
+  if (!strcmp(cmd, "led") || !strcmp(cmd, "name") || !strcmp(cmd, "owner") || !strcmp(cmd, "species") ||
+      !strcmp(cmd, "unpair")) {
+    return ack(cmd);
+  }
+  // Audio bring-up diagnostics, sent by hand (docs/voice-pe.md#audio-diagnostics).
+  if (!strcmp(cmd, "tone")) {
+    chirpTone(doc["hz"] | 440, doc["ms"] | 1000, doc["level"] | 0.5f);
+    return;
+  }
+  if (!strcmp(cmd, "amp")) {
+    chirpForceAmp(doc["on"] | false);
+    Serial.printf("[amp] forced %s\n", (doc["on"] | false) ? "on" : "off");
+    return;
+  }
+  if (!strcmp(cmd, "dac")) {
+    // {"cmd":"dac","page":0,"reg":65,"val":0}: val omitted = read only.
+    uint8_t page = doc["page"] | 0, reg = doc["reg"] | 0;
+    Wire.beginTransmission(0x18);
+    Wire.write(0x00);
+    Wire.write(page);
+    bool ok = Wire.endTransmission() == 0;
+    if (!doc["val"].isNull()) {
+      Wire.beginTransmission(0x18);
+      Wire.write(reg);
+      Wire.write((uint8_t)(doc["val"].as<int>()));
+      ok = ok && Wire.endTransmission() == 0;
+    }
+    Wire.beginTransmission(0x18);
+    Wire.write(reg);
+    ok = ok && Wire.endTransmission(false) == 0;
+    int v = (Wire.requestFrom(0x18, 1) == 1) ? Wire.read() : -1;
+    Serial.printf("[dac] page %u reg 0x%02X = 0x%02X (i2c %s)\n", page, reg, v & 0xFF, ok && v >= 0 ? "ok" : "FAIL");
+    return;
+  }
+  // cam, snap, face, look, move, mode, expression, emote, caption, char_*:
+  // this board has no camera, motors or screen.
+}
+
+char lineBuf[16384];
+size_t lineLen = 0;
+bool lineOverflow = false;
+
+void pollSerial() {
+  while (Serial.available()) {
+    char c = (char)Serial.read();
+    if (c == '\n') {
+      if (!lineOverflow) {
+        lineBuf[lineLen] = 0;
+        handleLine(lineBuf);
+      }
+      lineLen = 0;
+      lineOverflow = false;
+    } else if (c != '\r') {
+      if (lineLen < sizeof(lineBuf) - 1) lineBuf[lineLen++] = c;
+      else lineOverflow = true;  // drop the whole line, never half of it
+    }
+  }
+}
+
+// ---- button ----
+// Hold to talk, like the Telegram Mini App's call button: {"cmd":"ptt","on":true} on press,
+// {"cmd":"ptt","on":false} on release; the daemon records the Mac mic in between (desk_call.py).
+// While a session waits on you, a quick tap is Enter instead, and talking starts after TALK_AFTER_MS.
+constexpr uint32_t TALK_AFTER_MS = 400;
+bool btnDown = false, talking = false;
+uint32_t btnDownMs = 0, btnChangeMs = 0;
+
+void startTalking() {
+  talking = true;
+  send("{\"cmd\":\"ptt\",\"on\":true}");
+  Serial.println("[btn] talk");
+}
+
+void pollButton() {
+  bool down = digitalRead(SB_PIN_BUTTON) == LOW;
+  uint32_t now = millis();
+  if (down != btnDown && now - btnChangeMs > 25) {
+    btnChangeMs = now;
+    btnDown = down;
+    if (down) {
+      btnDownMs = now;
+      if (!connected()) {
+        chirpPlay(CHIRP_NO);
+      } else if (host.waiting == 0) {
+        startTalking();
+      }
+    } else if (talking) {
+      talking = false;
+      send("{\"cmd\":\"ptt\",\"on\":false}");
+      Serial.println("[btn] done");
+    } else if (host.waiting > 0 && connected()) {  // a quick tap on a waiting prompt
+      send("{\"cmd\":\"key\",\"name\":\"enter\"}");
+      chirpPlay(CHIRP_OK);
+      Serial.println("[btn] enter");
+    }
+  }
+  if (btnDown && !talking && connected() && host.waiting > 0 && now - btnDownMs >= TALK_AFTER_MS) {
+    startTalking();
+  }
+}
+
+// ---- dial ----
+// Quadrature decoder: a valid Gray-code step adds +-1; four steps per detent.
+volatile int32_t dialSteps = 0;
+volatile uint8_t dialPrev = 0;
+const int8_t kQuad[16] = {0, -1, 1, 0, 1, 0, 0, -1, -1, 0, 0, 1, 0, 1, -1, 0};
+
+void IRAM_ATTR onDial() {
+  uint8_t cur = (digitalRead(SB_PIN_DIAL_A) << 1) | digitalRead(SB_PIN_DIAL_B);
+  dialSteps += kQuad[(dialPrev << 2) | cur];
+  dialPrev = cur;
+}
+
+int32_t dialUsed = 0;
+
+void pollDial() {
+  int32_t detents = dialSteps / 4 - dialUsed;
+  if (detents == 0) return;
+  dialUsed += detents;
+  if (host.waiting > 0 && connected()) {
+    // Clockwise moves down the list of choices.
+    for (int32_t i = 0; i < abs(detents); i++) {
+      send(detents > 0 ? "{\"cmd\":\"key\",\"name\":\"next\"}" : "{\"cmd\":\"key\",\"name\":\"prev\"}");
+    }
+    chirpPlay(CHIRP_TICK);
+    return;
+  }
+  int32_t v = (int32_t)volume + detents;
+  volume = (uint8_t)constrain(v, 0, 10);
+  chirpSetVolume(volume);
+  prefs.putUChar("vol", volume);
+  ringShowLevel(volume);
+  chirpPlay(CHIRP_TICK);
+}
+
+// ---- ring ----
+bool agentActive() {
+  // A conversation that never sent "idle" (daemon killed) stops showing
+  // after 10 minutes.
+  return strcmp(host.agent, "idle") != 0 && millis() - host.agentAtMs < 600000;
+}
+
+void updateRing() {
+  bool muted = sbCodecMicMuted();
+  ringSetMuted(muted);
+  chirpSetEnabled(host.sound && !muted);
+
+  if (!connected()) return ringSet(LOOK_OFFLINE);
+  if (talking) return ringSet(LOOK_LISTENING);
+  if (agentActive()) {
+    const char *a = host.agent;
+    if (!strcmp(a, "wake") || !strcmp(a, "listening")) return ringSet(LOOK_LISTENING);
+    if (!strcmp(a, "thinking")) return ringSet(LOOK_THINKING);
+    if (!strcmp(a, "speaking")) return ringSet(LOOK_SPEAKING);
+    if (!strcmp(a, "working")) return ringSet(LOOK_WORKING);
+    if (!strcmp(a, "asking")) return ringSet(LOOK_WAITING);
+    // done and error are flashes: 3 s, then the session state shows.
+    bool recent = millis() - host.agentAtMs < 3000;
+    if (!strcmp(a, "done") && recent) return ringSet(LOOK_DONE);
+    if (!strcmp(a, "error") && recent) return ringSet(LOOK_ERROR);
+  }
+  if (host.listening) return ringSet(LOOK_LISTENING);
+  if (host.waiting > 0) return ringSet(LOOK_WAITING);
+  if (host.running > 0) return ringSet(LOOK_WORKING);
+  if (host.completed && millis() - host.completedAtMs < 3000) return ringSet(LOOK_DONE);
+  ringSet(LOOK_IDLE);
+}
+
+uint32_t lastAliveMs = 0;
+
+}  // namespace
+
+void setup() {
+  Serial.setRxBufferSize(16384);
+  Serial.begin(115200);
+  ringBegin();
+
+  prefs.begin("buddy", false);
+  host.sound = prefs.getBool("sound", true);
+  volume = prefs.getUChar("vol", 6);
+  chirpSetVolume(volume);
+
+  pinMode(SB_PIN_BUTTON, INPUT_PULLUP);
+  pinMode(SB_PIN_DIAL_A, INPUT_PULLUP);
+  pinMode(SB_PIN_DIAL_B, INPUT_PULLUP);
+  dialPrev = (digitalRead(SB_PIN_DIAL_A) << 1) | digitalRead(SB_PIN_DIAL_B);
+  attachInterrupt(SB_PIN_DIAL_A, onDial, CHANGE);
+  attachInterrupt(SB_PIN_DIAL_B, onDial, CHANGE);
+
+  // The daemon resyncs on a line starting "[boot] ".
+  Serial.printf("[boot] buddy_voice_pe %s\n", BUDDY_GIT_SHA);
+
+  bool codec = sbCodecBegin();  // ~2.5 s: DAC soft-step wait
+  bool spk = codec && sbI2sSpeakerBegin();
+  Serial.printf("[audio] codec=%d speaker=%d\n", codec, spk);
+  chirpBegin();
+  chirpSetEnabled(host.sound && !sbCodecMicMuted());
+  chirpPlay(CHIRP_WAKE);
+}
+
+void loop() {
+  pollSerial();
+  pollButton();
+  pollDial();
+  updateRing();
+  ringUpdate();
+
+  uint32_t now = millis();
+  if (now - lastAliveMs >= 5000) {
+    lastAliveMs = now;
+    Serial.printf("[alive] up=%lu heap=%u live=%d total=%u running=%u waiting=%u agent=%s\n", now / 1000,
+                  ESP.getFreeHeap(), connected(), host.total, host.running, host.waiting, host.agent);
+  }
+  delay(2);
+}

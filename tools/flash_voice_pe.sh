@@ -1,23 +1,22 @@
 #!/usr/bin/env bash
-# Compile + flash the M5StackChan build (firmware/claude_pet_stackchan).
+# Compile + flash buddy onto a Home Assistant Voice PE (firmware/buddy_voice_pe).
 #
-# Same port dance as flash.sh: the CoreS3 uses the ESP32-S3 native
-# USB-Serial/JTAG (/dev/cu.usbmodem*), and the bridge daemon holds that
-# port exclusively with KeepAlive, so it must be booted out before esptool
-# can connect. Archives the exact ELF first so a later panic backtrace stays
+# Same port dance as flash_stackchan.sh: the Voice PE uses the ESP32-S3 native
+# USB-Serial/JTAG (/dev/cu.usbmodem*), and the bridge daemon holds that port
+# exclusively with KeepAlive, so it must be booted out before esptool can
+# connect. Archives the exact ELF first so a later panic backtrace stays
 # symbolizable.
 #
-# The first flash replaces the factory firmware. Restore it with the full
-# dump taken on 2026-09-05 (see docs/stackchan/capabilities.md):
-#   esptool -p /dev/cu.usbmodem* write-flash 0x0 firmware/build-archive/stackchan-factory-20260905.bin
+# The first flash replaces the stock ESPHome firmware. Restore it from the full
+# dump taken before the first flash (docs/voice-pe.md):
+#   esptool -p /dev/cu.usbmodem* write-flash 0x0 firmware/build-archive/voice-pe-factory-20260926.bin
 # Do NOT pass -b/--baud on this link: the USB-Serial/JTAG stalls on a baud switch.
 set -euo pipefail
 cd "$(dirname "$0")/.."
 
-# huge_app keeps LittleFS on the 1MB spiffs partition for GIF character packs,
-# same layout as the Freenove pet. CoreS3 PSRAM is QSPI, not OPI.
-FQBN="esp32:esp32:m5stack_cores3:PartitionScheme=huge_app,PSRAM=enabled"
-SKETCH=firmware/claude_pet_stackchan
+# 16 MB flash, 8 MB octal PSRAM. CDCOnBoot routes Serial to the native USB.
+FQBN="esp32:esp32:esp32s3:FlashSize=16M,PSRAM=opi,PartitionScheme=app3M_fat9M_16MB,CDCOnBoot=cdc"
+SKETCH=firmware/buddy_voice_pe
 PLIST="$HOME/Library/LaunchAgents/com.github.cc-buddy-bridge.daemon.plist"
 PORT="${1:-}"
 # The Voice PE controller's USB serial (docs/voice-pe.md), from the environment or the daemon's env file.
@@ -26,20 +25,21 @@ PY=bridge/.venv/bin/python3
 [ -x "$PY" ] || PY=python3
 CTL_SERIAL="${CC_BUDDY_CONTROLLER_SERIAL:-$(sed -n 's/^CC_BUDDY_CONTROLLER_SERIAL=//p' "$HOME/.config/cc-buddy-bridge/env" 2>/dev/null | tail -1)}"
 if [ -z "$PORT" ]; then
-  # An Espressif node (VID 0x303a) that is not the Voice PE controller: both
-  # are ESP32-S3s, and flashing this firmware onto the controller is wrong.
+  # With CC_BUDDY_CONTROLLER_SERIAL set, only that board; else the one
+  # Espressif node (VID 0x303a) — refuse to guess between two (the StackChan
+  # is an ESP32-S3 too).
   PORT=$(CTL="$CTL_SERIAL" "$PY" -c 'import os, sys
 from serial.tools import list_ports
-skip = os.environ.get("CTL", "").lower()
-hits = sorted(p.device for p in list_ports.comports() if p.vid == 0x303A and "/cu.usbmodem" in p.device
-              and (not skip or (p.serial_number or "").lower() != skip))
+want = os.environ.get("CTL", "").lower()
+hits = [p.device for p in list_ports.comports() if p.vid == 0x303A and "/cu.usbmodem" in p.device
+        and (not want or (p.serial_number or "").lower() == want)]
 if len(hits) > 1:
     sys.stderr.write("two Espressif boards and no CC_BUDDY_CONTROLLER_SERIAL: pass the port\n")
     hits = []
 print(hits[0] if hits else "")' || true)
 fi
 [ -n "$PORT" ] || {
-  echo "no StackChan /dev/cu.usbmodem* found (Espressif, not the Voice PE) — plugged in, and finished enumerating?" >&2
+  echo "no Espressif /dev/cu.usbmodem* found — plugged in, and finished enumerating? (pass the port as the first argument)" >&2
   exit 1
 }
 
@@ -47,13 +47,13 @@ SHA=$(git rev-parse --short HEAD)
 git diff --quiet || SHA="$SHA-dirty"
 
 BUILD=$(mktemp -d)
-# the sha lands in the "[boot] claude_pet_stackchan <sha>" banner the daemon logs
+# the sha lands in the "[boot] buddy_voice_pe <sha>" banner the daemon logs
 arduino-cli compile -b "$FQBN" --build-path "$BUILD" \
-  --build-property "compiler.cpp.extra_flags=-DCLAUDE_PET_GIT_SHA=\"$SHA\"" "$SKETCH"
+  --build-property "compiler.cpp.extra_flags=-DBUDDY_GIT_SHA=\"$SHA\"" "$SKETCH"
 
 mkdir -p firmware/build-archive
-cp "$BUILD/claude_pet_stackchan.ino.elf" \
-   "firmware/build-archive/claude_pet_stackchan-$SHA-$(date +%Y%m%d-%H%M%S).elf"
+cp "$BUILD/buddy_voice_pe.ino.elf" \
+   "firmware/build-archive/buddy_voice_pe-$SHA-$(date +%Y%m%d-%H%M%S).elf"
 echo "archived ELF for $SHA"
 
 UPLOAD=(arduino-cli upload -p "$PORT" -b "$FQBN" --input-dir "$BUILD" "$SKETCH")
