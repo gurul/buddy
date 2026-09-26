@@ -37,7 +37,7 @@ def _daemon(learning=None, bus_cfg: BusConfig | None = None) -> SimpleNamespace:
     """The stub-daemon shape of test_daemon_lesson.py, plus the bus."""
     d = SimpleNamespace(
         ble=_Ble(True),
-        state=SimpleNamespace(running_count=0, waiting_count=0, pending_count=0),
+        state=SimpleNamespace(running_count=0, waiting_count=0),
         _listen_sent=None, _listen_down=False, _explore_cfg=_cfg(), _last_activity_at=0.0,
         _explore_raw_frame=None, _conversation=None, _agent_state="idle",
         _sound=SimpleNamespace(on=True, muted=False), _notes=None, _learning_idle_handle=None,

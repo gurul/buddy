@@ -1283,7 +1283,7 @@ def test_the_daemon_honours_the_phones_decision_and_defers_without_one() -> None
 
     def daemon_with(inlet):
         d = SimpleNamespace(_telegram=inlet, audit=Audit(), matchers=SimpleNamespace(),
-                            state=SimpleNamespace(note_tool=lambda *a: None, pending_count=0),
+                            state=SimpleNamespace(note_tool=lambda *a: None),
                             ble=SimpleNamespace(connected=False), _ensure_session=lambda req: None,
                             _command_risk=lambda: None)              # the Auto Mode gate off: tests/test_command_risk.py
         d._handle_pretooluse = MethodType(Daemon._handle_pretooluse, d)

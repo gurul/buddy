@@ -23,7 +23,7 @@ buddy ファームウェアは公式には Claude for macOS/Windows のデスク
 - **重要な操作の物理 2FA** —— `defaultMode: bypassPermissions` を全体に設定しつつ、本当に気をつけたい数個のツールだけを `permissions.ask` に並べます。それらの allow/deny はデスクの buddy にある A/B ボタンで決まります。
 - **スマートマッチャー** —— 害のない Bash（`ls`/`cat`/`grep`/...）は自動許可、危険な Bash（`rm`/`curl`/`git push`/...）は常に確認、それ以外は stick に判断を委ねます。デフォルトルールは TOML で上書き可能。
 - **リアルタイム stick HUD** —— アシスタントの返信は JSONL tailer 経由で ~500 ms 以内に stick にミラーされます（Stop フックの flush レースを回避）。
-- **ステータスライン** —— `cc-buddy-bridge hud` がプロンプトバーにバッテリー / 暗号化状態 / **当日のトークン数** / **当日の USD 推定コスト** / 保留中の権限プロンプトを表示します。[claude-hud](https://github.com/jarrodwatts/claude-hud) と並べて使うことも可能。
+- **ステータスライン** —— `cc-buddy-bridge hud` がプロンプトバーにバッテリー / 暗号化状態 / **当日のトークン数** / **当日の USD 推定コスト** を表示します。[claude-hud](https://github.com/jarrodwatts/claude-hud) と並べて使うことも可能。
 - **ワンコマンドのインストール + 自動起動** —— `cc-buddy-bridge install --service` が OS ごとに正しいバックエンドを選びます（macOS は launchd、Linux は systemd ユーザーユニット、Windows はタスクスケジューラ）。
 - **カスタム GIF キャラクター** —— `cc-buddy-bridge push-character ./pack/` でフレームの入ったフォルダを BLE 経由でアップロードします。チャンク化されたフロー制御つき。
 - **新バージョン通知 + 自動更新** —— デーモンが GitHub releases を 1 日 1 回バックグラウンドで取得し、新タグがあれば hud に `↑ vX.Y.Z` を表示。`cc-buddy-bridge check-update` で明示チェック、`cc-buddy-bridge update` で pull + 再インストール + デーモン再起動まで一気に実行。ポーリング無効化は `CC_BUDDY_BRIDGE_NO_UPDATE_CHECK=1`。
@@ -166,7 +166,7 @@ Windows でポート 48765 が他プロセスと衝突したら、
 
 ### Claude Code のステータスラインに stick の状態を表示する
 
-`cc-buddy-bridge hud` はバッテリー、暗号化状態、保留中の権限プロンプトを 1 行に
+`cc-buddy-bridge hud` はバッテリー、暗号化状態、当日のトークン数とコストを 1 行に
 コンパクトにまとめて出力します。`~/.claude/settings.json` に組み込んでください：
 
 ```json
@@ -194,7 +194,6 @@ iTerm2 での実機キャプチャ —— 肉球、バッテリーバー、暗�
 🐾 🔋 96% 🔒                          # リンクは暗号化、バッテリー良好
 🐾 🔋 96% 🔒 12.3K $0.42              # 当日のトークン数（1K 以上）とコスト（$0.01 以上）
 🐾 🔋 12% 🔒 1.2M $8.50 2run          # 低バッテリー、ヘビーな一日、稼働中セッション
-🐾 ⚠ approve: Bash                    # stick に保留中の権限プロンプト
 🐾 ∅                                  # stick 切断（デーモンは生きている）
 🐾 off                                # デーモンが起動していない
 ```

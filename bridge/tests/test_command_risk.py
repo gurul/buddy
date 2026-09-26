@@ -107,7 +107,7 @@ class Audit:
 
 def daemon_with(inlet: Inlet, risk: Any, classify: str = "default") -> Any:
     d = SimpleNamespace(_telegram=inlet, audit=Audit(), matchers=SimpleNamespace(),
-                        state=SimpleNamespace(note_tool=lambda *a: None, pending_count=0),
+                        state=SimpleNamespace(note_tool=lambda *a: None),
                         ble=SimpleNamespace(connected=False), _ensure_session=lambda req: None,
                         _command_risk=lambda: risk)
     d._handle_pretooluse = MethodType(Daemon._handle_pretooluse, d)

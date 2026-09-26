@@ -44,7 +44,7 @@ bridge/.venv/bin/python bridge/tools/expression_live.py audition "I passed my fi
 bridge/.venv/bin/python bridge/tools/expression_live.py off
 ```
 
-`react "text"` sends a cue without changing conversation phase. `audition` temporarily uses the speaking phase for six seconds, refuses an active conversation or pending prompt, and restores the previous phase. `--phase listening` checks that listening wins. `cc-buddy-bridge sound off` keeps eyes active and silences sounds.
+`react "text"` sends a cue without changing conversation phase. `audition` temporarily uses the speaking phase for six seconds, refuses an active conversation or audition, and restores the previous phase. `--phase listening` checks that listening wins. `cc-buddy-bridge sound off` keeps eyes active and silences sounds.
 
 `--check` exercises the actual local model and board with happy, sad, skeptical, excited and wink cues during speaking and a suppressed affection cue during listening. It verifies eye application, expiry, one wink animation for the wink event, no Laya sound request, and an unchanged sound setting. It does not mute or unmute Buddy. Board telemetry confirms the eye-render path ran; it is not a camera measurement of the screen.
 

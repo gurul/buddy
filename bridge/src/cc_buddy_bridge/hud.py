@@ -3,8 +3,7 @@
 Connects to the running daemon's local IPC channel, asks for a snapshot, and
 prints a compact line. Designed to complement claude-hud rather than
 replace it: we focus on the stick-specific signals (BLE connection,
-encryption, battery, pending button prompts) that Claude Code itself
-doesn't know about.
+encryption, battery) that Claude Code itself doesn't know about.
 """
 
 from __future__ import annotations
@@ -110,16 +109,6 @@ def format_line(state: Optional[dict[str, Any]], *, ascii_only: bool = False) ->
 
     if not state.get("ble_connected"):
         return "buddy: disc" if ascii_only else "🐾 ∅"
-
-    # Pending permission takes over the line — visibility matters more than
-    # battery when the user needs to press a button.
-    pending = state.get("pending_tool")
-    if pending:
-        return (
-            f"buddy: ASK {pending}"
-            if ascii_only
-            else f"🐾 ⚠ approve: {pending}"
-        )
 
     parts: list[str] = []
 

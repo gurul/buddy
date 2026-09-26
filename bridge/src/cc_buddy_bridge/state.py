@@ -32,27 +32,12 @@ def notification_waits(kind: Optional[str]) -> bool:
 
 
 @dataclass
-class PendingPermission:
-    """A tool call waiting on a stick-button decision."""
-    tool_use_id: str
-    tool_name: str
-    hint: str
-    session_id: str
-    issued_at: float  # monotonic seconds
-    # Where the session lives — cwd basename goes on the card face so the
-    # human knows WHICH session is asking, and the full cwd drives the
-    # swipe-up focus-terminal action.
-    cwd: str = ""
-
-
-@dataclass
 class Session:
     session_id: str
     started_at: float
     transcript_path: Optional[str] = None
     cwd: Optional[str] = None
     running: bool = False
-    pending: Optional[PendingPermission] = None
     # Set by the Notification hook when Claude is blocked on the user
     # (permission prompt in the terminal, idle waiting for input). Drives
     # the firmware's attention animation via the heartbeat's ``waiting``
@@ -117,30 +102,6 @@ class State:
         if s is not None:
             s.running = False
 
-    # ---- permission lifecycle ----
-
-    def permission_resolved(self, tool_use_id: str) -> Optional[PendingPermission]:
-        """Clear the pending permission with this tool_use_id across any session. Returns it."""
-        for s in self.sessions.values():
-            if s.pending is not None and s.pending.tool_use_id == tool_use_id:
-                p = s.pending
-                s.pending = None
-                return p
-        return None
-
-    def first_pending(self) -> Optional[PendingPermission]:
-        """Oldest pending permission across sessions (for stick's single-prompt display)."""
-        pendings = [s.pending for s in self.sessions.values() if s.pending is not None]
-        if not pendings:
-            return None
-        return min(pendings, key=lambda p: p.issued_at)
-
-    @property
-    def pending_count(self) -> int:
-        """How many permissions are waiting across all sessions. The stick
-        shows the oldest as the card; the rest render as a deck behind it."""
-        return sum(1 for s in self.sessions.values() if s.pending is not None)
-
     # ---- needs-input (Notification hook) ----
 
     # Auto-expire so a notification for an abandoned session doesn't leave
@@ -179,15 +140,10 @@ class State:
     def attention_cwd(self) -> str:
         """The cwd behind the pet's attention state — for tap-the-pet focus.
 
-        Priority mirrors what the human sees: the oldest pending permission
-        is the card on screen, so its session wins; otherwise the most
-        recently flagged needs-input session (Claude idle, waiting on a
-        reply in the terminal). Empty when nothing is waiting — focus then
-        degrades to raising whichever terminal app is running.
+        The most recently flagged needs-input session (Claude idle, waiting
+        on a reply in the terminal). Empty when nothing is waiting — focus
+        then degrades to raising whichever terminal app is running.
         """
-        p = self.first_pending()
-        if p is not None and p.cwd:
-            return p.cwd
         waiting = [s for s in self.sessions.values() if self._needs_input_live(s)]
         if waiting:
             newest = max(waiting, key=lambda s: s.needs_input_at)
@@ -244,7 +200,7 @@ class State:
     def waiting_count(self) -> int:
         return sum(
             1 for s in self.sessions.values()
-            if s.pending is not None or self._needs_input_live(s)
+            if self._needs_input_live(s)
         )
 
     # ---- per-agent rows (monitor display) ----
@@ -274,9 +230,7 @@ class State:
         for s in self.sessions.values():
             name = os.path.basename((s.cwd or "").rstrip("/")) or s.session_id[:6] or "?"
             name = name[: self.AGENT_NAME_CHARS]
-            if s.pending is not None:
-                rank, status, tool = 0, "wait", s.pending.tool_name
-            elif self._needs_input_live(s):
+            if self._needs_input_live(s):
                 rank, status, tool = 0, "wait", s.last_tool
             elif s.running:
                 rank, status, tool = 1, "run", s.last_tool

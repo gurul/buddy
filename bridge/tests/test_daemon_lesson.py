@@ -46,7 +46,7 @@ def _cfg() -> ExploreConfig:
 def _daemon(connected: bool = True, learning=None, conversation=None) -> SimpleNamespace:
     d = SimpleNamespace(
         ble=_Ble(connected),
-        state=SimpleNamespace(running_count=0, waiting_count=0, pending_count=0),
+        state=SimpleNamespace(running_count=0, waiting_count=0),
         _listen_sent=None,
         _listen_down=False,
         _explore_cfg=_cfg(),

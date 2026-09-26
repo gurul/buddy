@@ -58,10 +58,10 @@ def _cfg(enabled: bool = True) -> ExploreConfig:
                          notes_dir=Path("/nonexistent"), cycle_wait_secs=900.0)
 
 
-def _daemon(connected: bool = True, pending: int = 0, listen_sent=None, enabled: bool = True) -> SimpleNamespace:
+def _daemon(connected: bool = True, listen_sent=None, enabled: bool = True) -> SimpleNamespace:
     d = SimpleNamespace(
         ble=_Ble(connected),
-        state=SimpleNamespace(running_count=0, waiting_count=0, pending_count=pending),
+        state=SimpleNamespace(running_count=0, waiting_count=0),
         _listen_sent=listen_sent,
         _listen_down=False,
         _explore_cfg=_cfg(enabled),
@@ -143,10 +143,9 @@ def test_ipc_stop_ends_it_and_status_reports() -> None:
     asyncio.run(go())
 
 
-def test_ipc_start_is_refused_while_disconnected_or_a_card_waits_or_dictating() -> None:
+def test_ipc_start_is_refused_while_disconnected_or_dictating() -> None:
     async def go():
         for d, why in ((_daemon(connected=False), "board disconnected"),
-                       (_daemon(pending=1), "card pending"),
                        (_daemon(listen_sent=True), "listen key")):
             resp = await d._handle_ipc({"evt": "explore", "action": "start"})
             assert resp["ok"] is False and resp["error"] == why, why
@@ -457,13 +456,6 @@ def test_nothing_is_drawn_when_the_screen_is_not_buddys_to_use() -> None:
         # not exploring at all
         d = _exploring_daemon()
         d._show_thought(_thought("A thought nobody asked for."))
-        assert _captions(d) == []
-
-        # a permission card is waiting
-        d = _exploring_daemon()
-        await d._handle_ipc({"evt": "explore", "action": "start"})
-        d.state.pending_count = 1
-        d._show_thought(_thought("A thought."))
         assert _captions(d) == []
 
         # a conversation owns the screen
