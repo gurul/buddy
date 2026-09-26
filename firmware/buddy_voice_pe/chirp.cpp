@@ -4,6 +4,7 @@
 #include <esp_heap_caps.h>
 #include <freertos/FreeRTOS.h>
 #include <freertos/queue.h>
+#include <freertos/stream_buffer.h>
 #include <math.h>
 
 #include "sb_config.h"
@@ -32,6 +33,19 @@ struct Req {
 };
 
 QueueHandle_t queue = nullptr;
+
+// buddy's voice, streamed from the daemon ({"cmd":"pcm"}, desk_call.BoardSpeaker): 24 kHz mono int16 in
+// a PSRAM stream buffer, one writer (the serial loop) and one reader (this task), so no lock is needed.
+constexpr uint32_t VOICE_RATE = 24000;
+constexpr size_t VOICE_BUFFER_BYTES = VOICE_RATE * 2 * 12;       // 12 s; the daemon stays <= 3 s ahead
+constexpr size_t VOICE_PREROLL_BYTES = VOICE_RATE * 2 * 150 / 1000;  // 150 ms before a burst starts
+constexpr uint32_t VOICE_PREROLL_WAIT_MS = 200;                  // ...or once nothing new arrives this long
+StreamBufferHandle_t voice = nullptr;
+volatile bool voiceFlush = false;
+volatile uint32_t voiceInMs = 0;
+volatile uint32_t voiceDropped = 0;
+bool voicePlaying = false;
+int16_t voicePrev = 0;
 volatile bool enabled = true;
 volatile uint8_t volume = 6;  // 0..10
 
@@ -178,23 +192,53 @@ void play(const Req &r) {
   }
 }
 
+// Plays one 10 ms block of voice if there is one. Returns false when there is nothing to play.
+bool playVoiceBlock() {
+  if (voiceFlush) {
+    xStreamBufferReset(voice);
+    voiceFlush = false;
+    voicePlaying = false;
+  }
+  size_t avail = xStreamBufferBytesAvailable(voice);
+  if (avail == 0) {
+    if (voicePlaying) {
+      voicePlaying = false;
+      voicePrev = 0;
+    }
+    return false;
+  }
+  if (!voicePlaying && avail < VOICE_PREROLL_BYTES && millis() - voiceInMs < VOICE_PREROLL_WAIT_MS) {
+    return false;  // let a burst build up before it starts, so it does not stutter
+  }
+  voicePlaying = true;
+  int16_t in[240];  // 10 ms at 24 kHz
+  size_t got = xStreamBufferReceive(voice, in, sizeof(in), 0) / sizeof(int16_t);
+  int16_t out[480];
+  float gain = volume / 10.0f;
+  for (size_t i = 0; i < got; i++) {
+    // x2 to 48 kHz: the midpoint, then the sample.
+    out[i * 2] = (int16_t)(((int32_t)voicePrev + in[i]) / 2 * gain);
+    out[i * 2 + 1] = (int16_t)(in[i] * gain);
+    voicePrev = in[i];
+  }
+  sbI2sSpeakerWriteMono(out, got * 2);
+  return true;
+}
+
 void task(void *) {
   for (;;) {
+    if (voice && playVoiceBlock()) continue;  // the voice goes first; chirps wait for a gap
     Req r;
-    if (xQueueReceive(queue, &r, portMAX_DELAY) != pdTRUE) continue;
+    if (xQueueReceive(queue, &r, pdMS_TO_TICKS(10)) != pdTRUE) continue;
     bool tone = r.kind == CHIRP_TONE;
     if (!tone && (!enabled || volume == 0)) continue;
     uint32_t e0, b0, e1, b1;
     sbI2sSpeakerStats(&e0, &b0);
     uint32_t t0 = millis();
     play(r);
-    // Play what arrived meanwhile before the amplifier goes off.
-    while (xQueueReceive(queue, &r, 0) == pdTRUE) {
-      if (r.kind == CHIRP_TONE || enabled) play(r);
-    }
     sbI2sSpeakerStats(&e1, &b1);
-    Serial.printf("[chirp] played in %lu ms: %lu bytes to i2s, %lu write errors, amp=%d\n", millis() - t0,
-                  (unsigned long)(b1 - b0), (unsigned long)(e1 - e0), digitalRead(SB_PIN_AMP_ENABLE));
+    Serial.printf("[chirp] played in %lu ms: %lu bytes to i2s, %lu write errors\n", millis() - t0,
+                  (unsigned long)(b1 - b0), (unsigned long)(e1 - e0));
   }
 }
 
@@ -205,8 +249,9 @@ void chirpBegin() {
   if (!buf) buf = (int16_t *)malloc(MAX_SAMPLES * sizeof(int16_t));
   queue = xQueueCreate(4, sizeof(Req));
   // The amplifier stays on, as in ESPHome: switching it per phrase clicks.
-  if (buf && queue) xTaskCreatePinnedToCore(task, "chirp", 4096, nullptr, 2, nullptr, 0);
-  Serial.printf("[chirp] %s\n", (buf && queue) ? "ready" : "FAILED");
+  voice = xStreamBufferCreateWithCaps(VOICE_BUFFER_BYTES, 1, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+  if (buf && queue) xTaskCreatePinnedToCore(task, "chirp", 6144, nullptr, 2, nullptr, 0);
+  Serial.printf("[chirp] %s, voice buffer %s\n", (buf && queue) ? "ready" : "FAILED", voice ? "ready" : "FAILED");
 }
 
 void chirpSetEnabled(bool on) { enabled = on; }
@@ -224,6 +269,19 @@ void chirpTone(uint16_t hz, uint16_t ms, float level) {
   Req r{CHIRP_TONE, hz, ms, level};
   xQueueSend(queue, &r, 0);
 }
+
+size_t chirpVoiceWrite(const int16_t *samples, size_t count) {
+  if (!voice) return 0;
+  voiceInMs = millis();
+  size_t bytes = count * sizeof(int16_t);
+  size_t sent = xStreamBufferSend(voice, samples, bytes, 0);
+  if (sent < bytes) voiceDropped += bytes - sent;
+  return sent / sizeof(int16_t);
+}
+
+void chirpVoiceFlush() { voiceFlush = true; }
+
+uint32_t chirpVoiceDropped() { return voiceDropped; }
 
 void chirpForceAmp(bool on) {
   digitalWrite(SB_PIN_AMP_ENABLE, on ? HIGH : LOW);

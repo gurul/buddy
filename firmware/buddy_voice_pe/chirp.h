@@ -4,6 +4,7 @@
 // Larios' R2D2 Sound Generator, BSD); only the output path differs: a
 // FreeRTOS task renders each phrase at 16 kHz and writes it, upsampled x3, to
 // the 48 kHz AIC3204 bus. The amplifier stays on, as in ESPHome.
+#include <stddef.h>
 #include <stdint.h>
 
 enum ChirpKind : uint8_t {
@@ -30,3 +31,10 @@ void chirpPlay(ChirpKind kind);
 // chirps are off, and logs "[chirp] played ..." with the I2S write result.
 void chirpTone(uint16_t hz, uint16_t ms, float level);
 void chirpForceAmp(bool on);
+
+// buddy's voice ({"cmd":"pcm"}): 24 kHz mono int16 from the daemon, played at the
+// dial's volume. It plays whatever the sound setting says: sound off silences only
+// the chirps. Write from one task only (the serial loop).
+size_t chirpVoiceWrite(const int16_t *samples, size_t count);
+void chirpVoiceFlush();
+uint32_t chirpVoiceDropped();

@@ -992,9 +992,10 @@ class Daemon:
 
     def _desk_calls_get(self):
         """The board's hold-to-talk calls (desk_call.py), made on the first press: they borrow the Telegram
-        chat as the brain and the phone call's OpenAI voice, and wait while the phone is on a call."""
+        chat as the brain and the phone call's OpenAI voice, and wait while the phone is on a call. Each call
+        speaks on the Voice PE when the controller is connected as it starts, else on the Mac."""
         if getattr(self, "_desk_calls", None) is None:
-            from .desk_call import DeskCalls
+            from .desk_call import BoardSpeaker, DeskCalls, Speaker
             from .phone_call import make_voice
 
             def phone_busy() -> bool:
@@ -1002,8 +1003,16 @@ class Daemon:
                 calls = getattr(server, "calls", None)
                 return getattr(calls, "active", None) is not None
 
+            def speaker():
+                # buddy's reply on the Voice PE when it is the connected controller, else on the Mac.
+                ctl = getattr(self, "_controller", None)
+                if ctl is not None and ctl.connected:
+                    return BoardSpeaker(ctl.send_audio)
+                return Speaker()
+
             self._desk_calls = DeskCalls(getattr(self, "_telegram", None), make_voice(), self.ble.send,
-                                         mic_device=self._ears_cfg.device, busy=phone_busy)
+                                         mic_device=self._ears_cfg.device, busy=phone_busy,
+                                         speaker_factory=speaker)
         return self._desk_calls
 
     def _on_wake(self, keyword: str) -> None:

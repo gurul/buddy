@@ -4,7 +4,7 @@
 // lights, button, dial and chirps. It speaks the same newline-delimited JSON
 // as firmware/claude_pet_stackchan over the native USB-Serial/JTAG port and
 // drops the commands it cannot carry out (cam, look, move, face, caption...).
-// The microphone and buddy's voice stay on the Mac. See docs/voice-pe.md.
+// The microphone stays on the Mac. buddy's voice can stream here ({"cmd":"pcm"}). See docs/voice-pe.md.
 //
 // What the daemon needs from any board (bridge serial_transport.py, daemon.py):
 //   - some bytes at least every 20 s: the [alive] line below, every 5 s
@@ -14,12 +14,13 @@
 //   button hold  talk to buddy, like the Telegram Mini App's call button; let go to send
 //   button tap   while a session waits on you: Enter on the Mac (approve / pick)
 //   dial         while a session waits on you: down / up through the choices
-//   dial         otherwise: chirp volume
+//   dial         otherwise: volume of buddy's voice and chirps
 //   mute switch  silences the chirps (the Mac mic is not affected)
 #include <Arduino.h>
 #include <ArduinoJson.h>
 #include <Preferences.h>
 #include <Wire.h>
+#include <mbedtls/base64.h>
 
 #include "chirp.h"
 #include "ring.h"
@@ -98,8 +99,28 @@ void onHeartbeat(JsonDocument &doc) {
   if (host.waiting > waitingBefore) chirpPlay(CHIRP_ATTENTION);
 }
 
+// {"cmd":"pcm","d":"<base64>"}: a piece of buddy's voice (desk_call.BoardSpeaker), about 100 ms of
+// 24 kHz mono int16. Decoded straight into the voice buffer, without the JSON parser: 10 lines a second.
+constexpr char PCM_PREFIX[] = "{\"cmd\":\"pcm\",\"d\":\"";
+alignas(4) uint8_t pcmBytes[12288];
+
+bool handlePcm(const char *line, size_t len) {
+  constexpr size_t n = sizeof(PCM_PREFIX) - 1;
+  if (len < n + 2 || strncmp(line, PCM_PREFIX, n) != 0) return false;
+  const char *b64 = line + n;
+  const char *end = strchr(b64, '"');
+  if (!end) return true;
+  size_t out = 0;
+  if (mbedtls_base64_decode(pcmBytes, sizeof(pcmBytes), &out, (const unsigned char *)b64, end - b64) == 0) {
+    chirpVoiceWrite(reinterpret_cast<const int16_t *>(pcmBytes), out / 2);
+  }
+  host.lastLiveMs = millis();
+  return true;
+}
+
 void handleLine(const char *line) {
   if (line[0] != '{') return;
+  if (handlePcm(line, strlen(line))) return;
   JsonDocument doc;
   if (deserializeJson(doc, line)) return;
   host.lastLiveMs = millis();
@@ -110,6 +131,7 @@ void handleLine(const char *line) {
     return;  // {"time":[..]} and others: liveness only
   }
   if (!strcmp(cmd, "status")) return sendStatus();
+  if (!strcmp(cmd, "pcm_flush")) return chirpVoiceFlush();
   if (!strcmp(cmd, "agent")) return onAgent(doc["state"] | "idle");
   if (!strcmp(cmd, "listen")) {
     bool on = doc["on"] | false;
@@ -165,18 +187,24 @@ size_t lineLen = 0;
 bool lineOverflow = false;
 
 void pollSerial() {
-  while (Serial.available()) {
-    char c = (char)Serial.read();
-    if (c == '\n') {
-      if (!lineOverflow) {
-        lineBuf[lineLen] = 0;
-        handleLine(lineBuf);
+  // Bulk reads: buddy's voice arrives at about 64 KB/s.
+  uint8_t chunk[1024];
+  int avail;
+  while ((avail = Serial.available()) > 0) {
+    size_t n = Serial.read(chunk, avail < (int)sizeof(chunk) ? avail : sizeof(chunk));
+    for (size_t i = 0; i < n; i++) {
+      char c = (char)chunk[i];
+      if (c == '\n') {
+        if (!lineOverflow) {
+          lineBuf[lineLen] = 0;
+          handleLine(lineBuf);
+        }
+        lineLen = 0;
+        lineOverflow = false;
+      } else if (c != '\r') {
+        if (lineLen < sizeof(lineBuf) - 1) lineBuf[lineLen++] = c;
+        else lineOverflow = true;  // drop the whole line, never half of it
       }
-      lineLen = 0;
-      lineOverflow = false;
-    } else if (c != '\r') {
-      if (lineLen < sizeof(lineBuf) - 1) lineBuf[lineLen++] = c;
-      else lineOverflow = true;  // drop the whole line, never half of it
     }
   }
 }
@@ -332,8 +360,9 @@ void loop() {
   uint32_t now = millis();
   if (now - lastAliveMs >= 5000) {
     lastAliveMs = now;
-    Serial.printf("[alive] up=%lu heap=%u live=%d total=%u running=%u waiting=%u agent=%s\n", now / 1000,
-                  ESP.getFreeHeap(), connected(), host.total, host.running, host.waiting, host.agent);
+    Serial.printf("[alive] up=%lu heap=%u live=%d total=%u running=%u waiting=%u agent=%s voice_dropped=%lu\n",
+                  now / 1000, ESP.getFreeHeap(), connected(), host.total, host.running, host.waiting, host.agent,
+                  (unsigned long)chirpVoiceDropped());
   }
   delay(2);
 }

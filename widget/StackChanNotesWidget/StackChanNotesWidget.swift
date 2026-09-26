@@ -260,6 +260,9 @@ struct NotesView: View {
                     InkHeading("buddy", size: 18)
                     if !off, let mood = entry.snapshot.mood { MoodPill(mood: mood, size: 9.5) }
                     Spacer(minLength: 0)
+                    Link(destination: AppGroup.chatURL) {
+                        BrandPill("chat", fill: .brandPinkSoft, size: 9.5)
+                    }
                     Link(destination: learningURL) {
                         BrandPill("lessons", fill: .brandSun, size: 9.5)
                     }
@@ -304,6 +307,9 @@ struct NotesView: View {
                     .font(BrandFont.hand(16))
                     .foregroundStyle(BrandStyle.inkSoft)
                 Spacer(minLength: 0)
+                Link(destination: AppGroup.chatURL) {
+                    BrandPill("chat", fill: .brandPinkSoft)
+                }
                 Link(destination: learningURL) {
                     BrandPill("lessons", fill: .brandSun)
                 }

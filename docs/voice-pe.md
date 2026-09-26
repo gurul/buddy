@@ -12,8 +12,9 @@ motors. It acts as buddy's lights, button, dial and chirps. It uses the same
 newline-delimited JSON link and the same `cc-buddy-bridge` daemon as the
 [StackChan](stackchan/build.md).
 
-The **microphone and buddy's voice stay on the Mac**. You talk by holding the
-button ([hold to talk](#hold-to-talk)), and buddy answers on the Mac speaker.
+The **microphone stays on the Mac**. You talk by holding the button
+([hold to talk](#hold-to-talk)). buddy answers on the **Voice PE's speaker**
+while it is the connected controller, and on the Mac speaker otherwise.
 
 The Voice PE runs in one of two setups:
 
@@ -45,7 +46,7 @@ The Voice PE runs in one of two setups:
 |---|---|---|
 | Center button, hold | Talk to buddy after 0.4 s. Let go to send | Talk to buddy at once. Let go to send |
 | Center button, quick tap | Presses Enter on the Mac (approve, pick the selected choice) | Too short to be words, so nothing is sent |
-| Dial | Down / up arrow through the choices (clockwise = down) | Chirp volume, 0–10, shown on the ring |
+| Dial | Down / up arrow through the choices (clockwise = down) | Volume of buddy's voice, 0–10, shown on the ring |
 
 ## Hold to talk
 
@@ -57,8 +58,10 @@ Hold to talk works like **Call buddy** in the Telegram Mini App
 2. Let go. The daemon transcribes the press and sends it to **the Telegram
    chat's brain**, as if you had typed it. The chat's tools all work, and the
    Telegram chat keeps a written copy. The ring spins violet while buddy thinks.
-3. buddy reads the reply aloud on the **Mac speaker**, and the ring pulses blue.
-   Press again while it speaks to stop it and talk.
+3. buddy reads the reply aloud on the **Voice PE's speaker**, or on the Mac
+   speaker if no controller is connected when the call starts. The ring pulses
+   blue. Press again while it speaks to stop it and talk. The dial sets the
+   voice's volume.
 
 The daemon side is `bridge/src/cc_buddy_bridge/desk_call.py`. It runs
 `phone_call.Call` unchanged, with a stand-in for the phone's WebSocket that
@@ -71,6 +74,42 @@ chat and an OpenAI key must be set up, as they must for Mini App calls.
 
 On the wire, the board sends `{"cmd":"ptt","on":true}` on press and
 `{"cmd":"ptt","on":false}` on release.
+
+### buddy's voice on the Voice PE
+
+The speech is 24 kHz mono 16-bit PCM, the same audio the Mini App call
+plays. `desk_call.BoardSpeaker` sends it to the controller only, in lines of
+at most 100 ms:
+
+- `{"cmd":"pcm","d":"<base64>"}`: about 6.4 KB each, about 64 KB/s in total.
+- `{"cmd":"pcm_flush"}` drops what the board still holds when you interrupt.
+
+The board decodes each line straight into a 12 s stream buffer in PSRAM,
+skipping the JSON parser. The audio task waits for 150 ms of audio, then
+plays it upsampled to 48 kHz at the dial's volume. The daemon paces itself
+so it is never more than 3 s ahead of playback (`LEAD_SECS`), because
+speech is made faster than it plays and the buffer is finite. The sound
+setting (beeps off) does not mute the voice.
+
+The `[alive]` line reports `voice_dropped`: bytes that arrived with the
+buffer full. It stays 0 while the pacing holds.
+
+## Standard questions, answered by code
+
+"What time is it", "what's the weather", "when is sunset", "what's 17
+times 23", "convert 5 km to miles", "how many days until Christmas" and
+"what's my battery" get no model turn and no web search. Code answers them
+at once, with the clock, Open-Meteo (free, no key), a unit table or the
+Mac's `pmset` (`bridge/src/cc_buddy_bridge/quick_answers.py`). The check
+applies to everything the Telegram brain hears: texts, the chat window, Mini
+App calls and hold to talk. Only a message that is **only** that question
+counts. "What time is my meeting" or "weather in my photos" still goes to the
+model. If a source fails, the model answers as before.
+
+"Here" is `CC_BUDDY_WEATHER_PLACE` in `~/.config/cc-buddy-bridge/env` (a
+place name), or `CC_BUDDY_WEATHER_LAT` and `CC_BUDDY_WEATHER_LON`. A named
+place ("weather in Tokyo", "time in New York") is looked up with Open-Meteo's
+geocoder.
 
 The button and dial send keys only while the daemon reports a waiting
 session. The daemon also ignores them during a voice conversation.
@@ -217,8 +256,9 @@ ignores the camera, head, face, caption and character-transfer commands.
 
 - The Voice PE microphones are not used. Streaming them to the daemon would
   need a new audio path over serial.
-- Hold to talk speaks buddy's reply on the Mac speaker, not on the
-  StackChan: the daemon cannot stream speech to a board.
+- buddy's voice reaches the Voice PE, not the StackChan. The daemon picks
+  the speaker as each call starts, so a controller plugged in mid-call
+  takes over at the next call.
 - The dial's four steps per detent follow the usual encoder layout. They were
   not measured on this unit.
 - Audio starts about 6 s after boot: 3 s for the XMOS, then 2.5 s for the DAC.

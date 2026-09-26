@@ -7,7 +7,9 @@ reply read back — with the phone swapped for the desk:
 * **The button** (``{"cmd":"ptt","on":bool}`` from the board) is the phone's ``talk`` / ``done``.
 * **The Mac microphone** (the same device the wake word uses, ``CC_BUDDY_MIC``) is the phone's audio. It is
   opened only while the button is held.
-* **The Mac speaker** plays buddy's reply, where the phone played it.
+* **The speaker** plays buddy's reply, where the phone played it: the Voice PE's own speaker when it is the
+  connected controller (``BoardSpeaker``, streamed as ``{"cmd":"pcm"}`` lines; owner, 2026-09-26: "route the
+  sound of this through voice pe"), else the Mac's (``Speaker``).
 * **The board's ring** shows the call's state through ``{"cmd":"agent","state":..}``: listening, thinking,
   speaking.
 
@@ -19,14 +21,17 @@ chat has a single listener.
 from __future__ import annotations
 
 import asyncio
+import base64
 import contextlib
+import inspect
 import json
 import logging
 import queue
 import threading
+import time
 from typing import Any, Awaitable, Callable, Optional
 
-from .phone_call import OP_BIN, OP_TEXT, SAMPLE_RATE, Brain, Call, Closed, Voice
+from .phone_call import BYTES_PER_SEC, OP_BIN, OP_TEXT, SAMPLE_RATE, Brain, Call, Closed, Voice
 
 log = logging.getLogger(__name__)
 
@@ -117,6 +122,45 @@ class Speaker:
 
 Send = Callable[[dict[str, Any]], Awaitable[Any]]
 
+PCM_PIECE_BYTES = 4800     # 100 ms of 24 kHz mono int16 per {"cmd":"pcm"} line (6.4 KB of base64)
+LEAD_SECS = 3.0            # how far ahead of the board's playback the daemon may be; its buffer holds 12 s
+
+
+class BoardSpeaker:
+    """buddy's reply on the Voice PE's speaker (firmware chirp.cpp, the voice buffer). The audio goes as base64
+    lines of at most ``PCM_PIECE_BYTES``, paced to stay at most ``LEAD_SECS`` ahead of real time: speech
+    arrives faster than it plays, and the board's buffer is finite. A flush drops what the board still holds."""
+
+    def __init__(self, send: Send, clock: Callable[[], float] = time.monotonic,
+                 sleep: Callable[[float], Awaitable[Any]] = asyncio.sleep) -> None:
+        self.send, self.clock, self.sleep = send, clock, sleep
+        self.started: Optional[float] = None    # when the current burst began playing, roughly
+        self.queued = 0.0                       # seconds of audio sent in the current burst
+
+    def ahead(self) -> float:
+        """Seconds of audio the board has not played yet, by the clock."""
+        if self.started is None:
+            return 0.0
+        return max(0.0, self.queued - (self.clock() - self.started))
+
+    async def play(self, pcm: bytes) -> None:
+        for i in range(0, len(pcm) - len(pcm) % 2, PCM_PIECE_BYTES):
+            piece = pcm[i:i + PCM_PIECE_BYTES]
+            if self.ahead() == 0.0:              # the board ran dry: a new burst starts now
+                self.started, self.queued = self.clock(), 0.0
+            wait = self.ahead() + len(piece) / BYTES_PER_SEC - LEAD_SECS   # room for the whole piece
+            if wait > 0:
+                await self.sleep(wait)
+            await self.send({"cmd": "pcm", "d": base64.b64encode(piece).decode("ascii")})
+            self.queued += len(piece) / BYTES_PER_SEC
+
+    async def flush(self) -> None:
+        self.started, self.queued = None, 0.0
+        await self.send({"cmd": "pcm_flush"})
+
+    def close(self) -> None:
+        """What is on the board plays out; nothing is left here to drop."""
+
 # The call's states on the ring (firmware agent states). The call's "listening" means waiting for the next
 # press, so the ring goes quiet; it turns blue only while the button is held (DeskCalls._down).
 RING = {"thinking": "thinking", "speaking": "speaking"}
@@ -144,14 +188,18 @@ class DeskLink:
     async def send_bytes(self, data: bytes) -> None:
         if self.closed:
             raise Closed()
-        self.speaker.play(data)
+        played = self.speaker.play(data)
+        if inspect.isawaitable(played):         # BoardSpeaker; the Mac Speaker queues and returns
+            await played
 
     async def send_json(self, obj: dict[str, Any]) -> None:
         if self.closed:
             raise Closed()
         kind = obj.get("type")
         if kind == "flush":
-            self.speaker.flush()
+            flushed = self.speaker.flush()
+            if inspect.isawaitable(flushed):
+                await flushed
         elif kind == "state":
             await self.set_ring(RING.get(str(obj.get("state")), "idle"))
             if obj.get("note"):

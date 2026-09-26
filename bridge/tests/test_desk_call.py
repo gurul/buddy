@@ -214,3 +214,94 @@ async def test_once_buddy_is_done_the_call_ends_when_quiet(monkeypatch: pytest.M
     await desk.press(False)
     await until(lambda: not desk.active)
     assert rings(sent)[-1] == "idle"
+
+
+# ---- buddy's voice on the Voice PE (BoardSpeaker) ---------------------------------------------------
+
+class Clock:
+    def __init__(self) -> None:
+        self.t = 100.0
+        self.slept: list[float] = []
+
+    def __call__(self) -> float:
+        return self.t
+
+    async def sleep(self, secs: float) -> None:
+        self.slept.append(secs)
+        self.t += secs
+
+
+def board(clock: Clock):
+    lines: list[dict[str, Any]] = []
+
+    async def send(obj: dict[str, Any]) -> None:
+        lines.append(obj)
+
+    return desk_call.BoardSpeaker(send, clock=clock, sleep=clock.sleep), lines
+
+
+@run
+async def test_the_voice_goes_to_the_board_in_decodable_pieces() -> None:
+    import base64
+    clock = Clock()
+    spk, lines = board(clock)
+    pcm = bytes(range(256)) * 40                                   # 10240 bytes: 4800 + 4800 + 640
+    await spk.play(pcm)
+    assert [len(base64.b64decode(line["d"])) for line in lines] == [4800, 4800, 640]
+    assert b"".join(base64.b64decode(line["d"]) for line in lines) == pcm
+    assert all(line["cmd"] == "pcm" for line in lines)
+
+
+@run
+async def test_the_daemon_stays_at_most_three_seconds_ahead_of_the_board() -> None:
+    clock = Clock()
+    spk, lines = board(clock)
+    ten_secs = b"\x00\x00" * phone_call.SAMPLE_RATE * 10
+    await spk.play(ten_secs)
+    assert len(lines) == 100
+    assert spk.ahead() <= desk_call.LEAD_SECS + 1e-9
+    # 10 s sent with a 3 s lead: about 7 s of waiting, never a burst the 12 s board buffer cannot hold
+    assert 6.8 <= sum(clock.slept) <= 7.1
+
+
+@run
+async def test_after_a_pause_the_board_has_played_out_and_a_new_burst_starts() -> None:
+    clock = Clock()
+    spk, _ = board(clock)
+    await spk.play(b"\x00\x00" * phone_call.SAMPLE_RATE)          # 1 s
+    clock.t += 5                                                    # the board played it out long ago
+    assert spk.ahead() == 0.0
+    await spk.play(b"\x00\x00" * phone_call.SAMPLE_RATE)
+    assert clock.slept == [] and abs(spk.ahead() - 1.0) < 1e-9
+
+
+@run
+async def test_a_flush_empties_the_board() -> None:
+    clock = Clock()
+    spk, lines = board(clock)
+    await spk.play(b"\x00\x00" * 4800)
+    await spk.flush()
+    assert lines[-1] == {"cmd": "pcm_flush"} and spk.ahead() == 0.0
+
+
+@run
+async def test_an_interrupt_on_a_board_call_flushes_the_board() -> None:
+    brain, voice = Brain(), Voice()
+    sent: list[dict[str, Any]] = []
+
+    async def send(obj: dict[str, Any]) -> None:
+        sent.append(obj)
+
+    Mic.made.clear()
+    desk = desk_call.DeskCalls(brain, voice, send, mic_factory=Mic,
+                               speaker_factory=lambda: desk_call.BoardSpeaker(send))
+    await desk.press(True)
+    for _ in range(10):
+        Mic.made[-1].on_block(b"\x02\x00" * 1200)
+    await asyncio.sleep(0.05)
+    await desk.press(False)
+    await until(lambda: any(m.get("cmd") == "pcm" for m in sent))
+    await desk.press(True)
+    await until(lambda: {"cmd": "pcm_flush"} in sent)
+    await desk.press(False)
+    await desk.stop()

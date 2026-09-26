@@ -73,6 +73,11 @@ class Controller:
             with contextlib.suppress(Exception):
                 await self.link.send(obj)
 
+    async def send_audio(self, obj: dict[str, Any]) -> None:
+        """buddy's voice for the controller's speaker (desk_call.BoardSpeaker): sent only to this board."""
+        if self.connected:
+            await self.link.send(obj)
+
     async def _replay(self) -> None:
         for obj in [SILENT, *self.last.values()]:
             with contextlib.suppress(Exception):

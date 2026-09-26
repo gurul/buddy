@@ -78,6 +78,7 @@ from . import (
     composio_tools,
     consent,
     meet,
+    quick_answers,
     rundown,
     second_brain,
     spend,
@@ -1571,6 +1572,7 @@ class TelegramInlet:
         self._watcher = watcher                            # watch.Watcher, or None (CC_BUDDY_WATCH=0)
         self._meeter = meeter                              # meet.Meeter, or None (CC_BUDDY_MEET=0, no Chrome attach)
         self._call_say: Optional[Callable[[str], None]] = None   # a phone call's reader (phone_call.Call.say)
+        self._quick = quick_answers.QuickAnswers()               # the time, the weather, a sum: by code
         self._stream_create = stream_create                # responses streamed a sentence at a time, on a call
         self._streamed: Optional[str] = None               # this turn's reply, already read out as it was made
         self._screen = screen
@@ -2172,7 +2174,23 @@ class TelegramInlet:
         if word == "/start":
             self._spawn(self._say(inbound.chat_id, HELLO_LINE), "telegram-say")
             return
+        ask = None if inbound.tapped else self._quick.match(inbound.text)
+        if ask is not None:
+            # the time, the weather, a sum...: answered by code, no model turn and no search (quick_answers.py)
+            self._spawn(self._quick_answer(inbound, ask), "telegram-quick")
+            return
         self._spawn(self._turn(inbound), "telegram-turn")
+
+    async def _quick_answer(self, inbound: Inbound, ask: quick_answers.Ask) -> None:
+        """A standard question, answered by code. When the source fails the model answers, as it always did."""
+        answer = await self._quick.answer(ask)
+        if answer is None:
+            await self._turn(inbound)
+            return
+        log.info("telegram: %s answered by code", ask.kind)
+        self._note("user", inbound.text)
+        self._note("buddy", answer)
+        await self._say(inbound.chat_id, answer)
 
     async def _image(self, inbound: Inbound, target: str, epoch: int, *, claude_epoch: Optional[int] = None) -> None:
         """One image from the owner, downloaded and handed to its recipient. For the Claude or Codex relay a
