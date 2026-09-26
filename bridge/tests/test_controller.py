@@ -64,9 +64,9 @@ def test_the_controller_is_named_by_its_usb_serial() -> None:
 def test_only_what_the_controller_can_show_is_mirrored() -> None:
     assert controller.mirrored(HEARTBEAT)
     assert controller.mirrored({"time": [1, 2]})
-    for cmd in ("agent", "sound", "listen"):
+    for cmd in ("agent", "listen"):
         assert controller.mirrored({"cmd": cmd})
-    for cmd in ("status", "look", "cam", "caption", "move", "expression", "char_begin", "unpair"):
+    for cmd in ("sound", "status", "look", "cam", "caption", "move", "expression", "char_begin", "unpair"):
         assert not controller.mirrored({"cmd": cmd})
 
 
@@ -90,7 +90,7 @@ async def test_state_is_sent_while_connected_and_replayed_on_connect() -> None:
     task = asyncio.create_task(ctl.run())
     ctl.link.plug(True)
     await asyncio.sleep(0.05)
-    assert ctl.link.sent == [HEARTBEAT, {"cmd": "agent", "state": "thinking"}]
+    assert ctl.link.sent == [controller.SILENT, HEARTBEAT, {"cmd": "agent", "state": "thinking"}]
 
     await ctl.mirror({"cmd": "agent", "state": "speaking"})
     assert ctl.link.sent[-1] == {"cmd": "agent", "state": "speaking"}
@@ -98,6 +98,20 @@ async def test_state_is_sent_while_connected_and_replayed_on_connect() -> None:
     # a board reboot on an open link replays the latest of each kind
     ctl.link.sent.clear()
     await ctl.link.on_boot()
-    assert ctl.link.sent == [HEARTBEAT, {"cmd": "agent", "state": "speaking"}]
+    assert ctl.link.sent == [controller.SILENT, HEARTBEAT, {"cmd": "agent", "state": "speaking"}]
+
+
+@run
+async def test_the_beeps_are_the_robots_alone() -> None:
+    """The owner turning sound on reaches the robot, never the controller; the controller is silenced on connect."""
+    ctl, _ = make()
+    task = asyncio.create_task(ctl.run())
+    ctl.link.plug(True)
+    await asyncio.sleep(0.05)
+    await ctl.mirror({"cmd": "sound", "on": True})
+    assert {"cmd": "sound", "on": True} not in ctl.link.sent
+    assert ctl.link.sent[0] == {"cmd": "sound", "on": False}
+    task.cancel()
+    await asyncio.gather(task, return_exceptions=True)
     task.cancel()
     await asyncio.gather(task, return_exceptions=True)

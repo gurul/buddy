@@ -26,7 +26,8 @@ log = logging.getLogger(__name__)
 # What the controller sends that the daemon acts on. Everything else from it (acks, chatter) stays here.
 INPUT_CMDS = frozenset({"ptt", "key", "focus"})
 # Commands mirrored from the robot link. Heartbeats (no "cmd", a "total") and time sync are mirrored too.
-MIRRORED_CMDS = frozenset({"agent", "sound", "listen"})
+MIRRORED_CMDS = frozenset({"agent", "listen"})
+SILENT = {"cmd": "sound", "on": False}
 
 
 def controller_serial(environ: Optional[Mapping[str, str]] = None) -> Optional[str]:
@@ -73,7 +74,7 @@ class Controller:
                 await self.link.send(obj)
 
     async def _replay(self) -> None:
-        for obj in list(self.last.values()):
+        for obj in [SILENT, *self.last.values()]:
             with contextlib.suppress(Exception):
                 await self.link.send(obj)
 

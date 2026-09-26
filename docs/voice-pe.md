@@ -99,9 +99,11 @@ The daemon keeps its one robot link (`CC_BUDDY_SERIAL_PORT`) for the
 StackChan, and that glob skips the controller's serial. A second link
 (`bridge/src/cc_buddy_bridge/controller.py`) opens the controller:
 
-- **To the controller**, it copies the heartbeat, the time, the
-  conversation state and the sound setting. So the ring shows the same
-  state as the StackChan, and it catches up after a reconnect or reboot.
+- **To the controller**, it copies the heartbeat, the time and the
+  conversation state. So the ring lights up in sync with the StackChan, and
+  it catches up after a reconnect or reboot. The beeps are the StackChan's
+  alone. The owner's sound setting is not copied, and the controller is told
+  `{"cmd":"sound","on":false}` each time it connects.
 - **From the controller**, only `ptt`, `key` and `focus` reach the daemon.
   Its acks never reach the robot's status watchdog.
 
