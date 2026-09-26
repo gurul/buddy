@@ -1,9 +1,8 @@
 """Raise the terminal window running a given session.
 
-Two gestures land here. Swipe UP on the board's permission card = "show me":
-the human wants to see the session that is asking before deciding. Tap the
-pet while it demands attention = "take me there": a session is blocked on
-input and the human wants the terminal in front. Either way we (usually)
+One gesture lands here. Tap the pet while it demands attention = "take me
+there": a session is blocked on input and the human wants the terminal in
+front. We (usually)
 know the session's cwd; the
 best cross-terminal heuristic is a window whose title mentions the cwd
 basename — Terminal.app titles include the working directory by default, and

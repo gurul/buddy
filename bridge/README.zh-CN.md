@@ -15,12 +15,12 @@ BLE 硬件——无需经过 Claude 桌面客户端。
 
 buddy 固件官方只跟 Claude for macOS/Windows 桌面端配对。本项目让你在普通终端跑
 `claude` CLI 也能驱动同一个硬件——你的桌面宠物会跟着 CLI 会话作出反应：闲置时睡觉，
-工具调用时变忙，权限提示需要你确认时闪烁，并且能直接用 stick 上的物理按键批准/拒绝。
+工具调用时变忙，会话在等你时闪烁。权限由 Claude Code 自己的对话框决定，或经 Telegram 中继在手机上决定；机器人本身不再批准或拒绝。
 
 ## 主要特性
 
-- **关键操作的物理 2FA** —— 全局设 `defaultMode: bypassPermissions`，把真正在意的几个工具丢进 `permissions.ask`。这些操作的 allow/deny 由桌面 buddy 上的 A/B 按键决定。
-- **智能匹配器** —— 平凡的 Bash（`ls`/`cat`/`grep`/...）自动放行；危险的（`rm`/`curl`/`git push`/...）总是询问；其余转给 stick 决策。可通过 TOML 覆盖默认规则。
+- **智能匹配器** —— 平凡的 Bash（`ls`/`cat`/`grep`/...）不经询问直接放行；危险的（`rm`/`curl`/`git push`/...）总是询问；其余交给 Claude Code 自己的权限流程。可通过 TOML 覆盖默认规则。
+- **在手机上确认权限** —— 打开 Telegram 中继（`claude on`）后，总是询问的命令和 Claude Code 的权限对话框会在聊天里以是/否的形式询问；没有回复就回到 Mac 上的对话框，不会拒绝。Jev 也可以标出危险的 Bash 命令（`CC_BUDDY_COMMAND_RISK`）。
 - **实时 stick HUD** —— 助手回复经 JSONL tailer 在 ~500 ms 内镜像到 stick（绕过 Stop hook 落盘竞态）。
 - **状态栏组件** —— `cc-buddy-bridge hud` 在终端 prompt 渲染电量 / 加密状态 / **当日 token 数** / **当日预估 USD 花销**；可与 [claude-hud](https://github.com/jarrodwatts/claude-hud) 组合使用。
 - **一行命令安装 + 开机自启** —— `cc-buddy-bridge install --service` 自动选对每个 OS 的后端：macOS 用 launchd、Linux 用 systemd 用户级 unit、Windows 用任务计划程序。
@@ -40,7 +40,7 @@ claude CLI ──PreToolUse/Stop/etc hooks──▶ Unix socket ──▶ daemon
 * **Hooks**（在 `~/.claude/settings.json` 配置）在会话生命周期事件、工具调用、权限请求、回合边界处触发。
 * 每个 hook 是一个短小的 Python 脚本，通过 Unix socket 把事件 payload 转发给本地 **daemon**。
 * daemon 聚合每个会话的状态（`total` / `running` / `waiting` / `tokens` / `entries`），通过 BLE Nordic UART Service 把心跳快照推送给 stick，使用与桌面端完全一致的 JSON 线协议。
-* 对权限提示，hook **阻塞** 等 stick 按键裁决，再把 `allow` / `deny` 返回给 Claude Code。
+* 对权限提示，匹配器自动放行的直接放行；Telegram 中继打开时在手机上询问；否则不表态，由 Claude Code 自己的对话框处理。机器人已经没有批准/拒绝的操作面。
 
 完整线协议见
 [buddy 固件仓库的 REFERENCE.md](https://github.com/anthropics/claude-desktop-buddy/blob/main/REFERENCE.md)。
@@ -204,17 +204,17 @@ Claude Code 自己 `~/.claude/settings.json` 里的 `permissions` 块
 ```
 matcher classify_command(hint)
  ├─ "allow"  → bridge 直接返回 permissionDecision=allow（短路）
- ├─ "ask"    → bridge 等 stick 按键 → 返回按键结果
- └─ "default"→ bridge 不表态 → 由 Claude Code 的 settings.json + defaultMode 接管
+ ├─ "ask"    → 中继打开：在手机上是/否；没回复或中继关闭 → Claude Code 的流程
+ └─ "default"→ 中继打开：放行（中继即 bypass）；中继关闭 → 由 Claude Code 的 settings.json + defaultMode 接管
 ```
 
 **推荐组合**
 
 | Claude Code `defaultMode` | Matcher `strict` | 行为                                                                                                  |
 | ------------------------- | ---------------- | ----------------------------------------------------------------------------------------------------- |
-| `ask`（默认）              | `false`          | 平凡 bash 由 matcher 自动放行；危险 bash 走 stick；其它走 Claude Code 终端提示。                       |
-| `bypassPermissions`       | **`true`**       | **stick 是唯一的人工确认入口。** 平凡 bash 自动放行；其它一切（匹配/未匹配）都走 stick。终端不弹提示。 |
-| `bypassPermissions`       | `false`          | ⚠ 只有 matcher 的 `always_ask` 模式会走 stick；其它一切静默自动放行。daemon 启动时检测到这组合会打 WARNING。 |
+| `ask`（默认）              | `false`          | 平凡 bash 由 matcher 自动放行；其它走 Claude Code 的提示（中继打开时 `always_ask` 模式在手机上确认）。 |
+| `bypassPermissions`       | **`true`**       | 平凡 bash 自动放行；其它一切都算“询问”：中继打开时由手机决定。中继关闭时没人确认，所以只在配合中继时使用。 |
+| `bypassPermissions`       | `false`          | ⚠ 只有 matcher 的 `always_ask` 模式会被询问（中继打开时在手机上）；其它一切静默自动放行。daemon 启动时检测到这组合会打 WARNING。 |
 | `auto`                    | `false`          | 实质等同 `ask`——未匹配命令落到 Claude Code 的流程。                                                    |
 
 `strict` 写在 `~/.config/cc-buddy-bridge/matchers.toml`：
@@ -259,8 +259,7 @@ INFO cc_buddy_bridge.daemon: settings.json: permissions.defaultMode='auto' ask=0
 | `hint`      | 命令/路径短摘要（截断到 200 字符）                                            |
 | `matcher`   | 匹配器分类：`allow` / `ask` / `default`                                      |
 | `decision`  | 桥实际返回：`allow` / `deny` / `null`（未表态）                              |
-| `source`    | `auto_allow` / `stick` / `timeout` / `defer` / `ble_disconnected`           |
-| `elapsed_s` | 与 stick 往返耗时（秒），仅在 stick 参与时存在                                |
+| `source`    | `auto_allow` / `telegram`（你在手机上回答）/ `telegram_relay`（中继放行）/ `jev_safe` / `jev_error` / `jev_risky_deferred` / `jev_shadow` / `defer` / `ble_disconnected` |
 
 ### 查看
 
@@ -271,7 +270,7 @@ cc-buddy-bridge audit                       # 最近 20 条
 cc-buddy-bridge audit -n 100                # 最近 100 条
 cc-buddy-bridge audit -f                    # 持续追踪新条目（Ctrl+C 退出）
 cc-buddy-bridge audit --decision deny       # 只看你拒掉的
-cc-buddy-bridge audit --source stick        # 只看 stick 按键决策的
+cc-buddy-bridge audit --source telegram     # 只看在手机上回答的
 cc-buddy-bridge audit --tool Edit -n 50     # 最近 50 次 Edit 工具调用
 cc-buddy-bridge audit --path                # 打印审计文件路径并退出
 cc-buddy-bridge audit --ascii               # 不带颜色（管道 / 哑终端友好）
@@ -283,17 +282,17 @@ cc-buddy-bridge audit --ascii               # 不带颜色（管道 / 哑终端�
 # audit log: /Users/snow/Library/Logs/cc-buddy-bridge-audit.jsonl
 00:21:09.029 Bash     —     defer       sleep 8 && gh run list --repo ...
 00:30:10.212 Bash     allow auto_allow  cat >> tests/test_audit.py <<'EOF' ...
-00:34:55.871 Bash     deny  stick       git push origin main --force
+00:34:55.871 Bash     deny  telegram    git push origin main --force
 ```
 
-颜色：`allow` 绿、`deny` 红、`—`（未表态/转交）暗灰。source 列里 `stick`（你按了按键）黄、`timeout` 红，其余暗灰。
+颜色：`allow` 绿、`deny` 红、`—`（未表态/转交）暗灰。source 列里 `telegram`（你在手机上回答）黄，其余暗灰。
 
 ### 原生 jq 配方
 
 不想用子命令、直接 jq 也行：
 
 ```bash
-# 今天我在 stick 上拒了哪些
+# 今天我在手机上拒了哪些
 jq 'select(.decision=="deny")' ~/Library/Logs/cc-buddy-bridge-audit.jsonl
 
 # 本周自动放行频次 top N

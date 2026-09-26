@@ -2269,14 +2269,14 @@ class Daemon:
                 relay.relay_tool_call(str(tool_name), hint)
             return {"ok": True}
 
-        # Read tool takes its own path: out-of-cwd reads card on the stick and
-        # an approval grants the enclosing repo/dir. See read_policy.py.
+        # Read tool takes its own path: in-cwd reads never prompt; out-of-cwd reads
+        # are allowed by the relay, else Claude Code's own flow. See read_policy.py.
         if tool_name == "Read":
             return await self._handle_read_pretooluse(req, tool_use_id, session_id, hint)
 
-        # Smart matcher: classify trivial / risky commands before the BLE round-trip.
-        # auto_allow → approve immediately, no stick prompt (keeps ls/cat fast).
-        # always_ask → force stick prompt even if Claude Code would auto-approve.
+        # Smart matcher: classify trivial / risky commands first.
+        # auto_allow → approve immediately, no prompt anywhere (keeps ls/cat fast).
+        # always_ask → asked on the phone when the relay is on, else Claude Code's flow.
         # default    → no decision, let Claude Code's native permission flow run.
         decision_class = classify_command(hint, self.matchers)
         audit_kwargs = dict(
@@ -2804,8 +2804,9 @@ def _log_permission_config_summary(matchers: MatcherConfig) -> None:
     """One-shot log at startup: how does the matcher interact with Claude Code's
     own permissions config? Flags the two most confusing misalignments:
 
-    1. defaultMode == 'bypassPermissions' AND matcher is non-strict — the stick
-       only gates always_ask patterns; everything else is silently bypassed.
+    1. defaultMode == 'bypassPermissions' AND matcher is non-strict — only
+       always_ask patterns are asked (on the phone, with the relay on); everything
+       else is silently bypassed.
     2. matcher.strict but defaultMode unsuitable — strict mode wants
        bypassPermissions, otherwise unmatched commands still go through Claude
        Code's normal prompt UI.
@@ -2843,16 +2844,16 @@ def _log_permission_config_summary(matchers: MatcherConfig) -> None:
     if default_mode == "bypassPermissions" and not matchers.strict:
         log.warning(
             "permissions.defaultMode='bypassPermissions' + matcher.strict=false: "
-            "the stick gates *only* always_ask patterns (%d defined); everything "
-            "else is auto-approved without any human-in-the-loop. To put the "
-            "stick in front of every un-vetted command, set `strict = true` in "
-            "your matchers.toml.",
+            "only always_ask patterns (%d defined) are asked, on the phone with the "
+            "Telegram relay on; everything else is auto-approved without any "
+            "human-in-the-loop. To ask about every un-vetted command, set "
+            "`strict = true` in your matchers.toml.",
             len(matchers.always_ask),
         )
     elif matchers.strict and default_mode not in ("bypassPermissions", None):
         log.warning(
             "matcher.strict=true but permissions.defaultMode=%r: unmatched "
-            "commands will route to the stick AND Claude Code may still surface "
+            "commands are asked on the phone (relay on) AND Claude Code may still surface "
             "its own terminal prompt depending on the mode. Strict mode is "
             "designed to pair with defaultMode='bypassPermissions'.",
             default_mode,

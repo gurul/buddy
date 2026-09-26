@@ -16,13 +16,14 @@ hardware — without going through the Claude desktop app.
 The buddy firmware officially pairs with Claude for macOS/Windows. This project
 lets you drive the same hardware from a plain terminal running the `claude` CLI,
 so your desk pet reacts to CLI sessions: sleeps when idle, gets busy when a
-tool call runs, blinks when a permission prompt needs your attention, and lets
-you approve or deny right from the stick's buttons.
+tool call runs, and blinks when a session needs your attention. Permission
+decisions happen in Claude Code's own dialog, or on your phone through the
+Telegram relay; the robot itself no longer approves or denies.
 
 ## What you get
 
-- **Physical 2FA for risky tools** — set `defaultMode: bypassPermissions` everywhere except the desk buddy. A/B buttons on the stick decide allow/deny for the few operations you flagged on `permissions.ask`.
-- **Smart matcher** — auto-allow trivial Bash (`ls`/`cat`/`grep`/...), always-ask risky (`rm`/`curl`/`git push`/...), defer the rest to the stick. TOML-overridable.
+- **Smart matcher** — auto-allow trivial Bash (`ls`/`cat`/`grep`/...) with no prompt at all, mark risky commands (`rm`/`curl`/`git push`/...) always-ask, and leave the rest to Claude Code's own permission flow. TOML-overridable.
+- **Permissions from your phone** — with the Telegram relay on (`claude on`), an always-ask command or a Claude Code permission dialog is asked in the chat as a yes/no; silence falls back to the dialog on the Mac, never a deny. Jev can also flag a risky Bash command there (`CC_BUDDY_COMMAND_RISK`).
 - **Live stick HUD** — assistant replies mirror to the stick within ~500 ms via a JSONL tailer (no Stop-hook flush race).
 - **Statusline** — `cc-buddy-bridge hud` renders battery / encryption / **tokens today** / **estimated USD spend today** in your prompt bar; composes with [claude-hud](https://github.com/jarrodwatts/claude-hud).
 - **One-command install + autostart** — `cc-buddy-bridge install --service` picks the right backend per OS: launchd (macOS), systemd user unit (Linux), Task Scheduler (Windows).
@@ -46,8 +47,10 @@ claude CLI ──PreToolUse/Stop/etc hooks──▶ Unix socket ──▶ daemon
 * The daemon aggregates per-session state (`total` / `running` / `waiting` /
   `tokens` / `entries`) and pushes heartbeat snapshots to the stick over BLE
   Nordic UART Service, speaking the same JSON wire format as the desktop app.
-* For permission prompts, the hook **blocks** until the stick's buttons decide
-  the outcome, then returns `allow` / `deny` to Claude Code.
+* For permission prompts, the daemon allows what the matcher auto-allows,
+  asks your phone when the Telegram relay is on, and otherwise returns no
+  decision so Claude Code's own dialog runs. The robot has no approve/deny
+  surface any more.
 
 See [REFERENCE.md in the buddy firmware repo](https://github.com/anthropics/claude-desktop-buddy/blob/main/REFERENCE.md)
 for the full wire protocol.
@@ -273,17 +276,22 @@ For every `PreToolUse` event:
 ```
 matcher classify_command(hint)
  ├─ "allow"  → bridge returns permissionDecision=allow  (short-circuit)
- ├─ "ask"    → bridge waits on stick → returns the button's decision
- └─ "default"→ bridge returns no opinion → Claude Code's settings.json + defaultMode run
+ ├─ "ask"    → relay on: asked on your phone as a yes/no; no answer or relay off → Claude Code's own flow
+ └─ "default"→ relay on: allowed (the relay is bypass); relay off → Claude Code's settings.json + defaultMode run
 ```
+
+The robot has no approve/deny surface; it never decides a prompt. "Relay on"
+means the Telegram door's `claude on`. With it on, Jev can also judge a Bash
+command the matcher let through (`CC_BUDDY_COMMAND_RISK`: `shadow` only logs,
+`ask` sends a risky one to your phone).
 
 **Recommended pairings**
 
 | Claude Code `defaultMode` | Matcher `strict` | Behaviour                                                                                                              |
 | ------------------------- | ---------------- | ---------------------------------------------------------------------------------------------------------------------- |
-| `ask` (the default)       | `false`          | Trivial bash auto-approved by matcher; risky bash routes to stick; everything else gets Claude Code's terminal prompt. |
-| `bypassPermissions`       | **`true`**       | **Stick is the sole human-in-the-loop.** Trivial bash auto-approved; everything else (matched OR unmatched) routes to the stick. No terminal prompts. |
-| `bypassPermissions`       | `false`          | ⚠ Only matcher's `always_ask` patterns gate at the stick; everything else silently auto-approves. The daemon logs a warning at startup if it detects this combo. |
+| `ask` (the default)       | `false`          | Trivial bash auto-approved by the matcher; everything else gets Claude Code's prompt (or your phone, with the relay on, for `always_ask` patterns). |
+| `bypassPermissions`       | **`true`**       | Trivial bash auto-approved; every other command is an "ask": your phone decides with the relay on. With the relay off nothing asks, so this is the pairing to use only with the relay. |
+| `bypassPermissions`       | `false`          | ⚠ Only the matcher's `always_ask` patterns are asked (on your phone, relay on); everything else runs unasked. The daemon logs a warning at startup if it detects this combo. |
 | `auto`                    | `false`          | Same as `ask` for our purposes — unmatched commands fall through to Claude Code's flow.                                |
 
 `strict` lives in `~/.config/cc-buddy-bridge/matchers.toml`:
@@ -331,8 +339,7 @@ One line per decision; fields:
 | `hint`     | Short summary of what's being run (truncated to 200 chars)       |
 | `matcher`  | Matcher classification: `allow` / `ask` / `default`              |
 | `decision` | What the bridge returned: `allow` / `deny` / `null` (deferred)   |
-| `source`   | `auto_allow` / `stick` / `timeout` / `defer` / `ble_disconnected`|
-| `elapsed_s`| Round-trip seconds (only present when the stick was involved)    |
+| `source`   | `auto_allow` / `telegram` (you answered on the phone) / `telegram_relay` (allowed by the relay) / `jev_safe` / `jev_error` / `jev_risky_deferred` / `jev_shadow` / `defer` / `ble_disconnected` |
 
 ### Viewing
 
@@ -344,7 +351,7 @@ cc-buddy-bridge audit                       # last 20 entries
 cc-buddy-bridge audit -n 100                # last 100
 cc-buddy-bridge audit -f                    # follow new entries (Ctrl+C to stop)
 cc-buddy-bridge audit --decision deny       # only the things you blocked
-cc-buddy-bridge audit --source stick        # only stick-decided rounds
+cc-buddy-bridge audit --source telegram     # only rounds you answered on the phone
 cc-buddy-bridge audit --tool Edit -n 50     # last 50 Edit calls
 cc-buddy-bridge audit --path                # print the file path and exit
 cc-buddy-bridge audit --ascii               # no colour (pipes / dumb terminals)
@@ -356,19 +363,18 @@ Sample output:
 # audit log: /Users/snow/Library/Logs/cc-buddy-bridge-audit.jsonl
 00:21:09.029 Bash     —     defer       sleep 8 && gh run list --repo ...
 00:30:10.212 Bash     allow auto_allow  cat >> tests/test_audit.py <<'EOF' ...
-00:34:55.871 Bash     deny  stick       git push origin main --force
+00:34:55.871 Bash     deny  telegram    git push origin main --force
 ```
 
 Colours: green for `allow`, red for `deny`, dim for `—` (no decision /
-deferred). Source column is yellow for `stick` (a human pressed a button),
-red for `timeout`, dim otherwise.
+deferred). Source column is yellow for `telegram` (you answered on the phone), dim otherwise.
 
 ### Raw jq recipes
 
 If you prefer jq:
 
 ```bash
-# "What did I deny on the stick today?"
+# "What did I deny from the phone today?"
 jq 'select(.decision=="deny")' ~/Library/Logs/cc-buddy-bridge-audit.jsonl
 
 # "Top auto-allowed commands this week"

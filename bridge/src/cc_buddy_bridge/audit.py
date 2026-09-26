@@ -19,14 +19,14 @@ Fields:
   decision  what the bridge actually returned: "allow" / "deny" / null
   source    how we arrived at the decision:
               "auto_allow" — matcher short-circuited to allow
-              "stick"      — user pressed A/B on the buddy
-              "timeout"    — no answer within telegram.DEFAULT_PERMISSION_TIMEOUT_SECS
+              "telegram"   — the owner answered the yes/no on the phone
               "defer"      — bridge returned no opinion (Claude Code's flow ran)
               "telegram_relay" — the Claude relay is on: allowed without asking
               "jev_shadow" — a second line: Jev's risk verdict for a relayed command, logged only
               "jev_safe" / "jev_error" — the relay allowed after Jev judged the command safe / failed
               "jev_risky_deferred" — Jev judged it risky, the phone did not answer: Claude Code's flow ran
-  elapsed_s elapsed seconds for the round-trip (omitted on short-circuits)
+  elapsed_s elapsed seconds for the round-trip (older entries only)
+  Older logs also hold "stick" (A/B on the buddy) and "timeout": the robot no longer decides prompts.
   jev       {"verdict","why","destroys","escapes","publishes","secrets","ms"} when Jev judged the command
 
 Append failures are logged once and don't propagate; the daemon must never
@@ -168,7 +168,7 @@ def _fmt_source(src: str, *, ascii_only: bool) -> str:
     pad = f"{src[:11]:<11}"
     if ascii_only:
         return pad
-    if src == "stick":
+    if src in ("telegram", "stick"):                  # a person decided ("stick": older logs)
         return f"{_ANSI_YELLOW}{pad}{_ANSI_RESET}"
     if src == "timeout":
         return f"{_ANSI_RED}{pad}{_ANSI_RESET}"

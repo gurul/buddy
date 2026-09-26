@@ -16,12 +16,12 @@
 buddy ファームウェアは公式には Claude for macOS/Windows のデスクトップ版とのみペアリングします。
 本プロジェクトを使うと、ターミナルで `claude` CLI を起動するだけで同じハードウェアを駆動でき、
 デスクペットが CLI セッションに反応します。アイドル時には眠り、ツール呼び出し中は忙しそうにし、
-権限プロンプトが必要なときは点滅、そして stick の物理ボタンから直接 allow / deny できます。
+セッションがあなたを待っているときは点滅します。権限の判断は Claude Code 自身のダイアログか、Telegram リレー経由でスマートフォンで行います。ロボット本体はもう allow / deny を決めません。
 
 ## 主な機能
 
-- **重要な操作の物理 2FA** —— `defaultMode: bypassPermissions` を全体に設定しつつ、本当に気をつけたい数個のツールだけを `permissions.ask` に並べます。それらの allow/deny はデスクの buddy にある A/B ボタンで決まります。
-- **スマートマッチャー** —— 害のない Bash（`ls`/`cat`/`grep`/...）は自動許可、危険な Bash（`rm`/`curl`/`git push`/...）は常に確認、それ以外は stick に判断を委ねます。デフォルトルールは TOML で上書き可能。
+- **スマートマッチャー** —— 害のない Bash（`ls`/`cat`/`grep`/...）は確認なしで自動許可、危険な Bash（`rm`/`curl`/`git push`/...）は常に確認、それ以外は Claude Code 自身の権限フローに任せます。デフォルトルールは TOML で上書き可能。
+- **スマートフォンで権限確認** —— Telegram リレーが有効（`claude on`）なら、常に確認するコマンドや Claude Code の権限ダイアログはチャットで yes/no として聞かれます。返事がなければ Mac のダイアログに戻り、拒否にはなりません。Jev が危険な Bash を指摘することもできます（`CC_BUDDY_COMMAND_RISK`）。
 - **リアルタイム stick HUD** —— アシスタントの返信は JSONL tailer 経由で ~500 ms 以内に stick にミラーされます（Stop フックの flush レースを回避）。
 - **ステータスライン** —— `cc-buddy-bridge hud` がプロンプトバーにバッテリー / 暗号化状態 / **当日のトークン数** / **当日の USD 推定コスト** を表示します。[claude-hud](https://github.com/jarrodwatts/claude-hud) と並べて使うことも可能。
 - **ワンコマンドのインストール + 自動起動** —— `cc-buddy-bridge install --service` が OS ごとに正しいバックエンドを選びます（macOS は launchd、Linux は systemd ユーザーユニット、Windows はタスクスケジューラ）。
@@ -41,7 +41,7 @@ claude CLI ──PreToolUse/Stop/etc hooks──▶ Unix socket ──▶ daemon
 * **Hooks**（`~/.claude/settings.json` で設定）はセッションのライフサイクルイベント、ツール呼び出し、権限要求、ターン境界で発火します。
 * 各 hook は短命の Python スクリプトで、Unix socket 経由でイベントペイロードをローカルの **デーモン** に転送します。
 * デーモンはセッションごとの状態（`total` / `running` / `waiting` / `tokens` / `entries`）を集約し、デスクトップアプリと同じ JSON ワイヤーフォーマットで BLE Nordic UART Service 経由でハートビートスナップショットを stick にプッシュします。
-* 権限プロンプトでは hook が **ブロック** し、stick のボタンが結果を出すのを待ってから `allow` / `deny` を Claude Code に返します。
+* 権限プロンプトでは、マッチャーが自動許可するものは許可し、Telegram リレーが有効ならスマートフォンで聞き、それ以外は判断を返さず Claude Code 自身のダイアログに任せます。ロボットにはもう承認 / 拒否の手段はありません。
 
 完全なワイヤープロトコルは
 [buddy ファームウェアリポジトリの REFERENCE.md](https://github.com/anthropics/claude-desktop-buddy/blob/main/REFERENCE.md)
@@ -216,17 +216,17 @@ Claude Code 自身の `~/.claude/settings.json` の `permissions` ブロック
 ```
 matcher classify_command(hint)
  ├─ "allow"  → ブリッジが permissionDecision=allow を返す（ショートカット）
- ├─ "ask"    → ブリッジが stick のボタンを待つ → ボタン結果を返す
- └─ "default"→ ブリッジは判断を返さず → Claude Code の settings.json + defaultMode に委任
+ ├─ "ask"    → リレー有効：スマートフォンで yes/no；返事なし・リレー無効 → Claude Code のフロー
+ └─ "default"→ リレー有効：許可（リレーは bypass）；リレー無効 → Claude Code の settings.json + defaultMode に委任
 ```
 
 **推奨の組み合わせ**
 
 | Claude Code `defaultMode` | Matcher `strict` | 挙動                                                                                                       |
 | ------------------------- | ---------------- | ---------------------------------------------------------------------------------------------------------- |
-| `ask`（デフォルト）        | `false`          | 無害な bash はマッチャーが自動許可、危険な bash は stick へ、それ以外は Claude Code のターミナルプロンプト。  |
-| `bypassPermissions`       | **`true`**       | **stick が唯一の人間確認ポイント。** 無害な bash は自動許可、それ以外（マッチ・非マッチ問わず）はすべて stick へ。 |
-| `bypassPermissions`       | `false`          | ⚠ マッチャーの `always_ask` パターンだけが stick で止まり、それ以外は黙って自動承認されます。デーモン起動時にこの組み合わせを検出すると WARNING を出します。 |
+| `ask`（デフォルト）        | `false`          | 無害な bash はマッチャーが自動許可、それ以外は Claude Code のプロンプト（リレー有効時は `always_ask` パターンをスマートフォンで確認）。 |
+| `bypassPermissions`       | **`true`**       | 無害な bash は自動許可、それ以外はすべて「確認」：リレー有効ならスマートフォンで判断。リレー無効だと誰も確認しないので、リレーと組み合わせるときだけ使ってください。 |
+| `bypassPermissions`       | `false`          | ⚠ マッチャーの `always_ask` パターンだけが確認され（リレー有効時はスマートフォン）、それ以外は黙って自動承認されます。デーモン起動時にこの組み合わせを検出すると WARNING を出します。 |
 | `auto`                    | `false`          | 実質 `ask` と同じ — マッチしないコマンドは Claude Code のフローへ落ちます。                                  |
 
 `strict` は `~/.config/cc-buddy-bridge/matchers.toml` に記述：
@@ -274,8 +274,7 @@ INFO cc_buddy_bridge.daemon: settings.json: permissions.defaultMode='auto' ask=0
 | `hint`      | 実行内容の短いサマリ（200 文字に切り詰め）                                |
 | `matcher`   | マッチャー分類：`allow` / `ask` / `default`                              |
 | `decision`  | ブリッジが返した値：`allow` / `deny` / `null`（判定なし）                |
-| `source`    | `auto_allow` / `stick` / `timeout` / `defer` / `ble_disconnected`       |
-| `elapsed_s` | stick との往復秒数（stick が関わったときのみ）                            |
+| `source`    | `auto_allow` / `telegram`（スマートフォンで回答）/ `telegram_relay`（リレーが許可）/ `jev_safe` / `jev_error` / `jev_risky_deferred` / `jev_shadow` / `defer` / `ble_disconnected` |
 
 ### 表示する
 
@@ -286,7 +285,7 @@ cc-buddy-bridge audit                       # 直近 20 件
 cc-buddy-bridge audit -n 100                # 直近 100 件
 cc-buddy-bridge audit -f                    # 新着を追跡（Ctrl+C で終了）
 cc-buddy-bridge audit --decision deny       # 拒否したものだけ
-cc-buddy-bridge audit --source stick        # stick で判定したラウンドだけ
+cc-buddy-bridge audit --source telegram     # スマートフォンで回答したラウンドだけ
 cc-buddy-bridge audit --tool Edit -n 50     # 直近 50 件の Edit 呼び出し
 cc-buddy-bridge audit --path                # 監査ファイルパスを表示して終了
 cc-buddy-bridge audit --ascii               # 色なし（パイプ / 非対応端末向け）
@@ -298,17 +297,17 @@ cc-buddy-bridge audit --ascii               # 色なし（パイプ / 非対応�
 # audit log: /Users/snow/Library/Logs/cc-buddy-bridge-audit.jsonl
 00:21:09.029 Bash     —     defer       sleep 8 && gh run list --repo ...
 00:30:10.212 Bash     allow auto_allow  cat >> tests/test_audit.py <<'EOF' ...
-00:34:55.871 Bash     deny  stick       git push origin main --force
+00:34:55.871 Bash     deny  telegram    git push origin main --force
 ```
 
-色：`allow` は緑、`deny` は赤、`—`（判定なし / 委任）はディム。source 列は `stick`（人がボタンを押した）が黄色、`timeout` が赤、それ以外はディム。
+色：`allow` は緑、`deny` は赤、`—`（判定なし / 委任）はディム。source 列は `telegram`（スマートフォンで回答）が黄色、それ以外はディム。
 
 ### 生の jq レシピ
 
 サブコマンドを使わず jq で直接見たい場合：
 
 ```bash
-# 今日 stick で拒否したもの
+# 今日スマートフォンで拒否したもの
 jq 'select(.decision=="deny")' ~/Library/Logs/cc-buddy-bridge-audit.jsonl
 
 # 今週の自動許可コマンド頻度トップ
