@@ -470,10 +470,10 @@ offline demo.
 
 ## Credits
 
-The lessons were built for an event by **Gurucharan Lingamallu, Swetank Griyage
-and Emaha Tekle**. The whiteboard began with Swetank's `smartboard`
-work; the tutor, voice integration and widget cards were developed on buddy and
-merged back here. The event fork, first launch film and presentation are in
+The lessons were built with **Gurucharan Lingamallu, Swetank Griyage and Emaha
+Tekle**. The whiteboard began with Swetank's `smartboard` work; the tutor, voice
+integration and widget cards were developed on buddy and merged back here. The
+lessons fork, first launch film and presentation are in
 [gurul/buddyTinkerer](https://github.com/gurul/buddyTinkerer). The cut-paper
 illustration above also comes from that project.
 
