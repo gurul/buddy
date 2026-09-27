@@ -284,31 +284,60 @@ class SpotifyApi:
         return next((i for i in items if isinstance(i, dict) and i.get("uri")), None)
 
 
-class DeviceColors:
-    """Which colour each device has: the first colour no known device holds, kept for good. Past seven devices
-    colours repeat, the least-used first."""
+FORGET_DEVICE_DAYS = 30   # a device not seen this long gives its colour back (a guest's phone, a hotel TV)
 
-    def __init__(self, path: Optional[Path] = None) -> None:
+
+class DeviceColors:
+    """Which colour each device has: the first colour no known device holds. A device keeps it while it is seen;
+    one not seen for ``FORGET_DEVICE_DAYS`` is forgotten, so one-off devices do not use up the seven colours
+    (owner, 2026-09-27). Past seven devices colours repeat, the least-used first.
+
+    The file maps a name to ``{"i": colour index, "seen": day}``; the day is days since 1970 (UTC). A bare index
+    (the first version's shape) reads as seen today."""
+
+    def __init__(self, path: Optional[Path] = None, today: Callable[[], int] = lambda: int(time.time() // 86400),
+                 forget_days: int = FORGET_DEVICE_DAYS) -> None:
         self.path = path.expanduser() if path is not None else None
-        self.known: dict[str, int] = {}
+        self.today = today
+        self.forget_days = forget_days
+        self.known: dict[str, dict[str, int]] = {}
         if self.path is not None:
             try:
                 raw = json.loads(self.path.read_text(encoding="utf-8"))
-                self.known = {str(k): int(v) % len(DEVICE_COLORS) for k, v in raw.items()}
-            except (OSError, ValueError, AttributeError, TypeError):
+                for k, v in raw.items():
+                    if isinstance(v, dict):
+                        self.known[str(k)] = {"i": int(v["i"]) % len(DEVICE_COLORS), "seen": int(v.get("seen", 0))}
+                    else:
+                        self.known[str(k)] = {"i": int(v) % len(DEVICE_COLORS), "seen": self.today()}
+            except (OSError, ValueError, AttributeError, TypeError, KeyError):
                 self.known = {}
 
+    def _save(self) -> None:
+        if self.path is None:
+            return
+        try:
+            self.path.parent.mkdir(parents=True, exist_ok=True)
+            self.path.write_text(json.dumps(self.known, indent=2), encoding="utf-8")
+        except OSError as e:
+            log.warning("spotify: could not keep device colours (%s)", e)
+
     def index(self, name: str) -> int:
-        if name not in self.known:
-            used = list(self.known.values())
-            self.known[name] = min(range(len(DEVICE_COLORS)), key=lambda i: (used.count(i), i))
-            if self.path is not None:
-                try:
-                    self.path.parent.mkdir(parents=True, exist_ok=True)
-                    self.path.write_text(json.dumps(self.known, indent=2), encoding="utf-8")
-                except OSError as e:
-                    log.warning("spotify: could not keep device colours (%s)", e)
-        return self.known[name]
+        today = self.today()
+        entry = self.known.get(name)
+        if entry is None:
+            gone = [n for n, e in self.known.items() if today - e["seen"] > self.forget_days]
+            for n in gone:
+                del self.known[n]
+            if gone:
+                log.info("spotify: forgot %d device(s) not seen in %d days", len(gone), self.forget_days)
+            used = [e["i"] for e in self.known.values()]
+            entry = self.known[name] = {"i": min(range(len(DEVICE_COLORS)), key=lambda i: (used.count(i), i)),
+                                        "seen": today}
+            self._save()
+        elif entry["seen"] != today:
+            entry["seen"] = today                    # written at most once a day per device
+            self._save()
+        return entry["i"]
 
     def rgb(self, name: str) -> tuple[int, int, int]:
         return DEVICE_COLORS[self.index(name)][1]

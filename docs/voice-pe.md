@@ -130,9 +130,11 @@ are told apart.
 colour**: blue, orange, purple, cyan, yellow, pink or white. Green and red are
 never used, because they mean Spotify mode and a refusal. While a device is
 selected, the ring glows faintly in its colour, with a bright dot at its place
-in the list. A device keeps the colour it gets the first time buddy sees it
-(`~/.config/cc-buddy-bridge/spotify-colors.json`). After an eighth device,
-colours repeat. When the music moves, the ring sweeps in the new device's
+in the list. A device gets its colour the first time buddy sees it and keeps
+it while it keeps showing up (`~/.config/cc-buddy-bridge/spotify-colors.json`).
+A device buddy hasn't seen for 30 days, such as a guest's phone or a hotel TV,
+is forgotten, and its colour goes back to the free ones. With more than seven
+devices, colours repeat. When the music moves, the ring sweeps in the new device's
 colour. The Mini App's Music card shows the key. The picker opens on the
 device that is playing now. Turning the dial
 moves through your Spotify Connect devices, and buddy says each device's name

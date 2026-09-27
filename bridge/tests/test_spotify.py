@@ -442,7 +442,7 @@ def test_each_device_keeps_its_own_colour_and_green_and_red_are_never_used(tmp_p
     assert all(not (r > 150 and g < 60 and b < 60) for r, g, b in rgbs)       # no red: a refusal's
     for i in range(20):                                                 # past seven, colours repeat evenly
         c.index(f"extra {i}")
-    counts = [list(c.known.values()).count(i) for i in range(len(S.DEVICE_COLORS))]
+    counts = [[e["i"] for e in c.known.values()].count(i) for i in range(len(S.DEVICE_COLORS))]
     assert max(counts) - min(counts) <= 1
 
 
@@ -457,3 +457,24 @@ def test_a_broken_colours_file_starts_fresh(tmp_path: Any) -> None:
     path = tmp_path / "c.json"
     path.write_text("not json")
     assert S.DeviceColors(path).hex("A") == "#%02x%02x%02x" % S.DEVICE_COLORS[0][1]
+
+
+def test_a_device_not_seen_for_30_days_gives_its_colour_back(tmp_path: Any) -> None:
+    path = tmp_path / "spotify-colors.json"
+    day = {"d": 20000}
+    c = S.DeviceColors(path, today=lambda: day["d"])
+    mac, guest = c.index("MacBook"), c.index("Guest phone")
+    day["d"] += 20
+    assert c.index("MacBook") == mac                           # seen again: its day moves on
+    day["d"] += 15                                             # the guest: 35 days unseen; the Mac: 15
+    new = S.DeviceColors(path, today=lambda: day["d"]).index("New speaker")
+    assert new == guest                                        # the guest's colour is free again
+    kept = json.loads(path.read_text())
+    assert "Guest phone" not in kept and kept["MacBook"]["i"] == mac
+
+
+def test_the_first_colours_file_shape_still_reads(tmp_path: Any) -> None:
+    path = tmp_path / "spotify-colors.json"
+    path.write_text(json.dumps({"MacBook": 0, "TV": 1}))
+    c = S.DeviceColors(path, today=lambda: 20000)
+    assert c.index("MacBook") == 0 and c.index("TV") == 1 and c.index("Phone") == 2
