@@ -106,6 +106,29 @@ like the rest of the home page. An app's token never reaches it. The page gets
 the lights' names and rooms only, never an address or a key. Without lights
 the card does not appear.
 
+## Music
+
+With [Spotify](../spotify.md) logged in, a **Music** card sits under Lights.
+It gives the phone the same controls as spotKnob:
+
+- The album art, track, artist and album that are playing now.
+- **⏮ ▶/⏸ ⏭**: previous, play or pause, next.
+- A **Volume** slider for the playing device. It sends the value when you let
+  go.
+- **Playing on**: your Spotify Connect devices, with the playing one
+  selected. Pick another to move the music there. A device that Spotify won't
+  let buddy control is shown as **no remote control** and can't be picked.
+- **Voice PE Spotify mode**: turns [Spotify mode](../voice-pe.md#spotify-mode)
+  on the Voice PE on or off. It appears only when a Voice PE is connected as
+  buddy's controller.
+
+After each tap the card reloads the player and shows a line such as
+"Paused." or "Playing on Kitchen Speaker.". The card calls `/api/spotify`, and
+only the owner's signed `initData` opens it. The card only controls playback:
+it can't search, and an app's token never reaches it. Album art is shown only
+from Spotify's image host (`i.scdn.co`). Without a Spotify login, the card
+does not appear.
+
 ## Making an app
 
 Ask in the chat ("make me a habit tracker with streaks", "build a workout

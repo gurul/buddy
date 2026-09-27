@@ -453,6 +453,10 @@ class Daemon:
                 await self._meeter.close()                  # a call in progress: its notes are written
             if getattr(self, "_lights", None) is not None:
                 await self._lights.close()                  # a held Bluetooth connection goes back to the phone app
+            if getattr(self, "_music_mode", None) is not None:
+                await self._music_mode.close()
+            if getattr(self, "_spotify", None) is not None:
+                await self._spotify.close()
             if getattr(self, "_chrome_lane", None) is not None:
                 await self._chrome_lane.close()             # buddy's tab only; the owner's Chrome stays
             for t in tasks:
@@ -1143,7 +1147,8 @@ class Daemon:
                                            on_open=lambda session: Daemon._on_voice_session(self, session),
                                            mac_busy=lambda: Daemon._texted_task_running(self),
                                            meeter=getattr(self, "_meeter", None),
-                                           lights=Daemon._lights_hub(self))
+                                           lights=Daemon._lights_hub(self),
+                                           spotify=Daemon._spotify_hub(self))
         except asyncio.CancelledError:
             self._explore_after_conversation = None      # hushed: stay put
             self._think_aloud_wish = None                # a hush or a stop cancels a pending listen too
@@ -1259,6 +1264,7 @@ class Daemon:
         self._meeter = Daemon._make_meeter(self, apps) if tg.enabled else None
         return telegram_mod.make_inlet(
             tg, watcher=watcher, meeter=self._meeter, lights=Daemon._lights_hub(self),
+            spotify=Daemon._spotify_hub(self),
             apps=apps,
             vault=vault if tg.enabled and vault.enabled else None,
             agent_factory=self._make_agent, agent_enabled=self._agent_cfg.enabled,
@@ -1310,6 +1316,7 @@ class Daemon:
         server = getattr(self._miniapp, "server", None)
         if server is not None:
             server.lights = Daemon._lights_hub(self)        # the Lights card, when there are lights (lights.py)
+            server.spotify = Daemon._spotify_hub(self)      # the Music card, when Spotify is logged in (spotify.py)
             server.calls = PhoneCalls(
                 lambda init_data: miniapp.check_init_data(init_data, cfg.token, cfg.owner_ids),
                 getattr(self, "_telegram", None), make_voice())
@@ -1362,6 +1369,47 @@ class Daemon:
                 log.exception("lights: could not load; lights are off this run")
                 self._lights = None
         return self._lights
+
+    def _spotify_hub(self) -> Any:
+        """The owner's Spotify (spotify.py), made once and shared by the chat, the voice and the Mini App; None
+        when never logged in or CC_BUDDY_SPOTIFY=0."""
+        if not hasattr(self, "_spotify"):
+            from . import spotify as spotify_mod
+
+            try:
+                self._spotify = spotify_mod.make_spotify()
+            except Exception:  # noqa: BLE001 — a Spotify that cannot load costs Spotify, never the daemon
+                log.exception("spotify: could not load; Spotify is off this run")
+                self._spotify = None
+            ctl = getattr(self, "_controller", None)
+            if self._spotify is not None and ctl is not None:
+                # Spotify mode on the Voice PE: its ring green, its dial the volume, its clicks the transport
+                from .music_mode import MusicMode
+
+                self._music_mode = MusicMode(self._spotify, ctl.show, say=Daemon._board_say(self))
+                self._spotify.mode = self._music_mode
+        return self._spotify
+
+    def _board_say(self) -> Any:
+        """A few words on the Voice PE's speaker (the device picker's names), with the call voice; None without
+        one (no OPENAI_API_KEY): the picker then shows the ring alone."""
+        from .phone_call import make_voice
+
+        voice = make_voice()
+        if voice is None:
+            return None
+
+        async def say(text: str) -> None:
+            ctl = getattr(self, "_controller", None)
+            if not text or ctl is None or not ctl.connected:
+                return
+            from .desk_call import BoardSpeaker
+
+            pcm = await asyncio.to_thread(lambda: b"".join(voice.speak_stream(text)))
+            speaker = BoardSpeaker(ctl.send_audio)
+            await speaker.flush()                         # a name not yet finished gives way to the next
+            await speaker.play(pcm)
+        return say
 
     def _make_meeter(self, apps: Any) -> Any:
         """The Meet notetaker (meet.py): joins from the owner's Chrome (attach mode) on a browser lane of its own,
@@ -2668,6 +2716,17 @@ class Daemon:
             self._note_activity()
             log.info("explore: called back by a double tap")
             await self._dismiss_explore("double tap")
+            return
+        if cmd == "music":
+            # Spotify mode's input from the Voice PE (music_mode.py): clicks, holds and the dial.
+            self._note_activity()
+            mode = getattr(self, "_music_mode", None)
+            if mode is not None:
+                await mode.on_input(obj)
+            else:
+                ctl = getattr(self, "_controller", None)
+                if ctl is not None:                        # no Spotify: a board stuck in the mode is put back
+                    await ctl.show({"cmd": "music_mode", "on": False})
             return
         if cmd == "ptt":
             # The board's button held to talk (Voice PE, desk_call.py): the Mini App's push-to-talk call, on

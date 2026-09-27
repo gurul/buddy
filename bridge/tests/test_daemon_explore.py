@@ -511,3 +511,23 @@ def test_a_double_tap_on_the_screen_calls_buddy_back() -> None:
         await d._explore_step(1.0)
         assert d._explorer.state == "off"
     asyncio.run(go())
+
+
+def test_the_voice_pe_music_input_reaches_spotify_mode_or_puts_the_board_back() -> None:
+    async def go():
+        d = _daemon()
+        got: list = []
+        shown: list = []
+
+        async def on_input(obj):
+            got.append(obj)
+
+        async def show(obj):
+            shown.append(obj)
+        d._controller = SimpleNamespace(show=show)
+        await d._handle_ble({"cmd": "music", "clicks": 2})       # no Spotify: the board leaves the mode
+        assert shown == [{"cmd": "music_mode", "on": False}] and got == []
+        d._music_mode = SimpleNamespace(on_input=on_input)
+        await d._handle_ble({"cmd": "music", "dial": 3})
+        assert got == [{"cmd": "music", "dial": 3}]
+    asyncio.run(go())

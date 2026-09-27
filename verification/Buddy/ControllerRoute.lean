@@ -8,14 +8,18 @@
   to `Controller.mirror`. `mirror` keeps the latest message of each mirrored kind in `self.last` and sends it
   at once when the controller is connected. `_replay` sends the kept state; `run` calls it on each connect,
   and the link calls it as `on_boot` when the board prints its boot line. A line from the controller reaches
-  the daemon (`on_input`, which is `Daemon._handle_ble`) only when its cmd is in INPUT_CMDS = {ptt, key, focus}.
+  the daemon (`on_input`, which is `Daemon._handle_ble`) only when its cmd is in INPUT_CMDS =
+  {ptt, key, focus, music}. Since 2026-09-27 the daemon also sends the controller alone the Voice PE's Spotify
+  mode (music_mode.py) through `Controller.show`: `music_mode` (kept in `self.last` and replayed), `ring_level`
+  and `music_flash` (sent only). `show` is called with nothing else: `MusicMode.send` and the daemon's put-back
+  in `_handle_ble` are its only callers.
 
   The properties, over every trace of mirror(any message), connect, disconnect, boot and a controller
   line(any message):
 
     (P1) the controller is never sent {"cmd":"sound","on":true}. The owner's rule: beeps only on the StackChan.
-    (P2) every line forwarded to the daemon is ptt, key or focus. So the controller's acks and status never
-         reach the robot's ack waiters.
+    (P2) every line forwarded to the daemon is ptt, key, focus or music. So the controller's acks and status
+         never reach the robot's ack waiters.
 
   The counterexample (commit 4ed166d). MIRRORED_CMDS was {"agent", "sound", "listen"} and `_replay` sent
   only `self.last.values()`. With the controller connected, `mirror({"cmd":"sound","on":true})` sent it to the
@@ -27,6 +31,8 @@
   The pytest replays against the real class: `test_the_beeps_are_the_robots_alone` (P1: sound-on mirrored
   while connected is not sent, and the first message on connect is SILENT) and
   `test_input_reaches_the_daemon_and_acks_do_not` (P2), both in bridge/tests/test_controller.py.
+  `test_controller_show_keeps_the_mode_only` (bridge/tests/test_music_mode.py) replays `display`: only
+  `music_mode` is kept, and it is sent again on connect.
 
   Abstraction and deviations from the Python.
   - A message is its shape only: `sound on`, agent, listen, heartbeat (no "cmd", has "total"), time (no
@@ -61,12 +67,16 @@ inductive Msg where
   | ptt                 -- {"cmd":"ptt","on":…}
   | key                 -- {"cmd":"key","name":…}
   | focus               -- {"cmd":"focus",…}
+  | music               -- {"cmd":"music",…}: Spotify mode's clicks, holds and dial, from the board
+  | musicMode           -- {"cmd":"music_mode","on":…}: to the board, `Controller.show`
+  | ringLevel           -- {"cmd":"ring_level",…}: to the board, `Controller.show`
+  | musicFlash          -- {"cmd":"music_flash","ok":…}: to the board, `Controller.show`
   | ack                 -- {"ack":…,"ok":…}: no "cmd"
   | other               -- any other cmd ("look", "cam", "explore", …)
   deriving DecidableEq, Repr
 
 inductive Cmd where
-  | sound | agent | listen | status | ptt | key | focus | other
+  | sound | agent | listen | status | ptt | key | focus | music | musicMode | ringLevel | musicFlash | other
   deriving DecidableEq, Repr
 
 /-- `obj.get("cmd")`. -/
@@ -78,6 +88,10 @@ def cmdOf : Msg → Option Cmd
   | .ptt => some .ptt
   | .key => some .key
   | .focus => some .focus
+  | .music => some .music
+  | .musicMode => some .musicMode
+  | .ringLevel => some .ringLevel
+  | .musicFlash => some .musicFlash
   | .other => some .other
   | .heartbeat | .time | .ack => none
 
@@ -87,7 +101,7 @@ def totalOrTime : Msg → Bool
   | _ => false
 
 /-- INPUT_CMDS, controller.py. -/
-def inputCmds : List Cmd := [.ptt, .key, .focus]
+def inputCmds : List Cmd := [.ptt, .key, .focus, .music]
 
 /-- MIRRORED_CMDS: {agent, sound, listen} at 4ed166d; {agent, listen} now. -/
 def mirroredCmds (fixed : Bool) : List Cmd :=
@@ -109,8 +123,9 @@ structure S where
   lSound : Option Msg := none      -- self.last["sound"] (only ever set at 4ed166d)
   lHeart : Option Msg := none      -- self.last["heartbeat"]
   lTime : Option Msg := none       -- self.last["time"]
+  lMusic : Option Msg := none      -- self.last["music_mode"] (`show`)
   beeped : Bool := false           -- ghost: the controller was sent {"cmd":"sound","on":true}
-  fwdBad : Bool := false           -- ghost: the daemon was handed a line other than ptt, key or focus
+  fwdBad : Bool := false           -- ghost: the daemon was handed a line other than ptt, key, focus or music
   deriving DecidableEq, Repr
 
 /-- The owner's rule (P1) and the input rule (P2). -/
@@ -131,7 +146,7 @@ def store (s : S) (m : Msg) : S :=
   | .time => { s with lTime := some m }
   | _ => s
 
-def slots (s : S) : List (Option Msg) := [s.lAgent, s.lListen, s.lSound, s.lHeart, s.lTime]
+def slots (s : S) : List (Option Msg) := [s.lAgent, s.lListen, s.lSound, s.lHeart, s.lTime, s.lMusic]
 
 /-- `_replay`: `[SILENT, *self.last.values()]` now; `list(self.last.values())` at 4ed166d. -/
 def replay (fixed : Bool) (s : S) : S :=
@@ -143,8 +158,26 @@ def forwards (m : Msg) : Bool :=
   | some c => inputCmds.contains c
   | none => false
 
-/-- P2's set, stated on messages: exactly ptt, key and focus. -/
-def isInput (m : Msg) : Bool := m == .ptt || m == .key || m == .focus
+/-- P2's set, stated on messages: exactly ptt, key, focus and music. -/
+def isInput (m : Msg) : Bool := m == .ptt || m == .key || m == .focus || m == .music
+
+/-- What `Controller.show` is ever called with (music_mode.py `MusicMode.send`, the daemon's put-back). -/
+inductive Shown where
+  | musicMode | ringLevel | musicFlash
+  deriving DecidableEq, Repr
+
+def Shown.msg : Shown → Msg
+  | .musicMode => .musicMode
+  | .ringLevel => .ringLevel
+  | .musicFlash => .musicFlash
+
+/-- `Controller.show`, first half: `music_mode` is kept in `self.last`. -/
+def keep (s : S) (k : Shown) : S := if k = .musicMode then { s with lMusic := some k.msg } else s
+
+/-- `Controller.show`, second half: `if self.connected: await self.link.send(obj)`. -/
+def sendIf (s : S) (m : Msg) : S := if s.conn then sendAll s [m] else s
+
+def display (s : S) (k : Shown) : S := sendIf (keep s k) k.msg
 
 inductive Event where
   | mirror (m : Msg)   -- `send_both` sent m to the robot, then `Controller.mirror(m)`
@@ -152,6 +185,7 @@ inductive Event where
   | disconnect         -- the link closed
   | boot               -- `on_boot` = `_replay`, on the board's boot line
   | line (m : Msg)     -- the controller sent m: `_on_message(m)`
+  | display (k : Shown)   -- `Controller.show(k)`: Spotify mode's messages, for the controller alone
   deriving DecidableEq, Repr
 
 def step (fixed : Bool) (s : S) : Event → S
@@ -164,6 +198,7 @@ def step (fixed : Bool) (s : S) : Event → S
   | .disconnect => { s with conn := false }
   | .boot => replay fixed s
   | .line m => if forwards m then { s with fwdBad := s.fwdBad || !isInput m } else s
+  | .display k => display s k
 
 /-! ## The code at 4ed166d -/
 
@@ -229,9 +264,40 @@ theorem store_inv (s : S) (m : Msg) (hm : m ≠ .sound true) (h : Inv s) : Inv (
   have hS := hs s.lSound (by simp [slots])
   have hH := hs s.lHeart (by simp [slots])
   have hT := hs s.lTime (by simp [slots])
+  have hM := hs s.lMusic (by simp [slots])
   have hmo : okSlot (some m) := fun e => hm (Option.some.inj e)
   cases m <;> refine ⟨hb, hf, ?_⟩ <;> intro o ho <;> simp [store, slots] at ho <;>
-    rcases ho with ho | ho | ho | ho | ho <;> subst ho <;> assumption
+    rcases ho with ho | ho | ho | ho | ho | ho <;> subst ho <;> assumption
+
+theorem keep_inv (s : S) (k : Shown) (h : Inv s) : Inv (keep s k) := by
+  obtain ⟨hb, hf, hs⟩ := h
+  unfold keep
+  split
+  · rename_i hk
+    subst hk
+    refine ⟨hb, hf, ?_⟩
+    intro o ho
+    simp only [slots, List.mem_cons, List.mem_nil_iff, or_false] at ho
+    rcases ho with ho | ho | ho | ho | ho | ho <;> subst ho
+    · exact hs _ (by simp [slots])
+    · exact hs _ (by simp [slots])
+    · exact hs _ (by simp [slots])
+    · exact hs _ (by simp [slots])
+    · exact hs _ (by simp [slots])
+    · simp [okSlot, Shown.msg]
+  · exact ⟨hb, hf, hs⟩
+
+theorem sendIf_inv (s : S) (m : Msg) (hm : (m == Msg.sound true) = false) (h : Inv s) :
+    Inv (sendIf s m) := by
+  obtain ⟨hb, hf, hs⟩ := h
+  unfold sendIf
+  split
+  · exact ⟨by simp [sendAll, hb, hm], by simp [sendAll, hf], by simpa [sendAll, slots] using hs⟩
+  · exact ⟨hb, hf, hs⟩
+
+/-- `Controller.show` sends and keeps only Spotify mode's messages, none of them sound. -/
+theorem display_inv (s : S) (k : Shown) (h : Inv s) : Inv (display s k) :=
+  sendIf_inv _ _ (by cases k <;> decide) (keep_inv s k h)
 
 theorem inv_step (s : S) (e : Event) (h : Inv s) : Inv (step true s e) := by
   cases e with
@@ -268,6 +334,7 @@ theorem inv_step (s : S) (e : Event) (h : Inv s) : Inv (step true s e) := by
       have : isInput m = true := current_forwards_only_input m hfw
       simp [hf, this]
     · exact ⟨hb, hf, hs⟩
+  | display k => exact display_inv s k h
 
 theorem inv_run (evs : List Event) : ∀ s : S, Inv s → Inv (evs.foldl (step true) s) := by
   induction evs with
@@ -275,7 +342,7 @@ theorem inv_run (evs : List Event) : ∀ s : S, Inv s → Inv (evs.foldl (step t
   | cons e rest ih => intro s h; exact ih _ (inv_step s e h)
 
 /-- For every trace of mirrors, connects, disconnects, boots and controller lines: the controller is never
-sent sound-on (P1), and the daemon is handed only ptt, key and focus (P2). -/
+sent sound-on (P1), and the daemon is handed only ptt, key, focus and music (P2). -/
 theorem fixed_invariant (evs : List Event) :
     (Fix.run evs).beeped = false ∧ (Fix.run evs).fwdBad = false ∧ Spec (Fix.run evs) = true := by
   have h := inv_run evs {} ⟨rfl, rfl, by intro o ho; simp [slots] at ho; subst ho; simp [okSlot]⟩

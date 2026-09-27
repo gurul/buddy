@@ -13,8 +13,11 @@ Adafruit_NeoPixel pixels(N, SB_PIN_LED_RING, NEO_GRB + NEO_KHZ800);
 
 RingLook look = LOOK_OFFLINE;
 uint32_t lookAtMs = 0;
-uint8_t levelShown = 0;
+uint8_t levelShown = 0, levelOf = 10;
+bool levelDot = false;
 uint32_t levelUntil = 0;
+bool flashOk = false;
+uint32_t flashAtMs = 0, flashUntil = 0;
 bool muted = false;
 uint32_t lastRender = 0;
 
@@ -86,11 +89,30 @@ void render(uint32_t now) {
     case LOOK_ERROR:
       fill({200, 0, 0}, ((now / 150) % 2) ? 0.0f : 1.0f);
       break;
+    case LOOK_MUSIC:
+      fill({30, 215, 96}, 0.12f + 0.28f * breathe(3000, now));   // Spotify green
+      break;
   }
 
-  if (now < levelUntil) {
-    uint8_t lit = (uint8_t)((levelShown * N + 5) / 10);
-    for (uint8_t i = 0; i < N; i++) frame[i] = i < lit ? Rgb{120, 120, 120} : Rgb{0, 0, 0};
+  if (now < levelUntil && levelOf > 0) {
+    Rgb on = look == LOOK_MUSIC ? Rgb{30, 215, 96} : Rgb{120, 120, 120};
+    if (levelDot) {
+      // position `levelShown` (1-based) of `levelOf`, spread round the ring; the rest faintly lit
+      uint8_t at = (uint8_t)(((levelShown > 0 ? levelShown - 1 : 0) * N) / levelOf);
+      for (uint8_t i = 0; i < N; i++) frame[i] = i == at ? on : Rgb{on.r * 0.06f, on.g * 0.06f, on.b * 0.06f};
+    } else {
+      uint8_t lit = (uint8_t)((levelShown * N + levelOf / 2) / levelOf);
+      for (uint8_t i = 0; i < N; i++) frame[i] = i < lit ? on : Rgb{0, 0, 0};
+    }
+  }
+  if (now < flashUntil) {
+    uint32_t age = now - flashAtMs;
+    if (flashOk) {
+      float lit = age < 400 ? (float)age / 400 * N : N;
+      for (uint8_t i = 0; i < N; i++) frame[i] = i < lit ? Rgb{40, 220, 80} : Rgb{0, 0, 0};
+    } else {
+      fill({200, 0, 0}, ((age / 150) % 2) ? 0.0f : 1.0f);
+    }
   }
   if (muted) {
     frame[0] = {180, 0, 0};
@@ -121,9 +143,17 @@ void ringSet(RingLook l) {
   lookAtMs = millis();
 }
 
-void ringShowLevel(uint8_t level) {
+void ringShowLevel(uint8_t level, uint8_t of, bool dot, uint32_t ms) {
   levelShown = level;
-  levelUntil = millis() + 1500;
+  levelOf = of;
+  levelDot = dot;
+  levelUntil = millis() + ms;
+}
+
+void ringFlash(bool ok) {
+  flashOk = ok;
+  flashAtMs = millis();
+  flashUntil = flashAtMs + (ok ? 900 : 750);
 }
 
 void ringSetMuted(bool m) { muted = m; }

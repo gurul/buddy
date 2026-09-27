@@ -5225,3 +5225,49 @@ def test_lights_by_code_and_by_the_brain() -> None:
     rig = Rig(FakeApi(), FakeCreate(say("ok")))
     asyncio.run(rig.inlet._turn(telegram.Inbound(OWNER, OWNER, "hi", message_id=10)))
     assert not any(t.get("name") in lights.TOOL_NAMES for t in rig.create.requests[0]["tools"])
+
+
+def test_spotify_by_code_and_by_the_brain() -> None:
+    from cc_buddy_bridge import spotify
+
+    class Hub:
+        def __init__(self) -> None:
+            self.real = spotify.Spotify(None)            # only for match(); the doing is faked below
+            self.ran: list = []
+            self.handled: list = []
+
+        def match(self, text: str) -> Any:
+            return self.real.match(text)
+
+        async def run(self, cmd: Any) -> str:
+            self.ran.append(cmd)
+            return "Paused."
+
+        def tools(self) -> list:
+            return spotify.TOOLS
+
+        def instructions(self) -> str:
+            return spotify.INSTRUCTIONS
+
+        async def handle(self, name: str, args: dict) -> dict:
+            self.handled.append((name, args))
+            return {"ok": True, "line": "Playing Daft Punk."}
+
+    hub = Hub()
+    # "pause the music": by code, no model call
+    run_rig(rig := Rig(api := FakeApi([update("pause the music")]), FakeCreate(), spotify=hub))
+    assert api.sent[-1] == (OWNER, "Paused.")
+    assert rig.create.requests == [] and hub.ran == [spotify.Command("pause")]
+    # anything more goes to the brain, which has the tools
+    args = {"action": "play", "query": "daft punk", "kind": "artist", "volume": None, "volume_change": None,
+            "device": None}
+    rig = Rig(FakeApi(), FakeCreate(call("spotify_control", args), say("On it.")), spotify=hub)
+    asyncio.run(rig.inlet._turn(telegram.Inbound(OWNER, OWNER, "put on some daft punk", message_id=9)))
+    first = rig.create.requests[0]
+    assert {"spotify_now_playing", "spotify_control"} <= {t.get("name") for t in first["tools"]}
+    assert "spotify_control" in first["instructions"]
+    assert hub.handled == [("spotify_control", args)]
+    # no login: no tools, and "pause the music" is the brain's like any other text
+    rig = Rig(FakeApi(), FakeCreate(say("ok")))
+    asyncio.run(rig.inlet._turn(telegram.Inbound(OWNER, OWNER, "hi", message_id=10)))
+    assert not any(t.get("name") in spotify.TOOL_NAMES for t in rig.create.requests[0]["tools"])

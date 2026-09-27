@@ -2449,3 +2449,49 @@ def test_lights_out_loud_reach_the_lights() -> None:
     asyncio.run(go())
     assert hub.calls == [("lights_set", args)]
     assert conn.tool_outputs()[0]["done"] == ["floor lamp"]
+
+
+class _FakeSpotify:
+    def __init__(self) -> None:
+        self.calls: list = []
+
+    def tools(self) -> list:
+        from cc_buddy_bridge import spotify
+        return spotify.TOOLS
+
+    def instructions(self) -> str:
+        from cc_buddy_bridge import spotify
+        return spotify.INSTRUCTIONS
+
+    async def handle(self, name: str, args: dict) -> dict:
+        self.calls.append((name, args))
+        return {"ok": True, "line": "Paused."}
+
+
+def test_spotify_is_offered_to_the_backend_only_when_logged_in_and_never_in_a_lesson() -> None:
+    from cc_buddy_bridge import voice_agent
+
+    names = lambda cfg: [t.get("name") for t in cfg["delegation"]["responses"]["tools"]]  # noqa: E731
+    cfg = VoiceConfig()
+    assert "spotify_control" not in names(voice_agent.session_config(cfg))
+    on = voice_agent.session_config(cfg, spotify=_FakeSpotify())
+    assert {"spotify_now_playing", "spotify_control"} <= set(names(on))
+    assert "spotify_control" in on["delegation"]["responses"]["instructions"]
+    lesson = voice_agent.session_config(cfg, think_aloud={"id": "l1", "topic": "fractions"}, spotify=_FakeSpotify())
+    assert "spotify_control" not in names(lesson)
+
+
+def test_music_out_loud_reaches_spotify() -> None:
+    hub = _FakeSpotify()
+    args = {"action": "pause", "query": None, "kind": None, "volume": None, "volume_change": None, "device": None}
+    conn = FakeConnection([_tool_call("spotify_control", "c1", **args)])
+    s, _, _ = _session(conn, [FakeAgent(None, None)], spotify=hub)
+
+    async def go():
+        task = asyncio.create_task(s.run())
+        await _eventually(lambda: bool(conn.tool_outputs()))
+        conn.feed(_tool_call("end_conversation", "c9"), None)
+        await task
+    asyncio.run(go())
+    assert hub.calls == [("spotify_control", args)]
+    assert conn.tool_outputs()[0]["line"] == "Paused."

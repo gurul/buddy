@@ -41,6 +41,7 @@ The Voice PE runs in one of two setups:
 | Task finished | Green sweep, happy trill |
 | Error | Red blink, falling boop |
 | Hardware mute switch on | Two red LEDs at the top. Chirps are silenced. The Mac microphone is not affected |
+| [Spotify mode](#spotify-mode) on | Slow green breathe. The button and the dial control Spotify |
 
 | Control | While a session waits on you | Otherwise |
 |---|---|---|
@@ -101,6 +102,51 @@ setting (beeps off) does not mute the voice.
 The `[alive]` line reports `voice_dropped`: bytes that arrived with the
 buffer full. It stays 0 while the pacing holds.
 
+## Spotify mode
+
+In Spotify mode the Voice PE works like
+[spotKnob](https://github.com/gurul/spotify-knob): the dial is the Spotify
+volume and the button is the transport. It needs [Spotify](spotify.md) logged
+in and the Voice PE connected as buddy's controller.
+
+**Turning it on.** Say "spotify mode" to buddy, send it in Telegram, or tap
+**Voice PE Spotify mode** on the Mini App's Music card. The ring breathes
+green. "Spotify mode off", "exit spotify mode", or the Mini App button turns
+it off, and so does holding the button for 3 s.
+
+| On the Voice PE | In Spotify mode |
+|---|---|
+| 1 click | Play or pause |
+| 2 clicks | Next track |
+| 3 clicks | Previous track |
+| Dial | Spotify volume, 4% per detent. The ring shows the level in green at once. buddy sends the level to Spotify 0.4 s after the dial stops |
+| Hold, then let go (0.6 s to 3 s) | Opens the device picker. A tick at 0.6 s tells you that you can let go |
+| Hold 3 s | Leaves Spotify mode |
+
+A click waits 0.35 s for the next one before it counts, so 1, 2 and 3 clicks
+are told apart.
+
+**The device picker** is spotKnob's picker. The ring shows one green dot for
+each position. It opens on the device that is playing now. Turning the dial
+moves through your Spotify Connect devices, and buddy says each device's name
+on the Voice PE's speaker. A click plays on the chosen device. A hold, or 10 s
+with no input, backs out with nothing changed. Devices that Spotify marks as
+restricted are left out. Without `OPENAI_API_KEY`, buddy doesn't say the
+names, and the ring is the only guide.
+
+A green sweep with the "ok" chirp means Spotify took the command. A red blink
+with the falling boop means it refused, for example when nothing is playing
+on any device or the account isn't Premium.
+
+While Spotify mode is on, the button doesn't do hold to talk, and a tap
+doesn't press Enter on a waiting prompt. Leave the mode to get them back. The
+mode is kept when the Voice PE reconnects, but turns off when the daemon
+restarts. On the wire, the board sends `{"cmd":"music","clicks":n}`,
+`{"cmd":"music","hold":"short"|"long"}` and `{"cmd":"music","dial":d}`. The
+daemon sends `{"cmd":"music_mode","on":…}`, `{"cmd":"ring_level",…}` and
+`{"cmd":"music_flash","ok":…}` to the Voice PE only. The code is
+`bridge/src/cc_buddy_bridge/music_mode.py`.
+
 ## Standard questions, answered by code
 
 "What time is it", "what's the weather", "when is sunset", "what's 17
@@ -116,6 +162,10 @@ model. If a source fails, the model answers as before.
 Light commands are handled the same way. "Lights off", "lights blue" or "dim
 the lamp to 30%" is done by code, and anything more ("make it cozy") goes to
 the model with the light tools. See [lights](lights.md).
+
+Music commands work the same way. "Pause the music", "next song" or "music
+volume 40" is handled by code, and anything more ("put on something chill")
+goes to the model with the Spotify tools. See [Spotify](spotify.md).
 
 "Here" is `CC_BUDDY_WEATHER_PLACE` in `~/.config/cc-buddy-bridge/env` (a
 place name), or `CC_BUDDY_WEATHER_LAT` and `CC_BUDDY_WEATHER_LON`. A named

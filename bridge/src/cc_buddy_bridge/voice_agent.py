@@ -91,6 +91,7 @@ from typing import TYPE_CHECKING, Any, Awaitable, Callable, Optional
 from . import head as head_mod
 from . import lights as lights_mod
 from . import spend, system_context, websearch
+from . import spotify as spotify_mod
 from .agent_contract import AgentEvent
 from .caption_pager import CaptionPager, Event, PagerConfig, caption_instructions
 from .computer_agent import ComputerAgent
@@ -503,7 +504,7 @@ def session_config(config: VoiceConfig, brief: str = "",
                    backend_profile: str = "", today: str = "", backend_today: str = "",
                    memory_tools: Optional[list[dict[str, Any]]] = None,
                    meet_tools: Optional[list[dict[str, Any]]] = None,
-                   lights: Any = None) -> dict[str, Any]:
+                   lights: Any = None, spotify: Any = None) -> dict[str, Any]:
     """The `session.start` payload (Live API, openai 3.13).
 
     There is no `output_modalities` and no turn-detection block: gpt-live-1 is
@@ -531,6 +532,9 @@ def session_config(config: VoiceConfig, brief: str = "",
     # the owner's lights (lights.py), when there are any: the backend gets the tools and the list of lights
     light_tools = [] if listening or lights is None else lights.tools()
     lights_block = "" if not light_tools else "\n\n" + lights.instructions()
+    # the owner's Spotify (spotify.py), when logged in: the same slot, never in a lesson
+    music_tools = [] if listening or spotify is None else spotify.tools()
+    lights_block += "" if not music_tools else "\n\n" + spotify.instructions()
     return {
         "model": config.model,
         "instructions": INSTRUCTIONS + profile_block(profile) + today_block(today) + context + memory_block(brief)
@@ -551,7 +555,7 @@ def session_config(config: VoiceConfig, brief: str = "",
                                 + (think_aloud_mod.backend_instructions(think_aloud) if listening else "")
                                 + lights_block,
                 "tools": TOOLS + (websearch.tools_for(config.search) if config.web_search else []) + extra + meeting
-                         + light_tools,
+                         + light_tools + music_tools,
                 "tool_choice": "auto",
                 "reasoning": {"effort": config.backend_effort},
                 "parallel_tool_calls": False,
@@ -742,9 +746,11 @@ class VoiceSession:
         mac_busy: Callable[[], bool] = lambda: False,       # a task from another door (telegram.py) has the Mac
         meeter: Any = None,                                 # meet.Meeter, or None: "join my meeting" out loud
         lights: Any = None,                                 # lights.Lights, or None: "lights off" out loud
+        spotify: Any = None,                                # spotify.Spotify, or None: "pause the music" out loud
     ) -> None:
         self.meeter = meeter
         self.lights = lights
+        self.spotify = spotify
         self.on_expression = on_expression
         self.mac_busy = mac_busy
         self._expression_chars = 0
@@ -874,7 +880,7 @@ class VoiceSession:
         cfg = session_config(self.config, self.brief, self._think_aloud, profile,
                              backend_profile=backend_profile, today=self.today, backend_today=self.backend_today,
                              memory_tools=memory_tools, meet_tools=MEET_TOOLS if self.meeter is not None else None,
-                             lights=self.lights)
+                             lights=self.lights, spotify=self.spotify)
         log.info("voice: prompt front %d chars, backend %d chars",
                  len(cfg["instructions"]), len(cfg["delegation"]["responses"]["instructions"]))
         await self.conn.session.start(session=cfg)
@@ -1552,7 +1558,8 @@ class VoiceSession:
             else:
                 result = {"ok": False, "reason": "on must be true or false"}
         elif (name in ("look", "look_around", "find", "think_hard", "lesson", "take_photo", websearch.TOOL_NAME)
-              or name in self._memory_tool_names or name in MEET_TOOL_NAMES or name in lights_mod.TOOL_NAMES):
+              or name in self._memory_tool_names or name in MEET_TOOL_NAMES or name in lights_mod.TOOL_NAMES
+              or name in spotify_mod.TOOL_NAMES):
             # Seconds (or a minute, for think_hard) of camera, head, model or disk work:
             # answered from a background task, so Live events (the owner talking,
             # captions) keep flowing meanwhile.
@@ -1638,6 +1645,10 @@ class VoiceSession:
                     # a Bluetooth light can take seconds to connect: a slow tool, like the camera
                     result = (await self.lights.handle(name, args) if self.lights is not None
                               else {"ok": False, "reason": lights_mod.OFF_REASON})
+                elif name in spotify_mod.TOOL_NAMES:
+                    # a Web API round trip, and opening the Mac's Spotify can take seconds
+                    result = (await self.spotify.handle(name, args) if self.spotify is not None
+                              else {"ok": False, "reason": spotify_mod.OFF_REASON})
                 else:
                     result = await self._find(str(args.get("target", "")))
             except asyncio.CancelledError:
@@ -2089,6 +2100,7 @@ async def open_session(
     mac_busy: Callable[[], bool] = lambda: False,
     meeter: Any = None,
     lights: Any = None,
+    spotify: Any = None,
 ) -> None:
     """Run one full conversation on the real Live API — captions to the robot,
     or the real speaker in audio mode.
@@ -2119,7 +2131,7 @@ async def open_session(
                                    think_aloud=think_aloud, lesson_wake=lesson_wake, on_spoken_idea=on_spoken_idea,
                                    on_think_aloud=on_think_aloud, head_pose=head_pose, gate=gate,
                                    on_expression=on_expression, mac_busy=mac_busy, meeter=meeter,
-                                   lights=lights)
+                                   lights=lights, spotify=spotify)
             if on_open is not None:
                 on_open(session)
             try:

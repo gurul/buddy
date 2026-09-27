@@ -27,6 +27,9 @@ def main(argv: list[str] | None = None) -> int:
         # everything after "lights" is the lights CLI's own (argparse's REMAINDER drops a leading --help)
         from . import lights
         return lights.cli(rest[1:] or ["--help"])
+    if rest[:1] == ["spotify"]:
+        from . import spotify
+        return spotify.cli(rest[1:] or ["--help"])
     parser = argparse.ArgumentParser(prog="cc-buddy-bridge")
     parser.add_argument("--version", action="version", version=f"cc-buddy-bridge {__version__}")
     sub = parser.add_subparsers(dest="cmd")
@@ -206,6 +209,14 @@ def main(argv: list[str] | None = None) -> int:
         add_help=False,
     )
     p_lights.add_argument("lights_args", nargs=argparse.REMAINDER)
+
+    p_spotify = sub.add_parser(
+        "spotify",
+        help="The owner's Spotify (spotKnob's powers): login, status, devices, play, pause, next, previous, "
+             "volume, transfer. See docs/spotify.md",
+        add_help=False,
+    )
+    p_spotify.add_argument("spotify_args", nargs=argparse.REMAINDER)
 
     p_sound = sub.add_parser(
         "sound",

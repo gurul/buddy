@@ -16,6 +16,13 @@
 //   dial         while a session waits on you: down / up through the choices
 //   dial         otherwise: volume of buddy's voice and chirps
 //   mute switch  silences the chirps (the Mac mic is not affected)
+//
+// Spotify mode ({"cmd":"music_mode","on":true}, bridge music_mode.py): the ring breathes green and
+//   1 / 2 / 3 clicks  play-pause / next / previous   ({"cmd":"music","clicks":n})
+//   hold, let go      the device picker               ({"cmd":"music","hold":"short"})
+//   hold 3 s          leave Spotify mode              ({"cmd":"music","hold":"long"})
+//   dial              Spotify volume, or the picker   ({"cmd":"music","dial":d})
+// The board only counts and times; the daemon does the Spotify part and sends the ring its levels.
 #include <Arduino.h>
 #include <ArduinoJson.h>
 #include <Preferences.h>
@@ -43,6 +50,7 @@ struct Host {
   char agent[12] = "idle";         // {"cmd":"agent","state":..}
   uint32_t agentAtMs = 0;
   bool sound = true;               // {"cmd":"sound","on":..}
+  bool music = false;              // {"cmd":"music_mode","on":..}: Spotify mode
   uint32_t lastLiveMs = 0;         // last valid JSON line
 } host;
 
@@ -133,6 +141,22 @@ void handleLine(const char *line) {
   if (!strcmp(cmd, "status")) return sendStatus();
   if (!strcmp(cmd, "pcm_flush")) return chirpVoiceFlush();
   if (!strcmp(cmd, "agent")) return onAgent(doc["state"] | "idle");
+  if (!strcmp(cmd, "music_mode")) {
+    bool on = doc["on"] | false;
+    if (on != host.music) chirpPlay(on ? CHIRP_OK : CHIRP_TICK);
+    host.music = on;
+    return;
+  }
+  if (!strcmp(cmd, "ring_level")) {
+    ringShowLevel(doc["n"] | 0, doc["of"] | 10, doc["dot"] | false, doc["ms"] | 1500);
+    return;
+  }
+  if (!strcmp(cmd, "music_flash")) {
+    bool ok = doc["ok"] | false;
+    ringFlash(ok);
+    chirpPlay(ok ? CHIRP_OK : CHIRP_NO);
+    return;
+  }
   if (!strcmp(cmd, "listen")) {
     bool on = doc["on"] | false;
     if (on && !host.listening) chirpPlay(CHIRP_LISTEN);
@@ -223,9 +247,62 @@ void startTalking() {
   Serial.println("[btn] talk");
 }
 
+// Spotify mode: clicks are counted until CLICK_GAP_MS passes with no new press; a press held HOLD_MS is a
+// hold (the picker, on release), and one held LEAVE_MS leaves the mode at once.
+constexpr uint32_t CLICK_GAP_MS = 350, HOLD_MS = 600, LEAVE_MS = 3000;
+uint8_t clicks = 0;
+uint32_t lastClickMs = 0;
+bool holdTicked = false, leaveSent = false;
+
+void musicButton(bool changed, uint32_t now) {
+  char b[48];
+  if (changed && btnDown) {
+    btnDownMs = now;
+    holdTicked = leaveSent = false;
+  } else if (changed) {
+    uint32_t held = now - btnDownMs;
+    if (leaveSent) {
+      // already sent on the hold
+    } else if (held >= HOLD_MS) {
+      clicks = 0;
+      send("{\"cmd\":\"music\",\"hold\":\"short\"}");
+      Serial.println("[btn] music hold");
+    } else {
+      clicks++;
+      lastClickMs = now;
+    }
+  }
+  if (btnDown && !holdTicked && now - btnDownMs >= HOLD_MS) {
+    holdTicked = true;
+    chirpPlay(CHIRP_TICK);  // "let go now for the picker"
+  }
+  if (btnDown && !leaveSent && now - btnDownMs >= LEAVE_MS) {
+    leaveSent = true;
+    clicks = 0;
+    send("{\"cmd\":\"music\",\"hold\":\"long\"}");
+    Serial.println("[btn] music leave");
+  }
+  if (!btnDown && clicks > 0 && now - lastClickMs >= CLICK_GAP_MS) {
+    snprintf(b, sizeof(b), "{\"cmd\":\"music\",\"clicks\":%u}", clicks);
+    send(b);
+    Serial.printf("[btn] music %u click(s)\n", clicks);
+    chirpPlay(CHIRP_TICK);
+    clicks = 0;
+  }
+}
+
 void pollButton() {
   bool down = digitalRead(SB_PIN_BUTTON) == LOW;
   uint32_t now = millis();
+  if (host.music && connected() && !talking) {
+    bool changed = down != btnDown && now - btnChangeMs > 25;
+    if (changed) {
+      btnChangeMs = now;
+      btnDown = down;
+    }
+    return musicButton(changed, now);
+  }
+  clicks = 0;
   if (down != btnDown && now - btnChangeMs > 25) {
     btnChangeMs = now;
     btnDown = down;
@@ -269,6 +346,13 @@ void pollDial() {
   int32_t detents = dialSteps / 4 - dialUsed;
   if (detents == 0) return;
   dialUsed += detents;
+  if (host.music && connected()) {
+    // Spotify volume or the device picker: the daemon decides, and sends the ring its level
+    char b[48];
+    snprintf(b, sizeof(b), "{\"cmd\":\"music\",\"dial\":%ld}", (long)detents);
+    send(b);
+    return;
+  }
   if (host.waiting > 0 && connected()) {
     // Clockwise moves down the list of choices.
     for (int32_t i = 0; i < abs(detents); i++) {
@@ -299,6 +383,7 @@ void updateRing() {
 
   if (!connected()) return ringSet(LOOK_OFFLINE);
   if (talking) return ringSet(LOOK_LISTENING);
+  if (host.music) return ringSet(LOOK_MUSIC);
   if (agentActive()) {
     const char *a = host.agent;
     if (!strcmp(a, "wake") || !strcmp(a, "listening")) return ringSet(LOOK_LISTENING);

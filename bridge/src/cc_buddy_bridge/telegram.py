@@ -83,6 +83,7 @@ from . import (
     rundown,
     second_brain,
     spend,
+    spotify,
     system_context,
     telegram_images,
     watch,
@@ -1539,6 +1540,7 @@ class TelegramInlet:
                  watcher: Optional[watch.Watcher] = None,
                  meeter: Optional[meet.Meeter] = None,
                  lights: Optional[lights.Lights] = None,
+                 spotify: Optional[spotify.Spotify] = None,
                  screen: Callable[[], Optional[Path]] = capture_screen,
                  scene: Any = None, head: Any = None,
                  on_explore: Optional[Callable[[], Any]] = None,
@@ -1574,6 +1576,7 @@ class TelegramInlet:
         self._watcher = watcher                            # watch.Watcher, or None (CC_BUDDY_WATCH=0)
         self._meeter = meeter                              # meet.Meeter, or None (CC_BUDDY_MEET=0, no Chrome attach)
         self._lights = lights                              # lights.Lights, or None (CC_BUDDY_LIGHTS=0, no lights file)
+        self._spotify = spotify                            # spotify.Spotify, or None (CC_BUDDY_SPOTIFY=0, no login)
         self._call_say: Optional[Callable[[str], None]] = None   # a phone call's reader (phone_call.Call.say)
         self._quick = quick_answers.QuickAnswers()               # the time, the weather, a sum: by code
         self._stream_create = stream_create                # responses streamed a sentence at a time, on a call
@@ -2182,6 +2185,11 @@ class TelegramInlet:
             # "lights off", "lamp blue at 40%": done by code, no model turn (lights.py)
             self._spawn(self._lights_by_code(inbound, light_cmd), "telegram-lights")
             return
+        music_cmd = None if inbound.tapped or self._spotify is None else self._spotify.match(inbound.text)
+        if music_cmd is not None:
+            # "pause the music", "next song", "play Daft Punk on Spotify": done by code, no model turn (spotify.py)
+            self._spawn(self._spotify_by_code(inbound, music_cmd), "telegram-spotify")
+            return
         ask = None if inbound.tapped else self._quick.match(inbound.text)
         if ask is not None:
             # the time, the weather, a sum...: answered by code, no model turn and no search (quick_answers.py)
@@ -2193,6 +2201,14 @@ class TelegramInlet:
         """A message that is only a light command, done by code; the line says which lights changed."""
         assert self._lights is not None
         line = await self._lights.run(cmd)
+        self._note("user", inbound.text)
+        self._note("buddy", line)
+        await self._say(inbound.chat_id, line)
+
+    async def _spotify_by_code(self, inbound: Inbound, cmd: spotify.Command) -> None:
+        """A message that is only a music command, done by code; the line says what Spotify did."""
+        assert self._spotify is not None
+        line = await self._spotify.run(cmd)
         self._note("user", inbound.text)
         self._note("buddy", line)
         await self._say(inbound.chat_id, line)
@@ -3425,14 +3441,18 @@ class TelegramInlet:
             set(second_brain.SECOND_BRAIN_TOOL_NAMES) if self._vault is not None else set()) | (
             set(watch.TOOL_NAMES) if self._watcher is not None else set()) | (
             set(meet.TOOL_NAMES) if self._meeter is not None else set()) | (
-            set(lights.TOOL_NAMES) if self._lights is not None else set())
-        # the watcher's tools and block, then the Meet notetaker's, then the lights': all ride the same slot
+            set(lights.TOOL_NAMES) if self._lights is not None else set()) | (
+            set(spotify.TOOL_NAMES) if self._spotify is not None else set())
+        # the watcher's tools and block, then the Meet notetaker's, the lights' and Spotify's: all ride one slot
         watch_tools = (self._watcher.tools() if self._watcher is not None else []) + (
             self._meeter.tools() if self._meeter is not None else []) + (
-            self._lights.tools() if self._lights is not None else [])
+            self._lights.tools() if self._lights is not None else []) + (
+            self._spotify.tools() if self._spotify is not None else [])
         watch_block = "\n\n".join(b for b in (self._watcher.instructions() if self._watcher is not None else "",
                                                 self._meeter.instructions() if self._meeter is not None else "",
-                                                self._lights.instructions() if self._lights is not None else "") if b)
+                                                self._lights.instructions() if self._lights is not None else "",
+                                                self._spotify.instructions() if self._spotify is not None else "")
+                                                if b)
         parts = {"profile": prof, "app_tools": app_tools, "vault": self._vault is not None, "today": today,
                  "memory_tools": mem_tools, "watch_tools": watch_tools, "watch_block": watch_block}
         return parts, allowed, app_tools
@@ -3480,6 +3500,10 @@ class TelegramInlet:
                 if self._lights is None:
                     return {"ok": False, "reason": lights.OFF_REASON}
                 return await self._lights.handle(name, args)
+            if name in spotify.TOOL_NAMES:
+                if self._spotify is None:
+                    return {"ok": False, "reason": spotify.OFF_REASON}
+                return await self._spotify.handle(name, args)
             if name in watch.TOOL_NAMES:
                 if self._watcher is None:
                     return {"ok": False, "reason": watch.OFF_REASON}

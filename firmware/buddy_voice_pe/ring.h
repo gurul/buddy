@@ -12,12 +12,16 @@ enum RingLook : uint8_t {
   LOOK_WAITING,    // a session waits on you: amber pulse
   LOOK_DONE,       // a task finished: green sweep (transient)
   LOOK_ERROR,      // red blink (transient)
+  LOOK_MUSIC,      // Spotify mode (bridge music_mode.py): green, slow breathe
 };
 
 void ringBegin();
 void ringSet(RingLook look);
-// Shows `level` of 10 as lit LEDs for 1.5 s, over whatever look is on.
-void ringShowLevel(uint8_t level);
+// Shows `level` of `of` as lit LEDs for `ms`, over whatever look is on (green in Spotify mode). With `dot`,
+// one LED marks the position instead (the device picker). ms = 0 clears it.
+void ringShowLevel(uint8_t level, uint8_t of = 10, bool dot = false, uint32_t ms = 1500);
+// Spotify mode's answer to a command: a green sweep (ok) or a red blink, for about a second.
+void ringFlash(bool ok);
 // Two red LEDs at the top while the hardware mute switch is on.
 void ringSetMuted(bool muted);
 // Call every loop; renders at most every 20 ms.

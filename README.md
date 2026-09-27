@@ -61,6 +61,16 @@ and desktop widget show its diary, memories and lessons.
   Voice PE or the robot's voice, and the Mini App has a Lights card (on, off,
   colours, brightness). "Make it cozy" goes to the model. See
   [lights](docs/lights.md).
+- **Controls your Spotify.** The same controls as spotKnob, the Spotify dial:
+  "pause the music", "next song", "music volume 40", "what's playing", "play the
+  music on the kitchen speaker", and "play Daft Punk on Spotify". A message that
+  is only one of these is handled by code. Anything more goes to the model,
+  which has the Spotify tools. The Mini App has a Music card (art, ⏮ ▶ ⏭,
+  volume, and a device list). If nothing is online, buddy opens the Mac's
+  Spotify. "Spotify mode" turns the Voice PE into the knob: a green ring, the
+  dial as volume, 1/2/3 clicks for play-pause/next/previous, hold for a device
+  picker, and a 3 s hold to leave. Log in once with
+  `cc-buddy-bridge spotify login`. See [Spotify](docs/spotify.md).
 
 ### From your phone (opt-in)
 
@@ -465,6 +475,7 @@ Persistent data lives under `~/.config/cc-buddy-bridge/`:
 | `learning/` | `lessons.sqlite3` and saved lesson/whiteboard data |
 | `agent-runs/` | Desktop-task run logs |
 | `lights.json` | Your lights: names, rooms, local addresses and Tuya keys (mode 600). See [lights](docs/lights.md). |
+| `spotify.json` | The Spotify login: the app's client id and the refresh token (mode 600). See [Spotify](docs/spotify.md). |
 | `spend/` | The daily spend ledger (one JSONL file per local day: provider, model, feature, dollars, token counts, never words) and `providers.json`, the providers' own figures. See [what buddy spends](docs/stackchan/spending.md). |
 
 - `cc-buddy-bridge mic off` disables microphone capture until re-enabled.

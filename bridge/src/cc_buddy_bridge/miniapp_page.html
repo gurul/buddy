@@ -206,6 +206,30 @@
   .lights input[type="range"] { flex: 1; accent-color: var(--accent); min-height: 44px; }
   .lights .level output { font-variant-numeric: tabular-nums; min-width: 3.2em; text-align: right; font-size: 14px; }
   .lights .said { color: var(--hint); font-size: 13px; margin: 6px 0 0; min-height: 1.5em; }
+  /* The Music card (spotify.py via /api/spotify): spotKnob's face — the track, prev / play-pause / next, volume,
+     and where it plays */
+  .music .now { display: flex; gap: 12px; align-items: center; margin-bottom: 10px; min-height: 64px; }
+  .music .art { width: 64px; height: 64px; border-radius: 8px; object-fit: cover; flex: none; background: var(--code); }
+  .music .art[hidden] { display: none; }
+  .music .titles { min-width: 0; }
+  .music h2 { margin: 0 0 2px; font-size: 16px; }
+  .music .track { font-weight: 600; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .music .by { color: var(--hint); font-size: 14px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .music .transport { display: flex; justify-content: center; gap: 12px; margin: 4px 0 8px; }
+  .music .transport button { min-width: 56px; min-height: 44px; font-size: 18px; }
+  .music .transport button:focus-visible, .music select:focus-visible { outline: 2px solid var(--link); outline-offset: 2px; }
+  .music .level { display: flex; align-items: center; gap: 10px; }
+  .music .level label { font-weight: 400; margin: 0; font-size: 14px; color: var(--hint); flex: none; }
+  .music input[type="range"] { flex: 1; accent-color: var(--accent); min-height: 44px; }
+  .music .level output { font-variant-numeric: tabular-nums; min-width: 3.2em; text-align: right; font-size: 14px; }
+  .music .where { display: flex; align-items: center; gap: 10px; margin-top: 6px; }
+  .music .where label { font-weight: 400; margin: 0; font-size: 14px; color: var(--hint); flex: none; }
+  .music select { flex: 1; min-height: 44px; font: inherit; color: var(--text); background: var(--bubble);
+    border: 1px solid var(--code); border-radius: 10px; padding: 0 10px; min-width: 0; }
+  .music .vpe { margin-top: 8px; width: 100%; min-height: 44px; }
+  .music .vpe[aria-pressed="true"] { background: #1ed760; color: #000; border-color: #1ed760; }
+  .music .vpe:focus-visible { outline: 2px solid var(--link); outline-offset: 2px; }
+  .music .said { color: var(--hint); font-size: 13px; margin: 6px 0 0; min-height: 1.5em; }
   .call { position: fixed; inset: 0; z-index: 50; background: var(--bg); display: flex; flex-direction: column;
     align-items: center; justify-content: center; gap: 18px; padding: 24px 16px calc(24px + env(safe-area-inset-bottom)); }
   .call .face { width: 132px; height: 132px; border-radius: 50%; background: var(--accent); color: var(--accent-text);
@@ -256,6 +280,20 @@
     <div class="level"><label for="level">Brightness</label>
       <input type="range" id="level" min="1" max="100" step="1" value="100"><output id="level-out" for="level">100%</output></div>
     <p class="said" id="lights-said" role="status" aria-live="polite"></p>
+  </div>
+  <div class="make music" id="music-card" role="region" aria-labelledby="music-title" hidden>
+    <div class="now" id="music-now">
+      <div class="titles"><h2 id="music-title">Music</h2>
+        <div class="track" id="music-track">Nothing playing</div><div class="by" id="music-by"></div></div></div>
+    <div class="transport" role="group" aria-label="Playback">
+      <button type="button" class="btn" id="music-prev" aria-label="Previous track">⏮</button>
+      <button type="button" class="btn" id="music-play" aria-label="Play">▶</button>
+      <button type="button" class="btn" id="music-next" aria-label="Next track">⏭</button></div>
+    <div class="level"><label for="music-volume">Volume</label>
+      <input type="range" id="music-volume" min="0" max="100" step="2" value="50"><output id="music-volume-out" for="music-volume">50%</output></div>
+    <div class="where"><label for="music-device">Playing on</label><select id="music-device"></select></div>
+    <button type="button" class="btn vpe" id="music-mode" aria-pressed="false" hidden>Voice PE Spotify mode</button>
+    <p class="said" id="music-said" role="status" aria-live="polite"></p>
   </div>
   <div class="make" id="make-card">
     <label for="want" id="want-label">What should I build?</label>
@@ -343,6 +381,7 @@
       if (j.error) { spent.textContent = j.error; return; }
       showSpent(j);
       if (Array.isArray(j.lights) && j.lights.length) showLights(j.lights);
+      if (j.spotify === true) showMusic();
     }).catch(() => {});
 
   // ---- the Lights card: every light at once by default (owner, 2026-09-27: "usually i set all the lights to be
@@ -398,6 +437,75 @@
     try {
       const j = await reply(await post("api/lights", Object.assign({ action: "set", target: lightTarget }, change)));
       said.textContent = j.line || j.error || "Something went wrong.";
+      if (tg && tg.HapticFeedback) tg.HapticFeedback.notificationOccurred(j.ok ? "success" : "error");
+    } catch (e) {
+      said.textContent = "buddy didn't answer. Is the Mac awake?";
+    }
+  }
+
+  // ---- the Music card: spotKnob on the phone (owner, 2026-09-27: "give buddy spotKnob capabilities"). Track,
+  // artist and device names come from Spotify, so they only ever reach the page as textContent.
+  let musicPlaying = false;
+  function paintMusic(j) {
+    if (!j || j.ok === false) return;
+    // the art <img> is made only when there is art: the page holds no <img> of its own otherwise
+    let art = $("music-art");
+    if (!art) { art = el("img", "art"); art.id = "music-art"; art.alt = ""; art.hidden = true; $("music-now").prepend(art); }
+    $("music-track").textContent = j.track || "Nothing playing";
+    $("music-by").textContent = (j.artists || []).join(", ") + (j.album ? " · " + j.album : "");
+    if (typeof j.art === "string" && j.art.indexOf("https://i.scdn.co/") === 0) { art.src = j.art; art.hidden = false; }
+    else art.hidden = true;
+    musicPlaying = !!j.playing;
+    const play = $("music-play");
+    play.textContent = musicPlaying ? "⏸" : "▶";
+    play.setAttribute("aria-label", musicPlaying ? "Pause" : "Play");
+    const vol = $("music-volume");
+    if (j.device && typeof j.device.volume === "number" && document.activeElement !== vol) {
+      vol.value = j.device.volume; $("music-volume-out").textContent = j.device.volume + "%";
+    }
+    // Spotify mode on the Voice PE (music_mode.py): only when the board is buddy's controller (mode is a bool)
+    const mode = $("music-mode");
+    if (typeof j.mode === "boolean") {
+      mode.hidden = false;
+      mode.setAttribute("aria-pressed", String(j.mode));
+      mode.textContent = j.mode ? "Voice PE Spotify mode: on" : "Voice PE Spotify mode: off";
+    }
+    const pick = $("music-device");
+    if (Array.isArray(j.devices)) {
+      pick.textContent = "";
+      const active = j.devices.find((d) => d.active);
+      if (!active) { const o = el("option", "", "No device playing"); o.value = ""; o.selected = true; pick.append(o); }
+      j.devices.forEach((d) => {
+        const o = el("option", "", d.name + (d.restricted ? " (no remote control)" : ""));
+        o.value = d.name; o.disabled = !!d.restricted; o.selected = !!d.active;
+        pick.append(o);
+      });
+      if (!j.devices.length) { const o = el("option", "", "Open Spotify somewhere"); o.value = ""; pick.append(o); }
+    }
+  }
+  function showMusic() {
+    $("music-card").hidden = false;
+    $("music-play").onclick = () => music({ action: musicPlaying ? "pause" : "play" });
+    $("music-next").onclick = () => music({ action: "next" });
+    $("music-prev").onclick = () => music({ action: "previous" });
+    const vol = $("music-volume"), out = $("music-volume-out");
+    vol.oninput = () => { out.textContent = vol.value + "%"; };
+    vol.onchange = () => music({ action: "volume", volume: Number(vol.value) });
+    $("music-mode").onclick = () => music({ action: "mode", on: $("music-mode").getAttribute("aria-pressed") !== "true" });
+    $("music-device").onchange = (e) => { if (e.target.value) music({ action: "transfer", device: e.target.value }); };
+    post("api/spotify", { action: "status" }).then(reply).then((j) => {
+      paintMusic(j);
+      if (j.ok === false) $("music-said").textContent = j.reason || j.line || "";
+    }).catch(() => {});
+  }
+  async function music(body) {
+    const said = $("music-said");
+    said.textContent = "…";
+    if (tg && tg.HapticFeedback) tg.HapticFeedback.impactOccurred("light");
+    try {
+      const j = await reply(await post("api/spotify", body));
+      paintMusic(j);
+      said.textContent = j.line || j.reason || j.error || "Something went wrong.";
       if (tg && tg.HapticFeedback) tg.HapticFeedback.notificationOccurred(j.ok ? "success" : "error");
     } catch (e) {
       said.textContent = "buddy didn't answer. Is the Mac awake?";

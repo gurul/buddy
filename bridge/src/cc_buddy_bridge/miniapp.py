@@ -41,6 +41,9 @@ apps"): the apps are the point.
 * **A Lights card** (owner, 2026-09-27: "in telegram apps allow me to control lights"): with lights set up
   (lights.py), the home page shows On, Off, colours and a brightness slider for every light at once, a room or one
   light, through ``/api/lights`` (owner only). ``/api/me`` lists the lights' names and rooms, never an address.
+* **A Music card** (owner, 2026-09-27: "give buddy spotKnob capabilities"): with Spotify logged in (spotify.py),
+  the home page shows the track and its art, previous / play-pause / next, a volume slider and the Spotify
+  Connect devices to move the music to, through ``/api/spotify`` (owner only).
 
 Off unless ``CC_BUDDY_MINIAPP=1`` with the Telegram door configured and ``ANTHROPIC_API_KEY`` set.
 """
@@ -348,6 +351,7 @@ class MiniAppServer:
         self.public_url = ""                              # the tunnel's address: the origin app pages are bound to
         self.calls: Any = None                            # phone_call.PhoneCalls: "Call buddy", or None
         self.lights: Any = None                           # lights.Lights: the Lights card, or None (no lights)
+        self.spotify: Any = None                          # spotify.Spotify: the Music card, or None (no login)
         self._conns: set[asyncio.Task] = set()
         self._server: Optional[asyncio.base_events.Server] = None
         self.port = 0
@@ -454,7 +458,8 @@ class MiniAppServer:
                                                                      "Access-Control-Allow-Headers": "content-type",
                                                                      "Access-Control-Max-Age": "600"})
             return
-        known = path in ("/api/me", "/api/spend", "/api/apps", "/api/make", "/api/lights") or api_app is not None
+        known = path in ("/api/me", "/api/spend", "/api/apps", "/api/make", "/api/lights", "/api/spotify") \
+            or api_app is not None
         if method != "POST" or not known:
             await self._send(writer, 404, b"not found", "text/plain")
             return
@@ -489,7 +494,8 @@ class MiniAppServer:
             return
         if path == "/api/me":
             await self._json(writer, 200, {"model": self.cfg.model, "apps": self.store is not None, **self.spend(),
-                                           "lights": self.lights.listing() if self.lights is not None else []})
+                                           "lights": self.lights.listing() if self.lights is not None else [],
+                                           "spotify": self.spotify is not None})
             return
         if path == "/api/lights":
             # The Lights card (lights.py): owner only, like everything above; an app's token never reaches here.
@@ -497,6 +503,13 @@ class MiniAppServer:
                 await self._json(writer, 404, {"ok": False, "line": "buddy has no lights on this computer."})
                 return
             await self._json(writer, 200, await self.lights.panel(body))
+            return
+        if path == "/api/spotify":
+            # The Music card (spotify.py): owner only, like the lights; an app's token never reaches here.
+            if self.spotify is None:
+                await self._json(writer, 404, {"ok": False, "line": "buddy has no Spotify login on this computer."})
+                return
+            await self._json(writer, 200, await self.spotify.panel(body))
             return
         if path == "/api/spend":
             await self._json(writer, 200, await asyncio.to_thread(self.spending))    # ~30 small file reads

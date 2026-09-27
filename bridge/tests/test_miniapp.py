@@ -1796,3 +1796,36 @@ def test_the_lights_card_is_the_owners_only_and_drives_the_lights(tmp_path: Path
     assert applied == [("floor lamp", lights.Change(color=lights.parse_color("blue"))),
                        ("floor lamp", lights.Change(brightness=40))]
     assert bad.json() == {"ok": False, "line": "Unknown colour 'plaid'."}
+
+
+def test_the_music_card_is_the_owners_only_and_drives_spotify(tmp_path: Path) -> None:
+    class Hub:
+        def __init__(self) -> None:
+            self.bodies: list = []
+
+        async def panel(self, body: dict) -> dict:
+            self.bodies.append({k: v for k, v in body.items() if k != "initData"})
+            return {"ok": True, "line": "Paused.", "playing": False}
+
+    hub = Hub()
+
+    async def go():
+        srv = run_server(tmp_path)
+        port = await srv.start()
+        try:
+            off = await post(port, "/api/me", {"initData": signed()})
+            none = await post(port, "/api/spotify", {"initData": signed(), "action": "status"})
+            srv.spotify = hub
+            me = await post(port, "/api/me", {"initData": signed()})
+            stranger = await post(port, "/api/spotify", {"initData": signed(999), "action": "pause"})
+            paused = await post(port, "/api/spotify", {"initData": signed(), "action": "pause"})
+            return off, none, me, stranger, paused
+        finally:
+            await srv.close()
+
+    off, none, me, stranger, paused = asyncio.run(go())
+    assert off.json()["spotify"] is False and none.status_code == 404
+    assert me.json()["spotify"] is True
+    assert stranger.status_code == 403
+    assert paused.json() == {"ok": True, "line": "Paused.", "playing": False}
+    assert hub.bodies == [{"action": "pause"}]                          # the stranger never reached Spotify

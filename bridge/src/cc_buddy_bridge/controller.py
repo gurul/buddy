@@ -24,7 +24,7 @@ from .serial_transport import USB_SERIAL_PREFIX, BuddySerial
 log = logging.getLogger(__name__)
 
 # What the controller sends that the daemon acts on. Everything else from it (acks, chatter) stays here.
-INPUT_CMDS = frozenset({"ptt", "key", "focus"})
+INPUT_CMDS = frozenset({"ptt", "key", "focus", "music"})    # music: Spotify mode's clicks, holds, dial
 # Commands mirrored from the robot link. Heartbeats (no "cmd", a "total") and time sync are mirrored too.
 MIRRORED_CMDS = frozenset({"agent", "listen"})
 SILENT = {"cmd": "sound", "on": False}
@@ -69,6 +69,15 @@ class Controller:
             return
         kind = str(obj.get("cmd") or ("time" if "time" in obj else "heartbeat"))
         self.last[kind] = obj
+        if self.connected:
+            with contextlib.suppress(Exception):
+                await self.link.send(obj)
+
+    async def show(self, obj: dict[str, Any]) -> None:
+        """A message for this board only (Spotify mode, music_mode.py). ``music_mode`` is kept and replayed on
+        the next connect, so a board that reboots comes back green; ring levels and flashes are only sent."""
+        if obj.get("cmd") == "music_mode":
+            self.last["music_mode"] = obj
         if self.connected:
             with contextlib.suppress(Exception):
                 await self.link.send(obj)
