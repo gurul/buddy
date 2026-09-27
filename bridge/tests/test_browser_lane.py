@@ -371,3 +371,20 @@ def test_return_in_a_search_field_waits_for_the_results_page(tmp_path: Path) -> 
     finally:
         srv.shutdown()
     assert result["status"] == "complete" and "results.html?q=solar+panels" in seen, (result, seen)
+
+
+ROUTE_APPS = ("Spotify", "Photo Booth", "Slack", "News", "Weather", "Maps", "Google Chrome", "Safari", "Notes")
+
+
+def test_only_a_browser_only_goal_goes_to_the_chrome_lane() -> None:
+    """The Chrome lane drives one tab: a web goal that also needs the Mac is Codex's (production, 2026-09-26:
+    "Open Spotify on my computer and on my browser" went to Chrome)."""
+    only = lambda g: bl.is_browser_only_goal(g, ROUTE_APPS)   # noqa: E731
+    for goal in ("open up Google", "search the latest news on Google", "check my gmail", "look up the weather",
+                 "open youtube and play lofi", "open github.com", "open spotify in chrome",
+                 "google how to reset spotify", "look up how to use Photo Booth"):
+        assert only(goal), goal
+    for goal in ("Open Spotify on my computer and on my browser", "open spotify and chrome",
+                 "Send the picture I just took on Photo Booth to me", "play my liked songs on Spotify",
+                 "open the desktop app for youtube", "open Notes"):
+        assert not only(goal), goal

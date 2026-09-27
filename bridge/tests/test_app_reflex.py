@@ -190,3 +190,43 @@ def test_the_body_logs_the_goals_shape_never_its_words(caplog: Any) -> None:
         asyncio.run(agent.run(f"please open this secretive place {MAP}"))
     line = next(r.getMessage() for r in caplog.records if "gets a goal of" in r.getMessage())
     assert "6 words, 1 link(s) (maps.app.goo.gl)" in line and "secretive" not in line
+
+
+def _routed_rig() -> tuple[ReflexFirstAgent, Inner, Inner, list[str]]:
+    """The daemon's shape: Codex inside, the Chrome lane beside it, the Chrome lane's own rule choosing."""
+    from cc_buddy_bridge import browser_lane
+
+    opened: list[str] = []
+
+    async def opener(app: str) -> tuple[bool, str]:
+        opened.append(app)
+        return True, ""
+
+    async def route_body(goal: str) -> str:
+        return "chrome" if browser_lane.is_web_goal(goal) else "codex"
+
+    codex, chrome = Inner(), Inner()
+    chrome.provider = "chrome-lane"
+    agent = ReflexFirstAgent(lambda: codex, lambda ev: None, apps=lambda: APPS + ("Photo Booth",), opener=opener,
+                             make_auto=lambda: chrome, route_body=route_body)
+    return agent, codex, chrome, opened
+
+
+def test_the_door_note_never_steers_the_route() -> None:
+    """Production 2026-09-26: Telegram's file hint says "open it in a browser", and read with the goal it sent
+    every Telegram task to the Chrome lane and made "open Spotify" too long to be a launch. The note now goes
+    beside the goal: the reflex and the router read the owner's words, the body gets both."""
+    from cc_buddy_bridge.telegram import TASK_FILE_HINT
+
+    agent, codex, chrome, opened = _routed_rig()
+    assert asyncio.run(agent.run("Open up Spotify.", note=TASK_FILE_HINT)) == "Opened Spotify."
+    assert opened == ["Spotify"] and codex.goals == chrome.goals == []
+
+    agent, codex, chrome, opened = _routed_rig()
+    goal = "Send the picture I just took on Photo Booth to me"
+    asyncio.run(agent.run(goal, note=TASK_FILE_HINT))
+    assert chrome.goals == [] and codex.goals == [goal + TASK_FILE_HINT] and opened == []
+
+    agent, codex, chrome, opened = _routed_rig()
+    asyncio.run(agent.run("open youtube.com in chrome", note=TASK_FILE_HINT))
+    assert codex.goals == [] and chrome.goals == ["open youtube.com in chrome" + TASK_FILE_HINT]

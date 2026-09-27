@@ -3733,7 +3733,8 @@ class TelegramInlet:
     async def _run_agent(self, goal: str, chat_id: int, progress: Optional[_Progress] = None) -> None:
         since = getattr(self, "_task_started", time.time())
         try:
-            final = await self._agent.run(goal + TASK_FILE_HINT)
+            # The hint goes beside the goal, never in it: the router reads only the owner's words (app_reflex.run).
+            final = await self._agent.run(goal, note=TASK_FILE_HINT)
         except asyncio.CancelledError:
             raise                                        # the daemon is stopping: nothing to say or settle
         except Exception as e:  # noqa: BLE001

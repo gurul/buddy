@@ -93,6 +93,10 @@ lane (code)     lane_router.py: one labelled control accounts for every word →
 astra           everything else; it may hand the lane exact labels: delegate(steps=[…])
 ```
 
+An app is matched by its installed name, a small alias table ("settings" → System Settings), or the same
+letters without spaces ("photobooth" → Photo Booth, only when one app has them). Finder counts as installed
+though it lives in CoreServices, so "open finder" is a launch too.
+
 A web search is harmless whatever its query says, so "google how to reset a Casio watch" is a reflex;
 "search for earbuds and buy the cheapest pair" is the planner's, because the risky word starts a
 second clause. "Search Spotify for jazz", "search for the invoice in Mail" and "look up Dana in my
@@ -285,9 +289,24 @@ own profile.
   school account" to student@school.example, "gmail" to owner@gmail.com. `CC_BUDDY_CHROME_PROFILE` sets the default. A
   profile needs an open Chrome window to be reachable, and naming one without
   a window gets a plain "open a window in that profile".
-- **Which tasks.** A web goal (`browser_lane.is_web_goal`: a URL, a site
-  name, the browser) tries your Chrome first. Everything else, including
-  anything the lane can't finish, goes to Codex.
+- **Which tasks.** A goal the Chrome lane can finish alone
+  (`browser_lane.is_browser_only_goal`) tries your Chrome first. That is a web
+  goal (`is_web_goal`: a URL, a site name, the browser) that needs nothing on
+  the Mac: it does not say "on my computer" or "the desktop app", and it
+  names no Mac app, unless it names the browser for it ("open spotify in
+  chrome") or is a web search about the app ("google how to reset
+  spotify"). Apple's everyday-word apps (News, Weather, Maps …) don't count
+  as naming a Mac app: "the latest news on Google" is a web search.
+  Everything else, including anything the lane can't finish, goes to Codex.
+  "Open Spotify on my computer and on my browser" and "open spotify and
+  chrome" go to Codex, which has both the Mac and the browser.
+- **Only the owner's words are routed.** The Telegram door gives the task a
+  note about files ("give the full path … do not open it in a browser").
+  It goes beside the goal (`ReflexFirstAgent.run(goal, note=…)`) and is
+  added only after the route is chosen. Until 2026-09-26 it was part of the
+  goal, so its word "browser" sent every Telegram task to Chrome, and its
+  length meant "open Spotify" was never a bare launch. "Open up Spotify"
+  opened the website instead of the app.
 - **"Open it" after a link.** A task's goal is the owner's words for that
   one request, so a link sent in an earlier message was not in it
   (2026-09-24: a Google Maps link, then "Use Google search to open it up").
@@ -518,7 +537,7 @@ knows ("Accept", "Agree", "OK") is never pressed there, so a notice that only
 offers to agree stays up and the step stops at `dialog_open`.
 
 ```
-goal ── is_web_goal? (a URL, a site, "the browser", or the router's search) ──▶ browser lane
+goal ── is_browser_only_goal? (a web goal with nothing on the Mac in it) ──▶ browser lane
    no │                                                                          │ outline: role + label per control
       ▼                                                                          ▼
  reflex → lane → plan-once → planner (the Mac tiers)          astra plans once (plan_contract, "Frontmost app: browser")

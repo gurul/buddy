@@ -230,3 +230,14 @@ def test_is_question_is_one_rule_for_both_routers() -> None:
     assert is_question("what's playing?") and is_question("is Slack open") and is_question("open it?")
     assert not is_question("open it?", polite=True)          # "can you open it?" is a request
     assert not is_question("open Spotify")
+
+
+def test_app_names_said_as_one_word_and_every_mention() -> None:
+    assert tr.match_app("photobooth", ["Photo Booth", "Photos"]) == "Photo Booth"
+    assert tr.match_app("photo booth", ["Photo Booth", "Photos"]) == "Photo Booth"
+    assert tr.match_app("photos", ["Photo Booth", "Photos"]) == "Photos"
+    assert tr.match_app("photobooth", ["Photo Booth", "Photob Ooth"]) == ""       # two apps have those letters
+    assert tr.app_mentions("open spotify and chrome", ["Spotify", "Google Chrome"]) == ["Spotify", "Google Chrome"]
+    assert tr.app_mentions("take a photo in photo booth", ["Photo Booth", "Photos"]) == ["Photo Booth"]
+    assert tr.find_app_mention("open spotify and chrome", ["Spotify", "Google Chrome"]) == ""
+    assert tr.classify("open photobooth", apps=("Photo Booth", "Photos")).app == "Photo Booth"

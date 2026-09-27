@@ -1443,7 +1443,9 @@ class Daemon:
             return ComputerAgent(create, config=cfg, on_event=ev, ask_user=ask, browser=lane)
 
         async def route_body(goal: str) -> str:
-            return "chrome" if browser_lane.is_web_goal(goal) else "codex"
+            from .task_router import installed_apps
+
+            return "chrome" if browser_lane.is_browser_only_goal(goal, installed_apps()) else "codex"
 
         return {"make_auto": lambda: chrome_lane.ChromeLaneAgent(make_planner, make_inner, on_event, ask_user,
                                                                   prepare=prepare, lane_screenshot=lane.screenshot),

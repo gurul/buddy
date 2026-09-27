@@ -293,7 +293,11 @@ class ReflexFirstAgent:
         return await asyncio.to_thread(task_router.classify, goal, apps=apps, model=self._asker,
                                        quit_model=self._quit_asker)
 
-    async def run(self, goal: str) -> str:
+    async def run(self, goal: str, note: str = "") -> str:
+        """``goal`` is the owner's request and the only text the reflex and the body router read. ``note`` is
+        the door's own instruction to the body (telegram.TASK_FILE_HINT), added after the route is chosen:
+        read with the goal, its "open it in a browser" sent every Telegram task to the Chrome lane and kept
+        "open Spotify" from being a bare launch (production, 2026-09-26)."""
         if self._enabled:
             self._reflex_running = True
             try:
@@ -330,6 +334,6 @@ class ReflexFirstAgent:
         # The goal's shape, never its words: enough to tell later whether a link reached the body.
         log.info("app-reflex: %s gets a goal of %s", self.provider, goal_shape(goal))
         try:
-            return await self._inner.run(goal)
+            return await self._inner.run(goal + note)
         finally:
             self._on_done()

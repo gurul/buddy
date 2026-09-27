@@ -54,7 +54,7 @@ import re
 import time
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Awaitable, Callable, Mapping, Optional
+from typing import Any, Awaitable, Callable, Iterable, Mapping, Optional
 
 from .ax_candidates import Candidate, Snapshot, is_sensitive
 
@@ -322,6 +322,36 @@ class AttachError(RuntimeError):
 def is_web_goal(goal: str, route_kind: str = "") -> bool:
     """Code decides which lane sees a goal; the browser gets a URL, a site, or a named browser."""
     return route_kind in ("open_url", "search") or bool(WEB_WORDS.search(goal or ""))
+
+
+# The Chrome lane drives one browser tab and nothing else, so a web goal that also needs the Mac goes to Codex,
+# which has both. "The Mac" is said outright ("on my computer", "the desktop app"), or it is a Mac app named by
+# a name no one uses for anything else (Spotify, Photo Booth, Slack) with no browser named for it. Apple's
+# everyday-word apps (News, Weather, Maps …) are left out: "the latest news on Google" is a web search.
+ON_THE_MAC = re.compile(r"\b(?:on|in|from) (?:my|the) (?:computer|mac|macbook|laptop|desktop)\b|"
+                        r"\b(?:desktop|native|mac) (?:app|version)\b", re.I)
+IN_A_BROWSER = re.compile(r"(https?://|www\.|\b(?:in|on|using|with|via|through) (?:a |the |my )?(?:web ?)?"
+                          r"(?:browser|chrome|google chrome|safari|firefox|arc|brave|edge|web|internet)\b|"
+                          r"\bweb (?:version|app|player)\b)", re.I)
+BROWSER_APPS = frozenset({"google chrome", "safari", "firefox", "arc", "brave browser", "microsoft edge", "chromium"})
+EVERYDAY_WORD_APPS = frozenset({
+    "apps", "books", "calendar", "chess", "clock", "console", "contacts", "dictionary", "freeform", "games", "home",
+    "journal", "linear", "magnifier", "mail", "maps", "messages", "music", "news", "notes", "passwords", "phone",
+    "photos", "podcasts", "preview", "reminders", "screenshot", "shortcuts", "siri", "stocks", "tips", "tuner", "tv",
+    "weather"})
+
+
+def is_browser_only_goal(goal: str, apps: Iterable[str] = ()) -> bool:
+    """A web goal (is_web_goal) that the Chrome lane can finish alone: nothing in it is on the Mac."""
+    from .task_router import _explicit_search, app_mentions
+
+    if not is_web_goal(goal) or ON_THE_MAC.search(goal or ""):
+        return False
+    if _explicit_search(goal):
+        return True                    # "google how to reset Spotify": the app is what the search is about
+    native = [a for a in app_mentions(goal, apps)
+              if a.casefold() not in BROWSER_APPS and a.casefold() not in EVERYDAY_WORD_APPS]
+    return not native or bool(IN_A_BROWSER.search(goal))
 
 
 def snapshot_from_page(raw: Mapping[str, Any], seq: int, secs: float = 0.0) -> Snapshot:

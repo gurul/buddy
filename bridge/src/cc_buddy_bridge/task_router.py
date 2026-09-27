@@ -161,6 +161,7 @@ class Plan:
 
 
 _INSTALLED: Optional[tuple[str, ...]] = None
+FINDER = "/System/Library/CoreServices/Finder.app"
 
 
 def installed_apps(dirs: Iterable[str] = (), listdir=None) -> tuple[str, ...]:
@@ -180,6 +181,8 @@ def installed_apps(dirs: Iterable[str] = (), listdir=None) -> tuple[str, ...]:
         except OSError:
             continue
         names.extend(e[:-4] for e in entries if e.endswith(".app"))
+    if default and os.path.isdir(FINDER):
+        names.append("Finder")          # in CoreServices, not an app folder; "open finder" is a launch like any other
     found = tuple(sorted(set(names)))
     if default:
         _INSTALLED = found
@@ -214,7 +217,10 @@ def match_app(phrase: str, apps: Iterable[str]) -> str:
     alias = APP_ALIASES.get(said)
     if alias and alias.casefold() in names:
         return names[alias.casefold()]
-    return ""
+    # "photobooth" → "Photo Booth": the same letters with the spaces dropped, and only when one app has them.
+    squashed = said.replace(" ", "")
+    joined = [shown for folded, shown in names.items() if folded.replace(" ", "") == squashed]
+    return joined[0] if len(joined) == 1 else ""
 
 
 # What people say → what is installed. Closed and small on purpose: a wrong alias opens the wrong app.
@@ -343,6 +349,13 @@ ROUTER_MODEL_DEFAULT = "off"           # hosted: the request's words leave the M
 
 def find_app_mention(text: str, apps: Iterable[str]) -> str:
     """The ONE installed app the text mentions as whole words (aliases included), "" for none or two."""
+    found = app_mentions(text, apps)
+    return found[0] if len(found) == 1 else ""
+
+
+def app_mentions(text: str, apps: Iterable[str]) -> list[str]:
+    """Every installed app the text mentions as whole words (aliases included), in the order they are said.
+    A name inside a longer one that is also said ("Photo" in "Photo Booth") is not counted twice."""
     names = _display_names(apps)
     folded = " " + " ".join(re.findall(r"[a-z0-9.+&-]+", text.casefold())) + " "
     spoken = {**{k: v for k, v in names.items()},
@@ -353,7 +366,7 @@ def find_app_mention(text: str, apps: Iterable[str]) -> str:
         if at >= 0:
             if not any(said in longer and folded.find(f" {longer} ") >= 0 for longer in spoken if len(longer) > len(said)):
                 found.setdefault(spoken[said], at)
-    return next(iter(found)) if len(found) == 1 else ""
+    return sorted(found, key=found.__getitem__)
 
 
 EXPLICIT_SEARCH = re.compile(r"^(?:(?:do a |run a )?(?:google|web) search\b|search\b|google\b|look up\b)", re.IGNORECASE)

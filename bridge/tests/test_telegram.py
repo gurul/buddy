@@ -218,8 +218,8 @@ class FakeAgent:
         self.cancel_reason: Optional[str] = None
         self.release = asyncio.Event()
 
-    async def run(self, goal: str) -> str:
-        self.running, self.goal = True, goal
+    async def run(self, goal: str, note: str = "") -> str:
+        self.running, self.goal, self.note = True, goal, note
         self.on_event(AgentEvent("started", goal))
         answer = None
         if self.ask_q:
@@ -642,7 +642,8 @@ def test_a_texted_task_runs_the_agent_and_texts_the_result() -> None:
     rig = Rig(FakeApi([update("open the calculator")]), FakeCreate(call("start_task", {"goal": "open the calculator"})))
 
     async def during() -> None:
-        assert rig.agents[0].goal == "open the calculator" + telegram.TASK_FILE_HINT and rig.inlet.task_running
+        assert rig.agents[0].goal == "open the calculator" and rig.inlet.task_running
+        assert rig.agents[0].note == telegram.TASK_FILE_HINT          # beside the goal: the router never reads it
         assert rig.api.sent == [(OWNER, ON_IT_LINE)]      # started, not finished — and no second model call
         assert len(rig.create.requests) == 1
         rig.agents[0].release.set()
@@ -5171,8 +5172,8 @@ def test_a_file_a_task_made_is_sent_with_its_result(tmp_path: Path, monkeypatch:
             sent.append((Path(path).name, caption))
 
     class PhotoAgent(FakeAgent):
-        async def run(self, goal: str) -> str:
-            self.goal = goal
+        async def run(self, goal: str, note: str = "") -> str:
+            self.goal, self.note = goal, note
             photo.write_bytes(b"jpeg")                                  # the task makes the file
             return ("Took the photo. Saved it as [Buddy Photo 2026-09-25.jpg]"
                     "(/x/Documents/Buddy%20Photo%202026-09-25.jpg), also ~/Documents/Buddy Photo 2026-09-25.jpg. "
@@ -5184,4 +5185,4 @@ def test_a_file_a_task_made_is_sent_with_its_result(tmp_path: Path, monkeypatch:
               agent_factory=lambda ev, ask: agents.append(PhotoAgent(ev, ask)) or agents[-1])
     run_rig(rig)
     assert sent == [("Buddy Photo 2026-09-25.jpg", "From the task: Buddy Photo 2026-09-25.jpg")]   # once, not the old file
-    assert telegram.TASK_FILE_HINT in agents[0].goal                     # the task was told how files reach the owner
+    assert agents[0].note == telegram.TASK_FILE_HINT                     # the task was told how files reach the owner
