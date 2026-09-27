@@ -79,6 +79,13 @@ TOKEN_MARGIN_SECS = 60.0           # refresh an access token this long before Sp
 VOLUME_STEP = 10                   # "turn it up": the knob moves 2% a detent; a spoken step is five detents
 WAKE_SECS = 12.0                   # how long a freshly opened Spotify app gets to show up as a Connect device
 MAC_APP = Path("/Applications/Spotify.app")
+# Each Spotify Connect device keeps one colour, on the Voice PE's ring in the picker and on the Mini App's key
+# (owner, 2026-09-27: "can each device be represented with another color"). Green is Spotify mode's own and red
+# is a refusal, so neither is here. A device's colour is kept in COLORS_FILE from the first time it is seen.
+DEVICE_COLORS: tuple[tuple[str, tuple[int, int, int]], ...] = (
+    ("blue", (0, 90, 255)), ("orange", (255, 110, 0)), ("purple", (170, 0, 255)), ("cyan", (0, 200, 255)),
+    ("yellow", (255, 200, 0)), ("pink", (255, 40, 140)), ("white", (200, 200, 200)))
+COLORS_FILE = "spotify-colors.json"   # beside the login, ~/.config/cc-buddy-bridge/
 ART_HOST = "https://i.scdn.co/"    # album art; anything else is dropped before it reaches a page
 
 Http = Callable[[str, str, dict[str, str], Optional[bytes]], tuple[int, dict[str, str], bytes]]
@@ -277,6 +284,39 @@ class SpotifyApi:
         return next((i for i in items if isinstance(i, dict) and i.get("uri")), None)
 
 
+class DeviceColors:
+    """Which colour each device has: the first colour no known device holds, kept for good. Past seven devices
+    colours repeat, the least-used first."""
+
+    def __init__(self, path: Optional[Path] = None) -> None:
+        self.path = path.expanduser() if path is not None else None
+        self.known: dict[str, int] = {}
+        if self.path is not None:
+            try:
+                raw = json.loads(self.path.read_text(encoding="utf-8"))
+                self.known = {str(k): int(v) % len(DEVICE_COLORS) for k, v in raw.items()}
+            except (OSError, ValueError, AttributeError, TypeError):
+                self.known = {}
+
+    def index(self, name: str) -> int:
+        if name not in self.known:
+            used = list(self.known.values())
+            self.known[name] = min(range(len(DEVICE_COLORS)), key=lambda i: (used.count(i), i))
+            if self.path is not None:
+                try:
+                    self.path.parent.mkdir(parents=True, exist_ok=True)
+                    self.path.write_text(json.dumps(self.known, indent=2), encoding="utf-8")
+                except OSError as e:
+                    log.warning("spotify: could not keep device colours (%s)", e)
+        return self.known[name]
+
+    def rgb(self, name: str) -> tuple[int, int, int]:
+        return DEVICE_COLORS[self.index(name)][1]
+
+    def hex(self, name: str) -> str:
+        return "#%02x%02x%02x" % self.rgb(name)
+
+
 # ---- what is playing, in plain words -------------------------------------------------------------------------
 
 def now_of(player: Optional[dict[str, Any]]) -> dict[str, Any]:
@@ -432,10 +472,12 @@ class Spotify:
     """The owner's Spotify: the tools, the code path, the Mini App panel."""
 
     def __init__(self, api: SpotifyApi, *, wake: Optional[Callable[[], bool]] = None,
-                 sleep: Callable[[float], Any] = asyncio.sleep, wake_secs: float = WAKE_SECS) -> None:
+                 sleep: Callable[[float], Any] = asyncio.sleep, wake_secs: float = WAKE_SECS,
+                 colors: Optional[DeviceColors] = None) -> None:
         self.api = api
         # Spotify mode on the Voice PE (music_mode.MusicMode), lent by the daemon when the board is its controller
         self.mode: Any = None
+        self.colors = colors if colors is not None else DeviceColors()     # kept only in memory
         self.wake = wake if wake is not None else open_mac_app
         self._sleep = sleep
         self.wake_secs = wake_secs
@@ -447,7 +489,8 @@ class Spotify:
     async def now_playing(self) -> dict[str, Any]:
         try:
             now = now_of(await self._run(self.api.player))
-            devices = [_device_public(d) for d in await self._run(self.api.devices)]
+            devices = [{**_device_public(d), "color": self.colors.hex(d.get("name") or "")}
+                       for d in await self._run(self.api.devices)]
         except SpotifyError as e:
             return {"ok": False, "reason": e.line}
         except OSError as e:                                  # no network, DNS, a timeout
@@ -702,7 +745,7 @@ def make_spotify(path: Optional[Path] = None, environ: Any = None, http: Http = 
         log.info("spotify: not logged in (cc-buddy-bridge spotify login)")
         return None
     log.info("spotify: on")
-    return Spotify(SpotifyApi(Token(cfg, http, save_to=p), http))
+    return Spotify(SpotifyApi(Token(cfg, http, save_to=p), http), colors=DeviceColors(p.with_name(COLORS_FILE)))
 
 
 # ---- the CLI -------------------------------------------------------------------------------------------------
@@ -828,7 +871,8 @@ def cli(argv: Sequence[str], path: Optional[Path] = None, out: Callable[[str], A
     if not cfg:
         out(f"Not logged in ({cfg_path}). Run: cc-buddy-bridge spotify login --client-id ID")
         return 1
-    hub = Spotify(SpotifyApi(Token(cfg, http, save_to=cfg_path), http))
+    hub = Spotify(SpotifyApi(Token(cfg, http, save_to=cfg_path), http),
+                  colors=DeviceColors(cfg_path.with_name(COLORS_FILE)))
 
     async def go() -> dict[str, Any]:
         if a.act == "status":

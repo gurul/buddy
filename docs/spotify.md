@@ -129,6 +129,8 @@ just under Lights. It shows:
 - A **Volume** slider. It sends the value when you let go.
 - A **Playing on** list of your Connect devices. Pick a device to move the
   music there.
+- A key of each device's colour, as the Voice PE's ring shows it in the
+  picker.
 - **Voice PE Spotify mode**: on or off. It appears only when a Voice PE is
   connected as buddy's controller.
 

@@ -18,7 +18,8 @@ dial                            Spotify volume, ``VOLUME_PER_DETENT``% a detent;
                                 once and the write goes to Spotify ``VOLUME_DEBOUNCE_SECS`` after the dial stops
                                 (spotKnob's rule: one write per detent gets the account rate-limited)
 hold, let go before 3 s         the device picker: the dial moves through the Spotify Connect devices (the ring
-                                shows which, buddy says its name on the Voice PE), a click plays there, a hold or
+                                takes the device's own colour, spotify.DeviceColors, with a bright dot for its
+                                place; buddy says its name on the Voice PE), a click plays there, a hold or
                                 ``PICKER_IDLE_SECS`` without input backs out, nothing changed
 hold 3 s                        leave Spotify mode (the ring goes back to buddy's)
 ==============================  ================================================================================
@@ -42,6 +43,17 @@ PICKER_SAY_SECS = 0.35             # a name is said once the dial rests this lon
 
 Send = Callable[[dict[str, Any]], Awaitable[Any]]
 Say = Callable[[str], Awaitable[Any]]
+
+
+def _rgb(device: dict[str, Any]) -> list[int]:
+    """A device's colour (spotify.DeviceColors, as ``"#rrggbb"`` on the device) as [r, g, b] for the ring."""
+    c = str(device.get("color") or "")
+    if len(c) == 7 and c.startswith("#"):
+        try:
+            return [int(c[i:i + 2], 16) for i in (1, 3, 5)]
+        except ValueError:
+            pass
+    return [30, 215, 96]                                 # no colour: Spotify green
 
 
 class MusicMode:
@@ -111,10 +123,11 @@ class MusicMode:
             if not out.get("ok"):
                 await self._flash("error")
 
-    async def _flash(self, state: str) -> None:
-        """A short green sweep ("done") or red blink ("error") on the ring, with its chirp; the board times it."""
+    async def _flash(self, state: str, rgb: Optional[list[int]] = None) -> None:
+        """A short sweep ("done": green, or ``rgb``) or red blink ("error") on the ring, with its chirp; the board
+        times it."""
         with contextlib.suppress(Exception):
-            await self.send({"cmd": "music_flash", "ok": state == "done"})
+            await self.send({"cmd": "music_flash", "ok": state == "done", **({"rgb": rgb} if rgb else {})})
 
     # -- volume --
     async def _dial_volume(self, detents: int) -> None:
@@ -173,7 +186,7 @@ class MusicMode:
             log.info("music mode: picked %s (%s)", chosen["name"], "done" if out.get("ok") else "refused")
             if out.get("ok"):
                 self.volume = None                       # the new device has its own volume
-                await self._flash("done")
+                await self._flash("done", _rgb(chosen))  # the sweep in the new device's colour
             else:
                 await self._flash("error")
             if self.say is not None:
@@ -182,7 +195,7 @@ class MusicMode:
     async def _show_pick(self) -> None:
         assert self.picker is not None
         await self.send({"cmd": "ring_level", "n": self.index + 1, "of": len(self.picker), "dot": True,
-                         "ms": int(PICKER_IDLE_SECS * 1000)})
+                         "ms": int(PICKER_IDLE_SECS * 1000), "rgb": _rgb(self.picker[self.index])})
         if self.say is not None:
             self._say_later(self.picker[self.index]["name"], PICKER_SAY_SECS)
 

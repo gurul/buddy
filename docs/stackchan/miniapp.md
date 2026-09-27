@@ -118,6 +118,8 @@ It gives the phone the same controls as spotKnob:
 - **Playing on**: your Spotify Connect devices, with the playing one
   selected. Pick another to move the music there. A device that Spotify won't
   let buddy control is shown as **no remote control** and can't be picked.
+- A key of each device's colour. The Voice PE's ring uses these colours in
+  its device picker.
 - **Voice PE Spotify mode**: turns [Spotify mode](../voice-pe.md#spotify-mode)
   on the Voice PE on or off. It appears only when a Voice PE is connected as
   buddy's controller.

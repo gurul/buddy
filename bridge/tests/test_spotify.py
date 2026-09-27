@@ -426,3 +426,34 @@ def test_login_trades_the_code_with_the_injected_transport(tmp_path: Any, monkey
     assert S.login("cid", path=path, http=http, out=lines.append, open_browser=browser, timeout=10) == 0
     assert got[0]["code"] == "c0de" and got[0]["client_id"] == "cid" and got[0]["code_verifier"]
     assert S.load(path) == {"client_id": "cid", "refresh_token": "r-new", "scopes": S.SCOPES}
+
+
+# ---- each device's colour ----
+
+def test_each_device_keeps_its_own_colour_and_green_and_red_are_never_used(tmp_path: Any) -> None:
+    path = tmp_path / "spotify-colors.json"
+    c = S.DeviceColors(path)
+    mac, tv, phone = c.hex("MacBook"), c.hex("TV"), c.hex("Phone")
+    assert len({mac, tv, phone}) == 3                                   # distinct
+    assert S.DeviceColors(path).hex("TV") == tv                         # kept across restarts
+    assert S.DeviceColors(path).hex("Speaker") not in {mac, tv, phone}  # a new one takes a free colour
+    rgbs = [rgb for _, rgb in S.DEVICE_COLORS]
+    assert all(not (g > 150 and r < 100 and b < 150) for r, g, b in rgbs)     # no green: Spotify mode's
+    assert all(not (r > 150 and g < 60 and b < 60) for r, g, b in rgbs)       # no red: a refusal's
+    for i in range(20):                                                 # past seven, colours repeat evenly
+        c.index(f"extra {i}")
+    counts = [list(c.known.values()).count(i) for i in range(len(S.DEVICE_COLORS))]
+    assert max(counts) - min(counts) <= 1
+
+
+def test_now_playing_gives_each_device_its_colour() -> None:
+    h, _ = hub()
+    devices = run(h.now_playing())["devices"]
+    assert [d["color"] for d in devices] == [h.colors.hex(d["name"]) for d in devices]
+    assert len({d["color"] for d in devices}) == len(devices)
+
+
+def test_a_broken_colours_file_starts_fresh(tmp_path: Any) -> None:
+    path = tmp_path / "c.json"
+    path.write_text("not json")
+    assert S.DeviceColors(path).hex("A") == "#%02x%02x%02x" % S.DEVICE_COLORS[0][1]

@@ -126,8 +126,15 @@ it off, and so does holding the button for 3 s.
 A click waits 0.35 s for the next one before it counts, so 1, 2 and 3 clicks
 are told apart.
 
-**The device picker** is spotKnob's picker. The ring shows one green dot for
-each position. It opens on the device that is playing now. Turning the dial
+**The device picker** is spotKnob's picker. **Each device has its own
+colour**: blue, orange, purple, cyan, yellow, pink or white. Green and red are
+never used, because they mean Spotify mode and a refusal. While a device is
+selected, the ring glows faintly in its colour, with a bright dot at its place
+in the list. A device keeps the colour it gets the first time buddy sees it
+(`~/.config/cc-buddy-bridge/spotify-colors.json`). After an eighth device,
+colours repeat. When the music moves, the ring sweeps in the new device's
+colour. The Mini App's Music card shows the key. The picker opens on the
+device that is playing now. Turning the dial
 moves through your Spotify Connect devices, and buddy says each device's name
 on the Voice PE's speaker. A click plays on the chosen device. A hold, or 10 s
 with no input, backs out with nothing changed. Devices that Spotify marks as

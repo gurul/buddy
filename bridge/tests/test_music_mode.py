@@ -13,8 +13,8 @@ class FakeSpotify:
     def __init__(self) -> None:
         self.playing = True
         self.volume = 40
-        self.devices = [{"name": "MacBook", "type": "computer", "active": True, "volume": 40},
-                        {"name": "Kitchen Speaker", "type": "speaker", "active": False},
+        self.devices = [{"name": "MacBook", "type": "computer", "active": True, "volume": 40, "color": "#005aff"},
+                        {"name": "Kitchen Speaker", "type": "speaker", "active": False, "color": "#ff6e00"},
                         {"name": "TV", "type": "tv", "active": False, "restricted": True}]
         self.calls: list[tuple[str, dict]] = []
         self.refuse: set[str] = set()
@@ -110,8 +110,9 @@ def test_hold_opens_the_picker_dial_moves_click_plays_there() -> None:
     go(rig, {"hold": "short"}, {"dial": 1}, {"clicks": 1})
     dots = [o for o in rig.sent if o.get("cmd") == "ring_level" and o.get("dot")]
     assert [(d["n"], d["of"]) for d in dots] == [(1, 2), (2, 2)]    # the TV (restricted) is not in the picker
+    assert [d["rgb"] for d in dots] == [[0, 90, 255], [255, 110, 0]]  # each device in its own colour
     assert ("transfer", {"device": "Kitchen Speaker"}) in rig.spotify.calls
-    assert {"cmd": "music_flash", "ok": True} in rig.sent
+    assert {"cmd": "music_flash", "ok": True, "rgb": [255, 110, 0]} in rig.sent    # the sweep in its colour
     assert "Kitchen Speaker" in rig.said and rig.said[-1] == "did transfer on Kitchen Speaker"
     assert rig.mode.picker is None and rig.mode.on is True
 
@@ -216,3 +217,8 @@ def test_controller_show_keeps_the_mode_only() -> None:
     assert "music" in INPUT_CMDS
     assert ctl.last == {"music_mode": {"cmd": "music_mode", "on": True}}
     assert ctl.link.sent[-1] == {"cmd": "music_mode", "on": True}          # replayed on (re)connect
+
+
+def test_a_device_without_a_colour_is_green() -> None:
+    assert M._rgb({"name": "x"}) == [30, 215, 96] and M._rgb({"color": "#zzzzzz"}) == [30, 215, 96]
+    assert M._rgb({"color": "#ff6e00"}) == [255, 110, 0]

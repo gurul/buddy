@@ -15,7 +15,7 @@ RingLook look = LOOK_OFFLINE;
 uint32_t lookAtMs = 0;
 uint8_t levelShown = 0, levelOf = 10;
 bool levelDot = false;
-uint32_t levelUntil = 0;
+uint32_t levelUntil = 0, levelRgb = 0xFFFFFFFF, flashRgb = 0xFFFFFFFF;
 bool flashOk = false;
 uint32_t flashAtMs = 0, flashUntil = 0;
 bool muted = false;
@@ -26,6 +26,8 @@ struct Rgb {
 };
 
 Rgb frame[N];
+
+Rgb rgbOf(uint32_t c) { return {(float)((c >> 16) & 0xFF), (float)((c >> 8) & 0xFF), (float)(c & 0xFF)}; }
 
 void fill(Rgb c, float k) {
   for (uint8_t i = 0; i < N; i++) frame[i] = {c.r * k, c.g * k, c.b * k};
@@ -95,11 +97,13 @@ void render(uint32_t now) {
   }
 
   if (now < levelUntil && levelOf > 0) {
-    Rgb on = look == LOOK_MUSIC ? Rgb{30, 215, 96} : Rgb{120, 120, 120};
+    Rgb on = levelRgb != 0xFFFFFFFF ? rgbOf(levelRgb) : look == LOOK_MUSIC ? Rgb{30, 215, 96} : Rgb{120, 120, 120};
     if (levelDot) {
-      // position `levelShown` (1-based) of `levelOf`, spread round the ring; the rest faintly lit
+      // position `levelShown` (1-based) of `levelOf`, spread round the ring; the rest faintly lit, in the same
+      // colour, so the whole ring says which device it is
       uint8_t at = (uint8_t)(((levelShown > 0 ? levelShown - 1 : 0) * N) / levelOf);
-      for (uint8_t i = 0; i < N; i++) frame[i] = i == at ? on : Rgb{on.r * 0.06f, on.g * 0.06f, on.b * 0.06f};
+      float glow = levelRgb != 0xFFFFFFFF ? 0.14f : 0.06f;
+      for (uint8_t i = 0; i < N; i++) frame[i] = i == at ? on : Rgb{on.r * glow, on.g * glow, on.b * glow};
     } else {
       uint8_t lit = (uint8_t)((levelShown * N + levelOf / 2) / levelOf);
       for (uint8_t i = 0; i < N; i++) frame[i] = i < lit ? on : Rgb{0, 0, 0};
@@ -109,7 +113,8 @@ void render(uint32_t now) {
     uint32_t age = now - flashAtMs;
     if (flashOk) {
       float lit = age < 400 ? (float)age / 400 * N : N;
-      for (uint8_t i = 0; i < N; i++) frame[i] = i < lit ? Rgb{40, 220, 80} : Rgb{0, 0, 0};
+      Rgb c = flashRgb != 0xFFFFFFFF ? rgbOf(flashRgb) : Rgb{40, 220, 80};
+      for (uint8_t i = 0; i < N; i++) frame[i] = i < lit ? c : Rgb{0, 0, 0};
     } else {
       fill({200, 0, 0}, ((age / 150) % 2) ? 0.0f : 1.0f);
     }
@@ -143,14 +148,16 @@ void ringSet(RingLook l) {
   lookAtMs = millis();
 }
 
-void ringShowLevel(uint8_t level, uint8_t of, bool dot, uint32_t ms) {
+void ringShowLevel(uint8_t level, uint8_t of, bool dot, uint32_t ms, uint32_t rgb) {
+  levelRgb = rgb;
   levelShown = level;
   levelOf = of;
   levelDot = dot;
   levelUntil = millis() + ms;
 }
 
-void ringFlash(bool ok) {
+void ringFlash(bool ok, uint32_t rgb) {
+  flashRgb = rgb;
   flashOk = ok;
   flashAtMs = millis();
   flashUntil = flashAtMs + (ok ? 900 : 750);

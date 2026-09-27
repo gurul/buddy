@@ -126,6 +126,12 @@ bool handlePcm(const char *line, size_t len) {
   return true;
 }
 
+// "rgb":[r,g,b] as 0xRRGGBB; absent or malformed is 0xFFFFFFFF, the ring's default colour.
+uint32_t rgbOf(JsonVariantConst v) {
+  if (!v.is<JsonArrayConst>() || v.size() != 3) return 0xFFFFFFFF;
+  return ((uint32_t)(v[0] | 0) & 0xFF) << 16 | ((uint32_t)(v[1] | 0) & 0xFF) << 8 | ((uint32_t)(v[2] | 0) & 0xFF);
+}
+
 void handleLine(const char *line) {
   if (line[0] != '{') return;
   if (handlePcm(line, strlen(line))) return;
@@ -148,12 +154,12 @@ void handleLine(const char *line) {
     return;
   }
   if (!strcmp(cmd, "ring_level")) {
-    ringShowLevel(doc["n"] | 0, doc["of"] | 10, doc["dot"] | false, doc["ms"] | 1500);
+    ringShowLevel(doc["n"] | 0, doc["of"] | 10, doc["dot"] | false, doc["ms"] | 1500, rgbOf(doc["rgb"]));
     return;
   }
   if (!strcmp(cmd, "music_flash")) {
     bool ok = doc["ok"] | false;
-    ringFlash(ok);
+    ringFlash(ok, rgbOf(doc["rgb"]));
     chirpPlay(ok ? CHIRP_OK : CHIRP_NO);
     return;
   }
