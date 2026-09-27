@@ -72,6 +72,13 @@ wake-word conversation already has the microphone, so a press during one is
 ignored, and the wake word is off while the button is held. The Telegram
 chat and an OpenAI key must be set up, as they must for Mini App calls.
 
+For the whole call the StackChan's head **follows whoever is talking**
+([following whoever is talking](stackchan/vision.md#following-whoever-is-talking)).
+The call tells the follower it is a conversation: `listening` from the first
+press to the call's end (between presses too), `thinking` and `speaking` as
+the ring shows them, and `idle` when the call ends. Before 2026-09-27 the
+call's states went only to the ring, so the head never followed on a desk call.
+
 On the wire, the board sends `{"cmd":"ptt","on":true}` on press and
 `{"cmd":"ptt","on":false}` on release.
 

@@ -217,6 +217,64 @@ async def test_once_buddy_is_done_the_call_ends_when_quiet(monkeypatch: pytest.M
     assert rings(sent)[-1] == "idle"
 
 
+
+# ---- the head follows whoever is talking on a desk call (follow.py) ---------------------------------
+
+@run
+async def test_a_desk_call_is_a_conversation_to_the_head_follower(monkeypatch: pytest.MonkeyPatch) -> None:
+    """2026-09-27: "Buddy doesn't follow person anymore". Voice had moved to the Voice PE's button, and the
+    call's states went only to the ring, so the follower (which needs a conversation phase) never woke."""
+    monkeypatch.setattr(phone_call, "QUIET_SECS", 0.3)
+    monkeypatch.setattr(desk_call, "PING_SECS", 0.1)
+    phases: list[str] = []
+
+    async def on_phase(phase: str) -> None:
+        phases.append(phase)
+
+    sent: list[dict[str, Any]] = []
+
+    async def send(obj: dict[str, Any]) -> None:
+        sent.append(obj)
+
+    desk = desk_call.DeskCalls(Brain(), Voice(), send, mic_factory=Mic, speaker_factory=Speaker, on_phase=on_phase)
+    await desk.press(True)
+    assert phases == ["listening"]
+    for _ in range(10):
+        Mic.made[-1].on_block(b"\x02\x00" * 1200)
+    await asyncio.sleep(0.05)
+    await desk.press(False)
+    await until(lambda: not desk.active)
+    assert phases[:3] == ["listening", "thinking", "speaking"]
+    # after the reply the ring goes quiet, but the person is still there until the call ends
+    assert phases[-2:] == ["listening", "idle"]
+    assert "idle" not in phases[:-1]
+
+
+@run
+async def test_during_a_desk_call_buddy_turns_to_the_face_it_sees() -> None:
+    from cc_buddy_bridge.follow import SpeakerFollower
+    from cc_buddy_bridge.vision import FaceResult
+
+    t = [100.0]
+    looks: list[dict[str, Any]] = []
+
+    async def board(obj: dict[str, Any]) -> bool:
+        if obj.get("cmd") == "look":
+            looks.append(obj)
+        return True
+
+    follower = SpeakerFollower(board, clock=lambda: t[0])
+    desk = desk_call.DeskCalls(Brain(), Voice(), board, mic_factory=Mic, speaker_factory=Speaker,
+                               on_phase=follower.on_phase)
+    await desk.press(True)
+    assert follower.active
+    for _ in range(12):                      # the owner sits well to buddy's left of where the head points
+        t[0] += 0.25
+        await follower.on_faces([FaceResult(bx=-60, by=10, size=22, conf=90)], 0.0, 45.0)
+    assert looks and looks[0]["yaw"] < -10
+    await desk.stop()
+    assert not follower.active and follower.phase == "idle"
+
 # ---- buddy's voice on the Voice PE (BoardSpeaker) ---------------------------------------------------
 
 class Clock:

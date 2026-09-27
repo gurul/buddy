@@ -232,7 +232,7 @@ void gazeUpdate(PersonaState active, bool needsAttention, bool listening,
       int p = hostlook::clampPitch(host->hostLookPitch);
       bodyHostLook((int8_t)y, (int8_t)p, host->hostLookHold);
       look::setMoving(true); model.noteMoving(true); moving = true;
-      Serial.printf("[gaze] host look yaw=%.0f pitch=%.0f hold=%u\n", y, p, (unsigned)host->hostLookHold);
+      Serial.printf("[gaze] host look yaw=%d pitch=%d hold=%u\n", y, p, (unsigned)host->hostLookHold);
     }
   }
 

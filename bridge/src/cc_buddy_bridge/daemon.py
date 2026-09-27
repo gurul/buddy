@@ -1015,7 +1015,9 @@ class Daemon:
 
             self._desk_calls = DeskCalls(getattr(self, "_telegram", None), make_voice(), self.ble.send,
                                          mic_device=self._ears_cfg.device, busy=phone_busy,
-                                         speaker_factory=speaker)
+                                         speaker_factory=speaker,
+                                         # a desk call is a conversation: buddy follows whoever is talking
+                                         on_phase=self._follower.on_phase)
         return self._desk_calls
 
     def _on_wake(self, keyword: str) -> None:

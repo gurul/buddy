@@ -146,7 +146,8 @@ live run searched three times back to back at an empty chair, which is how an an
 
 **What else it uses:** the conversation's phase (it follows in `wake`, `listening`, `asking`,
 `speaking`, and hands the head back at once for `thinking`'s glance aside and `working`'s head-down,
-so buddy keeps its own expressions); every face in the frame, not just the largest (it stays with the
+so buddy keeps its own expressions; a Voice PE hold-to-talk call reports these phases too, see
+[hold to talk](../voice-pe.md#hold-to-talk)); every face in the frame, not just the largest (it stays with the
 one nearest its track, so a passer-by does not steal the gaze); and who else owns the head — "look
 left", `look_around` and `find` for as long as they hold it, an explore, the dictation key, a lesson's
 listening pose.

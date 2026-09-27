@@ -12,6 +12,10 @@ reply read back — with the phone swapped for the desk:
   sound of this through voice pe"), else the Mac's (``Speaker``).
 * **The board's ring** shows the call's state through ``{"cmd":"agent","state":..}``: listening, thinking,
   speaking.
+* **The head follower** (follow.py) hears the call as a conversation through ``on_phase``: ``listening``
+  from the call's start (between presses too, since the person is still there), ``thinking`` and ``speaking``
+  from the ring, ``idle`` when the call ends. Without it buddy never looked at whoever was talking on a desk
+  call: the ring's states went straight to the board and never reached the follower.
 
 ``DeskLink`` is the stand-in for phone_call.WebSocket: the only change to the call itself is where its bytes
 come from and go to. A call starts on the first press and ends after ``phone_call.QUIET_SECS`` without one,
@@ -161,6 +165,8 @@ class BoardSpeaker:
     def close(self) -> None:
         """What is on the board plays out; nothing is left here to drop."""
 
+Phase = Callable[[str], Awaitable[None]]
+
 # The call's states on the ring (firmware agent states). The call's "listening" means waiting for the next
 # press, so the ring goes quiet; it turns blue only while the button is held (DeskCalls._down).
 RING = {"thinking": "thinking", "speaking": "speaking"}
@@ -170,11 +176,12 @@ PING_SECS = 10.0           # the phone pings every 10 s; the desk pings while bu
 class DeskLink:
     """What phone_call.Call needs from its WebSocket, served by the board, the Mac mic and the Mac speaker."""
 
-    def __init__(self, send_board: Send, speaker: Any) -> None:
-        self.send_board, self.speaker = send_board, speaker
+    def __init__(self, send_board: Send, speaker: Any, on_phase: Optional[Phase] = None) -> None:
+        self.send_board, self.speaker, self.on_phase = send_board, speaker, on_phase
         self.closed = False
         self.inbox: asyncio.Queue[tuple[int, bytes]] = asyncio.Queue()
         self.ring = "idle"
+        self.phase = "idle"
 
     # ---- the call's side ----
     async def recv(self) -> tuple[int, bytes]:
@@ -230,6 +237,17 @@ class DeskLink:
             self.ring = state
             with contextlib.suppress(Exception):
                 await self.send_board({"cmd": "agent", "state": state})
+        # The ring goes quiet between presses, but the call is still a conversation with someone at the desk.
+        await self.set_phase(state if state in ("thinking", "speaking") else "listening")
+
+    async def set_phase(self, phase: str) -> None:
+        if phase != self.phase:
+            self.phase = phase
+            if self.on_phase is not None:
+                try:
+                    await self.on_phase(phase)
+                except Exception:  # noqa: BLE001 — the head is an audience; the call goes on without it
+                    log.exception("desk call: phase hook failed")
 
 
 class DeskCalls:
@@ -238,8 +256,9 @@ class DeskCalls:
 
     def __init__(self, brain: Optional[Brain], voice: Optional[Voice], send_board: Send,
                  mic_device: Optional[str] = None, busy: Callable[[], bool] = lambda: False,
-                 mic_factory: Callable[..., Any] = Mic, speaker_factory: Callable[[], Any] = Speaker) -> None:
-        self.brain, self.voice, self.send_board = brain, voice, send_board
+                 mic_factory: Callable[..., Any] = Mic, speaker_factory: Callable[[], Any] = Speaker,
+                 on_phase: Optional[Phase] = None) -> None:
+        self.brain, self.voice, self.send_board, self.on_phase = brain, voice, send_board, on_phase
         self.mic_device, self.busy = mic_device, busy
         self.mic_factory, self.speaker_factory = mic_factory, speaker_factory
         self.link: Optional[DeskLink] = None
@@ -293,7 +312,7 @@ class DeskCalls:
 
     async def _start(self) -> None:
         speaker = self.speaker_factory()
-        link = self.link = DeskLink(self.send_board, speaker)
+        link = self.link = DeskLink(self.send_board, speaker, self.on_phase)
         call = Call(link, self.brain, self.voice)  # type: ignore[arg-type]
 
         async def keepalive() -> None:
@@ -308,6 +327,7 @@ class DeskCalls:
         async def run() -> None:
             log.info("desk call: started from the board's button")
             reason = "?"
+            await link.set_phase("listening")
             pinger = asyncio.create_task(keepalive())
             try:
                 reason = await call.run()
@@ -319,6 +339,7 @@ class DeskCalls:
                 self.held = False
                 speaker.close()
                 await link.set_ring("idle")
+                await link.set_phase("idle")
                 await link.close()
                 log.info("desk call: ended (%s), %d press(es)", reason, call.presses)
 
