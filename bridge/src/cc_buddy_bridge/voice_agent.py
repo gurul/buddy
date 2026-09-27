@@ -1938,8 +1938,8 @@ class VoiceSession:
 
     def _on_agent_event(self, ev: AgentEvent) -> None:
         if ev.kind == "progress":
-            if getattr(self.agent, "provider", None) == "codex" and not self._ended.is_set():
-                self._bg(self._speak("Codex progress: " + ev.text))
+            # Steps are never spoken: hearing each one read out is noise (owner report 2026-09-26).
+            # The voice says "on it" once and the result once; a step shows only as a caption.
             # A helper sentence from the task ("opened Safari") as a caption page
             # while the robot is working — when nothing else is on screen and at
             # least PROGRESS_MIN_GAP_SECS after the previous one.

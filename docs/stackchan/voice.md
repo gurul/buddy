@@ -2,7 +2,7 @@
 
 **Current computer-task backend (2026-09-22):** `start_task` in voice and text now
 uses `codex_computer.py`, the public Codex app-server protocol, and the installed
-`cua_repl.js` plugin. Codex progress reaches voice commentary/captions; permission
+`cua_repl.js` plugin. Codex progress shows as captions only and is never spoken (the voice says "on it" once, then the result); permission
 questions wait for an explicit answer; steering and cancellation use Codex turn
 methods. Model settings come from Codex. The Python desktop worker, fast lanes,
 and `CC_BUDDY_AGENT_*` tuning described below are retained legacy internals and

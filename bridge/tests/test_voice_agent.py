@@ -781,6 +781,26 @@ def test_progress_events_become_caption_pages_while_working() -> None:
     assert captions[-1]["lines"] == ["typed the search"]
 
 
+def test_codex_progress_is_never_spoken() -> None:
+    """Steps of a Codex task are not read aloud (owner report 2026-09-26): the voice says
+    "on it" and the result, nothing in between."""
+    from cc_buddy_bridge.computer_agent import AgentEvent as Ev
+
+    async def go():
+        conn = FakeConnection()
+        s, _, _ = _captions_session(conn, {"now": 0.0})
+        s.agent = FakeAgent(None, None)
+        s.agent.provider = "codex"
+        s.state = "working"
+        s._on_agent_event(Ev("progress", "Opening Safari", 1))
+        s._on_agent_event(Ev("progress", "Typing the search", 1))
+        await asyncio.sleep(0)
+        await asyncio.sleep(0)
+        return conn
+    conn = asyncio.run(go())
+    assert not any("Opening Safari" in c or "Typing the search" in c for c in conn.commentary())
+
+
 def test_conversation_close_cancels_the_task_with_a_reason() -> None:
     agent = FakeAgent(None, None)
     conn = FakeConnection([_tool_call("start_task", "c1", goal="g")])
