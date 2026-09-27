@@ -64,6 +64,10 @@ log = logging.getLogger(__name__)
 
 CONFIG_PATH = Path("~/.config/cc-buddy-bridge/spotify.json")
 OFF_REASON = "Spotify is not set up on this computer (cc-buddy-bridge spotify login; CC_BUDDY_SPOTIFY)"
+# Said when a music command arrives with no login: the code path still knows the words, so the model never gets
+# a Spotify request it has no tools for (2026-09-27: "spotify mode" on the Voice PE went to Composio and failed).
+NOT_SET_UP_LINE = ("Spotify isn't set up on this Mac yet. Run: cc-buddy-bridge spotify login --client-id ID, "
+                   "then restart buddy.")
 API = "https://api.spotify.com/v1"
 ACCOUNTS = "https://accounts.spotify.com"
 REDIRECT_URI = "http://127.0.0.1:8888/callback"     # spotKnob's registered redirect: one Spotify app serves both
@@ -415,6 +419,11 @@ _PATTERNS: list[tuple[re.Pattern[str], Callable[[re.Match[str]], Command]]] = [
      lambda m: Command("transfer", device=m.group(1).strip())),
     (re.compile(rf"play\s+(?!{_MUSIC}\s+{_ON_SPOTIFY})(.{{1,80}}?)\s+{_ON_SPOTIFY}"), lambda m: Command("play", query=m.group(1).strip())),
 ]
+
+
+def match(text: str) -> Optional[Command]:
+    """``Spotify.match`` without a Spotify: the words alone, for the not-logged-in reply."""
+    return Spotify.match(None, text)  # type: ignore[arg-type]  — match reads no state
 
 
 # ---- the whole thing -----------------------------------------------------------------------------------------

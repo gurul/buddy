@@ -5271,3 +5271,14 @@ def test_spotify_by_code_and_by_the_brain() -> None:
     rig = Rig(FakeApi(), FakeCreate(say("ok")))
     asyncio.run(rig.inlet._turn(telegram.Inbound(OWNER, OWNER, "hi", message_id=10)))
     assert not any(t.get("name") in spotify.TOOL_NAMES for t in rig.create.requests[0]["tools"])
+
+
+def test_a_music_command_without_a_spotify_login_says_how_to_set_it_up() -> None:
+    from cc_buddy_bridge import spotify
+
+    # "spotify mode" said on the Voice PE with no login went to the model, which had no Spotify tools (2026-09-27)
+    run_rig(rig := Rig(api := FakeApi([update("spotify mode")]), FakeCreate()))
+    assert api.sent[-1] == (OWNER, spotify.NOT_SET_UP_LINE) and rig.create.requests == []
+    # anything that is not a music command still goes to the brain
+    run_rig(rig := Rig(FakeApi([update("what's the plan today")]), FakeCreate(say("ok"))))
+    assert rig.create.requests

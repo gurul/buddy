@@ -2185,8 +2185,12 @@ class TelegramInlet:
             # "lights off", "lamp blue at 40%": done by code, no model turn (lights.py)
             self._spawn(self._lights_by_code(inbound, light_cmd), "telegram-lights")
             return
-        music_cmd = None if inbound.tapped or self._spotify is None else self._spotify.match(inbound.text)
-        if music_cmd is not None:
+        music_cmd = None if inbound.tapped else spotify.match(inbound.text)
+        if music_cmd is not None and self._spotify is None and spotify.enabled():
+            # a music command with no Spotify login: say so, rather than send it to a model with no Spotify tools
+            self._spawn(self._say(inbound.chat_id, spotify.NOT_SET_UP_LINE), "telegram-spotify")
+            return
+        if music_cmd is not None and self._spotify is not None:
             # "pause the music", "next song", "play Daft Punk on Spotify": done by code, no model turn (spotify.py)
             self._spawn(self._spotify_by_code(inbound, music_cmd), "telegram-spotify")
             return
