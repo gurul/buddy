@@ -5186,3 +5186,42 @@ def test_a_file_a_task_made_is_sent_with_its_result(tmp_path: Path, monkeypatch:
     run_rig(rig)
     assert sent == [("Buddy Photo 2026-09-25.jpg", "From the task: Buddy Photo 2026-09-25.jpg")]   # once, not the old file
     assert agents[0].note == telegram.TASK_FILE_HINT                     # the task was told how files reach the owner
+
+
+def test_lights_by_code_and_by_the_brain() -> None:
+    from cc_buddy_bridge import lights
+
+    applied: list[tuple[str, Any]] = []
+
+    class Driver:
+        def __init__(self, light: Any) -> None:
+            self.light = light
+
+        async def apply(self, change: Any) -> None:
+            applied.append((self.light.name, change))
+
+        async def state(self) -> Any:
+            return lights.State(on=True, brightness=50, rgb=(255, 0, 0))
+
+        async def close(self) -> None:
+            return None
+
+    hub = lights.Lights([lights.Light("floor lamp", "govee"), lights.Light("strip", "triones")],
+                        drivers={k: Driver for k in lights.KINDS})
+    # "lights blue": every light, by code, no model call
+    run_rig(rig := Rig(api := FakeApi([update("lights blue")]), FakeCreate(), lights=hub))
+    assert api.sent[-1] == (OWNER, "Lights blue.")
+    assert rig.create.requests == [] and [n for n, _ in applied] == ["floor lamp", "strip"]
+    # anything more than a command goes to the brain, which has the tools and the list of lights
+    applied.clear()
+    rig = Rig(FakeApi(), FakeCreate(call("lights_set", {"target": "all", "power": None, "brightness": 30,
+                                                        "color": "warm white"}), say("Cozy.")), lights=hub)
+    asyncio.run(rig.inlet._turn(telegram.Inbound(OWNER, OWNER, "make it cozy in here", message_id=9)))
+    first = rig.create.requests[0]
+    assert {"lights_set", "lights_status"} <= {t.get("name") for t in first["tools"]}
+    assert "floor lamp" in first["instructions"]
+    assert applied[0][1] == lights.Change(brightness=30, color=lights.parse_color("warm white"))
+    # no lights: no tools, and "lights off" is the brain's like any other text
+    rig = Rig(FakeApi(), FakeCreate(say("ok")))
+    asyncio.run(rig.inlet._turn(telegram.Inbound(OWNER, OWNER, "hi", message_id=10)))
+    assert not any(t.get("name") in lights.TOOL_NAMES for t in rig.create.requests[0]["tools"])

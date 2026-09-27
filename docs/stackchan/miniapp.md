@@ -87,6 +87,25 @@ Switches: `CC_BUDDY_CALL_LIVE_STT` (on), `CC_BUDDY_CALL_TTS_PROVIDER` (`openrout
 `CC_BUDDY_CALL_OR_TTS_MODEL`, `CC_BUDDY_CALL_OR_VOICE`, `CC_BUDDY_CALL_STT_MODEL`,
 `CC_BUDDY_CALL_TTS_MODEL`, `CC_BUDDY_CALL_VOICE`.
 
+## Lights
+
+With [lights](../lights.md) set up, a **Lights** card sits at the top of the
+home page:
+
+- **All** is selected by default, so a tap changes every light at once. Pick
+  a room or one light to change only those.
+- **On** and **Off**, ten colour swatches (the last two are warm white and
+  white), and a **Brightness** slider. The slider sends its value when you let
+  go.
+- The line under the card shows each light's state when the page opens, and
+  after a tap it shows what changed ("Lights green.") and which light did not
+  answer, and why.
+
+The card calls `/api/lights`, which only an owner's signed `initData` opens,
+like the rest of the home page. An app's token never reaches it. The page gets
+the lights' names and rooms only, never an address or a key. Without lights
+the card does not appear.
+
 ## Making an app
 
 Ask in the chat ("make me a habit tracker with streaks", "build a workout

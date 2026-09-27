@@ -22,6 +22,11 @@ def main(argv: list[str] | None = None) -> int:
     # (OPENAI_API_KEY, CC_BUDDY_*) — read before any subcommand looks at
     # os.environ. Existing variables win; the file only fills gaps.
     load_env_file()
+    rest = sys.argv[1:] if argv is None else list(argv)
+    if rest[:1] == ["lights"]:
+        # everything after "lights" is the lights CLI's own (argparse's REMAINDER drops a leading --help)
+        from . import lights
+        return lights.cli(rest[1:] or ["--help"])
     parser = argparse.ArgumentParser(prog="cc-buddy-bridge")
     parser.add_argument("--version", action="version", version=f"cc-buddy-bridge {__version__}")
     sub = parser.add_subparsers(dest="cmd")
@@ -194,6 +199,13 @@ def main(argv: list[str] | None = None) -> int:
     p_headcal.add_argument("--port", type=int, default=8766)
     p_headcal.add_argument("--no-open", action="store_true", help="do not open a browser")
     p_headcal.add_argument("--socket", default=None, help="IPC path or host:port override")
+
+    p_lights = sub.add_parser(
+        "lights",
+        help="The owner's lights (Govee, HappyLighting, Sylvania/Tuya): scan, list, name, set. See docs/lights.md",
+        add_help=False,
+    )
+    p_lights.add_argument("lights_args", nargs=argparse.REMAINDER)
 
     p_sound = sub.add_parser(
         "sound",

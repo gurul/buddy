@@ -1,0 +1,294 @@
+"""lights.py: colours, the three protocols' bytes, which lights a request means, the code path, the tools."""
+
+from __future__ import annotations
+
+import asyncio
+import json
+import stat
+from typing import Any
+
+import pytest
+
+from cc_buddy_bridge import lights as L
+
+
+class FakeDriver:
+    def __init__(self, light: L.Light, log: list, fail: set) -> None:
+        self.light, self.log, self.fail = light, log, fail
+
+    async def apply(self, change: L.Change) -> None:
+        if self.light.name in self.fail:
+            raise ConnectionError("unreachable")
+        self.log.append((self.light.name, change))
+
+    async def state(self) -> L.State:
+        if self.light.name in self.fail:
+            raise ConnectionError("unreachable")
+        return L.State(on=True, brightness=40, rgb=(0, 0, 255))
+
+    async def close(self) -> None:
+        return None
+
+
+def hub(fail: set = frozenset()) -> tuple[L.Lights, list]:
+    calls: list = []
+    lights = [L.Light("floor lamp", "govee", room="bedroom", ip="192.0.2.10", device="AA:BB"),
+              L.Light("strip", "triones", room="bedroom", address="uuid-1", aliases=("led strip",)),
+              L.Light("desk bulb", "tuya", room="office", id="abc", key="k")]
+    make = {k: (lambda lt, _k=k: FakeDriver(lt, calls, set(fail))) for k in L.KINDS}
+    return L.Lights(lights, drivers=make), calls
+
+
+# ---- colour ----
+
+def test_parse_color_names_whites_hex_kelvin() -> None:
+    assert L.parse_color("Blue").rgb == (0, 0, 255)
+    assert L.parse_color("warm white").kelvin == 2700
+    assert L.parse_color("daylight").kelvin == 6500
+    assert L.parse_color("#FF8800").rgb == (255, 136, 0)
+    assert L.parse_color("ff8800").rgb == (255, 136, 0)
+    assert L.parse_color("2700K").kelvin == 2700
+    assert L.parse_color("12000k").kelvin == L.KELVIN_MAX
+    assert L.parse_color("red light").rgb == (255, 0, 0)
+    assert L.parse_color("plaid") is None
+
+
+def test_kelvin_to_rgb_is_warm_to_cool() -> None:
+    warm, cool = L.kelvin_to_rgb(2700), L.kelvin_to_rgb(6500)
+    assert warm[0] == 255 and warm[2] < warm[1] < 255
+    assert cool[2] >= 250 and abs(cool[0] - cool[2]) < 20
+
+
+def test_scale_rgb_keeps_hue_and_sets_level() -> None:
+    assert L.scale_rgb((0, 0, 128), 100) == (0, 0, 255)
+    assert L.scale_rgb((255, 128, 0), 50) == (128, 64, 0)
+    assert L.scale_rgb((0, 0, 0), 50) == (128, 128, 128)
+    assert L.rgb_percent((0, 0, 128)) == 50
+
+
+def test_color_word() -> None:
+    assert L.color_word((224, 0, 0)) == "red"
+    assert L.color_word((0, 0, 200)) == "blue"
+    assert L.color_word((250, 250, 245)) == "white"
+
+
+# ---- Govee ----
+
+def test_govee_off_is_one_turn() -> None:
+    assert L.govee_commands(L.Change(power=False)) == [{"msg": {"cmd": "turn", "data": {"value": 0}}}]
+
+
+def test_govee_colour_and_level_turn_on_first() -> None:
+    msgs = L.govee_commands(L.Change(brightness=40, color=L.parse_color("blue")))
+    assert [m["msg"]["cmd"] for m in msgs] == ["turn", "colorwc", "brightness"]
+    assert msgs[0]["msg"]["data"] == {"value": 1}
+    assert msgs[1]["msg"]["data"] == {"color": {"r": 0, "g": 0, "b": 255}, "colorTemInKelvin": 0}
+    assert msgs[2]["msg"]["data"] == {"value": 40}
+
+
+def test_govee_white_uses_kelvin_clamped() -> None:
+    msgs = L.govee_commands(L.Change(color=L.Color(kelvin=1500, word="x")))
+    assert msgs[1]["msg"]["data"]["colorTemInKelvin"] == L.GOVEE_KELVIN[0]
+
+
+def test_govee_brightness_zero_means_off() -> None:
+    assert L.govee_commands(L.Change(brightness=0)) == [{"msg": {"cmd": "turn", "data": {"value": 0}}}]
+
+
+# ---- Triones ----
+
+def test_triones_frames_bytes() -> None:
+    assert L.TRIONES_ON == bytes.fromhex("cc2333") and L.TRIONES_OFF == bytes.fromhex("cc2433")
+    assert L.triones_color((1, 2, 3)) == bytes.fromhex("56010203 00f0aa".replace(" ", ""))
+    assert L.triones_frames(L.Change(power=False), None) == [L.TRIONES_OFF]
+
+
+def test_triones_status_parse() -> None:
+    st = L.triones_parse_status(bytes.fromhex("66e3234120017b0000000399"))
+    assert st is not None and st.on is True and st.rgb == (123, 0, 0) and st.brightness == 48
+    off = L.triones_parse_status(bytes.fromhex("66e3244120017b0000000399"))
+    assert off is not None and off.on is False
+    assert L.triones_parse_status(b"\x66\x01") is None
+
+
+def test_triones_colour_keeps_current_level() -> None:
+    cur = L.State(on=True, rgb=(128, 0, 0), brightness=50)
+    frames = L.triones_frames(L.Change(color=L.parse_color("blue")), cur)
+    assert frames == [L.TRIONES_ON, L.triones_color((0, 0, 128))]
+
+
+def test_triones_level_keeps_current_colour() -> None:
+    cur = L.State(on=True, rgb=(255, 0, 0), brightness=100)
+    assert L.triones_frames(L.Change(brightness=20), cur)[-1] == L.triones_color((51, 0, 0))
+
+
+def test_triones_colour_on_an_off_light_is_full() -> None:
+    cur = L.State(on=False, rgb=(10, 0, 0))
+    assert L.triones_frames(L.Change(color=L.parse_color("green")), cur)[-1] == L.triones_color((0, 255, 0))
+
+
+# ---- Tuya ----
+
+def test_tuya_temp_percent() -> None:
+    assert L.tuya_temp_percent(2700) == 0 and L.tuya_temp_percent(6500) == 100
+    assert L.tuya_temp_percent(1000) == 0 and L.tuya_temp_percent(4000) == 34
+
+
+def test_tuya_without_key_says_so() -> None:
+    d = L.TuyaDriver(L.Light("b", "tuya", id="x"))
+    with pytest.raises(PermissionError):
+        asyncio.run(d.apply(L.Change(power=True)))
+
+
+# ---- the file ----
+
+def test_load_save_roundtrip_is_private(tmp_path: Any) -> None:
+    p = tmp_path / "lights.json"
+    h, _ = hub()
+    L.save(h.lights, p)
+    assert stat.S_IMODE(p.stat().st_mode) == 0o600
+    back = L.load(p)
+    assert [lt.to_dict() for lt in back] == [lt.to_dict() for lt in h.lights]
+    assert "address" not in back[0].to_dict() and "key" not in back[0].to_dict()
+
+
+def test_load_skips_bad_entries(tmp_path: Any) -> None:
+    p = tmp_path / "lights.json"
+    p.write_text(json.dumps({"lights": [{"name": "x", "kind": "hue"}, {"kind": "govee"}, {"name": "ok", "kind": "govee"}]}))
+    assert [lt.name for lt in L.load(p)] == ["ok"]
+    assert L.load(tmp_path / "missing.json") == []
+
+
+def test_merge_keeps_names_and_takes_new_address() -> None:
+    known = [L.Light("floor lamp", "govee", room="bedroom", ip="192.0.2.10", device="AA:BB")]
+    found = [L.Light("govee h6076", "govee", ip="192.0.2.99", device="AA:BB"),
+             L.Light("floor lamp", "triones", address="u2")]
+    merged, new = L.merge(known, found)
+    assert merged[0].name == "floor lamp" and merged[0].ip == "192.0.2.99" and merged[0].room == "bedroom"
+    assert [n.name for n in new] == ["floor lamp 2"]
+
+
+def test_make_lights_off_switch_and_empty(tmp_path: Any) -> None:
+    p = tmp_path / "lights.json"
+    assert L.make_lights(p, {}) is None
+    L.save([L.Light("a", "govee")], p)
+    assert L.make_lights(p, {"CC_BUDDY_LIGHTS": "0"}) is None
+    assert L.make_lights(p, {}) is not None
+
+
+# ---- which lights ----
+
+def test_resolve() -> None:
+    h, _ = hub()
+    names = lambda t: [lt.name for lt in h.resolve(t)[0]]  # noqa: E731
+    assert names("all") == names("the lights") == names("") == ["floor lamp", "strip", "desk bulb"]
+    assert names("Floor Lamp") == ["floor lamp"]
+    assert names("bedroom") == names("bedroom lights") == ["floor lamp", "strip"]
+    assert names("lamp") == ["floor lamp"]
+    assert names("led strip") == ["strip"]
+    assert names("govee") == ["floor lamp"] and names("sylvania") == ["desk bulb"]
+    got, why = h.resolve("garage")
+    assert got == [] and "floor lamp" in why
+
+
+# ---- the code path ----
+
+@pytest.mark.parametrize("text,names,change", [
+    ("lights off", "all", L.Change(power=False)),
+    ("Turn off the lights", "all", L.Change(power=False)),
+    ("turn the lights on please", "all", L.Change(power=True)),
+    ("lights out", "all", L.Change(power=False)),
+    ("lights blue", "all", L.Change(color=L.parse_color("blue"))),
+    ("set all the lights to purple", "all", L.Change(color=L.parse_color("purple"))),
+    ("make the lights warm white", "all", L.Change(color=L.parse_color("warm white"))),
+    ("lights to 2700K", "all", L.Change(color=L.parse_color("2700k"))),
+    ("lights #ff8800", "all", L.Change(color=L.parse_color("#ff8800"))),
+    ("floor lamp red", ("floor lamp",), L.Change(color=L.parse_color("red"))),
+    ("dim the bedroom lights", ("floor lamp", "strip"), L.Change(brightness=L.DIM_PERCENT)),
+    ("bedroom lights to 30%", ("floor lamp", "strip"), L.Change(brightness=30)),
+    ("set the lamp to blue at 40%", ("floor lamp",), L.Change(brightness=40, color=L.parse_color("blue"))),
+    ("turn off the lamp and the desk bulb", ("floor lamp", "desk bulb"), L.Change(power=False)),
+    ("led strip pink", ("strip",), L.Change(color=L.parse_color("pink"))),
+])
+def test_match(text: str, names: Any, change: L.Change) -> None:
+    h, _ = hub()
+    cmd = h.match(text)
+    assert cmd is not None, text
+    assert cmd.change == change
+    want = tuple(lt.name for lt in h.lights) if names == "all" else names
+    assert cmd.names == want
+
+
+@pytest.mark.parametrize("text", [
+    "turn off the lights in ten minutes", "are the lights on", "why are the lights blue", "blue",
+    "make it cozy", "lights", "turn on the tv", "what's the weather", "lights red and blue",
+    "lights on off", "open spotify", "",
+])
+def test_match_leaves_the_rest_to_the_model(text: str) -> None:
+    h, _ = hub()
+    assert h.match(text) is None, text
+
+
+def test_match_without_lights_is_none() -> None:
+    assert L.Lights([]).match("lights off") is None
+
+
+def test_run_by_code_reports_each() -> None:
+    h, calls = hub()
+    line = asyncio.run(h.run(h.match("lights off")))
+    assert line == "Lights off." and len(calls) == 3
+    h2, _ = hub(fail={"strip"})
+    line2 = asyncio.run(h2.run(h2.match("lights blue at 50%")))
+    assert line2 == "Floor lamp and desk bulb blue at 50%. strip: unreachable."
+
+
+# ---- the tools ----
+
+def test_tools_are_strict_and_complete() -> None:
+    h, _ = hub()
+    for t in h.tools():
+        params = t["parameters"]
+        assert t["strict"] is True and params["additionalProperties"] is False
+        assert sorted(params["required"]) == sorted(params["properties"])
+    assert set(L.TOOL_NAMES) == {"lights_set", "lights_status"}
+    assert "floor lamp (room: bedroom)" in h.instructions() and "led strip" in h.instructions()
+
+
+def test_handle_set_and_status() -> None:
+    h, calls = hub(fail={"desk bulb"})
+    out = asyncio.run(h.handle("lights_set", {"target": "all", "power": None, "brightness": 30, "color": "warm white"}))
+    assert out["ok"] and out["done"] == ["floor lamp", "strip"] and out["failed"][0]["name"] == "desk bulb"
+    assert calls[0][1] == L.Change(brightness=30, color=L.parse_color("warm white"))
+    bad = asyncio.run(h.handle("lights_set", {"target": "all", "power": None, "brightness": None, "color": "plaid"}))
+    assert bad["ok"] is False and "plaid" in bad["reason"]
+    none = asyncio.run(h.handle("lights_set", {"target": "all", "power": None, "brightness": None, "color": None}))
+    assert none["ok"] is False
+    st = asyncio.run(h.handle("lights_status", {"target": "bedroom"}))
+    assert [x["name"] for x in st["lights"]] == ["floor lamp", "strip"]
+    assert st["lights"][0] == {"name": "floor lamp", "room": "bedroom", "reachable": True, "on": True,
+                               "brightness": 40, "color": "blue", "rgb": "#0000ff"}
+    st2 = asyncio.run(h.handle("lights_status", {"target": "office"}))
+    assert st2["lights"][0]["reachable"] is False
+
+
+def test_a_slow_light_times_out_alone() -> None:
+    class Slow(FakeDriver):
+        async def apply(self, change: L.Change) -> None:
+            await asyncio.sleep(5)
+    calls: list = []
+    lights = [L.Light("a", "govee"), L.Light("b", "triones")]
+    h = L.Lights(lights, drivers={"govee": lambda lt: FakeDriver(lt, calls, set()),
+                                  "triones": lambda lt: Slow(lt, calls, set()), "tuya": lambda lt: None},
+                 timeout=0.05)
+    out = asyncio.run(h.set("all", L.Change(power=True)))
+    assert out["done"] == ["a"] and out["failed"] == [{"name": "b", "reason": "it did not answer in time"}]
+
+
+def test_cli_name_sets_room_and_key(tmp_path: Any) -> None:
+    p = tmp_path / "lights.json"
+    L.save([L.Light("tuya abcd", "tuya", id="x", ip="192.0.2.5")], p)
+    lines: list[str] = []
+    assert L.cli(["name", "tuya abcd", "desk bulb", "--room", "office", "--key", "secret"], p, lines.append) == 0
+    lt = L.load(p)[0]
+    assert (lt.name, lt.room, lt.key) == ("desk bulb", "office", "secret")
+    assert "secret" not in "\n".join(lines)

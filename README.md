@@ -55,6 +55,12 @@ and desktop widget show its diary, memories and lessons.
   [how a task is routed](#how-a-computer-task-is-routed).
 - **Takes notes.** `cc-buddy-bridge take-notes start` records a room-note session;
   stopping it produces a write-up of decisions, actions and open questions.
+- **Controls your lights.** Govee (LAN), HappyLighting (Bluetooth) and Sylvania
+  Smart+ Wi-Fi (Tuya), all on the Mac with no cloud. "Lights blue", "lights off" or
+  "dim the bedroom to 30%" is done by code in about a second, from Telegram, the
+  Voice PE or the robot's voice, and the Mini App has a Lights card (on, off,
+  colours, brightness). "Make it cozy" goes to the model. See
+  [lights](docs/lights.md).
 
 ### From your phone (opt-in)
 
@@ -458,6 +464,7 @@ Persistent data lives under `~/.config/cc-buddy-bridge/`:
 | `memory/` | With `CC_BUDDY_MEMORY=1`: `transcripts/` (every word, and meeting notes), `records/` (profile, stars, records and the dream journal, a sealed local git repository), `mem0/` (the meaning index) and `archive/` (the retired debrief store, moved once). See [memory.md](docs/stackchan/memory.md). |
 | `learning/` | `lessons.sqlite3` and saved lesson/whiteboard data |
 | `agent-runs/` | Desktop-task run logs |
+| `lights.json` | Your lights: names, rooms, local addresses and Tuya keys (mode 600). See [lights](docs/lights.md). |
 | `spend/` | The daily spend ledger (one JSONL file per local day: provider, model, feature, dollars, token counts, never words) and `providers.json`, the providers' own figures. See [what buddy spends](docs/stackchan/spending.md). |
 
 - `cc-buddy-bridge mic off` disables microphone capture until re-enabled.

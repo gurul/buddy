@@ -451,6 +451,8 @@ class Daemon:
             self._vision.stop()
             if getattr(self, "_meeter", None) is not None:
                 await self._meeter.close()                  # a call in progress: its notes are written
+            if getattr(self, "_lights", None) is not None:
+                await self._lights.close()                  # a held Bluetooth connection goes back to the phone app
             if getattr(self, "_chrome_lane", None) is not None:
                 await self._chrome_lane.close()             # buddy's tab only; the owner's Chrome stays
             for t in tasks:
@@ -1140,7 +1142,8 @@ class Daemon:
                                                self, on, lesson_id),
                                            on_open=lambda session: Daemon._on_voice_session(self, session),
                                            mac_busy=lambda: Daemon._texted_task_running(self),
-                                           meeter=getattr(self, "_meeter", None))
+                                           meeter=getattr(self, "_meeter", None),
+                                           lights=Daemon._lights_hub(self))
         except asyncio.CancelledError:
             self._explore_after_conversation = None      # hushed: stay put
             self._think_aloud_wish = None                # a hush or a stop cancels a pending listen too
@@ -1255,7 +1258,7 @@ class Daemon:
         apps = Daemon._make_apps(self, tg.owner_ids) if tg.enabled else None
         self._meeter = Daemon._make_meeter(self, apps) if tg.enabled else None
         return telegram_mod.make_inlet(
-            tg, watcher=watcher, meeter=self._meeter,
+            tg, watcher=watcher, meeter=self._meeter, lights=Daemon._lights_hub(self),
             apps=apps,
             vault=vault if tg.enabled and vault.enabled else None,
             agent_factory=self._make_agent, agent_enabled=self._agent_cfg.enabled,
@@ -1306,6 +1309,7 @@ class Daemon:
 
         server = getattr(self._miniapp, "server", None)
         if server is not None:
+            server.lights = Daemon._lights_hub(self)        # the Lights card, when there are lights (lights.py)
             server.calls = PhoneCalls(
                 lambda init_data: miniapp.check_init_data(init_data, cfg.token, cfg.owner_ids),
                 getattr(self, "_telegram", None), make_voice())
@@ -1345,6 +1349,19 @@ class Daemon:
                  "pressed by buddy (CC_BUDDY_CHROME_ACCESS=allow)" if chrome_consent.access_preference() == "allow"
                  else "asked on the phone")
         return lane
+
+    def _lights_hub(self) -> Any:
+        """The owner's lights (lights.py), made once and shared by the chat and the voice; None when there are none
+        (no lights file) or CC_BUDDY_LIGHTS=0. The file is read at the first ask: a restart picks up a new scan."""
+        if not hasattr(self, "_lights"):
+            from . import lights as lights_mod
+
+            try:
+                self._lights = lights_mod.make_lights()
+            except Exception:  # noqa: BLE001 — lights that cannot load cost the lights, never the daemon
+                log.exception("lights: could not load; lights are off this run")
+                self._lights = None
+        return self._lights
 
     def _make_meeter(self, apps: Any) -> Any:
         """The Meet notetaker (meet.py): joins from the owner's Chrome (attach mode) on a browser lane of its own,

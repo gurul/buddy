@@ -190,6 +190,22 @@
   header .call-btn { background: var(--accent); color: var(--accent-text); border-radius: 999px; padding: 6px 14px;
     font-weight: 600; font-size: 14px; min-height: 36px; }
   header .call-btn:disabled { opacity: .5; }
+  /* The Lights card (lights.py via /api/lights): which lights, on/off, a colour, a level */
+  .lights .head { display: flex; justify-content: space-between; align-items: center; gap: 8px; margin-bottom: 8px; }
+  .lights h2 { margin: 0; font-size: 16px; }
+  .lights .power { display: flex; gap: 6px; }
+  .lights .power button { min-width: 56px; }
+  .lights .ideas { margin-top: 0; }
+  .lights .ideas button[aria-checked="true"] { background: var(--accent); color: var(--accent-text); border-color: var(--accent); }
+  .swatches { display: grid; grid-template-columns: repeat(auto-fill, minmax(44px, 1fr)); gap: 8px; margin: 12px 0; }
+  .swatches button { aspect-ratio: 1; min-height: 44px; border-radius: 50%; border: 2px solid var(--code); padding: 0; }
+  .swatches button:focus-visible, .lights .ideas button:focus-visible, .lights .power button:focus-visible {
+    outline: 2px solid var(--link); outline-offset: 2px; }
+  .lights .level { display: flex; align-items: center; gap: 10px; }
+  .lights .level label { font-weight: 400; margin: 0; font-size: 14px; color: var(--hint); flex: none; }
+  .lights input[type="range"] { flex: 1; accent-color: var(--accent); min-height: 44px; }
+  .lights .level output { font-variant-numeric: tabular-nums; min-width: 3.2em; text-align: right; font-size: 14px; }
+  .lights .said { color: var(--hint); font-size: 13px; margin: 6px 0 0; min-height: 1.5em; }
   .call { position: fixed; inset: 0; z-index: 50; background: var(--bg); display: flex; flex-direction: column;
     align-items: center; justify-content: center; gap: 18px; padding: 24px 16px calc(24px + env(safe-area-inset-bottom)); }
   .call .face { width: 132px; height: 132px; border-radius: 50%; background: var(--accent); color: var(--accent-text);
@@ -231,6 +247,16 @@
   </div>
 </div>
 <section id="apps">
+  <div class="make lights" id="lights-card" role="region" aria-labelledby="lights-title" hidden>
+    <div class="head"><h2 id="lights-title">Lights</h2>
+      <div class="power"><button type="button" class="btn" id="lights-on">On</button>
+        <button type="button" class="btn" id="lights-off">Off</button></div></div>
+    <div class="ideas" id="light-targets" role="radiogroup" aria-label="Which lights"></div>
+    <div class="swatches" id="swatches" role="group" aria-label="Colour"></div>
+    <div class="level"><label for="level">Brightness</label>
+      <input type="range" id="level" min="1" max="100" step="1" value="100"><output id="level-out" for="level">100%</output></div>
+    <p class="said" id="lights-said" role="status" aria-live="polite"></p>
+  </div>
   <div class="make" id="make-card">
     <label for="want" id="want-label">What should I build?</label>
     <textarea id="want" rows="2" placeholder="A habit tracker with daily check-ins and streaks"></textarea>
@@ -313,7 +339,70 @@
 
   if (!initData) { spent.textContent = "Open this from buddy's pinned message in Telegram."; spent.disabled = true; $("make").disabled = true; }
   else fetch("api/me", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ initData }) })
-    .then((r) => r.json()).then((j) => { if (j.error) spent.textContent = j.error; else showSpent(j); }).catch(() => {});
+    .then((r) => r.json()).then((j) => {
+      if (j.error) { spent.textContent = j.error; return; }
+      showSpent(j);
+      if (Array.isArray(j.lights) && j.lights.length) showLights(j.lights);
+    }).catch(() => {});
+
+  // ---- the Lights card: every light at once by default (owner, 2026-09-27: "usually i set all the lights to be
+  // same color"), or one light or room. Names come from the owner's own lights file; still textContent only.
+  const SWATCHES = [["red", "#ff2a2a"], ["orange", "#ff7a1a"], ["yellow", "#ffd21a"], ["green", "#1ed760"],
+    ["cyan", "#1ae0ff"], ["blue", "#2a5cff"], ["purple", "#8c2aff"], ["pink", "#ff4fa3"],
+    ["warm white", "#ffd9a0"], ["white", "#fff6ea"]];
+  let lightTarget = "all";
+  function showLights(list) {
+    const card = $("lights-card"), targets = $("light-targets"), said = $("lights-said");
+    const choices = [["all", "All"]];
+    const rooms = [...new Set(list.map((l) => l.room).filter(Boolean))];
+    if (list.length > 1) rooms.forEach((r) => choices.push([r, r[0].toUpperCase() + r.slice(1)]));
+    if (list.length > 1) list.forEach((l) => choices.push([l.name, l.name[0].toUpperCase() + l.name.slice(1)]));
+    targets.hidden = choices.length < 2;
+    choices.forEach(([value, label]) => {
+      const b = el("button", "", label);
+      b.type = "button"; b.setAttribute("role", "radio"); b.setAttribute("aria-checked", String(value === lightTarget));
+      b.onclick = () => {
+        lightTarget = value;
+        targets.querySelectorAll("button").forEach((x) => x.setAttribute("aria-checked", String(x === b)));
+      };
+      targets.append(b);
+    });
+    const swatches = $("swatches");
+    SWATCHES.forEach(([name, hex]) => {
+      const b = el("button", "");
+      b.type = "button"; b.style.background = hex; b.setAttribute("aria-label", name); b.title = name;
+      b.onclick = () => setLights({ color: name });
+      swatches.append(b);
+    });
+    const level = $("level"), out = $("level-out");
+    level.oninput = () => { out.textContent = level.value + "%"; };
+    level.onchange = () => setLights({ brightness: Number(level.value) });
+    $("lights-on").onclick = () => setLights({ power: true });
+    $("lights-off").onclick = () => setLights({ power: false });
+    card.hidden = false;
+    // what they are now: the first light that answers sets the slider
+    post("api/lights", { action: "status" }).then(reply).then((j) => {
+      const seen = (j.lights || []).filter((l) => l.reachable);
+      if (seen.length && typeof seen[0].brightness === "number") {
+        level.value = Math.max(1, seen[0].brightness); out.textContent = level.value + "%";
+      }
+      said.textContent = (j.lights || []).map((l) => l.name + ": " + (!l.reachable ? "not answering"
+        : !l.on ? "off" : [l.color || (l.white_kelvin ? "white" : ""), typeof l.brightness === "number" ? l.brightness + "%" : ""]
+          .filter(Boolean).join(" "))).join(" · ");
+    }).catch(() => {});
+  }
+  async function setLights(change) {
+    const said = $("lights-said");
+    said.textContent = "…";
+    if (tg && tg.HapticFeedback) tg.HapticFeedback.impactOccurred("light");
+    try {
+      const j = await reply(await post("api/lights", Object.assign({ action: "set", target: lightTarget }, change)));
+      said.textContent = j.line || j.error || "Something went wrong.";
+      if (tg && tg.HapticFeedback) tg.HapticFeedback.notificationOccurred(j.ok ? "success" : "error");
+    } catch (e) {
+      said.textContent = "buddy didn't answer. Is the Mac awake?";
+    }
+  }
 
   // ---- apps ----
   // App titles and descriptions come from pages Claude wrote, so they only ever reach the page as textContent.

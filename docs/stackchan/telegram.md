@@ -479,6 +479,11 @@ Flip it to `ask` if two seconds a command is a price you will pay.
   code with no model call, relay or not. "join my 3pm" in words is a model turn
   with `meet_join`, `meet_status` and `meet_leave`. The texts are titled
   **Meet**. See [sitting in on Meet calls](meet.md).
+- **Lights** — a text that is only a light command ("lights off", "lights
+  blue", "dim the lamp to 30%") is done by code with no model call, and the
+  reply is one line ("Lights blue."). Anything more ("make it cozy") is a model
+  turn with `lights_set` and `lights_status`. Only with lights set up. See
+  [lights](../lights.md).
 - **"typing…"** shows while buddy works on a reply, for the whole turn, not only
   the first 5 seconds. It is sent again every 4 s and stops when the reply goes
   out. `think_hard` keeps it up for up to 5 minutes. It pauses while buddy waits

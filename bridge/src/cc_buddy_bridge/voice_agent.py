@@ -89,6 +89,7 @@ from datetime import datetime
 from typing import TYPE_CHECKING, Any, Awaitable, Callable, Optional
 
 from . import head as head_mod
+from . import lights as lights_mod
 from . import spend, system_context, websearch
 from .agent_contract import AgentEvent
 from .caption_pager import CaptionPager, Event, PagerConfig, caption_instructions
@@ -501,7 +502,8 @@ def session_config(config: VoiceConfig, brief: str = "",
                    think_aloud: Optional[dict[str, Any]] = None, profile: str = "", *,
                    backend_profile: str = "", today: str = "", backend_today: str = "",
                    memory_tools: Optional[list[dict[str, Any]]] = None,
-                   meet_tools: Optional[list[dict[str, Any]]] = None) -> dict[str, Any]:
+                   meet_tools: Optional[list[dict[str, Any]]] = None,
+                   lights: Any = None) -> dict[str, Any]:
     """The `session.start` payload (Live API, openai 3.13).
 
     There is no `output_modalities` and no turn-detection block: gpt-live-1 is
@@ -526,6 +528,9 @@ def session_config(config: VoiceConfig, brief: str = "",
         memory_tools = None
     extra = list(memory_tools or [])
     meeting = [] if listening else list(meet_tools or [])      # a lesson never sends buddy into a call
+    # the owner's lights (lights.py), when there are any: the backend gets the tools and the list of lights
+    light_tools = [] if listening or lights is None else lights.tools()
+    lights_block = "" if not light_tools else "\n\n" + lights.instructions()
     return {
         "model": config.model,
         "instructions": INSTRUCTIONS + profile_block(profile) + today_block(today) + context + memory_block(brief)
@@ -543,8 +548,10 @@ def session_config(config: VoiceConfig, brief: str = "",
                 "instructions": BACKEND_INSTRUCTIONS + (BACKEND_MEMORY_RULES if extra else "")
                                 + backend_profile_block(backend_profile)
                                 + today_block(backend_today, BACKEND_TODAY_HEADER) + context
-                                + (think_aloud_mod.backend_instructions(think_aloud) if listening else ""),
-                "tools": TOOLS + (websearch.tools_for(config.search) if config.web_search else []) + extra + meeting,
+                                + (think_aloud_mod.backend_instructions(think_aloud) if listening else "")
+                                + lights_block,
+                "tools": TOOLS + (websearch.tools_for(config.search) if config.web_search else []) + extra + meeting
+                         + light_tools,
                 "tool_choice": "auto",
                 "reasoning": {"effort": config.backend_effort},
                 "parallel_tool_calls": False,
@@ -734,8 +741,10 @@ class VoiceSession:
         on_expression: Optional[Callable[[str, str], None]] = None,
         mac_busy: Callable[[], bool] = lambda: False,       # a task from another door (telegram.py) has the Mac
         meeter: Any = None,                                 # meet.Meeter, or None: "join my meeting" out loud
+        lights: Any = None,                                 # lights.Lights, or None: "lights off" out loud
     ) -> None:
         self.meeter = meeter
+        self.lights = lights
         self.on_expression = on_expression
         self.mac_busy = mac_busy
         self._expression_chars = 0
@@ -864,7 +873,8 @@ class VoiceSession:
                 memory_tools = self._memory_tools()
         cfg = session_config(self.config, self.brief, self._think_aloud, profile,
                              backend_profile=backend_profile, today=self.today, backend_today=self.backend_today,
-                             memory_tools=memory_tools, meet_tools=MEET_TOOLS if self.meeter is not None else None)
+                             memory_tools=memory_tools, meet_tools=MEET_TOOLS if self.meeter is not None else None,
+                             lights=self.lights)
         log.info("voice: prompt front %d chars, backend %d chars",
                  len(cfg["instructions"]), len(cfg["delegation"]["responses"]["instructions"]))
         await self.conn.session.start(session=cfg)
@@ -1542,7 +1552,7 @@ class VoiceSession:
             else:
                 result = {"ok": False, "reason": "on must be true or false"}
         elif (name in ("look", "look_around", "find", "think_hard", "lesson", "take_photo", websearch.TOOL_NAME)
-              or name in self._memory_tool_names or name in MEET_TOOL_NAMES):
+              or name in self._memory_tool_names or name in MEET_TOOL_NAMES or name in lights_mod.TOOL_NAMES):
             # Seconds (or a minute, for think_hard) of camera, head, model or disk work:
             # answered from a background task, so Live events (the owner talking,
             # captions) keep flowing meanwhile.
@@ -1624,6 +1634,10 @@ class VoiceSession:
                     result = await self._memory_tool(name, args)
                 elif name in MEET_TOOL_NAMES:
                     result = await self._meeting(name, args)
+                elif name in lights_mod.TOOL_NAMES:
+                    # a Bluetooth light can take seconds to connect: a slow tool, like the camera
+                    result = (await self.lights.handle(name, args) if self.lights is not None
+                              else {"ok": False, "reason": lights_mod.OFF_REASON})
                 else:
                     result = await self._find(str(args.get("target", "")))
             except asyncio.CancelledError:
@@ -2074,6 +2088,7 @@ async def open_session(
     on_expression: Optional[Callable[[str, str], None]] = None,
     mac_busy: Callable[[], bool] = lambda: False,
     meeter: Any = None,
+    lights: Any = None,
 ) -> None:
     """Run one full conversation on the real Live API — captions to the robot,
     or the real speaker in audio mode.
@@ -2103,7 +2118,8 @@ async def open_session(
                                    backend_today=backend_today, learning=learning,
                                    think_aloud=think_aloud, lesson_wake=lesson_wake, on_spoken_idea=on_spoken_idea,
                                    on_think_aloud=on_think_aloud, head_pose=head_pose, gate=gate,
-                                   on_expression=on_expression, mac_busy=mac_busy, meeter=meeter)
+                                   on_expression=on_expression, mac_busy=mac_busy, meeter=meeter,
+                                   lights=lights)
             if on_open is not None:
                 on_open(session)
             try:

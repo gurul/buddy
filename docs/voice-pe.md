@@ -113,6 +113,10 @@ App calls and hold to talk. Only a message that is **only** that question
 counts. "What time is my meeting" or "weather in my photos" still goes to the
 model. If a source fails, the model answers as before.
 
+Light commands are handled the same way. "Lights off", "lights blue" or "dim
+the lamp to 30%" is done by code, and anything more ("make it cozy") goes to
+the model with the light tools. See [lights](lights.md).
+
 "Here" is `CC_BUDDY_WEATHER_PLACE` in `~/.config/cc-buddy-bridge/env` (a
 place name), or `CC_BUDDY_WEATHER_LAT` and `CC_BUDDY_WEATHER_LON`. A named
 place ("weather in Tokyo", "time in New York") is looked up with Open-Meteo's

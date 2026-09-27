@@ -77,6 +77,9 @@ dev = ["pytest>=8.0", "ruff>=0.6"]
 # 1.63.0 current per PyPI, 2026-09-21, Python >=3.10. Imported lazily; the daemon runs without it. Install with
 # `pip install -e ".[browser]"` then `python -m playwright install chromium` (~95 MB).
 browser = ["playwright>=1.63,<2"]
+# The owner's Sylvania Smart+ Wi-Fi lights (lights.py) are Tuya devices: tinytuya speaks Tuya's local protocol.
+# 1.20.0 current per PyPI, 2026-09-27. Imported lazily; Govee and HappyLighting need nothing extra.
+lights = ["tinytuya>=1.20,<2"]
 # The watcher's Chrome-like read (watch.py tls_request): libcurl that shakes hands as Chrome does, for shops that
 # refuse Python's TLS (LEGO 403, Best Buy no answer; measured 2026-09-26). 0.16.3 current per PyPI, 2026-09-26,
 # MIT, Python >=3.10; wheels bundle their own libcurl. Imported lazily; `pip install -e ".[tls]"`.

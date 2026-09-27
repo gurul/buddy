@@ -2404,3 +2404,48 @@ def test_join_meeting_without_a_meeter_says_why() -> None:
         await task
     asyncio.run(go())
     assert conn.tool_outputs()[0]["ok"] is False and "off" in conn.tool_outputs()[0]["reason"]
+
+
+class _FakeLights:
+    def __init__(self) -> None:
+        self.calls: list = []
+
+    def tools(self) -> list:
+        from cc_buddy_bridge import lights
+        return lights.TOOLS
+
+    def instructions(self) -> str:
+        return "The lights:\n- floor lamp"
+
+    async def handle(self, name: str, args: dict) -> dict:
+        self.calls.append((name, args))
+        return {"ok": True, "done": ["floor lamp"], "failed": [], "change": "off"}
+
+
+def test_the_lights_are_offered_to_the_backend_only_with_lights_and_never_in_a_lesson() -> None:
+    from cc_buddy_bridge import voice_agent
+
+    names = lambda cfg: [t.get("name") for t in cfg["delegation"]["responses"]["tools"]]  # noqa: E731
+    cfg = VoiceConfig()
+    assert "lights_set" not in names(voice_agent.session_config(cfg))
+    on = voice_agent.session_config(cfg, lights=_FakeLights())
+    assert {"lights_set", "lights_status"} <= set(names(on))
+    assert "floor lamp" in on["delegation"]["responses"]["instructions"]
+    lesson = voice_agent.session_config(cfg, think_aloud={"id": "l1", "topic": "fractions"}, lights=_FakeLights())
+    assert "lights_set" not in names(lesson) and "floor lamp" not in lesson["delegation"]["responses"]["instructions"]
+
+
+def test_lights_out_loud_reach_the_lights() -> None:
+    hub = _FakeLights()
+    args = {"target": "all", "power": False, "brightness": None, "color": None}
+    conn = FakeConnection([_tool_call("lights_set", "c1", **args)])
+    s, _, _ = _session(conn, [FakeAgent(None, None)], lights=hub)
+
+    async def go():
+        task = asyncio.create_task(s.run())
+        await _eventually(lambda: bool(conn.tool_outputs()))
+        conn.feed(_tool_call("end_conversation", "c9"), None)
+        await task
+    asyncio.run(go())
+    assert hub.calls == [("lights_set", args)]
+    assert conn.tool_outputs()[0]["done"] == ["floor lamp"]

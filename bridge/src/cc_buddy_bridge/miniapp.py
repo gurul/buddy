@@ -38,6 +38,9 @@ apps"): the apps are the point.
   app and how each build went (``/api/apps/<slug>/history``, owner only), and takes the next change. Inside an
   app, Telegram's Settings item and a small pencil lead there; the app only navigates, it never gets the power
   to change apps or spend.
+* **A Lights card** (owner, 2026-09-27: "in telegram apps allow me to control lights"): with lights set up
+  (lights.py), the home page shows On, Off, colours and a brightness slider for every light at once, a room or one
+  light, through ``/api/lights`` (owner only). ``/api/me`` lists the lights' names and rooms, never an address.
 
 Off unless ``CC_BUDDY_MINIAPP=1`` with the Telegram door configured and ``ANTHROPIC_API_KEY`` set.
 """
@@ -344,6 +347,7 @@ class MiniAppServer:
         self.notify = notify
         self.public_url = ""                              # the tunnel's address: the origin app pages are bound to
         self.calls: Any = None                            # phone_call.PhoneCalls: "Call buddy", or None
+        self.lights: Any = None                           # lights.Lights: the Lights card, or None (no lights)
         self._conns: set[asyncio.Task] = set()
         self._server: Optional[asyncio.base_events.Server] = None
         self.port = 0
@@ -450,7 +454,7 @@ class MiniAppServer:
                                                                      "Access-Control-Allow-Headers": "content-type",
                                                                      "Access-Control-Max-Age": "600"})
             return
-        known = path in ("/api/me", "/api/spend", "/api/apps", "/api/make") or api_app is not None
+        known = path in ("/api/me", "/api/spend", "/api/apps", "/api/make", "/api/lights") or api_app is not None
         if method != "POST" or not known:
             await self._send(writer, 404, b"not found", "text/plain")
             return
@@ -484,7 +488,15 @@ class MiniAppServer:
             await self._json(writer, 403, {"error": "Only buddy's owner can use this."})
             return
         if path == "/api/me":
-            await self._json(writer, 200, {"model": self.cfg.model, "apps": self.store is not None, **self.spend()})
+            await self._json(writer, 200, {"model": self.cfg.model, "apps": self.store is not None, **self.spend(),
+                                           "lights": self.lights.listing() if self.lights is not None else []})
+            return
+        if path == "/api/lights":
+            # The Lights card (lights.py): owner only, like everything above; an app's token never reaches here.
+            if self.lights is None:
+                await self._json(writer, 404, {"ok": False, "line": "buddy has no lights on this computer."})
+                return
+            await self._json(writer, 200, await self.lights.panel(body))
             return
         if path == "/api/spend":
             await self._json(writer, 200, await asyncio.to_thread(self.spending))    # ~30 small file reads

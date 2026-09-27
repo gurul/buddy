@@ -1740,3 +1740,59 @@ def test_requests_from_before_results_were_kept_say_so_once(tmp_path: Path) -> N
     rows, errors = browse(tmp_path, script)
     assert errors == [] and [r[0] for r in rows] == ["msg note", "msg asked", "msg asked"]
     assert rows[0][1][0] == "Earlier changes show only what was asked: their results were not kept then."
+
+
+def test_the_lights_card_is_the_owners_only_and_drives_the_lights(tmp_path: Path) -> None:
+    from cc_buddy_bridge import lights
+
+    applied: list = []
+
+    class Driver:
+        def __init__(self, light) -> None:
+            self.light = light
+
+        async def apply(self, change) -> None:
+            if self.light.name == "strip":
+                raise ConnectionError("out of range")
+            applied.append((self.light.name, change))
+
+        async def state(self):
+            return lights.State(on=True, brightness=30, rgb=(0, 255, 0))
+
+        async def close(self) -> None:
+            return None
+
+    hub = lights.Lights([lights.Light("floor lamp", "govee", room="bedroom", ip="192.0.2.1", device="d"),
+                         lights.Light("strip", "triones", room="bedroom", address="u")],
+                        drivers={k: Driver for k in lights.KINDS})
+
+    async def go():
+        srv = run_server(tmp_path)
+        port = await srv.start()
+        try:
+            off = await post(port, "/api/me", {"initData": signed()})           # no lights lent: none listed
+            none = await post(port, "/api/lights", {"initData": signed(), "action": "status"})
+            srv.lights = hub
+            me = await post(port, "/api/me", {"initData": signed()})
+            stranger = await post(port, "/api/lights", {"initData": signed(999), "action": "set", "color": "red"})
+            status = await post(port, "/api/lights", {"initData": signed(), "action": "status"})
+            blue = await post(port, "/api/lights", {"initData": signed(), "action": "set", "target": "all",
+                                                    "color": "blue"})
+            dim = await post(port, "/api/lights", {"initData": signed(), "action": "set", "target": "floor lamp",
+                                                   "brightness": 40})
+            bad = await post(port, "/api/lights", {"initData": signed(), "action": "set", "color": "plaid"})
+            return off, none, me, stranger, status, blue, dim, bad
+        finally:
+            await srv.close()
+
+    off, none, me, stranger, status, blue, dim, bad = asyncio.run(go())
+    assert off.json()["lights"] == [] and none.status_code == 404
+    assert me.json()["lights"] == [{"name": "floor lamp", "room": "bedroom"}, {"name": "strip", "room": "bedroom"}]
+    assert "192.0.2.1" not in me.text                                   # names and rooms only, never addresses
+    assert stranger.status_code == 403 and applied[:1] != [("floor lamp", lights.Change(color=lights.parse_color("red")))]
+    assert [x["name"] for x in status.json()["lights"]] == ["floor lamp", "strip"]
+    assert blue.json() == {"ok": True, "line": "Floor lamp blue. strip: out of range.", "failed": ["strip"]}
+    assert dim.json()["line"] == "Floor lamp at 40%."
+    assert applied == [("floor lamp", lights.Change(color=lights.parse_color("blue"))),
+                       ("floor lamp", lights.Change(brightness=40))]
+    assert bad.json() == {"ok": False, "line": "Unknown colour 'plaid'."}
