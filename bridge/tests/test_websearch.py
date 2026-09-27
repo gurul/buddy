@@ -100,7 +100,9 @@ def test_parse_reads_the_answer_and_the_citations_once_each() -> None:
         ws.parse({"error": "x"})
 
 
-def test_search_posts_once_and_never_raises() -> None:
+def test_search_posts_once_and_never_raises(monkeypatch: pytest.MonkeyPatch) -> None:
+    # No key on this machine, whatever the shell has: with one, the no-key case made a real, paid search.
+    monkeypatch.delenv("OPENROUTER_API_KEY", raising=False)
     seen: list[tuple[str, dict, float]] = []
 
     def opener(req, timeout):
