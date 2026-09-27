@@ -1,6 +1,7 @@
 #pragma once
 #include <Arduino.h>
 #include <LittleFS.h>
+#include <Preferences.h>
 #include "ble_bridge.h"
 #include "diag.h"
 #include "hal_m5.h"
@@ -138,6 +139,41 @@ inline bool xferCommand(JsonDocument& doc) {
     settings().led = doc["on"] | true;
     settingsSave();
     _xAck("led", true);
+    return true;
+  }
+
+  // {"cmd":"pitch_zero"} reports the pitch servo's zero (NVS servo/zero_pos_2, raw
+  // servo steps, 3.2 per degree; BSP default 620). {"cmd":"pitch_zero","raw":N}
+  // stores a new one and reboots, since the BSP reads it only at begin(). It
+  // shifts the whole pitch range: on this robot the raw servo runs opposite to
+  // the code convention (body.cpp PITCH_REVERSED), so a LOWER zero tilts the
+  // range UP. Added 2026-09-27 while chasing what turned out to be that
+  // reversal; the zero itself stays at the BSP default 620. Bounded to 520..700
+  // so one command cannot drive the neck hard into its stop; step it while
+  // someone watches the head.
+  // {"cmd":"ext_power","on":bool}: the CoreS3 external 5 V output, not persisted
+  // (every boot is quiet again). Acks with the readback and a fresh servo read in
+  // tenths of a degree (n = yaw*10000 + pitch, both offset by 5000 to stay
+  // unsigned), so a bench can tell a servo that answers from one that does not.
+  if (strcmp(cmd, "ext_power") == 0) {
+    bool on = doc["on"] | false;
+    int y = 0, pt = 0;
+    bool ok = halExtPower(on, &y, &pt);
+    _xAck("ext_power", ok, (uint32_t)((y + 5000) * 10000 + (pt + 5000)));
+    return true;
+  }
+
+  if (strcmp(cmd, "pitch_zero") == 0) {
+    Preferences p;
+    int cur = -1;
+    if (p.begin("servo", true)) { cur = p.getInt("zero_pos_2", -1); p.end(); }
+    if (doc["raw"].isNull()) { _xAck("pitch_zero", cur >= 0, (uint32_t)(cur < 0 ? 0 : cur)); return true; }
+    int raw = doc["raw"] | -1;
+    if (raw < 520 || raw > 700) { _xAck("pitch_zero", false, (uint32_t)(cur < 0 ? 0 : cur)); return true; }
+    bool ok = p.begin("servo", false) && p.putInt("zero_pos_2", raw) == sizeof(int32_t);
+    p.end();
+    _xAck("pitch_zero", ok, (uint32_t)raw);
+    if (ok) { Serial.flush(); delay(200); ESP.restart(); }
     return true;
   }
 

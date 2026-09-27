@@ -5,6 +5,8 @@
 #include <sys/time.h>
 #include <time.h>
 
+int bodyServoPitchTenthsToCode(int tenths);   // body.cpp: the PITCH_REVERSED mirror for a raw servo read
+
 void halBegin() {
   // Enlarge the HWCDC rings before the first begin(): the bridge's
   // heartbeats arrive as one USB-speed burst, and the default 256-byte RX
@@ -97,6 +99,16 @@ bool halNoiseTest(const char* target) {
 }
 
 bool halNoiseMotorsOff() { return noiseTest == NoiseTest::Motors; }
+
+bool halExtPower(bool on, int* yaw, int* pitch) {
+  M5.Power.setExtOutput(on);
+  delay(300);
+  *yaw = M5StackChan.Motion.getCurrentXAngle();
+  *pitch = bodyServoPitchTenthsToCode(M5StackChan.Motion.getCurrentYAngle());   // code convention, as body.cpp logs it
+  bool now = M5.Power.getExtOutput();
+  Serial.printf("[power] external_5v=%d servo yaw=%d pitch=%d (0.1deg)\n", now, *yaw, *pitch);
+  return now == on;
+}
 
 void halNoiseTestUpdate() {
   if (noiseTest == NoiseTest::None) return;

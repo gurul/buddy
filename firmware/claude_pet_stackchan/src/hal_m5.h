@@ -22,6 +22,8 @@ void   halUpdate();
 bool   halNoiseTest(const char* target);
 void   halNoiseTestUpdate();
 bool   halNoiseMotorsOff();
+// External 5 V on/off (not persisted) and a fresh servo read in 0.1 deg; true when the readback matches.
+bool   halExtPower(bool on, int* yaw, int* pitch);
 // The CoreS3 panel (M5.Display). Valid to take the reference before begin().
 M5GFX& halDisplay();
 

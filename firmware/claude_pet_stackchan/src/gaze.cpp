@@ -14,13 +14,13 @@
 #include <M5StackChan.h>
 #include <Preferences.h>
 
-// ---- geometry (spike values; kElevSign unverified on the bench) ----
+// ---- geometry (spike values; signs bench-verified 2026-09-27 with the camera) ----
 static constexpr float kCameraHfovDeg = 66.0f;                 // GC0308 lens assumption
 static constexpr float kCameraVfovDeg = kCameraHfovDeg * 3.0f / 4.0f;
 // bench 2026-09-05: +1 — the head follows the hand (frame not mirrored
 // relative to BSP yaw).
 static constexpr float kYawSign  = 1.0f;
-static constexpr float kElevSign = 1.0f;                       // UNVERIFIED
+static constexpr float kElevSign = 1.0f;                       // bench 2026-09-27: +by (down) = lower pitch, with body.cpp's mirror
 static constexpr float kYawLimitDeg = 60.0f;
 static constexpr float kPitchMinDeg = 5.0f, kPitchMaxDeg = 85.0f;
 static constexpr int   kObserveMinConf = 20;                   // weaker motion is noise

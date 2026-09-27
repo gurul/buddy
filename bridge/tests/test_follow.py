@@ -151,7 +151,9 @@ def test_weak_or_tiny_faces_are_not_people() -> None:
     for _ in range(8):
         b.t += 0.25
         asyncio.run(b.f.on_faces([FaceResult(70, 0, 20, 20), FaceResult(-70, 0, 2, 95)], 0.0, 45.0))
-    assert b.sent == [] and b.f.track is None
+    # never a track; the only looks are the empty-map opening scan, which keeps the head's own yaw (a
+    # followed face at bx=70 would have turned it)
+    assert b.f.track is None and all(c["yaw"] == 0 for c in b.sent)
 
 
 def test_an_asked_for_pose_is_the_owners_for_as_long_as_it_is_held() -> None:
@@ -258,17 +260,82 @@ def test_a_conversation_that_opens_on_an_empty_frame_looks_where_they_usually_ar
     assert b.looks()[0][:2] == (-20, 40) and b.f._acquired      # one look at the chair …
     assert b.f.holding and abs(b.pose[0] - far[0]) <= 12        # … and from there it sees them and follows
     assert b.f.searches == 0                                    # that look is not a search
-    empty = Bench()                                            # nothing learned yet: nothing to try, and no twitch
+    empty = Bench()                                            # nothing learned yet: scan down from the head's pose
     empty.phase("wake")
+    empty.watch(None, 1.0)
+    assert empty.sent == []                                    # patience first
     empty.watch(None, 6.0)
-    assert empty.sent == []
+    assert [look[:2] for look in empty.looks()][:3] == [(0, 27), (0, 9), (0, 63)]
     seen = Bench(presence=usual)                               # someone already in view: the look is never spent
     seen.phase("wake")
     seen.watch((3.0, 45.0), 6.0)
     assert all(abs(y) <= 8 for y, *_ in seen.looks())
 
 
-def test_a_heading_is_not_guessed_from_two_noisy_sightings() -> None:
+
+def test_a_seated_owner_below_the_usual_place_is_found_by_looking_a_little_lower() -> None:
+    """2026-09-27: the level pose looked over the seated owner (frames held the top of his hair), and a face
+    at a frame's edge is not detected. The opening looks where they usually are, then lower."""
+    usual = PresenceMap(None)
+    for _ in range(30):
+        usual.note(-10.0, 30.0)
+    b = Bench(presence=usual)
+    seated = (-10.0, 12.0)
+    b.phase("listening")
+    for _ in range(40):                                        # only a face well inside the frame is detected
+        b.t += 0.25
+        near = abs(seated[1] - b.pose[1]) <= 12 and abs(seated[0] - b.pose[0]) <= 20
+        asyncio.run(b.f.on_faces([face_at(*seated, *b.pose)] if near else [], *b.pose))
+    whys = [p for p in b.looks()]
+    assert whys[0][:2] == (-10, 30) and whys[1][:2] == (-10, 12)
+    assert b.f.holding and abs(b.pose[1] - seated[1]) <= fo.DEADBAND_PITCH
+
+
+def test_every_return_from_thinking_with_nobody_in_view_gets_a_fresh_opening() -> None:
+    """A desk call hands the head back for each "thinking"; the board's own pose then looks over the owner.
+    Coming back to speak, buddy looks for them again, at most MAX_OPENINGS times a conversation."""
+    usual = PresenceMap(None)
+    for _ in range(30):
+        usual.note(*CHAIR)
+    b = Bench(presence=usual)
+    for turn in range(fo.MAX_OPENINGS + 2):
+        b.phase("listening" if turn == 0 else "speaking")
+        b.watch(None, 6.0)
+        b.phase("thinking")
+        b.pose = (0.0, 45.0)                                   # the board takes the head back to level
+        b.watch(None, 1.0)
+    starts = [c for c in b.sent if c["cmd"] == "look" and c["hold"] > 0 and (c["yaw"], c["pitch"]) == (-20, 40)]
+    assert len(starts) == fo.MAX_OPENINGS
+    b.phase("speaking")
+    b.watch(CHAIR, 6.0)                                        # someone in view is still followed after that
+    assert b.f.holding and abs(b.pose[0] - CHAIR[0]) <= fo.DEADBAND_YAW
+
+
+def test_a_learned_place_past_the_limits_is_brought_back_inside_them() -> None:
+    """2026-09-27: the map held yaw 120 pitch 0 (10° bins, learned off refused looks) and the opening look
+    turned the head right round to the wall behind it."""
+    usual = PresenceMap(None)
+    for _ in range(30):
+        usual.note(118.0, 2.0)
+    b = Bench(presence=usual)
+    b.phase("listening")
+    b.watch(None, 4.0)
+    assert b.looks() and all(abs(y) <= fo.MAX_YAW and 5 <= p <= 85 for y, p, _ in b.looks())
+
+
+def test_a_refused_look_is_noticed_and_the_head_is_not_walked_to_its_limits() -> None:
+    """The board keeps the head when it wants the owner's attention (hostlook.h). The follower must then
+    build on the pose the board echoes, not the one it asked for — or a face that never moves in the
+    frame walks the ask to yaw 100 (live, 2026-09-27 09:49)."""
+    b = Bench()
+    b.ok = True
+    b.phase("listening")
+    real = (0.0, 45.0)
+    for _ in range(40):                                        # the board answers every look but never moves
+        b.t += 0.25
+        asyncio.run(b.f.on_faces([face_at(20.0, 45.0, *real)], *real))
+    asked = [y for y, _p, _h in b.looks()]
+    assert max(asked) <= 20 + fo.DEADBAND_YAW
     b = Bench()
     b.phase("listening")
     b.see((-4.0, 38.0))

@@ -52,7 +52,12 @@ IT USES WHAT THE DAEMON KNOWS:
 WHEN A CONVERSATION OPENS AND NOBODY IS IN VIEW, it does not wait at the board's fixed pose hoping. On
 2026-09-21 the owner sat 23° to buddy's left and a little below level, and from the fixed pose his face
 was in a quarter of the frames, mostly at the edge. After ACQUIRE_AFTER_SECS with no confirmed face it
-looks, once, at the place the map says people most often are, and follows from there.
+looks where they were last followed, then at the place the map says people most often are, then a
+little lower there (with nothing learned yet: lower, lower still, then higher than the head is now),
+and follows from there. That opening re-arms each time the conversation comes back
+to a follow phase with nobody in view (a desk call hands the head back for every "thinking", and the
+board's level pose looks over a seated owner: on 2026-09-27 its frames held only the top of his hair),
+at most MAX_OPENINGS times a conversation.
 
 AND IT TELLS THE MEMORY BUS. Every change — seen, lost, found and how — is published on
 `/buddy/presence`, so rosbridge clients (Foxglove, `cc-buddy-bridge memory tail`) see buddy's sense of
@@ -76,6 +81,7 @@ from .head import CAMERA_HFOV_DEG, build_look_cmd, clamp_pose, target_pose
 log = logging.getLogger(__name__)
 
 FOLLOW_PHASES = frozenset({"wake", "listening", "asking", "speaking"})
+REFUSED_DEG = 8.0            # the echoed pose this far from the asked pose after settling: the board said no
 SETTLE_SECS = 1.2            # after a move: the glide (≥ 0.3 s) plus ~0.5 s of frame pipeline, with margin
 DEADBAND_YAW = 6.0           # degrees off-centre before the head bothers to turn
 DEADBAND_PITCH = 5.0
@@ -97,6 +103,8 @@ MAX_SEARCHES = 3             # per conversation
 USUAL_PLACES = 2
 MAX_PLACES = 6               # a search is at most this many looks (~10 s), likeliest first
 ACQUIRE_AFTER_SECS = 1.5     # a conversation opened and nobody is in view yet: look where they usually are
+LOWER_DEG = 18               # the opening's last look: this much lower than the usual place (a seated person)
+MAX_OPENINGS = 4             # opening sequences per conversation (each at most three looks)
 MIN_CONF = 35                # the tracker's 0..100; weaker boxes are posters and lamps
 MIN_SIZE = 4                 # a face under 4% of the frame width is across the room
 MAX_YAW = 100                # short of the neck's ±120: past that the robot is looking behind itself
@@ -105,6 +113,14 @@ DEFAULT_PRESENCE_FILE = "~/.config/cc-buddy-bridge/presence.json"
 
 Sender = Callable[[dict[str, Any]], Awaitable[bool]]
 Publisher = Callable[[str, dict[str, Any]], Any]
+
+
+def _reachable(yaw: float, pitch: float) -> tuple[int, int]:
+    """A learned place, brought inside the poses the follower may ask for: the map's cells are 10° bins
+    and can sit on 0 or past MAX_YAW (2026-09-27: an opening look at yaw 120 pitch 0 turned the head right
+    round to face the wall behind it)."""
+    y, p, _ = clamp_pose(max(-MAX_YAW, min(MAX_YAW, yaw)), pitch)
+    return y, p
 
 
 @dataclass
@@ -237,8 +253,12 @@ class SpeakerFollower:
         self.found_by: list[str] = []         # how each re-acquisition happened, this conversation
         self._noted_at = float("-inf")
         self._announced = ""                  # the last presence state published
-        self._opened_at: Optional[float] = None    # when this conversation's first follow phase began
-        self._acquired = False                # the one look at the usual place has been spent
+        self._opened_at: Optional[float] = None    # when the current stretch of follow phases began
+        self._acquired = False                # this stretch's opening sequence has been planned
+        self._opening: list[tuple[int, int, str]] = []   # its looks still to make
+        self._opening_at = float("-inf")
+        self._openings = 0                    # opening sequences this conversation
+        self._last_seen: Optional[tuple[float, float]] = None   # where someone was last followed
 
     # -- context from the daemon --
     @property
@@ -249,11 +269,14 @@ class SpeakerFollower:
     async def on_phase(self, phase: str) -> None:
         """The conversation's phase changed. Leaving a follow phase hands the head back at once."""
         was = self.active
+        entering = phase in FOLLOW_PHASES and self.phase not in FOLLOW_PHASES
         self.phase = phase
-        if phase in FOLLOW_PHASES and self._opened_at is None:
+        if entering:                                 # a new stretch: nobody in view by then earns a fresh opening
             self._opened_at = self.clock()
+            self._acquired = False
         if was and not self.active:
             await self.release("phase " + phase)
+            self._opening = []
         if phase == "idle":                          # the conversation is over: keep what was learned, start fresh
             if self.presence.save():
                 log.info("follow: presence map saved (%d places)", len(self.presence.cells))
@@ -264,6 +287,9 @@ class SpeakerFollower:
             self._announced = ""
             self._opened_at = None
             self._acquired = False
+            self._opening = []
+            self._openings = 0
+            self._last_seen = None
 
     def owner_moved(self, hold_secs: float) -> None:
         """The owner asked for a pose (move_head, look_around, find): it is theirs for as long as it is held."""
@@ -353,6 +379,17 @@ class SpeakerFollower:
         now = self.clock()
         if now - self.last_move_at < SETTLE_SECS:
             return                                   # this frame was taken while the head was still swinging
+        if self.holding and self.commanded is not None and (
+                abs(float(pose_yaw) - self.commanded[0]) > REFUSED_DEG
+                or abs(float(pose_pitch) - self.commanded[1]) > REFUSED_DEG):
+            # The board kept the head (it refuses a host look while it wants the owner's attention, or
+            # outside a conversation, hostlook.h): the pose it echoes is the truth, not the one asked for.
+            # Building on the ask walked the head to its limits at a face that never moved (2026-09-27).
+            log.info("follow: the board kept the head at yaw %.0f pitch %.0f (asked %d/%d)",
+                     pose_yaw, pose_pitch, *self.commanded)
+            self.holding = False
+            self.commanded = None
+            self.track = None
         picked = self._pick(faces, float(pose_yaw), float(pose_pitch), now)
         if picked is None:
             await self._lost(now, float(pose_yaw), float(pose_pitch))
@@ -363,7 +400,9 @@ class SpeakerFollower:
             return
         t = self.track
         assert t is not None
-        self._acquired = True                        # someone has been followed: the opening look is spent
+        self._acquired = True                        # someone is followed: this stretch's opening is spent
+        self._opening = []
+        self._last_seen = (t.yaw, t.pitch)
         if was_searching is not None:
             how = was_searching.looking or "they came back"
             self.found_by.append(how)
@@ -429,7 +468,7 @@ class SpeakerFollower:
                 places.append((y, p, "where they were heading"))
         tried = [(float(y), float(p)) for y, p, _ in places] + [(t.yaw, t.pitch)]
         for y, p in self.presence.top(USUAL_PLACES, exclude=tried):
-            places.append((y, p, "where they usually are"))
+            places.append((*_reachable(y, p), "where they usually are"))
         heading = int(round(max(-MAX_YAW, min(MAX_YAW, t.yaw))))
         tried += [(float(y), float(p)) for y, p, _ in places[len(tried) - 1:]]
         for side in (-1, 1):                         # a sideways shift is the commonest way to leave a frame
@@ -441,17 +480,47 @@ class SpeakerFollower:
                 places.append((heading, pitch, "up and down"))
         return places[:MAX_PLACES]
 
+    def _plan_opening(self, pose_yaw: float, pose_pitch: float) -> list[tuple[int, int, str]]:
+        places: list[tuple[int, int, str]] = []
+        if self._last_seen is not None:
+            y, p, _ = clamp_pose(*self._last_seen)
+            places.append((y, p, "where they were"))
+        usual = self.presence.top(1)
+        if usual:
+            places.append((*_reachable(usual[0][0], usual[0][1]), "where they usually are"))
+            places.append((*_reachable(usual[0][0], usual[0][1] - LOWER_DEG), "a little lower"))
+        if not places:
+            # Nothing learned yet (a first conversation, a cleared map): scan from where the head is,
+            # downward first — a desk robot's person is more often below its level gaze than above it.
+            for k, why in ((-1, "lower"), (-2, "lower still"), (1, "higher")):
+                y, p, _ = clamp_pose(pose_yaw, pose_pitch + k * LOWER_DEG)
+                places.append((y, p, why))
+        kept: list[tuple[int, int, str]] = []
+        for y, p, why in places:                     # never the pose it already has, never the same place twice
+            if abs(y - pose_yaw) < DEADBAND_YAW and abs(p - pose_pitch) < DEADBAND_PITCH:
+                continue
+            if any(abs(y - ky) < DEADBAND_YAW and abs(p - kp) < DEADBAND_PITCH for ky, kp, _ in kept):
+                continue
+            kept.append((y, p, why))
+        return kept
+
     async def _lost(self, now: float, pose_yaw: float, pose_pitch: float) -> None:
         t = self.track
         if t is None or t.confirmed < 2:
-            # Nobody has been followed yet, so nothing was lost — but a conversation that opened on an
-            # empty frame gets one look at the place people usually are.
+            # Nobody is being followed, so nothing was lost — but a stretch of conversation that opens on an
+            # empty frame gets a short opening: where they were last, where they usually are, a little lower.
             if (not self._acquired and self._opened_at is not None and self.search is None
                     and now - self._opened_at >= ACQUIRE_AFTER_SECS):
                 self._acquired = True
-                usual = self.presence.top(1)
-                if usual and (abs(usual[0][0] - pose_yaw) >= DEADBAND_YAW or abs(usual[0][1] - pose_pitch) >= DEADBAND_PITCH):
-                    await self._look(usual[0][0], usual[0][1], now, "where they usually are, to start with")
+                if self._openings < MAX_OPENINGS:
+                    self._opening = self._plan_opening(pose_yaw, pose_pitch)
+                    if self._opening:
+                        self._openings += 1
+            quiet = self.track is None or now - self.track.seen_at >= SEARCH_STEP_SECS   # one stray box is no find
+            if self._opening and quiet and now - self._opening_at >= SEARCH_STEP_SECS:
+                y, p, why = self._opening.pop(0)
+                self._opening_at = now
+                await self._look(y, p, now, why + ", to start with")
             return
         gone = now - t.seen_at
         if self.search is None and gone > STALE_TRACK_SECS + LOST_HOLD_SECS:

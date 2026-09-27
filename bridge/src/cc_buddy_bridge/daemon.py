@@ -2055,6 +2055,39 @@ class Daemon:
                 "at": getattr(head, "pose_at", None),
                 "connected": self.ble.connected}
 
+    async def _ipc_follow(self, req: dict[str, Any]) -> dict[str, Any]:
+        # A follow-only test: the follower gets a conversation phase ("listening") for `secs` seconds, with no
+        # voice, ring or expressions, so buddy just keeps its eyes on whoever is in front of it. "stop" ends it.
+        follower = self._follower
+        task = getattr(self, "_follow_test", None)
+        if task is not None and not task.done():
+            task.cancel()
+        if str(req.get("action") or "start") == "stop":
+            await follower.on_phase("idle")
+            if self.ble.connected:
+                await self.ble.send({"cmd": "agent", "state": "idle"})
+            return {"ok": True, "phase": follower.phase}
+        secs = max(1.0, min(600.0, float(req.get("secs") or 60)))
+
+        async def hold() -> None:
+            try:
+                await asyncio.sleep(secs)
+            finally:
+                if follower.phase == "listening":
+                    await follower.on_phase("idle")
+                    if self.ble.connected:
+                        await self.ble.send({"cmd": "agent", "state": "idle"})
+                    log.info("follow test: over")
+
+        # The board accepts a host look in any state only during a conversation (hostlook.h), so the test
+        # shows it one, as a desk call would; otherwise an attention state silently keeps the head.
+        if self.ble.connected:
+            await self.ble.send({"cmd": "agent", "state": "listening"})
+        await follower.on_phase("listening")
+        log.info("follow test: following for %.0f s", secs)
+        self._follow_test = asyncio.create_task(hold(), name="follow-test")
+        return {"ok": True, "phase": follower.phase, "secs": secs, "connected": self.ble.connected}
+
     async def _ipc_move(self, req: dict[str, Any]) -> dict[str, Any]:
         # `cc-buddy-bridge move …`: a named motion the BOARD runs. The host
         # only names it; motion.h admits every number before a servo sees it,
@@ -2861,6 +2894,7 @@ IPC_HANDLERS: dict[str, Any] = {
     "notes": Daemon._ipc_notes,
     "trace": Daemon._ipc_trace,
     "pose": Daemon._ipc_pose,
+    "follow": Daemon._ipc_follow,
     "move": Daemon._ipc_move,
     "celebrate": Daemon._ipc_celebrate,
     "species": Daemon._ipc_species,

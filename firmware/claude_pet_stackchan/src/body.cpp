@@ -24,15 +24,27 @@
 // its own shoulders on both sides, which is most of a room.
 static const int PITCH_MIN = 5;
 static const int PITCH_MAX = 85;
+// This robot's pitch servo turns the other way from the BSP's convention: on
+// 2026-09-27 a commanded pitch 10 ("down at the desk") raised the head to the
+// ceiling, so the follower looked further over the owner's head the harder it
+// tried to look down, and the working pose and nods went up. Every pose passes
+// stepTween(), which mirrors pitch across the servo's 0..90 range here. The
+// code's convention (5 = down at the desk, 85 = up) is unchanged everywhere
+// else. Set false if the neck is reassembled and pitch runs backwards again.
+static const bool PITCH_REVERSED = true;
+static int servoPitchTenths(float p) { return (int)lroundf((PITCH_REVERSED ? 90.0f - p : p) * 10.0f); }
+int bodyServoPitchTenthsToCode(int tenths) { return PITCH_REVERSED ? 900 - tenths : tenths; }
 static const int YAW_MAX   = 120;
 
 // ---- poses (degrees) — bench-tune these on the real robot ----
-// Pitch 0 is the bottom of the servo range (chin down), 90 is straight up.
+// Code convention: pitch 0 is chin down, 90 is straight up (the raw servo runs the
+// other way on this robot; PITCH_REVERSED above mirrors it at the one write).
 // PITCH_LEVEL is the "looking at the desk owner" gaze; it depends on how the
 // head was zeroed (NVS servo/zero_pos_2), so treat 45 as a starting guess.
 static const int PITCH_LEVEL     = 45;
-static const int PITCH_SLEEP     = 10;   // inside 5..15 per the port spec
-static const int PITCH_ATTENTION = 70;
+static const int PITCH_SLEEP     = 5;    // owner, 2026-09-27: idle and asleep rest "all the way down"
+static const int PITCH_REST      = 5;    // idle: chin on the desk, the owner's choice (was level)
+static const int PITCH_ATTENTION = 60;   // was 70: with pitch mirrored right, 70 read as "the ceiling" (owner, 2026-09-27)
 // Toucher tilt/turn. BSP moveX(+) is "turn left" from the robot's point of
 // view, i.e. toward a person standing at the screen's right. Flip the sign
 // if the bench shows the head turning away.
@@ -171,7 +183,7 @@ static void stepTween(uint32_t now) {
   sentYaw = y; sentPitch = p;
   float cy = fminf(fmaxf(y, (float)-YAW_MAX), (float)YAW_MAX);
   float cp = fminf(fmaxf(p, (float)PITCH_MIN), (float)PITCH_MAX);   // the pose can never leave 5..85
-  M5StackChan.Motion.move((int)lroundf(cy * 10.0f), (int)lroundf(cp * 10.0f), speed);   // 0.1 deg units
+  M5StackChan.Motion.move((int)lroundf(cy * 10.0f), servoPitchTenths(cp), speed);   // 0.1 deg units
 }
 
 static void play(const Key* k, uint8_t n, uint32_t now) {
@@ -191,6 +203,7 @@ static void stepSeq(uint32_t now) {
 // ---- fixed sequences ----
 static const Key SEQ_SLEEP[]     = { {0, 0, PITCH_SLEEP, 150} };
 static const Key SEQ_LEVEL[]     = { {0, 0, PITCH_LEVEL, 250} };
+static const Key SEQ_REST[]      = { {0, 0, PITCH_REST, 200} };
 static const Key SEQ_ATTN_UP[]   = { {0, 0, PITCH_ATTENTION, 500} };
 // "Where are you?" search, two rows so a face above the current gaze is
 // found: row 1 at pitch 45 sweeps left to right across the full ±100 the
@@ -204,7 +217,7 @@ static const Key SEQ_ATTN_SCAN[] = {
   {2400, 100, PITCH_SCAN_LOW,  500}, {3000, 100, PITCH_SCAN_HIGH, 400},
   {3500,  45, PITCH_SCAN_HIGH, 400}, {4000, -45, PITCH_SCAN_HIGH, 500},
   {4600,-100, PITCH_SCAN_HIGH, 500}, {5200,   0, PITCH_SCAN_HIGH, 500} };
-static const Key SEQ_NOD[]       = { {0, KEEP, PITCH_LEVEL - 8, 400}, {450, KEEP, PITCH_LEVEL, 400} };
+static const Key SEQ_NOD[]       = { {0, KEEP, PITCH_REST + 8, 400}, {450, KEEP, PITCH_REST, 400} };   // a lift from the rest, not a return to level
 static const Key SEQ_CELEBRATE[] = {
   {0, 20, PITCH_LEVEL + 10, 900}, {150, -20, KEEP, 900}, {300, 12, KEEP, 900},
   {450, -12, KEEP, 900}, {600, 0, PITCH_LEVEL, 600} };
@@ -636,9 +649,12 @@ void bodyBegin() {
   // Streamed 25 Hz targets: do not teleport the spring to the bus-read angle
   // on every target (that is the BSP's "stutter" case).
   M5StackChan.Motion.setAutoAngleSyncEnabled(false);
-  M5StackChan.Motion.goHome(300);
-  curYaw = 0; curPitch = 0;
-  cmdYaw = 0; cmdPitch = 0; sentYaw = 0; sentPitch = 0; gliding = false;
+  // Home is level, through the same pitch mirror every pose takes. The BSP's goHome() sends raw pitch 0,
+  // which on this robot is straight up at the ceiling (2026-09-27: "on startup looks straight at ceiling"),
+  // and left the tween believing the head was at code 0 while the servo sat at code 90.
+  M5StackChan.Motion.move(0, servoPitchTenths((float)PITCH_LEVEL), 300);
+  curYaw = 0; curPitch = PITCH_LEVEL;
+  cmdYaw = 0; cmdPitch = PITCH_LEVEL; sentYaw = 0; sentPitch = PITCH_LEVEL; gliding = false;
   lastState = 0xFF;
   // The Si12T baseline is stale right after the servo 5 V rail comes up
   // (bench 2026-09-05: the middle zone read pressed at boot and fired a
@@ -647,7 +663,8 @@ void bodyBegin() {
   touchArmAt = millis() + 3000;
   touchArmed = false;
   Serial.printf("[body] servo yaw=%d pitch=%d (0.1deg) bat=%.2fV %.0fmA\n",
-                M5StackChan.Motion.getCurrentXAngle(), M5StackChan.Motion.getCurrentYAngle(),
+                M5StackChan.Motion.getCurrentXAngle(),
+                bodyServoPitchTenthsToCode(M5StackChan.Motion.getCurrentYAngle()),
                 M5StackChan.getBatteryVoltage(), M5StackChan.getBatteryCurrent());
 }
 
@@ -661,10 +678,10 @@ static void onEnter(PersonaState s, uint32_t now, bool fromSleep) {
   switch (s) {
     case P_SLEEP:     if (!exploring) play(SEQ_SLEEP, NKEYS(SEQ_SLEEP), now);   // explore: head stays where the host put it
                       say(CHIRP_SLEEPY); break;
-    case P_IDLE:      play(SEQ_LEVEL, NKEYS(SEQ_LEVEL), now);
+    case P_IDLE:      play(SEQ_REST, NKEYS(SEQ_REST), now);
                       nextIdleAt = now + 8000 + random(7000);
                       if (fromSleep) say(CHIRP_WAKE); break;
-    case P_BUSY:      play(SEQ_LEVEL, NKEYS(SEQ_LEVEL), now);
+    case P_BUSY:      play(SEQ_REST, NKEYS(SEQ_REST), now);   // sessions run most of the day: rest down too (owner, 2026-09-27)
                       nextNodAt = now + 2500;
                       if (fromSleep) say(CHIRP_WAKE); break;
     case P_ATTENTION: play(SEQ_ATTN_UP, NKEYS(SEQ_ATTN_UP), now);
@@ -788,8 +805,8 @@ static void updateInner(PersonaState active, bool needsAttention, uint32_t now) 
       if (!held && !seq && (int32_t)(now - nextIdleAt) >= 0) {
         int amp = 8 + random(11);
         if (random(2)) amp = -amp;
-        dyn[0] = { 0,    (int8_t)amp, PITCH_LEVEL, 120 };
-        dyn[1] = { 2500, 0,           PITCH_LEVEL, 120 };
+        dyn[0] = { 0,    (int8_t)amp, PITCH_REST, 120 };
+        dyn[1] = { 2500, 0,           PITCH_REST, 120 };
         play(dyn, 2, now);
         nextIdleAt = now + 8000 + random(7000);
       }

@@ -120,3 +120,7 @@ uint32_t bodyPlayKeys(motion::Key* k, uint8_t n);
 // Clears the glide and the sequence as well as the hold.
 void bodyStopMotion();
 bool bodyMotionRunning();
+
+// A raw pitch servo read (0.1 deg) in the code convention (0 = chin down, 90 = up); body.cpp's
+// PITCH_REVERSED mirror. For diagnostics that read the servo directly.
+int bodyServoPitchTenthsToCode(int tenths);
