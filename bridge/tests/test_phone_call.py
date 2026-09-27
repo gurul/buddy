@@ -431,3 +431,69 @@ def test_make_voice_picks_the_fast_voice_only_with_an_openrouter_key():
                                "CC_BUDDY_CALL_TTS_PROVIDER": "openai", "CC_BUDDY_CALL_LIVE_STT": "0"})
     assert v.or_key == "" and not v.live
     assert phone_call.make_voice({}) is None
+
+
+def test_calls_are_transcribed_in_english_unless_told_otherwise():
+    # a short Voice PE press, left to guess, was heard as Chinese and answered in Chinese (2026-09-27)
+    assert phone_call.make_voice({"OPENAI_API_KEY": "sk-test"}).language == "en"
+    assert phone_call.make_voice({"OPENAI_API_KEY": "sk-test", "CC_BUDDY_CALL_LANGUAGE": "ES"}).language == "es"
+    assert phone_call.make_voice({"OPENAI_API_KEY": "sk-test", "CC_BUDDY_CALL_LANGUAGE": ""}).language == ""
+
+    asked: list = []
+
+    class Transcriptions:
+        def create(self, **kw):
+            asked.append(kw)
+            return type("R", (), {"text": " hi ", "usage": None})()
+
+    v = phone_call.OpenAIVoice.__new__(phone_call.OpenAIVoice)
+    v._client = type("C", (), {"audio": type("A", (), {"transcriptions": Transcriptions()})()})()
+    v.stt_model, v.language = "m", "en"
+    assert v.transcribe(b"\0\0" * 2400) == "hi" and asked[-1]["language"] == "en"
+    v.language = ""
+    v.transcribe(b"\0\0" * 2400)
+    assert "language" not in asked[-1]
+
+    sessions: list = []
+
+    class Session:
+        async def update(self, session):
+            sessions.append(session)
+
+    class Conn:
+        session = Session()
+
+        def __aiter__(self):
+            return self
+
+        async def __anext__(self):
+            raise StopAsyncIteration
+
+    class Manager:
+        async def __aenter__(self):
+            return Conn()
+
+        async def __aexit__(self, *a):
+            return None
+
+    import openai
+
+    class Realtime:
+        def connect(self, **kw):
+            return Manager()
+
+    class Client:
+        def __init__(self, **kw):
+            self.realtime = Realtime()
+
+    orig = openai.AsyncOpenAI
+    openai.AsyncOpenAI = Client
+    try:
+        async def go():
+            ears = phone_call.LiveEars("k", "m", "en")
+            await ears.open()
+            await ears.close()
+        asyncio.run(go())
+    finally:
+        openai.AsyncOpenAI = orig
+    assert sessions[0]["audio"]["input"]["transcription"] == {"model": "m", "language": "en"}

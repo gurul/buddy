@@ -85,7 +85,9 @@ Code: `bridge/src/cc_buddy_bridge/phone_call.py` (the WebSocket, the call, the e
 `bridge/tests/test_phone_call.py` and the call tests in `test_telegram.py`. Spend shows as "phone calls".
 Switches: `CC_BUDDY_CALL_LIVE_STT` (on), `CC_BUDDY_CALL_TTS_PROVIDER` (`openrouter`, or `openai`),
 `CC_BUDDY_CALL_OR_TTS_MODEL`, `CC_BUDDY_CALL_OR_VOICE`, `CC_BUDDY_CALL_STT_MODEL`,
-`CC_BUDDY_CALL_TTS_MODEL`, `CC_BUDDY_CALL_VOICE`.
+`CC_BUDDY_CALL_TTS_MODEL`, `CC_BUDDY_CALL_VOICE`, `CC_BUDDY_CALL_LANGUAGE` (`en`: the language
+calls and Voice PE presses are transcribed in. Without it, the model guesses from each press and sometimes
+hears English as another language. Set it empty to let the model guess again).
 
 ## Lights
 

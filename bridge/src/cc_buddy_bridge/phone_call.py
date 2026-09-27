@@ -49,6 +49,10 @@ MAX_CALL_SECS = 60 * 60                 # a call this long is ended
 QUIET_SECS = 30.0                       # nothing from the phone this long (it sends a ping every 10 s): it is gone
 MAX_SPOKEN_CHARS = 1500                 # a reply longer than this is read in part; the chat has all of it
 DEFAULT_STT_MODEL = "gpt-4o-mini-transcribe"   # the room notes' model (notes.py)
+# The language the owner speaks, ISO-639-1. Left to guess, the model heard "Spotify mode" as Chinese on a short
+# Voice PE press and buddy answered in Chinese (2026-09-27; owner: "it sometimes thinks i am speaking another
+# language"). CC_BUDDY_CALL_LANGUAGE sets it; an empty value lets the model guess again.
+DEFAULT_LANGUAGE = "en"
 DEFAULT_TTS_MODEL = "gpt-4o-mini-tts"   # the fallback voice, on OpenAI
 DEFAULT_TTS_VOICE = "marin"             # the desk voice's (voice_agent.DEFAULT_VOICE)
 # The call's voice, on OpenRouter (owner, 2026-09-25: "switch to these ... for telegram call"). Measured from this
@@ -227,8 +231,8 @@ class LiveEars:
     live, 2026-09-25: commit to text 1.0 s on an open session, against 1.5 s uploading the press after release.
     Any failure is the caller's cue to fall back to uploading the press (``Voice.transcribe``)."""
 
-    def __init__(self, api_key: str, model: str) -> None:
-        self.api_key, self.model = api_key, model
+    def __init__(self, api_key: str, model: str, language: str = DEFAULT_LANGUAGE) -> None:
+        self.api_key, self.model, self.language = api_key, model, language
         self.conn: Any = None
         self._manager: Any = None
         self._reader: Optional[asyncio.Task[Any]] = None
@@ -246,7 +250,7 @@ class LiveEars:
         self.conn = await self._manager.__aenter__()
         await self.conn.session.update(session={"type": "transcription", "audio": {"input": {
             "format": {"type": "audio/pcm", "rate": SAMPLE_RATE},
-            "transcription": {"model": self.model},
+            "transcription": {"model": self.model, **({"language": self.language} if self.language else {})},
             "turn_detection": {"type": "server_vad", "silence_duration_ms": 400, "prefix_padding_ms": 200}}}})
         self._reader = asyncio.ensure_future(self._read())
 
@@ -316,14 +320,16 @@ class OpenAIVoice:
         self._client = openai.OpenAI(api_key=api_key)
         self._key = api_key
         self.stt_model, self.tts_model, self.voice = stt_model, tts_model, voice
+        self.language = DEFAULT_LANGUAGE                # CC_BUDDY_CALL_LANGUAGE; "" = the model guesses
         self.live = True                                # LiveEars on (CC_BUDDY_CALL_LIVE_STT=0 turns it off)
         self.or_key, self.or_model, self.or_voice = "", DEFAULT_OR_TTS_MODEL, DEFAULT_OR_TTS_VOICE
 
     def transcribe(self, pcm: bytes) -> str:
         from .notes import to_wav
 
+        extra = {"language": self.language} if self.language else {}
         resp = self._client.audio.transcriptions.create(file=("call.wav", to_wav(pcm, SAMPLE_RATE), "audio/wav"),
-                                                        model=self.stt_model)
+                                                        model=self.stt_model, **extra)
         spend.record_transcription(spend.CALLS, self.stt_model, resp, seconds=len(pcm) / BYTES_PER_SEC)
         return (getattr(resp, "text", "") or "").strip()
 
@@ -357,7 +363,7 @@ class OpenAIVoice:
         spend.record("openai", self.tts_model, spend.CALLS, None, note=f"speech, {len(text)} chars")
 
     def live_ears(self) -> Optional[LiveEars]:
-        return LiveEars(self._key, self.stt_model) if self.live else None
+        return LiveEars(self._key, self.stt_model, self.language) if self.live else None
 
 
 def make_voice(environ: Any = None) -> Optional[Voice]:
@@ -371,6 +377,7 @@ def make_voice(environ: Any = None) -> Optional[Voice]:
                             (env.get("CC_BUDDY_CALL_TTS_MODEL") or DEFAULT_TTS_MODEL).strip(),
                             (env.get("CC_BUDDY_CALL_VOICE") or env.get("CC_BUDDY_VOICE_NAME") or DEFAULT_TTS_VOICE).strip())
         voice.live = (env.get("CC_BUDDY_CALL_LIVE_STT") or "1").strip().lower() not in ("0", "false", "no", "off")
+        voice.language = (env.get("CC_BUDDY_CALL_LANGUAGE", DEFAULT_LANGUAGE) or "").strip().lower()
         # the fast voice, when there is an OpenRouter key and CC_BUDDY_CALL_TTS_PROVIDER is not "openai"
         if (env.get("CC_BUDDY_CALL_TTS_PROVIDER") or "openrouter").strip().lower() != "openai":
             voice.or_key = (env.get("OPENROUTER_API_KEY") or "").strip()

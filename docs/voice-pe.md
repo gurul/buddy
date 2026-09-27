@@ -156,6 +156,13 @@ daemon sends `{"cmd":"music_mode","on":…}`, `{"cmd":"ring_level",…}` and
 `{"cmd":"music_flash","ok":…}` to the Voice PE only. The code is
 `bridge/src/cc_buddy_bridge/music_mode.py`.
 
+### Language
+
+buddy transcribes Voice PE presses as English (`CC_BUDDY_CALL_LANGUAGE=en`, the default). Before this was set,
+the transcription model guessed the language of each press, and a short press was sometimes heard as another
+language, so buddy answered in that language. To use another language, set its ISO-639-1 code in
+`~/.config/cc-buddy-bridge/env`. Set it empty to let the model guess again.
+
 ## Standard questions, answered by code
 
 "What time is it", "what's the weather", "when is sunset", "what's 17
