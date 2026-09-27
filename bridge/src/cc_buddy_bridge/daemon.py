@@ -2088,6 +2088,25 @@ class Daemon:
         self._follow_test = asyncio.create_task(hold(), name="follow-test")
         return {"ok": True, "phase": follower.phase, "secs": secs, "connected": self.ble.connected}
 
+    async def _ipc_axis(self, req: dict[str, Any]) -> dict[str, Any]:
+        # The head's axis directions (body.cpp, saved on the board). With "pitch_rev"/"yaw_rev" it sets them;
+        # without, it reads them. The head calibration page (head_cal.py) drives this.
+        if not self.ble.connected:
+            return {"ok": False, "error": "the robot is not connected"}
+        cmd: dict[str, Any] = {"cmd": "axis"}
+        for k in ("pitch_rev", "yaw_rev"):
+            if req.get(k) is not None:
+                cmd[k] = bool(req[k])
+        waiter = self.expect_ack("axis")
+        try:
+            await self.ble.send(cmd)
+            ack = await self.wait_for_ack("axis", timeout=3.0, waiter=waiter)
+        except asyncio.TimeoutError:
+            return {"ok": False, "error": "the board did not answer (older firmware?)"}
+        n = int(ack.get("n") or 0)
+        log.info("axis: pitch_rev=%s yaw_rev=%s", bool(n & 2), bool(n & 1))
+        return {"ok": True, "pitch_rev": bool(n & 2), "yaw_rev": bool(n & 1)}
+
     async def _ipc_move(self, req: dict[str, Any]) -> dict[str, Any]:
         # `cc-buddy-bridge move …`: a named motion the BOARD runs. The host
         # only names it; motion.h admits every number before a servo sees it,
@@ -2894,6 +2913,7 @@ IPC_HANDLERS: dict[str, Any] = {
     "notes": Daemon._ipc_notes,
     "trace": Daemon._ipc_trace,
     "pose": Daemon._ipc_pose,
+    "axis": Daemon._ipc_axis,
     "follow": Daemon._ipc_follow,
     "move": Daemon._ipc_move,
     "celebrate": Daemon._ipc_celebrate,

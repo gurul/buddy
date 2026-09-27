@@ -5,7 +5,7 @@
 #include <sys/time.h>
 #include <time.h>
 
-int bodyServoPitchTenthsToCode(int tenths);   // body.cpp: the PITCH_REVERSED mirror for a raw servo read
+int bodyServoPitchTenthsToCode(int tenths);   // body.cpp: the saved pitch-axis mirror (pitchRev) for a raw servo read
 
 void halBegin() {
   // Enlarge the HWCDC rings before the first begin(): the bridge's

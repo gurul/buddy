@@ -167,29 +167,21 @@ The log says what it did: `follow: → yaw -20 pitch 39 (face bx=-57 by=12; trac
 `follow: lost them 0.9 s ago (moving 31°/s) — looking: where they were heading, then …`,
 `follow: found them again (where they were heading) at yaw 64 pitch 47`, `follow: let go (phase thinking)`.
 
-### Pitch ran backwards, and how that hid (2026-09-27)
+### The head fell back up, and the calibration page (2026-09-27)
 
-"Buddy doesn't follow person anymore." Two things were wrong, and the second hid the first for a week.
+"Buddy doesn't follow person anymore." What was really wrong, found the hard way:
 
-**The pitch servo runs opposite to the code's convention.** The firmware says pitch 5 is chin down and 85 is
-up at the ceiling; on this robot the raw servo does the reverse, and `gaze.cpp` carried the note
-`kElevSign UNVERIFIED` since the port. So every "down" was up: the working pose ("head down at the desk")
-looked at the ceiling, and the follower, which lowers pitch for a face below the frame's centre, drove the
-head *away* from the face. Its own log showed it: `by` (the face's offset, + is down) grew with each step
-down — `13, 22, 45, 60` — until the face left the frame. It went unnoticed while buddy sat below its owner:
-the follower converges in yaw, the presence map's pitches were learned in the same reversed coordinates,
-and a face a little off-centre was near enough. It surfaced when buddy's spot changed and every conversation
-needed a real pitch correction, each of which went the wrong way.
+**The servos let go at rest, and the head fell back up.** The firmware enabled the BSP's auto torque release
+("release at rest"), and since the idle micro-drift was removed on 2026-09-23 to stop a servo whine, the head
+really does come to rest. Released, it is heavy enough to fall back to the ceiling. So every pose that ended
+in stillness — the rest pose, the working pose, a follower look held while the person sat still — drifted up
+seconds later, and the camera saw the wall above the owner's head. The board still reported the commanded
+pose, so nothing in the logs said the head had moved. `body.cpp` now keeps torque on at rest
+(`setAutoTorqueReleaseEnabled(false)`); a faint hum is the cost.
 
-The fix is one mirror at the one place the firmware writes the pitch servo (`body.cpp`, `PITCH_REVERSED`,
-`servoPitchTenths()`); the code convention is unchanged everywhere else, including the pose the board echoes
-on every camera frame (it is the tween's commanded pose, not a servo read). Boot goes home through the same
-mirror: the BSP's `goHome()` sends raw pitch 0, which on this robot is straight up ("on startup looks straight
-at the ceiling"). The bench check that finally decided it was the owner watching two held poses — pitch 5
-("now is good"), then pitch 85 ("this is ceiling") — after camera frames taken while he and the robot were
-both moving had pointed both ways. The presence map and the firmware's owner model, learned under the
-reversal, were cleared (`presence.json.bak-20260927-*`; `{"cmd":"owner","op":"reset"}`), and the attention
-pose came down from 70 to 60.
+On the way, pitch looked reversed (a held "down" pointed up) and was mirrored in firmware for an afternoon. The
+owner set both axes back to as built on the calibration page once the head held; the mirror stays as a saved
+setting that defaults off.
 
 **The board can refuse a host look, and the follower did not know.** `hostlook.h` accepts a look in any
 state during a conversation, and otherwise only in calm states — never while the pet wants the owner's
@@ -197,16 +189,23 @@ attention. The follower built each next move on the pose it had *asked* for, so 
 that never moved in the frame walked the ask to the yaw and pitch limits, then learned that place into the
 map (one opening look later turned the head right round to the wall behind it). Now, once a move has had
 its settle time, an echoed pose more than `REFUSED_DEG` (8°) from the ask means the board kept the head:
-the follower logs it (`follow: the board kept the head at yaw 0 pitch 45 (asked 100/5)`), drops its hold and
-its track, and starts again from the pose the board reports. Learned places are also brought inside
-±`MAX_YAW` and 5..85 before they are looked at.
+the follower logs it, drops its hold and its track, and starts again from the pose the board reports.
+Learned places are brought inside ±`MAX_YAW` and 5..85 before they are looked at. The presence map and the
+firmware's owner model learned during the fault were cleared (`presence.json.bak-20260927-*`;
+`{"cmd":"owner","op":"reset"}`).
+
+**The head calibration page.** `cc-buddy-bridge head-cal` opens a page on `http://127.0.0.1:8766/` with one
+button per extreme (up, down, your left, your right, centre). Each holds the head there for 6 s; under each
+axis, "looks right" or "flip". A flip goes to the board as `{"cmd":"axis","pitch_rev":bool,"yaw_rev":bool}`
+(daemon `axis` IPC) and is saved in NVS (`body`: `p_rev`, `y_rev`), applied at the one servo write in
+`body.cpp`, so it survives reboots with no reflash. Directions are the owner's facing buddy: "your left" is
++yaw. Use it whenever the head is reassembled or seems to go the wrong way — two held poses and a person
+watching settle a direction in a minute; camera frames taken while anyone moves do not.
 
 **A follow-only test.** `{"evt":"follow","secs":60}` on the daemon's IPC socket (`/tmp/cc-buddy-bridge.sock`)
-gives the follower a `listening` phase for that long, with no voice, ring or expressions, and shows the board
-a conversation (`{"cmd":"agent","state":"listening"}`) so its looks are accepted, as they are on a desk call.
-`{"evt":"follow","action":"stop"}` ends it. With `CC_BUDDY_SAVE_FRAMES=<dir>` in the daemon's env the frames
-land in that directory, one a second. A keyframe `move` fits at most 8 keys inside 8 s (`motion.h`
-`kBoutMaxMs`); longer sweeps are silently cut, so sweep in two moves.
+gives the follower a `listening` phase for that long and shows the board a conversation so its looks are
+accepted, as on a desk call. `{"evt":"follow","action":"stop"}` ends it. A keyframe `move` fits at most 8 keys
+inside 8 s (`motion.h` `kBoutMaxMs`); longer sweeps are cut silently.
 
 ### The eyes lead the head (needs a reflash)
 

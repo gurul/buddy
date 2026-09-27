@@ -122,5 +122,9 @@ void bodyStopMotion();
 bool bodyMotionRunning();
 
 // A raw pitch servo read (0.1 deg) in the code convention (0 = chin down, 90 = up); body.cpp's
-// PITCH_REVERSED mirror. For diagnostics that read the servo directly.
+// saved pitch-axis mirror (off as built). For diagnostics that read the servo directly.
 int bodyServoPitchTenthsToCode(int tenths);
+
+// Axis directions (saved in NVS, applied at the one servo write): the head calibration page flips them.
+void bodyAxisGet(bool* pitchReversed, bool* yawReversed);
+void bodySetAxis(bool pitchReversed, bool yawReversed);

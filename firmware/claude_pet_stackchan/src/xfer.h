@@ -145,10 +145,10 @@ inline bool xferCommand(JsonDocument& doc) {
   // {"cmd":"pitch_zero"} reports the pitch servo's zero (NVS servo/zero_pos_2, raw
   // servo steps, 3.2 per degree; BSP default 620). {"cmd":"pitch_zero","raw":N}
   // stores a new one and reboots, since the BSP reads it only at begin(). It
-  // shifts the whole pitch range: on this robot the raw servo runs opposite to
-  // the code convention (body.cpp PITCH_REVERSED), so a LOWER zero tilts the
-  // range UP. Added 2026-09-27 while chasing what turned out to be that
-  // reversal; the zero itself stays at the BSP default 620. Bounded to 520..700
+  // shifts the whole pitch range (a lower zero is a smaller servo angle; which
+  // way that tilts depends on the saved axis setting, {"cmd":"axis"}). Added
+  // 2026-09-27 while chasing a head that fell back up at rest; the zero itself
+  // stays at the BSP default 620. Bounded to 520..700
   // so one command cannot drive the neck hard into its stop; step it while
   // someone watches the head.
   // {"cmd":"ext_power","on":bool}: the CoreS3 external 5 V output, not persisted
@@ -160,6 +160,20 @@ inline bool xferCommand(JsonDocument& doc) {
     int y = 0, pt = 0;
     bool ok = halExtPower(on, &y, &pt);
     _xAck("ext_power", ok, (uint32_t)((y + 5000) * 10000 + (pt + 5000)));
+    return true;
+  }
+
+  // {"cmd":"axis"} reports the head's axis directions; with "pitch_rev"/"yaw_rev" it sets and saves
+  // them (body.cpp). n = pitch_rev*2 + yaw_rev. The host's head calibration page drives this.
+  if (strcmp(cmd, "axis") == 0) {
+    extern void bodyAxisGet(bool*, bool*);
+    extern void bodySetAxis(bool, bool);
+    bool pr = false, yr = false;
+    bodyAxisGet(&pr, &yr);
+    if (!doc["pitch_rev"].isNull()) pr = doc["pitch_rev"] | pr;
+    if (!doc["yaw_rev"].isNull())   yr = doc["yaw_rev"] | yr;
+    if (!doc["pitch_rev"].isNull() || !doc["yaw_rev"].isNull()) bodySetAxis(pr, yr);
+    _xAck("axis", true, (uint32_t)(pr * 2 + yr));
     return true;
   }
 

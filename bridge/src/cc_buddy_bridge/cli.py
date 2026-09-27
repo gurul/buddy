@@ -187,6 +187,14 @@ def main(argv: list[str] | None = None) -> int:
     p_move.add_argument("--cycles", type=int, default=None)
     p_move.add_argument("--socket", default=None, help="IPC path or host:port override")
 
+    p_headcal = sub.add_parser(
+        "head-cal",
+        help="Open the head calibration page: tap an extreme, confirm the axis or flip it (saved on the robot)",
+    )
+    p_headcal.add_argument("--port", type=int, default=8766)
+    p_headcal.add_argument("--no-open", action="store_true", help="do not open a browser")
+    p_headcal.add_argument("--socket", default=None, help="IPC path or host:port override")
+
     p_sound = sub.add_parser(
         "sound",
         help="Mute or unmute buddy (the head and lights keep moving), or show which it is",
@@ -437,6 +445,9 @@ def main(argv: list[str] | None = None) -> int:
         return _run_notes(args)
     if args.cmd == "move":
         return _run_move(args)
+    if args.cmd == "head-cal":
+        from . import head_cal
+        return head_cal.serve(args.port, args.socket, open_browser=not args.no_open)
     if args.cmd == "sound":
         return _run_sound(args.action, args.socket)
     if args.cmd == "mic":

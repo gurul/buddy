@@ -9,6 +9,7 @@
 #include "motion.h"
 #include "ticks.h"
 #include <M5StackChan.h>
+#include <Preferences.h>
 
 // ---- servo limits (degrees) ----
 // M5Stack advises 5..85 on the pitch axis; the BSP itself allows 0..90.
@@ -31,14 +32,25 @@ static const int PITCH_MAX = 85;
 // stepTween(), which mirrors pitch across the servo's 0..90 range here. The
 // code's convention (5 = down at the desk, 85 = up) is unchanged everywhere
 // else. Set false if the neck is reassembled and pitch runs backwards again.
-static const bool PITCH_REVERSED = true;
-static int servoPitchTenths(float p) { return (int)lroundf((PITCH_REVERSED ? 90.0f - p : p) * 10.0f); }
-int bodyServoPitchTenthsToCode(int tenths) { return PITCH_REVERSED ? 900 - tenths : tenths; }
+// Saved per robot (NVS "body": "p_rev", "y_rev"), set from the host's head calibration page with
+// {"cmd":"axis","pitch_rev":bool,"yaw_rev":bool}. Both as built: the owner set them on the calibration page
+// on 2026-09-27, once the head held at rest (see setAutoTorqueReleaseEnabled below).
+static bool pitchRev = false;
+static bool yawRev   = false;
+static int servoPitchTenths(float p) { return (int)lroundf((pitchRev ? 90.0f - p : p) * 10.0f); }
+static int servoYawTenths(float y)   { return (int)lroundf((yawRev ? -y : y) * 10.0f); }
+int bodyServoPitchTenthsToCode(int tenths) { return pitchRev ? 900 - tenths : tenths; }
+void bodyAxisGet(bool* pitchReversed, bool* yawReversed) { *pitchReversed = pitchRev; *yawReversed = yawRev; }
+static void loadAxis() {
+  Preferences p;
+  if (p.begin("body", true)) { pitchRev = p.getBool("p_rev", pitchRev); yawRev = p.getBool("y_rev", yawRev); p.end(); }
+  Serial.printf("[body] axis pitch_rev=%d yaw_rev=%d\n", pitchRev, yawRev);
+}
 static const int YAW_MAX   = 120;
 
 // ---- poses (degrees) — bench-tune these on the real robot ----
 // Code convention: pitch 0 is chin down, 90 is straight up (the raw servo runs the
-// other way on this robot; PITCH_REVERSED above mirrors it at the one write).
+// the saved pitchRev above can mirror it at the one write; off as built).
 // PITCH_LEVEL is the "looking at the desk owner" gaze; it depends on how the
 // head was zeroed (NVS servo/zero_pos_2), so treat 45 as a starting guess.
 static const int PITCH_LEVEL     = 45;
@@ -183,7 +195,7 @@ static void stepTween(uint32_t now) {
   sentYaw = y; sentPitch = p;
   float cy = fminf(fmaxf(y, (float)-YAW_MAX), (float)YAW_MAX);
   float cp = fminf(fmaxf(p, (float)PITCH_MIN), (float)PITCH_MAX);   // the pose can never leave 5..85
-  M5StackChan.Motion.move((int)lroundf(cy * 10.0f), servoPitchTenths(cp), speed);   // 0.1 deg units
+  M5StackChan.Motion.move(servoYawTenths(cy), servoPitchTenths(cp), speed);   // 0.1 deg units
 }
 
 static void play(const Key* k, uint8_t n, uint32_t now) {
@@ -645,13 +657,16 @@ static void ledForState(PersonaState s, uint32_t now) {
 // ---- lifecycle ----
 void bodyBegin() {
   M5StackChan.setServoPowerEnabled(true);
-  M5StackChan.Motion.setAutoTorqueReleaseEnabled(true);   // release at rest (sleep)
+  // Hold at rest. Released, the head is heavy enough to fall back up to the ceiling from the chin-down
+  // rest pose (owner, 2026-09-27: "he went back up" seconds after reaching the table).
+  M5StackChan.Motion.setAutoTorqueReleaseEnabled(false);
   // Streamed 25 Hz targets: do not teleport the spring to the bus-read angle
   // on every target (that is the BSP's "stutter" case).
   M5StackChan.Motion.setAutoAngleSyncEnabled(false);
   // Home is level, through the same pitch mirror every pose takes. The BSP's goHome() sends raw pitch 0,
   // which on this robot is straight up at the ceiling (2026-09-27: "on startup looks straight at ceiling"),
   // and left the tween believing the head was at code 0 while the servo sat at code 90.
+  loadAxis();
   M5StackChan.Motion.move(0, servoPitchTenths((float)PITCH_LEVEL), 300);
   curYaw = 0; curPitch = PITCH_LEVEL;
   cmdYaw = 0; cmdPitch = PITCH_LEVEL; sentYaw = 0; sentPitch = PITCH_LEVEL; gliding = false;
@@ -840,4 +855,12 @@ void bodySetLed(uint8_t r, uint8_t g, uint8_t b) {
 uint8_t bodyTouchZone(uint8_t zone) {
   if (!touchArmed || zone > 2) return 0;
   return M5StackChan.TouchSensor.getIntensities()[zone];
+}
+
+void bodySetAxis(bool pitchReversed, bool yawReversed) {
+  pitchRev = pitchReversed; yawRev = yawReversed;
+  Preferences p;
+  if (p.begin("body", false)) { p.putBool("p_rev", pitchRev); p.putBool("y_rev", yawRev); p.end(); }
+  sentYaw = sentPitch = 1e9f;          // resend the current pose through the new mapping at once
+  Serial.printf("[body] axis pitch_rev=%d yaw_rev=%d\n", pitchRev, yawRev);
 }

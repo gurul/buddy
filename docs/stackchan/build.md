@@ -106,18 +106,16 @@ depend on the servo zero (NVS `servo/zero_pos_2`): bench-tune them.
 
 **Rest pose.** Idle, busy (Claude sessions running) and asleep all rest chin-down at pitch 5, the owner's
 choice on 2026-09-27 ("all the way down"); the working nod is a small lift from there, and the attention
-pose is 60. Level (45) is only a reference now.
+pose is 60. Level (45) is only a reference now. Change these in `body.cpp` (`PITCH_REST`, `PITCH_SLEEP`).
 
-**Pitch is mirrored in software on this robot** (`body.cpp`, `PITCH_REVERSED = true`). The raw pitch servo
-runs opposite to the code convention (code 5 = chin down, 85 = up); the mirror is applied at the one
-`Motion.move()` and at boot, which goes home to level through it rather than the BSP's `goHome()` (raw 0,
-straight up here). Verified by the owner watching held poses on 2026-09-27
-([vision.md](vision.md#pitch-ran-backwards-and-how-that-hid-2026-09-27)). If the neck is reassembled and pitch
-runs backwards again, set it to `false`. Two diagnostics over serial (stop the daemon first; it holds the
-port): `{"cmd":"pitch_zero"}` reads the servo's stored zero (raw steps, BSP default 620; `"raw":N` stores a
-new one in 520..700 and reboots — leave it at 620 unless the neck was rebuilt), and
-`{"cmd":"ext_power","on":bool}` toggles the CoreS3 external 5 V for one boot and acks with a fresh servo read
-in code convention. Both were added chasing the reversal; neither changes anything persistent by default.
+**Axis directions and torque.** The head holds torque at rest (`setAutoTorqueReleaseEnabled(false)`):
+released, it falls back up to the ceiling from the rest pose. Each axis can be mirrored by a saved setting
+(NVS `body`: `p_rev`, `y_rev`, both off as built), set from the calibration page `cc-buddy-bridge head-cal`
+([vision.md](vision.md#the-head-fell-back-up-and-the-calibration-page-2026-09-27)). Serial diagnostics (stop
+the daemon first; it holds the port): `{"cmd":"axis"}` reads or sets the directions,
+`{"cmd":"pitch_zero"}` reads the servo's stored zero (raw steps, BSP default 620; `"raw":N` stores a new one in
+520..700 and reboots — leave it at 620 unless the neck was rebuilt), and `{"cmd":"ext_power","on":bool}`
+toggles the CoreS3 external 5 V for one boot and acks with a fresh servo read.
 
 Chirps (`src/chirp.cpp`) are synthesized to 8-bit PCM at 16 kHz into two 32 KB
 PSRAM buffers and played asynchronously through `M5.Speaker.playRaw()`. The
