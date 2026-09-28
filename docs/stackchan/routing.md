@@ -399,6 +399,25 @@ also reads the top three pages, then one cheap model call that answers from
 those pages. It takes seconds, needs none of your accounts, and never takes
 over your screen.
 
+**Alexandria data tools (on by default).** The same search also asks Firecrawl's
+Alexandria catalogue for data tools that fit the request: Google Flights and
+Skyscanner fares, government records, and so on. The model sees up to four of
+them beside the pages. When one fits and its data would answer more directly
+than the pages, the model picks it with its options, buddy runs it, and a second
+model call answers from its data.
+
+- Only a tool the search offered can run, and only with the options that tool
+  declares. Required options must be present. Anything else is dropped, and the
+  pages answer instead.
+- A link in the answer is kept only if buddy read it: a page it fetched or a link
+  in the tool's own result.
+- A tool that fails, or whose provider's terms you have not accepted, is dropped,
+  and the pages answer. buddy never accepts a provider's terms; that is your call
+  (`firecrawl alexandria terms`).
+- Cost: a tool adds its own credits (Google Flights: 5). A live check on
+  2026-09-28, "cheapest one-way SFO to JFK on Friday October 2", ran Google
+  Flights and answered with a fare in 12.7 s for 10 credits.
+
 **Which body** (`browser_router.py`): Jev decides, asked the way TypeSafe's
 docs recommend for a routing decision:
 
@@ -457,6 +476,7 @@ docs recommend for a routing decision:
 |---|---|---|
 | `CC_BUDDY_WEB_READER` | `auto` | On when `FIRECRAWL_API_KEY` is set and the router's gates passed their blind holdout (`browser_router.SHIPPED`). `0` turns it off, `1` forces it on. |
 | `CC_BUDDY_WEB_READER_TASKS` | 5 a day | Tasks read through Firecrawl per day (about 25 credits). Past it, Codex takes them. |
+| `CC_BUDDY_WEB_READER_ALEXANDRIA` | on | Offer Alexandria data tools beside the pages. `0` keeps to web pages. |
 | `CC_BUDDY_FIRECRAWL_USD` | unset | A credit's price on your plan, for the spend ledger. Unset: recorded unpriced. |
 | `CC_BUDDY_JEV_ROUTE` | (set up for Jev) | Jev's route. Without it, Firecrawl takes no tasks. |
 

@@ -371,8 +371,10 @@ permission choices.
   (`browser_router.py`) sends a task there only when the whole job is reading public
   websites: no accounts, nothing on the Mac, nothing to show on screen, nothing typed
   into a site. Firecrawl reads the top three pages and a cheap model answers from them
-  with their links, in seconds. Anything it can't answer, and every other task, goes
-  to Codex. Blind-tested: 30 of 30 routed correctly, 0 unsafe. See
+  with their links, in seconds. The same search also offers Firecrawl's Alexandria data
+  tools (live flight fares, government records, ...); when one fits, buddy runs it and
+  answers from its data (`CC_BUDDY_WEB_READER_ALEXANDRIA=0` turns that off). Anything
+  it can't answer, and every other task, goes to Codex. Blind-tested: 30 of 30 routed correctly, 0 unsafe. See
   [routing](docs/stackchan/routing.md#public-web-reading-tasks-go-to-firecrawl).
 - **Your own Chrome first (opt-in):** with `CC_BUDDY_BROWSER_ATTACH=1`, web goals try
   your logged-in Chrome first. Chrome's “Allow remote debugging?” prompt is answered
