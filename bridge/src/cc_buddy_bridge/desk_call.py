@@ -55,17 +55,20 @@ class Mic:
         try:
             import sounddevice as sd
 
-            from .ears import _find_input_device
+            from .ears import _find_input_device, input_device_name, open_input
 
             dev = _find_input_device(sd, self.device) if self.device else None
 
             def callback(indata: Any, _frames: int, _time: Any, _status: Any) -> None:
                 self.on_block(bytes(indata))
 
-            self._stream = sd.RawInputStream(samplerate=SAMPLE_RATE, channels=1, dtype="int16",
-                                             blocksize=int(SAMPLE_RATE * BLOCK_SECS), device=dev,
-                                             callback=callback)
-            self._stream.start()
+            # open_input refreshes PortAudio's device table and retries once when the open fails: a device
+            # that joined after the daemon started (a Bluetooth speaker's mic made the default) is otherwise
+            # a stale entry and paInternalError (live 2026-09-28 15:24).
+            self._stream = open_input(sd, lambda: sd.RawInputStream(
+                samplerate=SAMPLE_RATE, channels=1, dtype="int16", blocksize=int(SAMPLE_RATE * BLOCK_SECS),
+                device=dev, callback=callback), "desk call")
+            log.info("desk call: microphone %s", input_device_name(sd, dev))
             return True
         except Exception as e:  # noqa: BLE001 — no mic: the press is empty and the call says so
             log.warning("desk call: could not open the microphone (%s)", e)

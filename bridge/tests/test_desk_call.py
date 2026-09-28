@@ -364,3 +364,66 @@ async def test_an_interrupt_on_a_board_call_flushes_the_board() -> None:
     await until(lambda: {"cmd": "pcm_flush"} in sent)
     await desk.press(False)
     await desk.stop()
+
+
+# -- the microphone: a device table gone stale is refreshed once (live 2026-09-28 15:24, a JBL joined) --
+
+class FakeStream:
+    def __init__(self) -> None:
+        self.started = False
+
+    def start(self) -> None:
+        self.started = True
+
+    def stop(self) -> None:
+        pass
+
+    def close(self) -> None:
+        pass
+
+
+def fake_sounddevice(fail_times: int) -> Any:
+    import types
+
+    sd = types.SimpleNamespace(calls=[], streams=[], fails=fail_times)
+    sd.default = types.SimpleNamespace(device=[7, 2])
+
+    def raw_input_stream(**kw: Any) -> FakeStream:
+        sd.calls.append("open")
+        if sd.fails > 0:
+            sd.fails -= 1
+            raise RuntimeError("Error opening RawInputStream: Internal PortAudio error [PaErrorCode -9986]")
+        s = FakeStream()
+        sd.streams.append(s)
+        return s
+
+    sd.RawInputStream = raw_input_stream
+    sd._terminate = lambda: sd.calls.append("terminate")
+    sd._initialize = lambda: sd.calls.append("initialize")
+    sd.query_devices = lambda device=None, kind=None: {"name": "Yeti Stereo Microphone"}
+    return sd
+
+
+def test_a_stale_audio_device_table_is_refreshed_and_the_mic_opens(monkeypatch, caplog) -> None:
+    import sys
+
+    sd = fake_sounddevice(fail_times=1)
+    monkeypatch.setitem(sys.modules, "sounddevice", sd)
+    mic = desk_call.Mic(None, lambda b: None)
+    with caplog.at_level("INFO"):
+        assert mic.open() is True
+    assert sd.calls == ["open", "terminate", "initialize", "open"]
+    assert sd.streams[-1].started
+    assert "refreshing the audio device list" in caplog.text and "microphone Yeti" in caplog.text
+    mic.close()
+
+
+def test_a_mic_that_fails_after_the_refresh_is_a_clean_false(monkeypatch, caplog) -> None:
+    import sys
+
+    sd = fake_sounddevice(fail_times=2)
+    monkeypatch.setitem(sys.modules, "sounddevice", sd)
+    mic = desk_call.Mic(None, lambda b: None)
+    assert mic.open() is False
+    assert sd.calls == ["open", "terminate", "initialize", "open"]
+    assert "could not open the microphone" in caplog.text

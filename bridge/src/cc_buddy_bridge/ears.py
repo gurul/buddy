@@ -358,17 +358,15 @@ class Ears:
                 log.exception("ears: block failed")
 
         try:
-            self._stream = sd.InputStream(samplerate=SAMPLE_RATE, channels=1, dtype="int16",
-                                          blocksize=int(SAMPLE_RATE * BLOCK_SECS), device=device,
-                                          callback=callback)
-            self._stream.start()
+            self._stream = open_input(sd, lambda: sd.InputStream(
+                samplerate=SAMPLE_RATE, channels=1, dtype="int16", blocksize=int(SAMPLE_RATE * BLOCK_SECS),
+                device=device, callback=callback), "ears")
         except Exception as e:  # noqa: BLE001
             log.warning("ears: could not open the microphone (%s) — no wake word", e)
             self._stream = None
             return False
-        name = sd.query_devices(device if device is not None else sd.default.device[0])["name"]
-        log.info("ears: listening for %r on %s (%d Hz, threshold %.2f)", self.config.wake_word, name,
-                 SAMPLE_RATE, self.config.threshold)
+        log.info("ears: listening for %r on %s (%d Hz, threshold %.2f)", self.config.wake_word,
+                 input_device_name(sd, device), SAMPLE_RATE, self.config.threshold)
         return True
 
     def stop(self) -> None:
@@ -392,6 +390,40 @@ def _offer(q: "asyncio.Queue[bytes]", raw: bytes) -> None:
         except asyncio.QueueEmpty:
             pass
     q.put_nowait(raw)
+
+
+def open_input(sd: Any, make: Callable[[], Any], what: str) -> Any:
+    """Open and start an input stream; on failure, refresh PortAudio's device table and try once more.
+
+    PortAudio lists the audio devices when it is initialised and never again, so a device that appeared
+    after the daemon started (a Bluetooth speaker with a microphone, a USB mic) is not in its table, and
+    when macOS makes that device the default input, opening "the default" hits a stale entry and fails with
+    paInternalError (-9986). Seen live 2026-09-28 15:24: the desk call heard nothing twice, then could not
+    open the microphone at all, after a JBL Flip 4 joined. Terminating and re-initialising PortAudio
+    rebuilds the table; sounddevice exposes both for exactly this."""
+    try:
+        stream = make()
+        stream.start()
+        return stream
+    except Exception as first:  # noqa: BLE001 — one refresh, then the caller's own handling
+        log.warning("%s: could not open the microphone (%s); refreshing the audio device list", what, first)
+        try:
+            sd._terminate()
+            sd._initialize()
+        except Exception as e:  # noqa: BLE001
+            log.warning("%s: audio device refresh failed (%s)", what, e)
+            raise first from e
+        stream = make()
+        stream.start()
+        log.info("%s: microphone opened after the refresh", what)
+        return stream
+
+
+def input_device_name(sd: Any, device: Optional[int]) -> str:
+    try:
+        return str(sd.query_devices(device if device is not None else sd.default.device[0])["name"])
+    except Exception:  # noqa: BLE001 — a name is for the log only
+        return "?"
 
 
 def _find_input_device(sd: Any, needle: str) -> Optional[int]:
