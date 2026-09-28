@@ -67,3 +67,23 @@ The task budget is ten minutes, the same as Codex.
   the CLI's real event shape.
 - A real read-only run on `holo3-1-35b-a3b` (2026-09-28) answered "which app is in
   front?" correctly in 6.3 s.
+- A live read-only `holo4-27b` run through `HoloComputerAgent` itself (2026-09-28,
+  CLI 0.0.6, runtime 0.1.12): "which application window is in front?" answered
+  correctly in 9.5 s, with one `progress` event and the `final`. The daemon has run
+  with `CC_BUDDY_COMPUTER=holo` since that day; its startup log says
+  `agent: Holo desktop lane enabled; model=holo4-27b`.
+
+The CLI is [`hcompai/holo-desktop-cli`](https://github.com/hcompai/holo-desktop-cli)
+(Apache-2.0). To upgrade it in place, run the two commands the installer runs, with
+the toolchain already in `~/.holo`:
+
+```bash
+export UV_PYTHON_INSTALL_DIR=~/.holo/python UV_TOOL_DIR=~/.holo/tools UV_TOOL_BIN_DIR=~/.holo/bin
+~/.holo/toolchain/uv/uv tool install "holo-desktop-cli==<version>" --python 3.12 --force --reinstall-package holo-desktop-cli
+~/.holo/toolchain/uv/uv run --with "holo-desktop-cli==<version>" python -m holo_desktop.installer_bootstrap --yes
+```
+
+The second command downloads the runtime that version pins (sha256-checked). The
+consumer installer's manifest can lag the GitHub release (it said 0.0.5 when 0.0.6
+was out), so pin the version yourself. No daemon restart is needed: each task is its
+own `holo run`.
