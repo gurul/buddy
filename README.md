@@ -386,6 +386,14 @@ permission choices.
   is no “Allow remote debugging?” prompt at all. Sign it in once with
   `cc-buddy-bridge chrome-profile`. See [buddy's own Chrome](docs/stackchan/routing.md#buddys-own-chrome-no-allow-to-press).
 - **Stopping:** `stop_task` interrupts Codex, even while a permission is pending.
+- **Codex billing:** `CC_BUDDY_CODEX_AUTH=plan` is the default and uses your existing
+  Codex sign-in. To bill Buddy's Codex to your OpenAI API key, put `OPENAI_API_KEY`
+  in Buddy's env file, run `cc-buddy-bridge codex-home`, then set
+  `CC_BUDDY_CODEX_AUTH=api` for a future daemon start. This prepares a private
+  `~/.config/cc-buddy-bridge/codex-home` for computer tasks, Codex chat and warm
+  agents; your own Codex sign-in stays untouched. Missing API setup falls back to
+  the plan with one warning. API spend uses reported token counts when available.
+  See [setup and compatibility](docs/codex-computer-use/README.md#separate-api-key-billing).
 - **Permissions:** app prompts offer `yes`, `allow for task` and `always allow` when
   Codex permits them. Saved grants belong to Codex and are revoked in its Computer
   Use settings. `CC_BUDDY_CODEX_SITE_ACCESS=allow` skips the extra Telegram question

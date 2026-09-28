@@ -20,7 +20,7 @@ from pathlib import Path
 from typing import Any
 from urllib.parse import urlsplit
 
-from . import spend, telegram_images
+from . import codex_auth, pricing, spend, telegram_images
 from .agent_contract import AgentEvent
 
 log = logging.getLogger(__name__)
@@ -51,8 +51,7 @@ or the desktop as a substitute. Do any tab preservation before this final captur
 If capture fails, say so; do not claim a picture was sent.
 """
 INSTRUCTIONS += BROWSER_INSTRUCTIONS
-# Codex runs on the owner's ChatGPT plan, not per call: the spend meter records each task with no price, so the
-# dashboard can say how many there were without inventing a figure (spend.py).
+# Preserve the plan row; API-key processes are metered once their turn ends.
 PLAN_NOTE = 'ChatGPT plan, not per-call'
 
 
@@ -138,9 +137,7 @@ def executable() -> str:
 
 
 def external_environment() -> dict[str, str]:
-    # Deliberately omit desktop turn/pipe variables, API keys and Buddy bot tokens.
-    return {k: os.environ[k] for k in ('HOME', 'PATH', 'USER', 'LOGNAME', 'TMPDIR', 'LANG', 'CODEX_HOME')
-            if k in os.environ}
+    return codex_auth.launch_environment()[0]
 
 
 class CodexComputerAgent:
@@ -174,6 +171,103 @@ class CodexComputerAgent:
         self._approval_lock = asyncio.Lock()
         self._runner: asyncio.Task | None = None
         self._warmed_at: float | None = None       # prewarm() ran: run() only starts the turn
+        self._auth_mode = 'plan'                   # captured at launch, including a prewarmed process
+        self._launch_env: dict[str, str] | None = None
+        self._model = ''
+        self._usage_total: dict[str, int] | None = dict.fromkeys(('in', 'cached', 'out'), 0)
+        self._meter_what: str | None = None
+        self._meter_turn_id: str | None = None
+        self._metered_turns: set[str] = set()
+        self._meter_baseline: dict[str, int] | None = None
+        self._meter_tokens: dict[str, int] | None = None
+        self._meter_model: str | None = None
+        self._meter_invalid = False
+        self._meter_latest_valid = False
+        self._meter_completed = False
+
+    def _thread_started(self, result: dict[str, Any]) -> None:
+        self.thread_id = result['thread']['id']
+        self.turn_id = None
+        # The actual selection is on ThreadStartResponse, not Turn or its usage event.
+        model = result.get('model')
+        self._model = model if isinstance(model, str) else ''
+        self._usage_total = dict.fromkeys(('in', 'cached', 'out'), 0)
+        self._metered_turns.clear()
+        if self._meter_what is not None:
+            self._meter_model = self._model
+            self._meter_baseline = self._usage_total.copy()
+
+    def _begin_metering(self, what: str) -> None:
+        self._meter_what, self._meter_turn_id = what, None
+        self._meter_baseline = self._usage_total
+        self._meter_tokens = None
+        self._meter_model = self._model
+        self._meter_invalid = False
+        self._meter_latest_valid = False
+        self._meter_completed = False
+
+    def _meter_event(self, method: str, params: dict[str, Any]) -> None:
+        if self._auth_mode != 'api' or self._meter_what is None:
+            return
+        turn_id = params.get('turnId')
+        if method in {'turn/started', 'turn/completed'}:
+            turn_id = params.get('turn', {}).get('id')
+        if (not isinstance(turn_id, str) or turn_id in self._metered_turns
+                or self._meter_turn_id is not None and turn_id != self._meter_turn_id):
+            return
+        self._meter_turn_id = turn_id
+        if method == 'turn/completed':
+            self._meter_completed = True
+        elif method == 'model/rerouted':
+            # Aggregated usage cannot split a turn across two model prices.
+            model = params.get('toModel')
+            self._meter_model = model if self._meter_tokens is None and isinstance(model, str) else None
+        elif method == 'thread/tokenUsage/updated':
+            self._meter_latest_valid = False
+            usage = params.get('tokenUsage')
+            total = usage.get('total') if isinstance(usage, dict) else None
+            fields = {'in': 'inputTokens', 'cached': 'cachedInputTokens', 'out': 'outputTokens'}
+            if (not isinstance(total, dict) or any(type(total.get(field)) is not int or total[field] < 0
+                                                  for field in fields.values())):
+                self._meter_invalid = True
+                return
+            current = {name: total[field] for name, field in fields.items()}
+            self._meter_latest_valid = True
+            previous = self._usage_total
+            if (current['cached'] > current['in'] or previous is not None
+                    and any(current[k] < previous[k] for k in fields)):
+                self._meter_invalid = True
+            self._usage_total = current
+            if self._meter_baseline is not None:
+                delta = {k: current[k] - self._meter_baseline[k] for k in fields}
+                if any(n < 0 for n in delta.values()) or delta['cached'] > delta['in']:
+                    self._meter_invalid = True
+                else:
+                    # `total` is cumulative across the thread; `last` is only the last model request.
+                    # Replace this delta on each notification, so duplicate notifications do not add spend.
+                    self._meter_tokens = delta
+
+    def _finish_metering(self) -> None:
+        what, self._meter_what = self._meter_what, None
+        if what is None:
+            return
+        if self._auth_mode != 'api':
+            return
+        if self._meter_turn_id is not None:
+            self._metered_turns.add(self._meter_turn_id)
+        tokens = self._meter_tokens if not self._meter_invalid else None
+        usd = None
+        if tokens is not None and self._meter_model and self._meter_completed:
+            usd = pricing.estimate_openai_cost(self._meter_model, {
+                'input_tokens': tokens['in'], 'output_tokens': tokens['out'],
+                'input_tokens_details': {'cached_tokens': tokens['cached']},
+            })
+        if not self._meter_latest_valid or not self._meter_completed:
+            # Missing final counters would charge this turn's usage to the next turn.
+            self._usage_total = None
+        incomplete = '; incomplete usage' if not self._meter_completed else ''
+        spend.record('openai', 'codex', spend.CODEX, usd, tokens=tokens,
+                     note=f'API key, billed per token ({what}{incomplete})')
 
     def _emit(self, kind: str, text: str = '') -> None:
         self.on_event(AgentEvent(kind, text))
@@ -260,6 +354,12 @@ class CodexComputerAgent:
         if params.get('threadId') != self.thread_id:
             return
         method = msg.get('method')
+        if self._auth_mode == 'api' and method in {'turn/started', 'turn/completed'}:
+            turn_id = params.get('turn', {}).get('id')
+            if (turn_id in self._metered_turns
+                    or self.turn_id is not None and turn_id != self.turn_id):
+                return
+        self._meter_event(method, params)
         if method == 'item/started':
             item = params.get('item', {})
             if item.get('type') == 'mcpToolCall' and item.get('server') == 'cua_repl':
@@ -384,8 +484,11 @@ class CodexComputerAgent:
                 await self._send({'id': msg['id'], 'error': {'code': -32603, 'message': 'User input unavailable'}})
 
     async def _launch(self) -> None:
+        if self._launch_env is None:
+            self._launch_env, self._auth_mode = codex_auth.launch_environment()
+        env, self._launch_env = self._launch_env, None
         self._proc = await asyncio.create_subprocess_exec(
-            self.binary, 'app-server', '--listen', 'stdio://', env=external_environment(),
+            self.binary, 'app-server', '--listen', 'stdio://', env=env,
             stdin=asyncio.subprocess.PIPE, stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.DEVNULL, limit=32 * 1024 * 1024)
         self._reader = asyncio.create_task(self._read())
@@ -396,7 +499,7 @@ class CodexComputerAgent:
         await self._launch()
         result = await self._rpc('thread/start', {'ephemeral': True, 'cwd': str(Path.home()),
             'sandbox': 'read-only', 'approvalPolicy': 'on-request', 'developerInstructions': INSTRUCTIONS})
-        self.thread_id = result['thread']['id']
+        self._thread_started(result)
         cursor = None
         found = False
         while True:
@@ -448,7 +551,11 @@ class CodexComputerAgent:
         self.ui_evidence = []
         self._done = asyncio.get_running_loop().create_future()
         self._emit('started', goal)
-        meter_codex('computer task')
+        self._begin_metering('computer task')
+        if self._warmed_at is None:
+            self._launch_env, self._auth_mode = codex_auth.launch_environment()
+        if self._auth_mode == 'plan':
+            meter_codex('computer task')
         try:
             if self._cancelled:
                 raise asyncio.CancelledError
@@ -458,6 +565,7 @@ class CodexComputerAgent:
                 result = await self._rpc('turn/start', {'threadId': self.thread_id,
                     'input': [{'type': 'text', 'text': goal}]})
                 self.turn_id = result['turn']['id']
+                self._meter_turn_id = self.turn_id
                 turn = await asyncio.shield(self._done)
                 if turn['status'] == 'interrupted':
                     self.final = 'Codex task stopped. The requested result is not verified.'
@@ -480,6 +588,7 @@ class CodexComputerAgent:
             self._emit('error', self.final)
         finally:
             await self._close()
+            self._finish_metering()
             self._warmed_at = None
             self.running = False
             self._runner = None
