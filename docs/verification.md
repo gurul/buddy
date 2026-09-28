@@ -1,9 +1,9 @@
 # Formal verification (Lean 4)
 
-Eighteen models of buddy's state machines are in Lean 4 under `verification/`: six from
-the first pass, eight for the watcher (2026-09-25), and four for the Voice PE controller
-(2026-09-26, below). A model of code that had a bug
-has two kernel-checked theorems:
+Twenty models of buddy's state machines are in Lean 4 under `verification/`: six from
+the first pass, eight for the watcher (2026-09-25), four for the Voice PE controller
+(2026-09-26), and two for the Holo lane and the OpenAI seam (2026-09-28, below). A model
+of code that had a bug has two kernel-checked theorems:
 
 - **`current_violates`** — a concrete trace on a model of the code *as it was* on
   2026-09-25 (commit `0b7d36d`) after which the property is false: the bug, proved.
@@ -89,6 +89,21 @@ caught. The replays are named in each row.
 | `Buddy/ControllerRoute.lean` | `controller.py` `mirror`, `_replay`, `_on_message`; the tee in `daemon.py` | the controller is never sent sound-on (beeps only on the StackChan); only `ptt`, `key` and `focus` from it reach the daemon | the first version mirrored `{"cmd":"sound","on":true}` to the Voice PE, live or on the next connect (`test_the_beeps_are_the_robots_alone`) |
 | `Buddy/PortPick.lean` | `serial_transport.py` `_resolve_port` | the robot's glob never opens a node whose USB serial is skipped; a `usbsn:` pick is that serial's node | seen live: `/dev/cu.usbmodem101` (the Voice PE) sorted before `31201` (the StackChan) and was opened as the robot. The model's docstring also named a gap it could not cover: `comports()` raising skipped the skip filter. With a skip set, that now waits instead of guessing (`test_two_esp32_boards_are_told_apart_by_usb_serial`, `test_when_the_usb_list_fails_a_skip_is_never_guessed_past`) |
 | `Buddy/DeskCall.lean` | `desk_call.py` `DeskCalls`, `phone_call.py` `Call.run`, `telegram.py` `listen`, `daemon.py` `ptt` and `_wake_suppressed` | the desk mic is open only while the button is held; the chat's one call listener is never cleared under a live call; the wake word stays off while the button is held | four traces: a desk call ending cleared a phone call's reader, so the phone call went silent; a quick tap opened the mic after its release; a release during a conversation was dropped, leaving the mic open; a call ending mid-hold turned the wake word back on (`bridge/tests/test_desk_call_lean.py`) |
+
+## The Holo lane and the OpenAI seam (2026-09-28)
+
+Two models written with the code they check, the same day. Both have a `current_violates`
+on code that shipped (the cli-driver Holo lane, which refused every correction; the
+OpenAI seam before its retry, which died on one TLS drop), and `ResponseRetry.lean` also
+proves the obvious alternative wrong. The replays are `bridge/tests/test_holo_lean.py`
+(against the real `HoloComputerAgent` with a fake driver, and the real
+`make_stream_creator` with a fake client); the live proof of the steering path is
+`bridge/tools/holo_live_check.py`.
+
+| Model | Code | Property | What the counterexample was |
+|---|---|---|---|
+| `Buddy/HoloSteer.lean` | `holo_computer.py` `steer`, `cancel`, `_run_client`; `holo_driver.py` `Turn.announce`, `Turn.steer` | a correction given while the task runs (and no stop was asked) is never refused; a stop that was asked never lets a result be certified, even when Holo finished first; a certified result has no correction still waiting | `[start, steer]`: the cli driver returned False for every correction, so the owner's words were dropped while the task went on. Also proved: a correction before the session exists is delivered when the session is announced; a stop then a completed final is "stopped" |
+| `Buddy/ResponseRetry.lean` | `computer_agent.py` `make_response_creator`, `make_stream_creator` | no text is read out twice; a turn fails only after two drops, or a drop after text was read out | `[drop]`: one `ssl.SSLError` mid-read killed the turn (three phone-call turns on 2026-09-28). The naive cure, "always retry once", is proved wrong too: `[text, drop, text]` reads the sentence out twice. The fix retries once, only while nothing has been read out |
 
 ## Running it
 

@@ -386,9 +386,12 @@ permission choices.
   is no “Allow remote debugging?” prompt at all. Sign it in once with
   `cc-buddy-bridge chrome-profile`. See [buddy's own Chrome](docs/stackchan/routing.md#buddys-own-chrome-no-allow-to-press).
 - **Or Holo instead of Codex (opt-in):** with `CC_BUDDY_COMPUTER=holo`, the tasks Codex
-  would take run on H Company's Holo4 (`holo4-27b`) through the HoloDesktop CLI
-  (`holo run`). It needs `holo login` once and Models API credits. Holo takes no
-  corrections or questions mid-task. See [Holo computer use](docs/holo-computer-use.md).
+  would take run on H Company's Holo4 (`holo4-27b`) through the open-source
+  [holo-desktop-cli](https://github.com/hcompai/holo-desktop-cli). It needs `holo login`
+  once and Models API credits. buddy drives it through the CLI's own Python client
+  (`holo_driver.py`, under holo's Python), so a correction mid-task reaches Holo, a stop
+  pauses and cancels the session, and one runtime stays warm for the daemon's life. Holo
+  never asks questions. See [Holo computer use](docs/holo-computer-use.md).
 - **Stopping:** `stop_task` interrupts Codex, even while a permission is pending.
 - **Codex billing:** `CC_BUDDY_CODEX_AUTH=plan` is the default and uses your existing
   Codex sign-in. To bill Buddy's Codex to your OpenAI API key, put `OPENAI_API_KEY`
@@ -398,11 +401,15 @@ permission choices.
   agents; your own Codex sign-in stays untouched. Missing API setup falls back to
   the plan with one warning. API spend uses reported token counts when available.
   See [setup and compatibility](docs/codex-computer-use/README.md#separate-api-key-billing).
-- **Permissions:** app prompts offer `yes`, `allow for task` and `always allow` when
-  Codex permits them. Saved grants belong to Codex and are revoked in its Computer
-  Use settings. `CC_BUDDY_CODEX_SITE_ACCESS=allow` skips the extra Telegram question
-  for ordinary website-access prompts (default `ask`); it never approves uploads,
-  raw browser access, sign-in handoffs or other actions.
+- **Permissions:** routine app access, HTTP(S) site access and downloads proceed
+  automatically in chat and call tasks. Agents ask before purchases, deletions,
+  and sends/publication/uploads outside Telegram. Only uploads to the exact
+  `https://web.telegram.org` origin inherit the Telegram exception. Set
+  `CC_BUDDY_CODEX_ROUTINE_ACCESS=ask` to restore access questions;
+  `CC_BUDDY_CODEX_SITE_ACCESS` separately overrides site access (`ask` or `allow`).
+  Unknown permissions, raw browser access, sign-in handoffs and mandatory security
+  checks still ask or remain blocked. Explicit app prompts offer native persistence
+  choices when Codex permits them; Buddy's automatic grants do not save permissions.
 - **Pictures:** browser tasks return a capture of their own tab. A missing capture is
   reported rather than replaced with an unrelated desktop screenshot.
 - **Limits:** a read-only filesystem sandbox, approvals on request, and a ten-minute

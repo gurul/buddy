@@ -8,9 +8,12 @@ Holo is **off** by default. Codex stays the desktop lane unless you turn Holo on
 
 ## How it works
 
-`holo_computer.py` runs one `holo run` per task. `holo run` is the HoloDesktop CLI,
-H Company's own desktop agent. H's CLI does the screenshots, clicks and memory;
-buddy starts it, watches it, and stops it.
+`holo_computer.py` drives H Company's desktop agent through its open-source CLI,
+[holo-desktop-cli](https://github.com/hcompai/holo-desktop-cli): by default through the
+CLI's own Python client (`holo_driver.py`, "the two drivers" below), so a task can be
+corrected and stopped while it runs; or, when that Python is missing, as one `holo run`
+per task. H's runtime does the screenshots, clicks and memory; buddy starts the task,
+watches it, corrects it, and stops it.
 
 - **Order of lanes:** the launch reflex ("open Spotify"), the Firecrawl reader and the
   Chrome lane still take their tasks first. Holo takes what Codex would have taken.
@@ -19,10 +22,44 @@ buddy starts it, watches it, and stops it.
   are never shown, so text Holo types (a password, a message) does not reach the board
   or the chat.
 - **Answer:** the text `holo run` prints at the end is the task's result.
-- **Stopping:** `stop_task` runs `holo stop` and then ends the process.
-- **No steering, no questions:** `holo run` takes no messages mid-run, so a correction
-  is refused, and Holo never asks you anything.
+- **Corrections reach Holo:** "steer_task" (a texted or spoken correction while the task
+  runs) is sent to the running session. Before the session exists it is queued in the
+  driver and delivered the moment the session is running. If the runtime refuses one,
+  buddy says so as a progress line instead of pretending it was taken.
+- **Stopping:** `stop_task` asks the driver to stop: it files the CLI's own stop request
+  and pauses then cancels the session, so Holo halts at the next action boundary. A stop
+  that reached the task is always reported "stopped", never as a result, even when Holo
+  had already finished ("It had reached: …" is said, not certified). That is the rule
+  `verification/Buddy/HoloSteer.lean` proves, and the one `TaskStop.lean` proves for the
+  chat.
+- **No questions:** Holo has no move that asks you anything, so a task that needs a
+  decision from you is not one for this lane.
 - **No warm Codex:** while Holo is on, buddy does not keep a Codex process ready.
+
+### The two drivers
+
+`holo_computer.py` has two ways to drive Holo, one contract (run / steer / cancel /
+status, the same as Codex's):
+
+- **client** (the default when holo's own Python exists at
+  `~/.holo/tools/holo-desktop-cli/bin/python`): buddy starts `holo_driver.py` under
+  **holo's** Python, never its own venv, so buddy stays free of the CLI's fifteen
+  dependencies and the session request (instructions and skills from `~/.holo`) is built
+  by the client H ships. The two talk JSON lines: buddy sends `run`, `steer` and
+  `cancel`; the driver reports `ready`, `session`, `progress`, `steered` / `refused`,
+  and `final` (answer, status, the runtime's step and cost metrics). The driver uses the
+  CLI's own turn runner (`session_runner.run_turn`), so the machine-wide desktop lock and
+  the double-Esc / `holo stop` kill switch apply exactly as they do to `holo run`.
+- **cli** (`CC_BUDDY_HOLO_DRIVER=cli`, or when that Python is missing): one `holo run`
+  per task, progress tailed from the run's `events.jsonl`, no steering, as before.
+
+**The warm runtime.** The `hai-agent-runtime` binary shuts itself down when the process
+that launched it goes away, so a runtime the driver spawned would die with every task.
+The daemon therefore owns one: `HoloRuntime` starts `holo agent-api` as the daemon's
+child on the CLI's default port (18795) at the first task, hands the driver the same
+bearer token through `HAI_AGENT_RUNTIME_API_TOKEN`, and ends it when the daemon stops.
+Each task then only attaches. If something else already listens on the port (your own
+`holo run`), nothing is spawned and the driver attaches to that runtime instead.
 - **Screenshots are deleted:** each run writes to `~/.holo/runs/buddy/<id>/`, which
   holds desktop screenshots. buddy deletes it when the task ends.
 - **Spend:** each task writes one unpriced line (`hcompany`, the model) to the spend
@@ -55,16 +92,31 @@ buddy starts it, watches it, and stops it.
 | --- | --- | --- |
 | `CC_BUDDY_COMPUTER` | `codex` | `holo` makes Holo the desktop lane. |
 | `CC_BUDDY_HOLO_MODEL` | `holo4-27b` | Any Models API ID, for example `holo4-35b-a3b` (faster and cheaper) or `holo3-1-35b-a3b` (free tier). |
-| `CC_BUDDY_HOLO_MAX_STEPS` | none | A step cap passed to `holo run --max-steps`. |
+| `CC_BUDDY_HOLO_MAX_STEPS` | none | A step cap for each task (`--max-steps` on either driver). |
 | `CC_BUDDY_HOLO_KEEP_RUNS` | off | `1` keeps each run's events and screenshots, for debugging. |
-| `CC_BUDDY_HOLO_BIN` | `holo` on PATH, else `~/.holo/bin/holo` | The CLI to run. |
+| `CC_BUDDY_HOLO_BIN` | `holo` on PATH, else `~/.holo/bin/holo` | The CLI to run (`holo run`, `holo stop`, `holo agent-api`). |
+| `CC_BUDDY_HOLO_DRIVER` | `client` | `client` drives Holo through the CLI's Python client (corrections, clean stop, warm runtime); `cli` is one `holo run` per task. |
+| `CC_BUDDY_HOLO_PYTHON` | `~/.holo/tools/holo-desktop-cli/bin/python` | The interpreter `holo_driver.py` runs under: holo's own, where `holo_desktop` is installed. When it is missing the lane falls back to `cli`. |
 
 The task budget is ten minutes, the same as Codex.
 
 ## Checks
 
 - `bridge/tests/test_holo_computer.py` runs the lane against a fake `holo` that writes
-  the CLI's real event shape.
+  the CLI's real event shape (the cli driver), a fake `holo_driver.py` that speaks the
+  client protocol (a correction forwarded, one queued before the session, a stop that
+  lands after Holo finished, a driver that fails), and a fake `holo agent-api` (the warm
+  runtime spawned once for two tasks, the token handed to each driver, ended on close).
+- `bridge/tests/test_holo_lean.py` replays the traces of `verification/Buddy/HoloSteer.lean`
+  against the real `HoloComputerAgent`.
+- `bridge/tools/holo_live_check.py` is the live proof, on the real desktop: a read-only
+  task, then a correction sent through `steer()` asking Holo to end its answer with a
+  code word it was never given otherwise. 2026-09-28: `HOLO_STEER_OK`, the answer ended
+  with the word, 11 s from start to answer. Two things it caught on the way, both fixed:
+  a correction sent the instant the session was created bounced (the runtime takes a
+  message only once the session is running, so the driver now waits for that), and the
+  driver outlived its final event (a stdin reader on the default executor kept the
+  process alive; it is a daemon thread now, and buddy stops waiting after the final).
 - A real read-only run on `holo3-1-35b-a3b` (2026-09-28) answered "which app is in
   front?" correctly in 6.3 s.
 - A live read-only `holo4-27b` run through `HoloComputerAgent` itself (2026-09-28,
