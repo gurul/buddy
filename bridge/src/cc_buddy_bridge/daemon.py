@@ -399,6 +399,8 @@ class Daemon:
         # codex_warm.py: one Codex agent started ahead of time, so a hard task's handoff is the turn only.
         from . import codex_warm
         warm_on, warm_age = codex_warm.configured()
+        if holo_computer.configured().enabled:
+            log.info("agent: Holo desktop lane enabled; model=%s", holo_computer.configured().model)
         # With Holo as the floor (CC_BUDDY_COMPUTER=holo) no Codex is kept warm: nothing would take it.
         self._codex_warm = codex_warm.WarmCodex(CodexComputerAgent, enabled=warm_on and self._agent_cfg.enabled
                                                 and not holo_computer.configured().enabled, max_age=warm_age)
@@ -460,6 +462,8 @@ class Daemon:
                 await self._spotify.close()
             if getattr(self, "_chrome_lane", None) is not None:
                 await self._chrome_lane.close()             # buddy's tab only; the owner's Chrome stays
+            if getattr(self, "_holo_runtime", None) is not None:
+                await self._holo_runtime.close()            # the warm Holo runtime ends with the daemon
             for t in tasks:
                 t.cancel()
             for pend in list(self._pending_turn_ends.values()):
@@ -1292,8 +1296,11 @@ class Daemon:
                       else (lambda: CodexComputerAgent(on_event=on_event, ask_user=ask_user)))
         holo = holo_computer.configured()
         if holo.enabled:                                # CC_BUDDY_COMPUTER=holo: Holo is the floor, not Codex
+            # One warm runtime for the daemon's life (holo_computer.HoloRuntime), started by the first task.
+            if getattr(self, "_holo_runtime", None) is None:
+                self._holo_runtime = holo_computer.HoloRuntime(model=holo.model)
             make_inner = lambda: holo_computer.HoloComputerAgent(on_event=on_event, ask_user=ask_user,  # noqa: E731
-                                                                 config=holo)
+                                                                 config=holo, runtime=self._holo_runtime)
             warm = None
         agent = app_reflex.ReflexFirstAgent(make_inner, on_event, asker=app_reflex.jev_asker(),
                                             quit_asker=app_reflex.jev_quit_asker(),
