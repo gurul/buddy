@@ -46,6 +46,7 @@ import json
 import logging
 import os
 import re
+import ssl
 import sys
 import time
 from dataclasses import dataclass, field
@@ -1506,35 +1507,67 @@ def desktop_grants(prompt: bool = False) -> dict[str, Any]:
 
 # ---- the real Responses client --------------------------------------------------------
 
-def make_response_creator(api_key: Optional[str] = None) -> Callable[[dict[str, Any]], Awaitable[dict[str, Any]]]:
-    """responses.create as a dict-in/dict-out coroutine (the seam tests fake)."""
+def _openai_client(api_key: Optional[str], client: Any) -> Any:
+    if client is not None:
+        return client
     from openai import AsyncOpenAI
 
-    client = AsyncOpenAI(api_key=api_key) if api_key else AsyncOpenAI()
+    return AsyncOpenAI(api_key=api_key) if api_key else AsyncOpenAI()
+
+
+# The SDK retries its own connection errors, but a TLS read that fails AFTER the handshake comes out of anyio
+# as a bare ssl.SSLError (anyio/streams/tls.py re-raises everything but an EOF), which httpcore2 leaves unmapped
+# and the SDK neither wraps nor retries (openai/_httpx2.py request_exceptions: httpx2.RequestError only). Live,
+# 2026-09-28: three phone-call turns in one morning died on one each, "telegram: turn failed: SSLError", and
+# the owner heard FAILED_LINE. One retry is the whole cure; a second failure in a row is a real outage.
+TLS_RETRIES = 1
+
+
+def make_response_creator(api_key: Optional[str] = None, client: Any = None) -> Callable[[dict[str, Any]],
+                                                                                          Awaitable[dict[str, Any]]]:
+    """responses.create as a dict-in/dict-out coroutine (the seam tests fake). ``client`` is for tests."""
+    client = _openai_client(api_key, client)
 
     async def create(request: dict[str, Any]) -> dict[str, Any]:
-        r = await client.responses.create(**request)
-        return r.model_dump(exclude_none=True)
+        for attempt in range(TLS_RETRIES + 1):
+            try:
+                r = await client.responses.create(**request)
+            except ssl.SSLError as e:
+                if attempt == TLS_RETRIES:
+                    raise
+                log.warning("responses: TLS dropped mid-request (%s); once more", e.reason or type(e).__name__)
+                continue
+            return r.model_dump(exclude_none=True)
+        raise AssertionError("unreachable")
 
     return create
 
 
-def make_stream_creator(api_key: Optional[str] = None) -> Callable[[dict[str, Any], Callable[[str], None]],
-                                                                   Awaitable[dict[str, Any]]]:
+def make_stream_creator(api_key: Optional[str] = None, client: Any = None) -> Callable[
+        [dict[str, Any], Callable[[str], None]], Awaitable[dict[str, Any]]]:
     """responses.create, streamed: ``on_text`` gets each piece of the reply's text as it is written, and the
     finished response comes back as the same dict ``make_response_creator`` returns (the Telegram call reads a
-    reply out a sentence at a time, telegram.SentenceStream)."""
-    from openai import AsyncOpenAI
-
-    client = AsyncOpenAI(api_key=api_key) if api_key else AsyncOpenAI()
+    reply out a sentence at a time, telegram.SentenceStream). A TLS drop is retried only while nothing has been
+    handed to ``on_text``: once a sentence is being read out, a retry would read it out twice."""
+    client = _openai_client(api_key, client)
 
     async def create(request: dict[str, Any], on_text: Callable[[str], None]) -> dict[str, Any]:
-        async with client.responses.stream(**request) as stream:
-            async for event in stream:
-                if getattr(event, "type", "") == "response.output_text.delta":
-                    on_text(event.delta)
-            final = await stream.get_final_response()
-        return plain_response(final.model_dump(exclude_none=True))
+        for attempt in range(TLS_RETRIES + 1):
+            spoke = False
+            try:
+                async with client.responses.stream(**request) as stream:
+                    async for event in stream:
+                        if getattr(event, "type", "") == "response.output_text.delta":
+                            spoke = True
+                            on_text(event.delta)
+                    final = await stream.get_final_response()
+            except ssl.SSLError as e:
+                if attempt == TLS_RETRIES or spoke:
+                    raise
+                log.warning("responses: TLS dropped mid-stream (%s); once more", e.reason or type(e).__name__)
+                continue
+            return plain_response(final.model_dump(exclude_none=True))
+        raise AssertionError("unreachable")
 
     return create
 

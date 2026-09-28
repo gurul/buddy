@@ -79,6 +79,15 @@ Every press is timed in the daemon's log (`call: press … → heard in … → 
 None of OpenRouter's transcription models beat the live session (Deepgram Nova-3 0.69 s, Whisper Large V3
 Turbo 1.32 s, both uploaded), so the ears stay on OpenAI.
 
+### When a turn fails
+
+If the model call itself fails, buddy says "Something went wrong on my side. Try me again in a moment." and
+the log has `telegram: turn failed: <error>`. One cause is fixed in code (2026-09-28: three call turns in
+one morning): a TLS connection dropped while the answer was being read comes out of the OpenAI SDK as a
+bare `SSLError` that it does not retry. `make_response_creator` and `make_stream_creator` now retry it
+once (`responses: TLS dropped … once more` in the log). The streamed call retries only while nothing has
+been read out yet; a drop after the first sentence still fails the turn rather than repeat it.
+
 Code: `bridge/src/cc_buddy_bridge/phone_call.py` (the WebSocket, the call, the ears and the voice),
 `TelegramInlet.listen` / `hear`, `split_for_call` and `SentenceStream` in `telegram.py`,
 `make_stream_creator` in `computer_agent.py`, and the call screen in `miniapp_page.html`. Tests:
