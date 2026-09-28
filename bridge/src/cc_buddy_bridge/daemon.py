@@ -13,7 +13,7 @@ from typing import TYPE_CHECKING, Any, Optional
 if TYPE_CHECKING:
     from .key_tap import KeyTapper
 
-from . import claude_live, mem0_memory, photos, voice_agent
+from . import claude_live, holo_computer, mem0_memory, photos, voice_agent
 from . import dream as dream_mod
 from . import follow as follow_mod
 from . import memory as memory_mod
@@ -399,8 +399,9 @@ class Daemon:
         # codex_warm.py: one Codex agent started ahead of time, so a hard task's handoff is the turn only.
         from . import codex_warm
         warm_on, warm_age = codex_warm.configured()
-        self._codex_warm = codex_warm.WarmCodex(CodexComputerAgent, enabled=warm_on and self._agent_cfg.enabled,
-                                                max_age=warm_age)
+        # With Holo as the floor (CC_BUDDY_COMPUTER=holo) no Codex is kept warm: nothing would take it.
+        self._codex_warm = codex_warm.WarmCodex(CodexComputerAgent, enabled=warm_on and self._agent_cfg.enabled
+                                                and not holo_computer.configured().enabled, max_age=warm_age)
         tasks.append(asyncio.create_task(self._codex_warm.refresh_loop(), name="codex-warm"))
         # The fast path into the owner's logged-in Chrome (chrome_lane.py): ONE attached lane for the daemon's
         # life, so Chrome's "Allow remote debugging?" is answered once per Chrome session (over Telegram).
@@ -1282,12 +1283,18 @@ class Daemon:
 
     def _make_agent(self, on_event: Any, ask_user: Any) -> Any:
         """Codex computer use, behind the launch reflex (app_reflex.py): "open Spotify" is `open -a`,
-        with Jev for wording the rules do not know; everything else is Codex's, as before."""
+        with Jev for wording the rules do not know; everything else is Codex's, as before — or Holo's
+        (holo_computer.py) when CC_BUDDY_COMPUTER=holo."""
         from . import app_reflex
 
         warm = getattr(self, "_codex_warm", None)       # codex_warm.py: a Codex agent already started
         make_inner = ((lambda: warm.take(on_event, ask_user)) if warm is not None
                       else (lambda: CodexComputerAgent(on_event=on_event, ask_user=ask_user)))
+        holo = holo_computer.configured()
+        if holo.enabled:                                # CC_BUDDY_COMPUTER=holo: Holo is the floor, not Codex
+            make_inner = lambda: holo_computer.HoloComputerAgent(on_event=on_event, ask_user=ask_user,  # noqa: E731
+                                                                 config=holo)
+            warm = None
         agent = app_reflex.ReflexFirstAgent(make_inner, on_event, asker=app_reflex.jev_asker(),
                                             quit_asker=app_reflex.jev_quit_asker(),
                                             enabled=app_reflex.reflexes_on(),

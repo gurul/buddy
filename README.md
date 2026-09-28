@@ -383,6 +383,10 @@ permission choices.
   a second Chrome that belongs to buddy (`~/.config/cc-buddy-bridge/chrome`), so there
   is no “Allow remote debugging?” prompt at all. Sign it in once with
   `cc-buddy-bridge chrome-profile`. See [buddy's own Chrome](docs/stackchan/routing.md#buddys-own-chrome-no-allow-to-press).
+- **Or Holo instead of Codex (opt-in):** with `CC_BUDDY_COMPUTER=holo`, the tasks Codex
+  would take run on H Company's Holo4 (`holo4-27b`) through the HoloDesktop CLI
+  (`holo run`). It needs `holo login` once and Models API credits. Holo takes no
+  corrections or questions mid-task. See [Holo computer use](docs/holo-computer-use.md).
 - **Stopping:** `stop_task` interrupts Codex, even while a permission is pending.
 - **Permissions:** app prompts offer `yes`, `allow for task` and `always allow` when
   Codex permits them. Saved grants belong to Codex and are revoked in its Computer
