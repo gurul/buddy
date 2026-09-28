@@ -336,6 +336,57 @@ own profile.
   your Chrome, not just buddy. Switch it off in the same place when you don't
   need it.
 
+## buddy's own Chrome (no Allow to press)
+
+The owner, 2026-09-27: "lets give buddy its own profile". With
+`CC_BUDDY_BROWSER_OWN=1`, the Chrome lane drives **a second Chrome that
+belongs to buddy** instead of yours. Everything in attach mode above still
+applies (its own tab, the approval gate, 15 s then Codex), except the parts
+about the Allow dialog and profiles.
+
+- **Why there's no dialog.** Chrome refuses `--remote-debugging-port` only on
+  your **default** user data folder, which is why your Chrome asks "Allow
+  remote debugging?". buddy's Chrome runs from its own folder,
+  `~/.config/cc-buddy-bridge/chrome` (`CC_BUDDY_OWN_CHROME_DIR` moves it), and is
+  started with `--remote-debugging-port=0`. Chrome picks a free port and
+  writes it to `DevToolsActivePort` in that folder. buddy can read that file
+  because the folder is its own, so nothing asks and nothing is pressed.
+- **It's real Google Chrome**, started with `open -na "Google Chrome"`, not
+  Playwright's launch. It stays open between tasks and shows as a second
+  Chrome icon in the Dock. If it isn't running, the next web task starts it.
+  buddy trusts a port file only while something listens on that port, so a
+  file left by a Chrome that has quit is ignored.
+- **Sign in once: `cc-buddy-bridge chrome-profile`** (or `… chrome-profile <url>`).
+  Google's sign-in may refuse a Chrome that another program can drive, so
+  the command:
+  1. quits buddy's Chrome through its own port (never by app name, which would
+     also match your Chrome),
+  2. reopens the same folder with **no port** at Google's sign-in page,
+  3. waits while you sign in to each site buddy may use and then quit it (⌘Q),
+  4. starts it again with the port, opens Gmail in buddy's tab, and says
+     whether it landed in the inbox.
+
+  The sign-ins stay in the folder. If buddy needs the browser while the
+  sign-in window is still open, the task says to quit it and goes to Codex.
+  Google's account list (`ListAccounts`) answers 400 to a request made from
+  outside a page, so a real Gmail load is the check.
+- **One profile.** buddy's Chrome has one profile, so `CC_BUDDY_CHROME_PROFILE`
+  and the account lookup don't apply. Meet joins as the account signed in
+  there.
+- **The trade.** Any program on this Mac can drive buddy's Chrome through its
+  port, with no prompt. That's why it holds only what you sign into it, and
+  never your own Chrome's sessions.
+- **Verified 2026-09-27** (Chrome 154, this Mac):
+  - A cold start plus connect took 0.8 s with no dialog, and a reconnect 0.18 s.
+  - The owner signed in with the port off. After a restart with the port,
+    Gmail opened the inbox, and the check read signed in.
+  - The same check on an empty profile read not signed in.
+  - Quitting buddy's Chrome left the owner's Chrome running.
+- **Switching.** `CC_BUDDY_BROWSER_OWN=1` turns the lane on by itself, so it
+  doesn't need `CC_BUDDY_BROWSER_ATTACH`. `CC_BUDDY_CHROME_ACCESS` does nothing
+  in this mode. The daemon's startup line reads
+  `chrome lane: on — web tasks try buddy's own Chrome first … no Allow to press`.
+
 ## Public-web reading tasks go to Firecrawl
 
 A task that isn't a reflex goes to your computer: Codex, which drives your

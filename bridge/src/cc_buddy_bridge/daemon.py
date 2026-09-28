@@ -1335,7 +1335,8 @@ class Daemon:
 
     def _make_chrome_lane(self) -> Any:
         """CC_BUDDY_BROWSER_ATTACH=1: the browser lane attached to the owner's own Chrome, kept for the daemon's
-        life (connected on the first web task, not now). None otherwise, or without Playwright."""
+        life (connected on the first web task, not now). CC_BUDDY_BROWSER_OWN=1: the same lane on buddy's own
+        Chrome instead (browser_lane.py, BUDDY'S OWN CHROME). None otherwise, or without Playwright."""
         from . import browser_lane
 
         cfg = browser_lane.configured()
@@ -1351,6 +1352,10 @@ class Daemon:
         lane = browser_lane.BrowserLane(cfg, step_asker=browser_lane.make_step_asker(env))
         from . import chrome_consent
 
+        if cfg.own:
+            log.info("chrome lane: on — web tasks try buddy's own Chrome first (%s, signed in with "
+                     "`cc-buddy-bridge chrome-profile`); Codex is the floor; no Allow to press", cfg.own_dir)
+            return lane
         log.info("chrome lane: on — web tasks try the owner's logged-in Chrome first (profile: %s); Codex is the "
                  "floor; Chrome's Allow: %s", cfg.chrome_profile or "the first open",
                  "pressed by buddy (CC_BUDDY_CHROME_ACCESS=allow)" if chrome_consent.access_preference() == "allow"

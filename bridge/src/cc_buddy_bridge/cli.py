@@ -218,6 +218,15 @@ def main(argv: list[str] | None = None) -> int:
     )
     p_spotify.add_argument("spotify_args", nargs=argparse.REMAINDER)
 
+    p_chrome = sub.add_parser(
+        "chrome-profile",
+        help="Sign in to buddy's own Chrome (CC_BUDDY_BROWSER_OWN): opens it with nothing connected, waits "
+             "for you to quit it, then checks the sign-in. "
+             "See docs/stackchan/routing.md",
+    )
+    p_chrome.add_argument("url", nargs="?", default="https://accounts.google.com/",
+                          help="the page to open in it (default: Google sign-in)")
+
     p_sound = sub.add_parser(
         "sound",
         help="Mute or unmute buddy (the head and lights keep moving), or show which it is",
@@ -417,6 +426,8 @@ def main(argv: list[str] | None = None) -> int:
                             format="%(asctime)s %(levelname)s %(name)s: %(message)s")
         from .notes_widget import run as widget_run
         return widget_run(once=args.once)
+    if args.cmd == "chrome-profile":
+        return _run_chrome_profile(args.url)
     if args.cmd == "status":
         from .installer import show_status
         return show_status(config_dir=getattr(args, "config_dir", None))
@@ -1137,6 +1148,59 @@ def _run_diag(socket_path: str | None, watch: bool) -> int:
             _t.sleep(2.0)
     except KeyboardInterrupt:
         return 0
+
+
+def _run_chrome_profile(url: str) -> int:
+    """Sign in to buddy's own Chrome (browser_lane.py, BUDDY'S OWN CHROME). It opens with no debugging port,
+    because Google's sign-in may refuse a Chrome another program can drive. When the owner quits it, it starts
+    again with the port and this says which Google accounts buddy now sees."""
+    import subprocess
+    import time as _time
+
+    from . import browser_lane
+
+    cfg = browser_lane.configured()
+    if not browser_lane.quit_own_chrome(cfg.own_dir):
+        print("cc-buddy-bridge: buddy's own Chrome did not quit; quit it (⌘Q in that Chrome) and run this again",
+              file=sys.stderr)
+        return 2
+    subprocess.run(browser_lane.sign_in_command(cfg.own_dir, url), capture_output=True, text=True, timeout=15)
+    print(f"buddy's own Chrome is open for signing in ({cfg.own_dir}), with nothing connected to it.")
+    print("Sign in to each site buddy may use, then quit that Chrome (⌘Q). This waits; Ctrl-C to stop waiting.")
+    try:
+        _time.sleep(3)
+        while browser_lane.own_chrome_running(cfg.own_dir):
+            _time.sleep(1)
+    except KeyboardInterrupt:
+        print("\nStopped waiting. Quit buddy's Chrome when you're done; the next web task starts it again.")
+        return 0
+    try:
+        signed_in = asyncio.run(_own_chrome_signed_in(cfg))
+    except browser_lane.AttachError as e:
+        print(f"cc-buddy-bridge: {e}", file=sys.stderr)
+        return 2
+    print("Google in buddy's Chrome: " + ("signed in (Gmail opened the inbox)" if signed_in
+                                           else "NOT signed in (Gmail went to a sign-in page)"))
+    if not cfg.own:
+        print("Not in use yet: set CC_BUDDY_BROWSER_OWN=1 in ~/.config/cc-buddy-bridge/env and restart the daemon.")
+    return 0 if signed_in else 1
+
+
+async def _own_chrome_signed_in(cfg: Any) -> bool:
+    """Start buddy's own Chrome with its port, open Gmail in buddy's tab, and say whether it stayed signed in.
+    Google's account list (ListAccounts) answers 400 to a request from outside a page, and Chrome 154's
+    cookies may not work when copied out, so a real page load is the check. Leaves that Chrome running."""
+    import dataclasses
+
+    from . import browser_lane
+
+    lane = browser_lane.BrowserLane(dataclasses.replace(cfg, own=True, attach=True))
+    try:
+        await lane.connect()
+        await lane.open_url("https://mail.google.com/")
+        return not (await lane.page_text(limit=200))["signed_out"]
+    finally:
+        await lane.close()
 
 
 def _run_unpair() -> int:

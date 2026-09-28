@@ -349,3 +349,92 @@ def test_chrome_with_a_window_is_left_alone() -> None:
         return SimpleNamespace(stdout="2")
 
     assert bl.ensure_chrome_window(run) is True and len(calls) == 1 and "make new window" not in calls[0]
+
+
+# -- buddy's own Chrome (CC_BUDDY_BROWSER_OWN) ------------------------------------------------------------------
+
+def test_own_chrome_is_off_unless_asked_and_turns_the_lane_on_by_itself(tmp_path: Path) -> None:
+    assert configured({}).own is False
+    cfg = configured({"CC_BUDDY_BROWSER_OWN": "1", "CC_BUDDY_OWN_CHROME_DIR": str(tmp_path)})
+    assert cfg.own is True and cfg.attach is True and cfg.own_dir == tmp_path
+
+
+def test_own_chrome_starts_on_its_own_folder_never_the_owners() -> None:
+    cmd = bl.own_chrome_command(Path("/x/buddy-chrome"), "https://accounts.google.com/")
+    assert cmd[:3] == ["open", "-na", "Google Chrome"]
+    assert "--user-data-dir=/x/buddy-chrome" in cmd and "--remote-debugging-port=0" in cmd
+    assert cmd[-1] == "https://accounts.google.com/"
+    assert not any("Application Support/Google/Chrome" in a for a in cmd)
+
+
+def test_a_running_own_chrome_is_reused_without_starting_another(tmp_path: Path, monkeypatch) -> None:
+    (tmp_path / "DevToolsActivePort").write_text("51234\n/devtools/browser/abc\n")
+    monkeypatch.setattr(bl, "_listening", lambda port: port == 51234)
+    ran: list[Any] = []
+    assert bl.start_own_chrome(tmp_path, run=lambda *a, **k: ran.append(a)) == "ws://127.0.0.1:51234/devtools/browser/abc"
+    assert ran == []
+
+
+def test_a_stale_port_file_is_not_believed_and_chrome_is_started(tmp_path: Path, monkeypatch) -> None:
+    (tmp_path / "DevToolsActivePort").write_text("40000\n/devtools/browser/old\n")   # a Chrome that has quit
+    monkeypatch.setattr(bl, "_listening", lambda port: port == 51234)
+    ran: list[list[str]] = []
+
+    def run(cmd, **kw):
+        ran.append(cmd)
+        assert not (tmp_path / "DevToolsActivePort").exists()           # the stale file went first
+        (tmp_path / "DevToolsActivePort").write_text("51234\n/devtools/browser/new\n")
+        return SimpleNamespace(returncode=0, stdout="", stderr="")
+
+    assert bl.start_own_chrome(tmp_path, run=run, poll_secs=0) == "ws://127.0.0.1:51234/devtools/browser/new"
+    assert len(ran) == 1 and f"--user-data-dir={tmp_path}" in ran[0]
+
+
+def test_own_chrome_that_never_comes_up_is_an_attach_error(tmp_path: Path, monkeypatch) -> None:
+    monkeypatch.setattr(bl, "_listening", lambda port: False)
+    with pytest.raises(AttachError, match="did not start"):
+        bl.start_own_chrome(tmp_path, run=lambda *a, **k: None, wait_secs=0.05, poll_secs=0.01)
+
+
+def test_own_chrome_never_waits_on_an_allow_dialog() -> None:
+    lane = BrowserLane(BrowserLaneConfig(attach=True, own=True))
+    asked: list[str] = []
+
+    async def answer() -> str:
+        asked.append("asked")
+        return "auto_allowed"
+
+    def ensure() -> None:
+        lane._context = object()
+
+    lane._ensure = ensure  # type: ignore[method-assign]
+    asyncio.run(lane.connect(answer))
+    assert lane.connected and asked == []
+
+
+def test_own_chrome_uses_its_one_profile_without_a_lookup() -> None:
+    lane = BrowserLane(BrowserLaneConfig(attach=True, own=True, chrome_profile="someone@example.com"))
+    first = object()
+    lane._browser = SimpleNamespace(contexts=[first, object()])
+    lane._profiles = lambda: pytest.fail("no profile lookup in buddy's own Chrome")  # type: ignore[method-assign]
+    assert lane._pick_profile("someone@example.com") is first
+
+
+def test_signing_in_opens_buddys_chrome_with_no_port() -> None:
+    cmd = bl.sign_in_command(Path("/x/buddy-chrome"), "https://accounts.google.com/")
+    assert "--user-data-dir=/x/buddy-chrome" in cmd and cmd[-1] == "https://accounts.google.com/"
+    assert not any(a.startswith("--remote-debugging") for a in cmd)
+
+
+def test_a_sign_in_chrome_left_open_says_to_quit_it(tmp_path: Path, monkeypatch) -> None:
+    monkeypatch.setattr(bl, "_listening", lambda port: False)
+    monkeypatch.setattr(bl, "own_chrome_running", lambda own_dir, run=None: True)   # open, but with no port
+    with pytest.raises(AttachError, match="open for signing in"):
+        bl.start_own_chrome(tmp_path, run=lambda *a, **k: None, wait_secs=0.05, poll_secs=0.01)
+
+
+def test_own_chrome_running_looks_for_its_own_folder_only() -> None:
+    seen: list[list[str]] = []
+    run = lambda cmd, **k: seen.append(cmd) or SimpleNamespace(stdout="")   # noqa: E731
+    assert bl.own_chrome_running(Path("/x/buddy-chrome"), run) is False
+    assert seen == [["pgrep", "-f", "--", "--user-data-dir=/x/buddy-chrome"]]

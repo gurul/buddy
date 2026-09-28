@@ -103,7 +103,7 @@ realtime voice) was left out on purpose. Its caption bookkeeping was replaced by
 
 | Variable | Default | What it does |
 |---|---|---|
-| `CC_BUDDY_MEET` | on | Needs the Telegram door and `CC_BUDDY_BROWSER_ATTACH=1` (your Chrome). |
+| `CC_BUDDY_MEET` | on | Needs the Telegram door and `CC_BUDDY_BROWSER_ATTACH=1` (your Chrome) or `CC_BUDDY_BROWSER_OWN=1` (buddy's own Chrome). |
 | `CC_BUDDY_MEET_PROFILE` | the Chrome lane's profile | Google account whose Chrome profile joins. |
 | `CC_BUDDY_MEET_LOBBY_MINUTES` | 15 | How long to wait to be admitted. |
 | `CC_BUDDY_MEET_MAX_HOURS` | 4 | A call is left after this long. |
@@ -112,7 +112,9 @@ realtime voice) was left out on purpose. Its caption bookkeeping was replaced by
 | `CC_BUDDY_MEET_GUEST_NAME` | Buddy | The name typed in only when Chrome is signed out. |
 
 Chrome's "Allow remote debugging?" for the Meet tab's connection is answered the
-same way as the Chrome lane's (`CC_BUDDY_CHROME_ACCESS=allow` presses it).
+same way as the Chrome lane's (`CC_BUDDY_CHROME_ACCESS=allow` presses it). In
+buddy's own Chrome (`CC_BUDDY_BROWSER_OWN=1`) there is no dialog, and Meet joins
+as the account signed in there.
 
 ## Live test, 2026-09-25
 

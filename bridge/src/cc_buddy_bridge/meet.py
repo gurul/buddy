@@ -974,6 +974,9 @@ def make_meeter(config: Optional[MeetConfig], notes_root: Path, *, answer: Optio
     def make_page() -> MeetPage:
         return ChromeMeetPage(browser_lane.BrowserLane(lane_cfg), answer)
 
-    log.info("meet: on — joins from %s's Chrome profile, listen only", lane_cfg.chrome_profile or "the first open")
+    if lane_cfg.own:
+        log.info("meet: on — joins from buddy's own Chrome, as the account signed in there, listen only")
+    else:
+        log.info("meet: on — joins from %s's Chrome profile, listen only", lane_cfg.chrome_profile or "the first open")
     return Meeter(cfg, make_page, notes_root, list_events=calendar_lister(apps) if apps is not None else None,
                   summarize=make_summarizer(environ))

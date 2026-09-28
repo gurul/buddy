@@ -379,6 +379,10 @@ permission choices.
   from your phone (a no or silence cancels), or pressed by buddy with no question when
   `CC_BUDDY_CHROME_ACCESS=allow`. buddy works in its own tab, and anything
   unfinished goes to Codex. See [attach mode](docs/stackchan/routing.md#controlling-your-logged-in-chrome-attach-mode).
+- **Or buddy's own Chrome (opt-in):** with `CC_BUDDY_BROWSER_OWN=1`, web goals run in
+  a second Chrome that belongs to buddy (`~/.config/cc-buddy-bridge/chrome`), so there
+  is no “Allow remote debugging?” prompt at all. Sign it in once with
+  `cc-buddy-bridge chrome-profile`. See [buddy's own Chrome](docs/stackchan/routing.md#buddys-own-chrome-no-allow-to-press).
 - **Stopping:** `stop_task` interrupts Codex, even while a permission is pending.
 - **Permissions:** app prompts offer `yes`, `allow for task` and `always allow` when
   Codex permits them. Saved grants belong to Codex and are revoked in its Computer
@@ -414,7 +418,8 @@ now drives only the eye expressions (the `[laya]` extra). **Hosted Jev** can als
 drive narrowly scoped launch routing and spoken head moves. Clicks use accurate OCR
 directly, and a finished screen wait is reused for the reply screenshot. The
 **browser lane** (`browser_lane.py`) drives your own Chrome with Playwright in attach
-mode (`CC_BUDDY_BROWSER_ATTACH=1`).
+mode (`CC_BUDDY_BROWSER_ATTACH=1`), or buddy's own Chrome with no Allow prompt
+(`CC_BUDDY_BROWSER_OWN=1`).
 
 See [routing](docs/stackchan/routing.md) for switches and measured evaluations, and
 [voice and computer control](docs/stackchan/voice.md) for worker details.

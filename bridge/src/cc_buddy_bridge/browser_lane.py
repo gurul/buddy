@@ -34,6 +34,16 @@ profile; the supported route (Chrome 144+) is the owner switching on remote debu
 ``chrome://inspect/#remote-debugging``, after which Chrome writes ``DevToolsActivePort`` (port, then the
 browser's WebSocket path) into its user data directory. ``devtools_endpoint`` reads that file exactly as
 Google's chrome-devtools-mcp ``--autoConnect`` does, and Playwright's ``connect_over_cdp`` attaches.
+BUDDY'S OWN CHROME (owner, 2026-09-27: "lets give buddy its own profile"). With ``CC_BUDDY_BROWSER_OWN=1`` the
+lane drives a second Chrome that belongs to buddy: real Google Chrome, started with its own user data directory
+(``~/.config/cc-buddy-bridge/chrome``, ``CC_BUDDY_OWN_CHROME_DIR`` moves it) and ``--remote-debugging-port=0``.
+Chrome refuses that flag only on the owner's default directory, so this Chrome never asks "Allow remote
+debugging?" and nobody presses anything. It stays open between tasks with the owner's sign-ins for buddy
+(``cc-buddy-bridge chrome-profile`` opens it to sign in). It is plain Chrome, not Playwright's launch, so it
+carries no automation flags and Google's sign-in accepts it. The trade: any program on the Mac can drive this
+Chrome through its port, so it holds only the accounts the owner signs into it, never the owner's own Chrome.
+Own mode is attach mode with a different endpoint: the same tab rules and the same gate apply.
+
 In attach mode the lane works in a NEW TAB of its own — never one of the owner's — and closing it closes
 that tab and disconnects: the owner's browser, windows and tabs are never closed. The same gate applies as
 everywhere: a sensitive control (buy, send, delete, pay…) stops the plan for the owner's yes.
@@ -62,6 +72,9 @@ log = logging.getLogger(__name__)
 
 DEFAULT_PROFILE = "~/.config/cc-buddy-bridge/browser"
 DEFAULT_CHROME_DIR = "~/Library/Application Support/Google/Chrome"   # the owner's Chrome user data directory
+DEFAULT_OWN_CHROME_DIR = "~/.config/cc-buddy-bridge/chrome"    # buddy's own Chrome (see BUDDY'S OWN CHROME)
+CHROME_APP = "Google Chrome"
+OWN_START_SECS = 20.0                # buddy's Chrome: how long a cold start may take to open its debugging port
 READ_WAIT_SECS = 6.0                 # page_text: how long a still-growing page may take to settle
 READ_POLL_SECS = 0.5
 READ_ENOUGH_CHARS = 400              # below this a page is still loading (Gmail's shell is ~190)
@@ -200,21 +213,29 @@ class BrowserLaneConfig:
     chrome_dir: Path = Path(DEFAULT_CHROME_DIR).expanduser()
     debug_port: int = DEFAULT_DEBUG_PORT
     chrome_profile: str = ""                      # attach: the Google account whose Chrome profile to work in
+    own: bool = False                             # drive buddy's own Chrome, not the owner's (implies attach)
+    own_dir: Path = Path(DEFAULT_OWN_CHROME_DIR).expanduser()
 
 
 def configured(environ: Any = None) -> BrowserLaneConfig:
     """``CC_BUDDY_BROWSER_ATTACH=1`` drives the owner's running Chrome (``CC_BUDDY_CHROME_DIR`` moves where its
     ``DevToolsActivePort`` is looked for; ``CC_BUDDY_CHROME_DEBUG_PORT`` is the fallback port;
-    ``CC_BUDDY_CHROME_PROFILE`` names the Google account whose Chrome profile to work in)."""
+    ``CC_BUDDY_CHROME_PROFILE`` names the Google account whose Chrome profile to work in).
+    ``CC_BUDDY_BROWSER_OWN=1`` drives buddy's own Chrome instead, and turns the lane on by itself
+    (``CC_BUDDY_OWN_CHROME_DIR`` moves its user data directory)."""
     env = os.environ if environ is None else environ
-    attach = (env.get("CC_BUDDY_BROWSER_ATTACH") or "0").strip().lower() in ("1", "true", "yes", "on")
+    on = ("1", "true", "yes", "on")
+    own = (env.get("CC_BUDDY_BROWSER_OWN") or "0").strip().lower() in on
+    attach = own or (env.get("CC_BUDDY_BROWSER_ATTACH") or "0").strip().lower() in on
+    own_dir = Path((env.get("CC_BUDDY_OWN_CHROME_DIR") or "").strip() or DEFAULT_OWN_CHROME_DIR).expanduser()
     chrome_dir = Path((env.get("CC_BUDDY_CHROME_DIR") or "").strip() or DEFAULT_CHROME_DIR).expanduser()
     try:
         debug_port = int(str(env.get("CC_BUDDY_CHROME_DEBUG_PORT") or DEFAULT_DEBUG_PORT))
     except ValueError:
         debug_port = DEFAULT_DEBUG_PORT
     return BrowserLaneConfig(attach=attach, chrome_dir=chrome_dir, debug_port=debug_port,
-                             chrome_profile=(env.get("CC_BUDDY_CHROME_PROFILE") or "").strip().lower())
+                             chrome_profile=(env.get("CC_BUDDY_CHROME_PROFILE") or "").strip().lower(),
+                             own=own, own_dir=own_dir)
 
 
 # Which Chrome profile a context is: the Google accounts signed in there, from Google's own account list,
@@ -317,6 +338,97 @@ def ensure_chrome_window(run: Callable[..., Any] = None) -> bool:
 
 class AttachError(RuntimeError):
     """The owner's Chrome cannot be reached: remote debugging is off, or Chrome is not running."""
+
+
+def own_chrome_command(own_dir: Path, url: str = "") -> list[str]:
+    """Start buddy's own Chrome, or hand ``url`` to it when it is already running (Chrome passes a second
+    launch on the same user data directory to the running one). Port 0: Chrome picks a free port and writes it
+    to ``<own_dir>/DevToolsActivePort``, so it never collides with the owner's Chrome."""
+    return ["open", "-na", CHROME_APP, "--args", f"--user-data-dir={Path(own_dir)}", "--remote-debugging-port=0",
+            "--no-first-run", "--no-default-browser-check", *([url] if url else [])]
+
+
+def sign_in_command(own_dir: Path, url: str) -> list[str]:
+    """Buddy's own Chrome with NO debugging port, for the owner to sign in: Google's sign-in may refuse a
+    Chrome that another program can drive (owner, 2026-09-27: "i dont think u can sign into here"). The
+    sign-ins stay in ``own_dir``; the next start with the port is already signed in."""
+    return ["open", "-na", CHROME_APP, "--args", f"--user-data-dir={Path(own_dir)}", "--no-first-run",
+            "--no-default-browser-check", url]
+
+
+def own_chrome_running(own_dir: Path, run: Callable[..., Any] = None) -> bool:
+    """True while any Chrome runs on buddy's folder, with the debugging port or without it."""
+    import subprocess
+
+    run = run or subprocess.run
+    r = run(["pgrep", "-f", "--", f"--user-data-dir={Path(own_dir)}"], capture_output=True, text=True, timeout=10)
+    return bool((r.stdout or "").strip())
+
+
+def quit_own_chrome(own_dir: Path, wait_secs: float = 10.0) -> bool:
+    """Quit buddy's own Chrome through its own port (Browser.close), never by app name: the owner's Chrome is
+    the same app. True when it is not running afterwards."""
+    endpoint = _live_endpoint(Path(own_dir))
+    if endpoint is not None:
+        from playwright.sync_api import sync_playwright
+
+        with sync_playwright() as pw:
+            browser = pw.chromium.connect_over_cdp(endpoint, timeout=10000)
+            try:
+                browser.new_browser_cdp_session().send("Browser.close")
+            except Exception:  # noqa: BLE001 — the connection drops as Chrome quits
+                pass
+    deadline = time.monotonic() + wait_secs
+    while own_chrome_running(own_dir):
+        if time.monotonic() >= deadline:
+            return False
+        time.sleep(0.25)
+    return True
+
+
+def _live_endpoint(chrome_dir: Path) -> Optional[str]:
+    """``devtools_endpoint``, believed only while something listens on its port: a Chrome that has quit leaves
+    its DevToolsActivePort behind."""
+    endpoint = devtools_endpoint(chrome_dir)
+    if endpoint is None:
+        return None
+    try:
+        port = int(endpoint.split(":")[2].split("/")[0])
+    except (IndexError, ValueError):
+        return None
+    return endpoint if _listening(port) else None
+
+
+def start_own_chrome(own_dir: Path, *, url: str = "", run: Callable[..., Any] = None,
+                     wait_secs: float = OWN_START_SECS, poll_secs: float = 0.25) -> str:
+    """Buddy's own Chrome's browser WebSocket, starting that Chrome when it is not running (and handing it
+    ``url`` when one is given). Raises AttachError when it does not come up within ``wait_secs``."""
+    import subprocess
+
+    own_dir = Path(own_dir)
+    endpoint = _live_endpoint(own_dir)
+    if endpoint is not None and not url:
+        return endpoint
+    own_dir.mkdir(parents=True, exist_ok=True, mode=0o700)
+    if endpoint is None:
+        try:
+            (own_dir / "DevToolsActivePort").unlink()      # stale: the new Chrome writes its own
+        except OSError:
+            pass
+    run = run or subprocess.run
+    run(own_chrome_command(own_dir, url), capture_output=True, text=True, timeout=15)
+    deadline = time.monotonic() + wait_secs
+    while True:
+        endpoint = _live_endpoint(own_dir)
+        if endpoint is not None:
+            log.info("browser lane: buddy's own Chrome is up (%s)", own_dir)
+            return endpoint
+        if time.monotonic() >= deadline:
+            if own_chrome_running(own_dir):
+                raise AttachError("buddy's own Chrome is open for signing in (no port): quit it (⌘Q in that "
+                                  "Chrome) and buddy can use it")
+            raise AttachError(f"buddy's own Chrome did not start within {wait_secs:.0f} s ({own_dir})")
+        time.sleep(poll_secs)
 
 
 def is_web_goal(goal: str, route_kind: str = "") -> bool:
@@ -572,13 +684,16 @@ class BrowserLane:
             except Exception:  # noqa: BLE001 — the owner closed the window: open a fresh one
                 self._page = None
         if self._context is None and self.config.attach and self._launcher is None:
-            endpoint = devtools_endpoint(self.config.chrome_dir, self.config.debug_port)
-            if endpoint is None:
-                raise AttachError("Chrome's remote debugging is off (or Chrome is not running): open "
-                                  "chrome://inspect/#remote-debugging in Chrome and switch it on")
+            if self.config.own:
+                endpoint = start_own_chrome(self.config.own_dir)   # buddy's Chrome: no dialog, no window needed
+            else:
+                endpoint = devtools_endpoint(self.config.chrome_dir, self.config.debug_port)
+                if endpoint is None:
+                    raise AttachError("Chrome's remote debugging is off (or Chrome is not running): open "
+                                      "chrome://inspect/#remote-debugging in Chrome and switch it on")
+                ensure_chrome_window()                     # no window: Chrome answers 403 instead of asking
             from playwright.sync_api import sync_playwright
 
-            ensure_chrome_window()                         # no window: Chrome answers 403 instead of asking
             self._pw = sync_playwright().start()
             try:
                 self._browser = self._pw.chromium.connect_over_cdp(endpoint, timeout=CONSENT_TIMEOUT_MS)
@@ -663,6 +778,8 @@ class BrowserLane:
         return found
 
     def _pick_profile(self, wanted: str) -> Any:
+        if self.config.own:
+            return self._browser.contexts[0]               # buddy's Chrome has one profile: its own
         profiles = self._profiles() if wanted else {}
         if wanted and wanted not in profiles:
             raise AttachError(f"no open Chrome window for {wanted}: open one in that profile"
@@ -712,6 +829,8 @@ class BrowserLane:
                 return
             log.info("browser lane: the Chrome connection is gone (Chrome restarted?); reconnecting")
             await self._run(self._close)                 # then a fresh connection, and a fresh Allow
+        if self.config.own:
+            answer_prompt = None                       # buddy's own Chrome never asks: there is nothing to press
         connecting = asyncio.ensure_future(self._run(self._ensure))
         answering = asyncio.ensure_future(answer_prompt()) if answer_prompt is not None else None
         try:
