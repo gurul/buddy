@@ -371,8 +371,10 @@ permission choices.
   (`browser_router.py`) sends a task there only when the whole job is reading public
   websites: no accounts, nothing on the Mac, nothing to show on screen, nothing typed
   into a site. Firecrawl reads the top three pages and a cheap model answers from them
-  with their links, in seconds. Anything it can't answer, and every other task, goes
-  to Codex. Blind-tested: 30 of 30 routed correctly, 0 unsafe. See
+  with their links, in seconds. The same search also offers Firecrawl's Alexandria data
+  tools (live flight fares, government records, ...); when one fits, buddy runs it and
+  answers from its data (`CC_BUDDY_WEB_READER_ALEXANDRIA=0` turns that off). Anything
+  it can't answer, and every other task, goes to Codex. Blind-tested: 30 of 30 routed correctly, 0 unsafe. See
   [routing](docs/stackchan/routing.md#public-web-reading-tasks-go-to-firecrawl).
 - **Your own Chrome first (opt-in):** with `CC_BUDDY_BROWSER_ATTACH=1`, web goals try
   your logged-in Chrome first. Chrome's “Allow remote debugging?” prompt is answered
@@ -388,6 +390,14 @@ permission choices.
   (`holo run`). It needs `holo login` once and Models API credits. Holo takes no
   corrections or questions mid-task. See [Holo computer use](docs/holo-computer-use.md).
 - **Stopping:** `stop_task` interrupts Codex, even while a permission is pending.
+- **Codex billing:** `CC_BUDDY_CODEX_AUTH=plan` is the default and uses your existing
+  Codex sign-in. To bill Buddy's Codex to your OpenAI API key, put `OPENAI_API_KEY`
+  in Buddy's env file, run `cc-buddy-bridge codex-home`, then set
+  `CC_BUDDY_CODEX_AUTH=api` for a future daemon start. This prepares a private
+  `~/.config/cc-buddy-bridge/codex-home` for computer tasks, Codex chat and warm
+  agents; your own Codex sign-in stays untouched. Missing API setup falls back to
+  the plan with one warning. API spend uses reported token counts when available.
+  See [setup and compatibility](docs/codex-computer-use/README.md#separate-api-key-billing).
 - **Permissions:** app prompts offer `yes`, `allow for task` and `always allow` when
   Codex permits them. Saved grants belong to Codex and are revoked in its Computer
   Use settings. `CC_BUDDY_CODEX_SITE_ACCESS=allow` skips the extra Telegram question

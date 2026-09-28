@@ -120,7 +120,7 @@ class CodexChat(CodexComputerAgent):
                 'cwd': str(folder), 'ephemeral': False, 'sandbox': 'workspace-write',
                 'approvalPolicy': 'on-request', 'developerInstructions': CHAT_INSTRUCTIONS,
             })
-            self.thread_id = result['thread']['id']
+            self._thread_started(result)
             if Path(result['thread']['cwd']).resolve() != folder.resolve():
                 raise CodexUnavailable('Codex opened a different folder. The chat was closed.')
             self._connected = True
@@ -146,15 +146,18 @@ class CodexChat(CodexComputerAgent):
         self.browser_used, self.browser_screenshot, self.browser_tab_id = False, None, None
         self.ui_evidence = []
         self._done = asyncio.get_running_loop().create_future()
+        self._begin_metering('chat turn')
         try:
             result = await self._rpc('turn/start', {'threadId': self.thread_id,
                                                    'input': [{'type': 'text', 'text': text}]})
             self.turn_id = result['turn']['id']
+            self._meter_turn_id = self.turn_id
         except (OSError, TimeoutError, KeyError, CodexUnavailable) as exc:
             await self.close()
             raise CodexUnavailable('Codex did not confirm the message. It was not retried. '
                                    'The chat is closed; check Codex before sending the work again.') from exc
-        meter_codex('chat turn')
+        if self._auth_mode == 'plan':
+            meter_codex('chat turn')
         self._turn_job = asyncio.create_task(self._finish_turn())
 
     async def _finish_turn(self) -> None:
@@ -188,6 +191,8 @@ class CodexChat(CodexComputerAgent):
                 await (self._result or self._output)('Codex stopped responding. No work was retried. '
                                    'Send codex off to return to Buddy, or codex <folder> for a new chat.')
         finally:
+            if not self._cancelled:
+                self._finish_metering()
             self.running = False
             self.turn_id = None
 
@@ -237,6 +242,7 @@ class CodexChat(CodexComputerAgent):
             await asyncio.gather(self._turn_job, return_exceptions=True)
             self._turn_job = None
         await self._close()
+        self._finish_metering()
         self._proc = self._reader = self._done = None
         self.thread_id = self.turn_id = None
         self.running = False

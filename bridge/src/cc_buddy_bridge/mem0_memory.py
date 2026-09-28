@@ -149,7 +149,37 @@ def open_mem0(cfg: Mem0Config) -> Any:
 
     if telemetry.MEM0_TELEMETRY:
         raise RuntimeError("mem0 telemetry is on (mem0 was imported before buddy could turn it off)")
-    return meter(Memory.from_config(mem0_config(cfg)), cfg)
+    return meter(on_openai(Memory.from_config(mem0_config(cfg))), cfg)
+
+
+# The fields mem0 adds only on its OpenRouter path; OpenAI's Chat Completions has no use for them.
+OPENROUTER_ONLY = ("models", "route", "extra_headers")
+
+
+def on_openai(memory: Any) -> Any:
+    """mem0's fact extraction on OpenAI with the owner's OPENAI_API_KEY, always. mem0ai 2.2.0 sends it to
+    OpenRouter instead whenever OPENROUTER_API_KEY is set in the process (llms/openai.py checks the environment,
+    not the config), and the daemon sets that key for Jev. On that path it also dropped ``store: False``. Found
+    2026-09-28 in the owner's OpenRouter logs: the nightly dream's gpt-5.4-nano calls, billed to OpenRouter.
+    So the client is replaced with OpenAI's, and each call gets ``store: False`` back and loses the OpenRouter
+    fields. The embedder already calls OpenAI (it has no such check)."""
+    try:
+        from openai import OpenAI
+
+        memory.llm.client = OpenAI(api_key=os.environ.get("OPENAI_API_KEY"), base_url="https://api.openai.com/v1")
+        completions = memory.llm.client.chat.completions
+    except (AttributeError, ImportError) as e:
+        raise RuntimeError("mem0: its extraction client cannot be pinned to OpenAI") from e
+    original = completions.create
+
+    def create(*args: Any, **kwargs: Any) -> Any:
+        for name in OPENROUTER_ONLY:
+            kwargs.pop(name, None)
+        kwargs["store"] = False
+        return original(*args, **kwargs)
+
+    completions.create = create
+    return memory
 
 
 def meter(memory: Any, cfg: Mem0Config) -> Any:

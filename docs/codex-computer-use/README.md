@@ -45,7 +45,7 @@ Computer Use remains subject to its separate app and OS permissions.
 - `steer_task` uses `turn/steer`; `stop_task` cancels pending questions and sends
   `turn/interrupt`, with process termination as bounded cleanup. No prompt retry
   is attempted after a disconnect or ambiguous error.
-- No shell UI driver, private desktop IPC, copied session credentials, new API key,
+- No shell UI driver, private desktop IPC, copied session credentials, newly minted API key,
   or alternate computer-use implementation is involved.
 
 `CC_BUDDY_CODEX_BIN` optionally overrides the executable. The default prefers
@@ -53,6 +53,87 @@ Computer Use remains subject to its separate app and OS permissions.
 The adapter passes ordinary OS environment variables and optional `CODEX_HOME`;
 Buddy's keys and desktop session/pipe variables are not forwarded. Codex uses
 its own ordinary local sign-in/configuration. A task has a ten-minute wall limit.
+
+## Separate API-key billing
+
+`CC_BUDDY_CODEX_AUTH` accepts `plan` (the default) or `api`. Plan mode preserves
+the original child environment and uses your existing Codex sign-in, including an
+explicit `CODEX_HOME`. API mode selects Buddy's own home for every new app-server:
+computer tasks, folder chats, and the prewarmed agent. Existing processes retain
+the identity they started with; changing the setting takes effect on a future
+daemon start.
+
+1. Put your existing `OPENAI_API_KEY` in `~/.config/cc-buddy-bridge/env`.
+2. Run `cc-buddy-bridge codex-home` using the desktop Codex binary, or the binary
+   selected by `CC_BUDDY_CODEX_BIN`.
+3. After verifying Computer Use works with that API identity, set
+   `CC_BUDDY_CODEX_AUTH=api` in the env file for your next daemon start. Setup
+   itself does not enable the setting or restart the daemon.
+
+The command creates `~/.config/cc-buddy-bridge/codex-home` with mode `0700`.
+It copies `config.toml`, `computer-use/`, `browser/`, `plugins/`, the generated
+`.tmp/bundled-marketplaces/` catalog, and `chrome-native-hosts-v2.json` when present.
+These paths were inspected in the installed desktop distribution: plugin
+manifests, MCP launch configuration and helper binaries live under `plugins/`,
+while `config.toml` references the generated bundled marketplace. Embedded paths
+in the copied JSON/TOML configuration are redirected to Buddy's home. Runtime
+files are independent copies; refresh does not leave links back to personal files.
+External-link copies are refused.
+
+It never copies `auth.json`, MCP OAuth credentials, session databases, account
+caches, or desktop IPC. The copied config uses file credential storage and API
+authentication, so a personal keychain preference cannot redirect login. The key
+is passed through stdin to `codex login --with-api-key`, never through argv,
+logs, or the repository. The resulting private `auth.json` has mode `0600`.
+Your personal `~/.codex/auth.json` and config are never changed. Running setup
+again refreshes runtime configuration while preserving the private API sign-in;
+it does not require the key again or silently rotate credentials.
+
+If API mode is requested but the private home has no valid API-key sign-in,
+Buddy logs one warning and uses the original plan environment. Invalid setting
+values also fall back with a warning. This fallback is for missing local setup;
+an API service rejection during a task is reported without retrying on the plan.
+If the Computer Use plugin is absent, Buddy refuses the task as before and uses
+no alternate computer-use implementation. Keep the setting on `plan` if the live
+compatibility check fails.
+
+Plan tasks remain unpriced `chatgpt` / `codex` entries. API tasks are recorded as
+`openai` / `codex`, with the note `API key, billed per token`. When the app-server
+reports `thread/tokenUsage/updated`, the adapter uses per-turn differences in
+cumulative input, cached-input and output tokens and the actual selected model's
+rates from the spend price table. Reasoning tokens are already included in output.
+Missing or incomplete usage, mixed-model turns, and unknown model rates leave
+the entry unpriced. An interrupt acknowledgement alone is not final usage. This
+is an estimate of model token charges, not a reconciliation of all hosted-tool fees.
+
+Official [Codex authentication documentation](https://learn.chatgpt.com/docs/auth)
+describes API-key login, `CODEX_HOME` file credentials, and plugin limitations.
+The installed runtime's MCP inventory and a real task remain the compatibility
+check for this feature.
+
+### Live compatibility result (2026-09-28)
+
+Verified with `codex-cli 0.155.0-alpha.16.4` after the full test suite passed.
+The real `codex-home` setup completed, and `account/read` returned account type
+`apiKey` from the private home. The relevant `mcpServerStatus/list` entry was:
+
+```json
+{"name":"cua_repl","tools":["js","js_reset","turn_ended"],"authStatus":"unsupported"}
+```
+
+Here `unsupported` is the MCP server's authentication-status field; the tools
+were loaded and usable. A read-only task using model `gpt-6-astra` called the
+installed `cua_repl` and returned fresh Calculator accessibility state:
+`Window: "Calculator", App: Calculator` and `Edit field, Value: 4`. Its final
+answer was `Title: Calculator` / `Display: 4`; it entered no calculation and
+required no permission response. Computer Use therefore worked with this
+API-key login on this installed runtime.
+
+The task produced an `openai` / `codex` spend row with 73,306 input tokens,
+46,595 cached input tokens and 154 output tokens, estimated at $0.321405 by the
+existing price table. The personal auth file's SHA-256 matched the pre-setup
+checksum, and the original main worktree's diff and status were unchanged.
+The feature remained configured as `plan`; no daemon restart or push was made.
 
 ## Investigation evidence
 

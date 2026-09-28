@@ -33,6 +33,7 @@ def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(prog="cc-buddy-bridge")
     parser.add_argument("--version", action="version", version=f"cc-buddy-bridge {__version__}")
     sub = parser.add_subparsers(dest="cmd")
+    sub.add_parser("codex-home", help="Prepare Buddy's separate Codex API-key home without changing your own sign-in")
 
     p_daemon = sub.add_parser("daemon", help="Run the bridge daemon (connects to BLE device, serves hooks)")
     p_daemon.add_argument("--socket", default=None, help="IPC path or host:port override")
@@ -370,6 +371,19 @@ def main(argv: list[str] | None = None) -> int:
     if args.cmd is None:
         parser.print_help()
         return 1
+
+    if args.cmd == "codex-home":
+        from .codex_auth import SetupError, setup
+        from .codex_computer import executable
+        try:
+            home = setup(binary=executable())
+        except (SetupError, OSError, ValueError) as exc:
+            # Never echo config/subprocess exceptions: they may contain secrets.
+            print(str(exc) if isinstance(exc, SetupError) else "Could not prepare Buddy's Codex home.", file=sys.stderr)
+            return 1
+        print(f"Buddy Codex API home ready: {home}")
+        print("Your personal Codex sign-in is unchanged. Enable with CC_BUDDY_CODEX_AUTH=api.")
+        return 0
 
     if args.cmd == "learning":
         from .learning.server import main as learning_main

@@ -343,3 +343,37 @@ def test_the_retired_ingest_is_gone() -> None:
     for name in ("INGESTED_FILE", "NOTE_PREFIX", "note_body", "INGEST_INTERVAL_SECS", "DEFAULT_HOME"):
         assert not hasattr(mem0_memory, name), name
     assert "sessions_dir" not in inspect.getsource(mem0_memory)
+
+
+def test_extraction_goes_to_openai_with_store_off_even_with_an_openrouter_key(tmp_path: Path,
+                                                                             monkeypatch: pytest.MonkeyPatch) -> None:
+    """mem0ai 2.2.0 sends extraction to OpenRouter whenever OPENROUTER_API_KEY is set (the daemon sets it for Jev),
+    and drops store=False there. buddy pins it to OpenAI; a real mem0 is built and its own call path is driven."""
+    import importlib.util
+
+    if importlib.util.find_spec("mem0") is None:
+        pytest.skip("mem0ai is not installed")
+    from openai.resources.chat.completions import Completions
+
+    monkeypatch.setenv("OPENAI_API_KEY", "sk-test-not-real")
+    monkeypatch.setenv("OPENROUTER_API_KEY", "sk-or-test-not-real")
+    sent: list[dict[str, Any]] = []
+
+    class Reply:
+        choices = [type("C", (), {"message": type("M", (), {"content": "{}", "tool_calls": None})()})()]
+        usage = None
+
+    def fake_create(self: Any, *args: Any, **kwargs: Any) -> Any:
+        sent.append({"base_url": str(self._client.base_url), **kwargs})
+        return Reply()
+
+    monkeypatch.setattr(Completions, "create", fake_create)
+    from mem0 import Memory
+
+    unpinned = Memory.from_config(mem0_config(Mem0Config(enabled=True, home=tmp_path / "a")))
+    assert "openrouter.ai" in str(unpinned.llm.client.base_url)          # the fault, as mem0 ships it
+    real = mem0_memory.open_mem0(Mem0Config(enabled=True, home=tmp_path / "b"))
+    assert "api.openai.com" in str(real.llm.client.base_url)
+    real.llm.generate_response(messages=[{"role": "user", "content": "hi"}])
+    assert sent and sent[-1]["base_url"].startswith("https://api.openai.com")
+    assert sent[-1]["store"] is False and not {"models", "route", "extra_headers"} & set(sent[-1])
