@@ -1,6 +1,6 @@
-"""The owner's lights: Govee over the LAN, HappyLighting over Bluetooth, Sylvania through Tuya — one controller.
+"""The owner's lights: Govee and WiZ over the LAN, HappyLighting over Bluetooth, Tuya — one controller.
 
-The owner asked on 2026-09-27 to control three brands of light from buddy. Each speaks its own protocol, and none
+The owner asked on 2026-09-27 to control their lights from buddy (WiZ added 2026-09-28). Each speaks its own protocol, and none
 needs a cloud or a hub once set up:
 
 ==============  ==========================================================  =========================================
@@ -8,6 +8,8 @@ Brand           How buddy talks to it                                       What
 ==============  ==========================================================  =========================================
 Govee           Govee's LAN API: JSON over UDP (scan on multicast           "LAN Control" on for the light in the
                 239.255.255.250:4001, replies to :4002, commands to :4003)  Govee app. No key.
+WiZ            WiZ's local API: JSON over UDP port 38899 (``getPilot``,      "Allow local communication" on in the
+                ``setPilot``); found by a broadcast ``getPilot``            WiZ app (Settings, Security). No key.
 HappyLighting   Bluetooth LE, the "Triones" protocol QH-tek's controllers   Within Bluetooth range of the Mac. No key.
                 speak (``QHM-…`` names): write ``ffd9``, status on ``ffd4``
 Sylvania Smart+ Tuya's local protocol through tinytuya (the ``lights``      The device's local key, once, from Tuya's
@@ -52,7 +54,7 @@ log = logging.getLogger(__name__)
 
 CONFIG_PATH = Path("~/.config/cc-buddy-bridge/lights.json")
 OFF_REASON = "buddy has no lights on this computer (CC_BUDDY_LIGHTS, ~/.config/cc-buddy-bridge/lights.json)"
-KINDS = ("govee", "triones", "tuya")
+KINDS = ("govee", "wiz", "triones", "tuya")
 LIGHT_TIMEOUT_SECS = 12.0          # one light's whole change; a Bluetooth connect alone can take several seconds
 
 # ---- colour ---------------------------------------------------------------------------------------------------
@@ -199,7 +201,7 @@ class Light:
     kind: str
     room: str = ""
     aliases: tuple[str, ...] = ()
-    # govee
+    # govee and wiz (a WiZ light's device is its MAC, its sku the module name)
     ip: str = ""
     device: str = ""
     sku: str = ""
@@ -230,7 +232,8 @@ class Light:
             out["room"] = self.room
         if self.aliases:
             out["aliases"] = list(self.aliases)
-        fields = {"govee": ("ip", "device", "sku"), "triones": ("address",), "tuya": ("id", "ip", "key", "version")}
+        fields = {"govee": ("ip", "device", "sku"), "wiz": ("ip", "device", "sku"), "triones": ("address",),
+                  "tuya": ("id", "ip", "key", "version")}
         for f in fields[self.kind]:
             if getattr(self, f):
                 out[f] = getattr(self, f)
@@ -383,6 +386,150 @@ class GoveeDriver:
                     s.sendto(json.dumps(m).encode(), (self.light.ip, GOVEE_CMD_PORT))
                     time.sleep(0.05)        # the lamp drops a burst; a gap keeps every message
         await asyncio.to_thread(send)
+
+    async def close(self) -> None:
+        return None
+
+
+# ---- WiZ: the local UDP API --------------------------------------------------------------------------------------
+
+WIZ_PORT = 38899
+WIZ_KELVIN = (2200, 6500)           # WiZ colour bulbs; tunable-white ones span 2700-6500 and clamp the rest
+WIZ_MIN_DIMMING = 10                # the bulb refuses a dimming below this
+
+
+def wiz_params(change: Change) -> dict[str, Any]:
+    """The one ``setPilot`` (or ``setState``) params dict for a change. WiZ takes power, colour and level together."""
+    c = change.normalised()
+    if c.power is False:
+        return {"state": False}
+    out: dict[str, Any] = {"state": True}
+    if c.color is not None:
+        if c.color.kelvin is not None:
+            out["temp"] = max(WIZ_KELVIN[0], min(WIZ_KELVIN[1], c.color.kelvin))
+        else:
+            r, g, b = c.color.rgb or (255, 255, 255)
+            out.update(r=r, g=g, b=b)
+    if c.brightness is not None:
+        out["dimming"] = max(WIZ_MIN_DIMMING, c.brightness)
+    return out
+
+
+def wiz_parse_pilot(result: dict[str, Any]) -> State:
+    """A ``getPilot`` result as a State. A scene (sceneId, no r/g/b or temp) leaves the colour unknown."""
+    k = int(result.get("temp") or 0)
+    rgb = None
+    if not k and all(isinstance(result.get(x), int) for x in ("r", "g", "b")):
+        rgb = (int(result["r"]), int(result["g"]), int(result["b"]))
+    dim = result.get("dimming")
+    return State(on=bool(result.get("state")), brightness=int(dim) if isinstance(dim, (int, float)) else None,
+                 rgb=rgb, kelvin=k or None)
+
+
+def _wiz_call(ip: str, method: str, params: dict[str, Any], tries: int = 3, wait: float = 0.7) -> dict[str, Any]:
+    """One request and its reply. UDP drops, so it resends; the reply's ``error`` becomes an exception."""
+    msg = json.dumps({"id": 1, "method": method, "params": params}).encode()
+    with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as s:
+        s.settimeout(wait)
+        for _ in range(tries):
+            s.sendto(msg, (ip, WIZ_PORT))
+            end = time.monotonic() + wait
+            while time.monotonic() < end:
+                try:
+                    data, addr = s.recvfrom(4096)
+                except socket.timeout:
+                    break
+                if addr[0] != ip:
+                    continue
+                try:
+                    reply = json.loads(data)
+                except ValueError:
+                    continue
+                if reply.get("method") != method:
+                    continue
+                if "error" in reply:
+                    raise ConnectionError(f"the WiZ light refused {method}: {reply['error']}")
+                return reply.get("result") or {}
+    raise TimeoutError("the WiZ light did not answer (is \"Allow local communication\" on in the WiZ app?)")
+
+
+def _broadcast_addresses() -> list[str]:
+    """255.255.255.255 plus this Mac's /24 broadcast: some routers drop the all-ones one."""
+    out = ["255.255.255.255"]
+    try:
+        with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as s:
+            s.connect(("10.255.255.255", 1))           # no packet is sent; it only picks the LAN interface
+            a, b, c, _ = s.getsockname()[0].split(".")
+            out.append(f"{a}.{b}.{c}.255")
+    except OSError:
+        pass
+    return out
+
+
+def wiz_scan(seconds: float = 3.0) -> list[dict[str, str]]:
+    """Every WiZ light with local communication on: ``{"device" (MAC), "sku" (module), "ip"}``. Blocking."""
+    msg = json.dumps({"method": "getPilot", "params": {}}).encode()
+    found: dict[str, dict[str, str]] = {}
+    with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as s:
+        s.setsockopt(socket.SOL_SOCKET, socket.SO_BROADCAST, 1)
+        s.settimeout(0.3)
+        end, again = time.monotonic() + seconds, 0.0
+        while time.monotonic() < end:
+            if time.monotonic() >= again:
+                for addr in _broadcast_addresses():
+                    try:
+                        s.sendto(msg, (addr, WIZ_PORT))
+                    except OSError:
+                        pass
+                again = time.monotonic() + 1.0
+            try:
+                data, (ip, _port) = s.recvfrom(4096)
+            except socket.timeout:
+                continue
+            try:
+                mac = str(json.loads(data)["result"]["mac"]).lower()
+            except (ValueError, KeyError, TypeError):
+                continue
+            found[mac] = {"device": mac, "sku": "", "ip": ip}
+    for d in found.values():
+        try:
+            d["sku"] = str(_wiz_call(d["ip"], "getSystemConfig", {}, tries=1).get("moduleName") or "")
+        except (OSError, TimeoutError):
+            pass
+    return list(found.values())
+
+
+class WizDriver:
+    def __init__(self, light: Light) -> None:
+        self.light = light
+
+    def _rediscover(self) -> bool:
+        """DHCP moves a light: find it again by its MAC."""
+        if not self.light.device:
+            return False
+        for d in wiz_scan(2.0):
+            if d["device"] == self.light.device.lower() and d["ip"] != self.light.ip:
+                log.info("lights: %s moved to a new address", self.light.name)
+                self.light.ip = d["ip"]
+                return True
+        return False
+
+    async def _call(self, method: str, params: dict[str, Any]) -> dict[str, Any]:
+        if not self.light.ip and not await asyncio.to_thread(self._rediscover):
+            raise ConnectionError("no address for this WiZ light; run `cc-buddy-bridge lights scan`")
+        try:
+            return await asyncio.to_thread(_wiz_call, self.light.ip, method, params)
+        except (OSError, TimeoutError):
+            if await asyncio.to_thread(self._rediscover):
+                return await asyncio.to_thread(_wiz_call, self.light.ip, method, params)
+            raise
+
+    async def state(self) -> State:
+        return wiz_parse_pilot(await self._call("getPilot", {}))
+
+    async def apply(self, change: Change) -> None:
+        params = wiz_params(change)
+        await self._call("setState" if params == {"state": False} else "setPilot", params)
 
     async def close(self) -> None:
         return None
@@ -615,7 +762,8 @@ def tuya_scan(seconds: int = 8) -> list[dict[str, str]]:
              "version": str(d.get("version") or "3.3")} for ip, d in (found or {}).items()]
 
 
-DRIVERS: dict[str, Callable[[Light], Any]] = {"govee": GoveeDriver, "triones": TrionesDriver, "tuya": TuyaDriver}
+DRIVERS: dict[str, Callable[[Light], Any]] = {"govee": GoveeDriver, "wiz": WizDriver, "triones": TrionesDriver,
+                                              "tuya": TuyaDriver}
 
 
 # ---- which lights a request means --------------------------------------------------------------------------------
@@ -988,6 +1136,11 @@ async def scan(ble: bool = True, tuya: bool = True) -> list[Light]:
                              device=d["device"], sku=d["sku"]))
     except OSError as e:
         log.warning("lights: Govee scan failed (%s)", e)
+    try:
+        for d in await asyncio.to_thread(wiz_scan, 3.0):
+            out.append(Light(name=f"wiz {d['device'][-4:]}", kind="wiz", ip=d["ip"], device=d["device"], sku=d["sku"]))
+    except OSError as e:
+        log.warning("lights: WiZ scan failed (%s)", e)
     if ble:
         try:
             for d in await triones_scan():
@@ -1023,7 +1176,7 @@ def merge(existing: Sequence[Light], found: Sequence[Light]) -> tuple[list[Light
             f.name = n
             out.append(f)
             new.append(f)
-        elif f.ip and f.kind in ("govee", "tuya"):
+        elif f.ip and f.kind in ("govee", "wiz", "tuya"):
             known.ip = f.ip
     return out, new
 
@@ -1035,7 +1188,7 @@ def cli(argv: Sequence[str], path: Optional[Path] = None, out: Callable[[str], A
 
     p = argparse.ArgumentParser(prog="cc-buddy-bridge lights")
     sub = p.add_subparsers(dest="act", required=True)
-    s = sub.add_parser("scan", help="Find Govee, HappyLighting and Tuya lights and add new ones to the lights file")
+    s = sub.add_parser("scan", help="Find Govee, WiZ, HappyLighting and Tuya lights and add new ones to the lights file")
     s.add_argument("--no-ble", action="store_true", help="skip Bluetooth (a terminal without Bluetooth permission)")
     s.add_argument("--no-tuya", action="store_true")
     sub.add_parser("list", help="The lights and their state")

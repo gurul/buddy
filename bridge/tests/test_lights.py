@@ -1,4 +1,4 @@
-"""lights.py: colours, the three protocols' bytes, which lights a request means, the code path, the tools."""
+"""lights.py: colours, each protocol's bytes, which lights a request means, the code path, the tools."""
 
 from __future__ import annotations
 
@@ -93,6 +93,77 @@ def test_govee_white_uses_kelvin_clamped() -> None:
 
 def test_govee_brightness_zero_means_off() -> None:
     assert L.govee_commands(L.Change(brightness=0)) == [{"msg": {"cmd": "turn", "data": {"value": 0}}}]
+
+
+# ---- WiZ ----
+
+def test_wiz_off_is_setstate_false() -> None:
+    assert L.wiz_params(L.Change(power=False)) == {"state": False}
+    assert L.wiz_params(L.Change(brightness=0)) == {"state": False}
+
+
+def test_wiz_colour_and_level_in_one_pilot() -> None:
+    assert L.wiz_params(L.Change(brightness=40, color=L.parse_color("blue"))) == \
+        {"state": True, "r": 0, "g": 0, "b": 255, "dimming": 40}
+
+
+def test_wiz_white_is_temp_clamped_and_dimming_floored() -> None:
+    assert L.wiz_params(L.Change(color=L.Color(kelvin=1500, word="x"), brightness=3)) == \
+        {"state": True, "temp": L.WIZ_KELVIN[0], "dimming": L.WIZ_MIN_DIMMING}
+
+
+def test_wiz_parse_pilot() -> None:
+    s = L.wiz_parse_pilot({"mac": "x", "state": True, "r": 255, "g": 0, "b": 0, "dimming": 60})
+    assert (s.on, s.brightness, s.rgb, s.kelvin) == (True, 60, (255, 0, 0), None)
+    w = L.wiz_parse_pilot({"state": False, "temp": 2700, "dimming": 100})
+    assert (w.on, w.kelvin, w.rgb) == (False, 2700, None)
+    scene = L.wiz_parse_pilot({"state": True, "sceneId": 4, "dimming": 50})
+    assert scene.rgb is None and scene.kelvin is None
+
+
+def _fake_wiz(reply: dict) -> tuple[Any, list]:
+    """A UDP 'bulb' on localhost that records each request and answers with reply."""
+    import socket as so
+    import threading
+
+    srv = so.socket(so.AF_INET, so.SOCK_DGRAM)
+    srv.bind(("127.0.0.1", 0))
+    srv.settimeout(3)
+    got: list = []
+
+    def run() -> None:
+        try:
+            data, addr = srv.recvfrom(4096)
+        except OSError:
+            return
+        req = json.loads(data)
+        got.append(req)
+        srv.sendto(json.dumps({"method": req["method"], **reply}).encode(), addr)
+        srv.close()
+    threading.Thread(target=run, daemon=True).start()
+    return srv, got
+
+
+def test_wiz_driver_sends_setpilot_and_reads_reply(monkeypatch: Any) -> None:
+    srv, got = _fake_wiz({"result": {"success": True}})
+    monkeypatch.setattr(L, "WIZ_PORT", srv.getsockname()[1])
+    d = L.WizDriver(L.Light("bulb", "wiz", ip="127.0.0.1", device="aabbccddeeff"))
+    asyncio.run(d.apply(L.Change(color=L.parse_color("red"))))
+    assert got == [{"id": 1, "method": "setPilot", "params": {"state": True, "r": 255, "g": 0, "b": 0}}]
+
+
+def test_wiz_error_reply_raises(monkeypatch: Any) -> None:
+    srv, _ = _fake_wiz({"error": {"code": -32600, "message": "Invalid Request"}})
+    monkeypatch.setattr(L, "WIZ_PORT", srv.getsockname()[1])
+    with pytest.raises(ConnectionError):
+        L._wiz_call("127.0.0.1", "getPilot", {}, tries=1)
+
+
+def test_wiz_light_roundtrips_and_merges() -> None:
+    lt = L.Light.from_dict({"name": "bulb", "kind": "wiz", "ip": "192.0.2.5", "device": "aabb", "sku": "ESP"})
+    assert lt.to_dict() == {"name": "bulb", "kind": "wiz", "ip": "192.0.2.5", "device": "aabb", "sku": "ESP"}
+    merged, new = L.merge([lt], [L.Light("wiz aabb", "wiz", ip="192.0.2.9", device="aabb")])
+    assert new == [] and merged[0].name == "bulb" and merged[0].ip == "192.0.2.9"
 
 
 # ---- Triones ----

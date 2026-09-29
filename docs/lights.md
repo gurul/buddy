@@ -1,13 +1,14 @@
 # Lights
 
 buddy controls your lights from Telegram, the chat window, a Mini App call,
-the Voice PE and the robot's voice. It works with three brands. Each brand
+the Voice PE and the robot's voice. It works with four brands. Each brand
 uses its own protocol, and none needs a cloud account or a hub once it is set
 up.
 
 | Brand | How buddy talks to it | What setup needs |
 |---|---|---|
 | **Govee** | Govee's LAN API: JSON over UDP on your Wi-Fi | Turn on **LAN Control** for each light in the Govee Home app. No key. |
+| **WiZ** | WiZ's local API: JSON over UDP port 38899 on your Wi-Fi | Add the light in the WiZ app, then turn on **Allow local communication** (WiZ app → Settings → Security). No key. |
 | **HappyLighting** | Bluetooth LE, the "Triones" protocol that QH-tek's controllers use. Their names start with `QHM-`. | The controller must be within Bluetooth range of the Mac. No key. |
 | **Sylvania Smart+ Wi-Fi** | Tuya's local protocol through [tinytuya](https://github.com/jasonacox/tinytuya), on your Wi-Fi | Each device's **local key**, obtained once (see [Sylvania](#sylvania-smart-wi-fi-tuya)). |
 
@@ -99,8 +100,9 @@ and the reason.
    launchctl kickstart -k gui/$(id -u)/com.github.cc-buddy-bridge.daemon
    ```
 
-A scan keeps the names, rooms and keys you set. When DHCP gives a Govee light
-a new address, buddy finds the light again by its device ID.
+A scan keeps the names, rooms and keys you set. When DHCP gives a Govee or WiZ
+light a new address, buddy finds the light again by its device ID (a WiZ
+light's ID is its MAC address).
 
 ### Sylvania Smart+ Wi-Fi (Tuya)
 
@@ -139,6 +141,12 @@ tools, and "lights off" goes to the model like any other text.
 - **Govee:** buddy sends a scan to multicast `239.255.255.250:4001`, and each
   light answers on port 4002. Commands (`turn`, `brightness`, `colorwc`) go to
   the light on port 4003. `devStatus` reads a light's state back.
+- **WiZ:** buddy broadcasts `getPilot` to UDP port 38899, and each light
+  answers with its MAC address and state. One `setPilot` carries the whole
+  change: `state`, a colour (`r`, `g`, `b`) or a white (`temp`, 2200K to
+  6500K), and `dimming` (10 to 100: the bulb refuses less). Off is
+  `setState` with `state: false`. The bulb answers every command, so a
+  refused or lost command is reported.
 - **HappyLighting:** buddy writes to characteristic `ffd9`: `cc 23 33` is on,
   `cc 24 33` is off, and `56 RR GG BB 00 f0 aa` sets a colour. `ef 01 77`
   asks for the state, which comes back on `ffd4`. The controller has no
@@ -157,6 +165,9 @@ tools, and "lights off" goes to the model like any other text.
 - **A Govee light does not answer:** check that LAN Control is on in the Govee
   app and that the Mac is on the same network. `cc-buddy-bridge lights scan`
   shows what answers.
+- **A WiZ light does not answer:** check that **Allow local communication**
+  is on in the WiZ app and that the bulb is on the same 2.4 GHz network as
+  the Mac.
 - **"The Bluetooth light is out of range or taken by the phone app":** close
   HappyLighting on the phone. The controller accepts only one connection.
 - **"This Tuya light has no local key yet":** follow

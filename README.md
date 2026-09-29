@@ -55,8 +55,8 @@ and desktop widget show its diary, memories and lessons.
   [how a task is routed](#how-a-computer-task-is-routed).
 - **Takes notes.** `cc-buddy-bridge take-notes start` records a room-note session;
   stopping it produces a write-up of decisions, actions and open questions.
-- **Controls your lights.** Govee (LAN), HappyLighting (Bluetooth) and Sylvania
-  Smart+ Wi-Fi (Tuya), all on the Mac with no cloud. "Lights blue", "lights off" or
+- **Controls your lights.** Govee and WiZ (LAN), HappyLighting (Bluetooth) and
+  Tuya lights such as Sylvania Smart+ Wi-Fi, all on the Mac with no cloud. "Lights blue", "lights off" or
   "dim the bedroom to 30%" is done by code in about a second, from Telegram, the
   Voice PE or the robot's voice, and the Mini App has a Lights card (on, off,
   colours, brightness). "Make it cozy" goes to the model. See
