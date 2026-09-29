@@ -236,7 +236,7 @@ its existing OpenAI configuration. Browser Read aloud remains available.
 | `CC_BUDDY_LEARNING_MODEL` | `gpt-6-astra` on OpenAI (default); `openai/gpt-6-astra` on OpenRouter |
 | `OPENAI_API_KEY` | Tutor key for the default OpenAI provider |
 | `OPENROUTER_API_KEY` | Tutor key, used only with `CC_BUDDY_LEARNING_PROVIDER=openrouter` |
-| `FIRECRAWL_API_KEY` | Optional Firecrawl key for practice references (the same key the watcher and web lookups use) |
+| `TINYFISH_API_KEY` | Optional TinyFish key for practice references (the same key the watcher and web lookups use) |
 | `CC_BUDDY_TLDRAW_LICENSE_KEY` | Optional tldraw licence key, passed to the whiteboard. See [Licence](#licence) |
 | `--demo` | Explicit offline examples; separate default `learning/demo` store |
 | `--data-dir` / `--port` | Standalone and demo overrides |
@@ -403,7 +403,7 @@ the tldraw board (validation, mark counting, the `/canvas/` route, the content
 policy and its nonce, the licence key setting),
 current image inputs, API response validation, durable revisions, conflicts,
 failure recovery, lesson lifecycle, voice delegation, and local HTTP request
-boundaries. `bridge/tests/test_learning_search.py` covers Firecrawl search and env-file
+boundaries. `bridge/tests/test_learning_search.py` covers TinyFish search and env-file
 loading. `bridge/tests/test_daemon_lesson.py` covers `cc-buddy-bridge lesson` and
 the daemon's IPC handler. Voice tests cover the tool through the existing connection.
 `bridge/tests/test_learning_think_aloud.py` covers think out loud on the learning
@@ -488,25 +488,26 @@ an occupied port with this guidance and exits with status 2 instead of showing
 a traceback. `--port 48768` can launch a separate instance when intended.
 
 
-### Firecrawl practice references
+### TinyFish practice references
 
-Add `FIRECRAWL_API_KEY=your-firecrawl-key` to `~/.config/cc-buddy-bridge/env`, the same
+Add `TINYFISH_API_KEY=your-tinyfish-key` to `~/.config/cc-buddy-bridge/env`, the same
 bridge environment file, and restart the service. The daemon,
 `cc-buddy-bridge learning`, `python tools/start_learning.py`, and
 `python -m cc_buddy_bridge.learning` all read that file at startup. Variables
 already set in the environment win over values in the file. No additional Python packages are required. Live lesson generation
-searches Firecrawl once for the topic and level, then asks the configured tutor to
+searches TinyFish once for the topic and level, then asks the configured tutor to
 create one original adapted problem from relevant references. Help with an
 existing problem, checks, hints, and steps do not trigger searches. Demo mode
 makes no search requests.
 
-The integration uses [Firecrawl search](https://docs.firecrawl.dev/api-reference/endpoint/search),
-which reads the top three pages as markdown in the same call (about 4 credits).
-There is no site restriction, so any subject can find references.
-Only topic and level are sent to Firecrawl; learner work and images are not sent.
+The integration uses [TinyFish Search](https://docs.tinyfish.ai/search-api), then
+[TinyFish Fetch](https://docs.tinyfish.ai/fetch-api) to read the top three pages as
+markdown. Both are free. There is no site restriction, so any subject can find
+references. Only topic and level are sent to TinyFish; learner work and images are
+not sent.
 
-Until 2026-09-26 this used Exa with its content moderation on. **Firecrawl's
-search has no moderation option**, so for young learners the filter is now the
+Until 2026-09-26 this used Exa with its content moderation on, then Firecrawl
+until 2026-09-29. **TinyFish's search has no moderation option**, so for young learners the filter is now the
 tutor alone: it writes an original, adapted problem and never shows the pages'
 text. The reference titles and links are still shown in the lesson feedback.
 Retrieved text is treated as untrusted reference material. Search cannot
@@ -518,4 +519,4 @@ and remain available when reopening a lesson from the widget/dashboard. These
 are search references, not a claim that a particular exercise was copied from
 a page. Raw retrieved text is not saved. Missing keys, empty results, and search
 errors fall back to ordinary problem generation with a visible explanation.
-The tutor API key is still required; Firecrawl uses its own account and credits.
+The tutor API key is still required; TinyFish uses its own account.

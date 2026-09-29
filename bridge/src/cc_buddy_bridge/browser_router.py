@@ -1,10 +1,10 @@
-"""Which body carries a task that is not a reflex: the owner's computer (Codex, or the Chrome lane) or Firecrawl.
+"""Which body carries a task that is not a reflex: the owner's computer (Codex, or the Chrome lane) or the web reader.
 
-Firecrawl (web_reader.py) is a hosted web-reading service: it searches the public web and reads public pages
-in its own browsers, behind its own proxies, and buddy reports what it found as text. It has none of the owner's
-accounts, cannot reach the Mac or a local address, and as buddy uses it never clicks or types. For a lookup on
-the public web it is seconds where driving a browser is tens of seconds, and it never takes over the owner's
-screen. (The body before it was an isolated browser, retired 2026-09-23 before it was ever wired in.)
+The web reader (web_reader.py, through TinyFish) is a hosted web-reading service: it searches the public web and
+reads public pages on its own side, and buddy reports what it found as text. It has none of the owner's accounts,
+cannot reach the Mac or a local address, and as buddy uses it never clicks or types. For a lookup on the public
+web it is seconds where driving a browser is tens of seconds, and it never takes over the owner's screen. (The
+body before it was an isolated browser, retired 2026-09-23 before it was ever wired in.)
 
 Jev decides, asked the way TypeSafe documents for a routing decision (docs.typesafe.ai: State, Choice
 "Structured instructions and criteria", Intent routing, Jev 1.13 jaggedness), and the way typed_ask.py asks it
@@ -13,15 +13,16 @@ everywhere else:
 * The state is the request and nothing else — no tool manuals in the state ("context rot").
 * The two bodies are the options of one Choice, each described as structure: ``what`` it is, ``for``, and
   ``not_for`` — the facts from each tool's own docs, the boundary written into both sides so a literal reader
-  cannot confuse them.
+  cannot confuse them. The wording names no provider, so the service behind the web reader can change without
+  a refit.
 * Beside the Choice, absolute Nouls, one judgment each (Jev reads literally; "a Choice is relative, each
   Noul is absolute"): does the request need the owner's own accounts or data? anything on the Mac or a local
   address? something shown on the owner's screen? clicking, typing or a form? and is the whole job reading
   public web pages, reported back as text?
-* Code combines them and owns the safety rule: Firecrawl only when the job is reading the public web, needs
+* Code combines them and owns the safety rule: the web reader only when the job is reading the public web, needs
   none of the owner's accounts, nothing on the Mac, nothing on screen and no clicking or typing, AND the Choice
   picks it with enough weight. An unsafe route is a task that needs the owner (their accounts, their data,
-  their Mac) sent to Firecrawl: it would fail, and its request text would have gone to a third party. Every
+  their Mac) sent to the web reader: it would fail, and its request text would have gone to a third party. Every
   cut-off is fitted with zero unsafe routes allowed — tools/route_eval.py --browser, on a blind holdout.
 """
 
@@ -32,11 +33,11 @@ from typing import Any, Callable, Mapping, Optional
 
 Predict = Callable[[Any, dict[str, Any]], dict[str, Any]]
 
-CODEX, FIRECRAWL = "codex", "firecrawl"
-AUTO = FIRECRAWL                  # the name the fitting and eval code use for the non-Codex body
+CODEX, WEB = "codex", "web"
+AUTO = WEB                        # the name the fitting and eval code use for the non-Codex body
 
-# The two bodies, as the Choice's options. Facts only: Firecrawl's from docs.firecrawl.dev (search, scrape: its
-# own browsers and proxies, public pages, text back) and web_reader.py (no clicks, no forms, no owner accounts);
+# The two bodies, as the Choice's options. Facts only: the web reader's from its service's docs (search, then read
+# public pages on its side, text back) and web_reader.py (no clicks, no forms, no owner accounts);
 # the owner's computer from docs/codex-computer-use/README.md and chrome_lane.py.
 BODIES: dict[str, Any] = {
     "owner_computer": {
@@ -64,7 +65,7 @@ BODIES: dict[str, Any] = {
                     "anything the owner wants opened, shown or played on their own screen"],
     },
 }
-OPTION_TO_BODY = {"owner_computer": CODEX, "web_reader": FIRECRAWL}
+OPTION_TO_BODY = {"owner_computer": CODEX, "web_reader": WEB}
 
 
 def questions() -> dict[str, Any]:
@@ -139,13 +140,13 @@ def ask(predict: Predict, goal: str, clock: Callable[[], float]) -> BodyAnswer:
 
 
 def decide(a: BodyAnswer, g: BodyGates) -> str:
-    """FIRECRAWL only when every condition holds; anything else, including an error, is CODEX."""
+    """WEB only when every condition holds; anything else, including an error, is CODEX."""
     if a.error:
         return CODEX
     if a.accounts > g.accounts_max or a.mac > g.mac_max or a.show > g.show_max or a.interact > g.interact_max:
         return CODEX
     if a.public >= g.public and a.p_auto >= g.auto:
-        return FIRECRAWL
+        return WEB
     return CODEX
 
 
@@ -154,8 +155,8 @@ MAX_GRID = (0.05, 0.1, 0.2, 0.3, 0.5)
 
 
 def fit(answers: list[BodyAnswer], truths: list[str]) -> BodyGates:
-    """The cut-offs that route the most FIRECRAWL-labelled tasks there with ZERO CODEX-labelled tasks sent to
-    Firecrawl. Ties go to the stricter setting."""
+    """The cut-offs that route the most WEB-labelled tasks there with ZERO CODEX-labelled tasks sent to
+    the web reader. Ties go to the stricter setting."""
     best: Optional[tuple[float, ...]] = None
     chosen = BodyGates(1.01, 0.0, 0.0, 1.01, 0.0, 0.0)
     for public in GRID:
@@ -178,12 +179,12 @@ def fit(answers: list[BodyAnswer], truths: list[str]) -> BodyGates:
 # Fitted 2026-09-26 by tools/route_eval.py --browser on the 122 requests already seen (browser_tuning.json and
 # browser_holdout.json, whose one scoring with the first wording held at 12 routed: too few), zero unsafe allowed;
 # then scored ONCE on the blind browser_holdout2.json (79 requests, written by an agent that never saw this
-# module): 30 routed to Firecrawl, 30 right (precision 100%), coverage 93.8%, 0 unsafe, Jev p50 198 ms. Refit and
+# module): 30 routed to the web reader, 30 right (precision 100%), coverage 93.8%, 0 unsafe, Jev p50 198 ms. Refit and
 # re-score on a NEW blind set whenever the wording above or the model changes (an alias's answers can change).
 GATES = BodyGates(public=0.6, accounts_max=0.1, mac_max=0.1, auto=0.95, show_max=0.5, interact_max=0.2)
 
 # Whether GATES passed the blind holdout's bar (at least 15 routed, precision >= 95%, zero unsafe).
-# web_reader.configured's "auto" turns the Firecrawl body on only when this is True.
+# web_reader.configured's "auto" turns the web body on only when this is True.
 SHIPPED = True
 
 

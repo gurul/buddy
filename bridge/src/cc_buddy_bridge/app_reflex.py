@@ -239,7 +239,7 @@ class ReflexFirstAgent:
         self._on_done, self.provider = on_done, provider
         self._quit_asker, self._quitter = quit_asker, quitter
         self._quit_everything = quit_everything or (lambda: quit_all(quit_keep()))
-        # route_body names the body for a task the reflex declined: a name in ``bodies`` (e.g. "firecrawl",
+        # route_body names the body for a task the reflex declined: a name in ``bodies`` (e.g. "web",
         # browser_router.py), any other non-Codex name the one ``make_auto`` body (the Chrome lane), else Codex
         self._make_auto, self._route_body, self._bodies = make_auto, route_body, dict(bodies or {})
         self.body = "codex"

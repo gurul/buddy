@@ -7,7 +7,7 @@
    "why": "public product pages, no login, just wants the cheapest price reported back",
    "tricky": false,
    "source": "holdout_browser",
-   "reader": "firecrawl"
+   "reader": "web"
   },
   {
    "goal": "can you check if the target on 5th ave has patio furniture in stock right now",
@@ -23,7 +23,7 @@
    "why": "public business info lookup, classic no-account research task",
    "tricky": true,
    "source": "holdout_browser",
-   "reader": "firecrawl"
+   "reader": "web"
   },
   {
    "goal": "compare these three laptops - macbook air m3, dell xps 13, and thinkpad x1 - and tell me which is best for programming",
@@ -31,7 +31,7 @@
    "why": "public spec/review comparison ending in a recommendation, still just reported back as text",
    "tricky": true,
    "source": "holdout_browser",
-   "reader": "firecrawl"
+   "reader": "web"
   },
   {
    "goal": "what are the hours for the DMV on tuesday",
@@ -39,7 +39,7 @@
    "why": "simple public info lookup",
    "tricky": false,
    "source": "holdout_browser",
-   "reader": "firecrawl"
+   "reader": "web"
   },
   {
    "goal": "check my localhost:3000 site and tell me if the login page renders correctly",
@@ -55,7 +55,7 @@
    "why": "public page content lookup",
    "tricky": false,
    "source": "holdout_browser",
-   "reader": "firecrawl"
+   "reader": "web"
   },
   {
    "goal": "read through the top 3 reviews of the Sony WH-1000XM5 headphones on Best Buy and summarize what people are saying",
@@ -63,7 +63,7 @@
    "why": "public review reading and summarizing, no account needed",
    "tricky": false,
    "source": "holdout_browser",
-   "reader": "firecrawl"
+   "reader": "web"
   },
   {
    "goal": "check if there's a Trader Joe's within 2 miles of downtown Austin",
@@ -71,7 +71,7 @@
    "why": "public store locator lookup",
    "tricky": false,
    "source": "holdout_browser",
-   "reader": "firecrawl"
+   "reader": "web"
   },
   {
    "goal": "find the cheapest flight from SFO to JFK next friday using google flights, just tell me the price",
@@ -87,7 +87,7 @@
    "why": "public docs reading and summarizing",
    "tricky": false,
    "source": "holdout_browser",
-   "reader": "firecrawl"
+   "reader": "web"
   },
   {
    "goal": "compare mortgage rates from three different lenders' public rate pages and tell me who's cheapest right now",
@@ -95,7 +95,7 @@
    "why": "sounds financial but these are public advertised-rate pages, no account or personal info required",
    "tricky": true,
    "source": "holdout_browser",
-   "reader": "firecrawl"
+   "reader": "web"
   },
   {
    "goal": "fill out that newsletter signup form on the eff.org site with my test email, just to test it works",
@@ -111,7 +111,7 @@
    "why": "public showtime lookup",
    "tricky": false,
    "source": "holdout_browser",
-   "reader": "firecrawl"
+   "reader": "web"
   },
   {
    "goal": "check the public status page for AWS us-east-1 and tell me if anything's down",
@@ -119,7 +119,7 @@
    "why": "public status page, no login",
    "tricky": false,
    "source": "holdout_browser",
-   "reader": "firecrawl"
+   "reader": "web"
   },
   {
    "goal": "look up definitions for 'ephemeral' and 'ubiquitous' from merriam webster and dictionary.com and compare them",
@@ -127,7 +127,7 @@
    "why": "public reference lookup across sites",
    "tricky": false,
    "source": "holdout_browser",
-   "reader": "firecrawl"
+   "reader": "web"
   },
   {
    "goal": "research the differences between roth ira and traditional ira and summarize for me",
@@ -135,7 +135,7 @@
    "why": "public educational research, no account",
    "tricky": false,
    "source": "holdout_browser",
-   "reader": "firecrawl"
+   "reader": "web"
   },
   {
    "goal": "check if my library's public catalog has 'project hail mary' available",
@@ -151,7 +151,7 @@
    "why": "public restaurant research and list-back",
    "tricky": false,
    "source": "holdout_browser",
-   "reader": "firecrawl"
+   "reader": "web"
   },
   {
    "goal": "compare energy plan prices for my zip code on the state's public energy comparison site",
@@ -167,7 +167,7 @@
    "why": "public weather lookup",
    "tricky": false,
    "source": "holdout_browser",
-   "reader": "firecrawl"
+   "reader": "web"
   },
   {
    "goal": "look up how many calories are in a chipotle burrito bowl with chicken",
@@ -175,7 +175,7 @@
    "why": "public nutrition info lookup",
    "tricky": false,
    "source": "holdout_browser",
-   "reader": "firecrawl"
+   "reader": "web"
   },
   {
    "goal": "research three ergonomic office chairs under $300 and tell me which has the best reviews",
@@ -183,7 +183,7 @@
    "why": "public product research and comparison, reported back",
    "tricky": false,
    "source": "holdout_browser",
-   "reader": "firecrawl"
+   "reader": "web"
   },
   {
    "goal": "check the public tracking page for a UPS package using this tracking number 1Z999AA10123456784, tell me the status",
@@ -199,7 +199,7 @@
    "why": "public pricing pages comparison",
    "tricky": false,
    "source": "holdout_browser",
-   "reader": "firecrawl"
+   "reader": "web"
   },
   {
    "goal": "find the specs for the 2024 honda civic vs the 2024 toyota corolla",
@@ -207,7 +207,7 @@
    "why": "public spec comparison research",
    "tricky": false,
    "source": "holdout_browser",
-   "reader": "firecrawl"
+   "reader": "web"
   },
   {
    "goal": "check whether nike.com has the pegasus 41 in stock in size 10",
@@ -223,7 +223,7 @@
    "why": "public page reading and summarizing before any account is created",
    "tricky": false,
    "source": "holdout_browser",
-   "reader": "firecrawl"
+   "reader": "web"
   },
   {
    "goal": "search zillow for home value estimates in my old neighborhood, just curious what houses are going for",
@@ -247,7 +247,7 @@
    "why": "public repo page, distinct from checking the owner's own GitHub notifications which would need their account",
    "tricky": true,
    "source": "holdout_browser",
-   "reader": "firecrawl"
+   "reader": "web"
   },
   {
    "goal": "look up the public transit schedule for the 5 bus route downtown",
@@ -255,7 +255,7 @@
    "why": "public schedule lookup",
    "tricky": false,
    "source": "holdout_browser",
-   "reader": "firecrawl"
+   "reader": "web"
   },
   {
    "goal": "test my staging site at staging.mybuddyapp.dev and tell me if the signup button actually works",
@@ -271,7 +271,7 @@
    "why": "public comparison pages, explicitly research-only so no account or application is touched",
    "tricky": true,
    "source": "holdout_browser",
-   "reader": "firecrawl"
+   "reader": "web"
   },
   {
    "goal": "check the score of the warriors game last night",
@@ -279,7 +279,7 @@
    "why": "public sports score lookup",
    "tricky": false,
    "source": "holdout_browser",
-   "reader": "firecrawl"
+   "reader": "web"
   },
   {
    "goal": "look up my flight status on united using my confirmation number DL8X92Q, just want to know if it's on time",
@@ -642,5 +642,5 @@
    "reader": "codex"
   }
  ],
- "reader_note": "reader (2026-09-26): the body for the Firecrawl router. 'firecrawl' = a public-web job that is only reading pages and reporting text; every 'isolated' case that needs clicking, typing, a form, a local or staging site, or something only the owner knows is 'codex'. Labelled by capability before any model saw the holdout. 'body' is unchanged."
+ "reader_note": "reader (2026-09-26): the body for the web-reader router. 'web' = a public-web job that is only reading pages and reporting text; every 'isolated' case that needs clicking, typing, a form, a local or staging site, or something only the owner knows is 'codex'. Labelled by capability before any model saw the holdout. 'body' is unchanged."
 }

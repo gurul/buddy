@@ -95,9 +95,9 @@ The [Telegram door](docs/stackchan/telegram.md) is **off by default**. With it o
   back to the dialog on the Mac.
 - **Answers web lookups in seconds.** "What's the weather in Seattle this weekend" or
   "compare the Linear and Jira team plans" doesn't need your browser. Jev spots a
-  public-web reading task, and Firecrawl reads the top pages and answers with its
-  sources. Anything that needs your accounts, your Mac or typing into a site stays on
-  your computer. See [routing](docs/stackchan/routing.md#public-web-reading-tasks-go-to-firecrawl).
+  public-web reading task, and TinyFish (free) reads the top pages so buddy can answer
+  with their sources. Anything that needs your accounts, your Mac or typing into a site stays on
+  your computer. See [routing](docs/stackchan/routing.md#public-web-reading-tasks-go-to-the-web-reader).
 - **Watches prices, stocks and ticket releases.** "Tell me when AAPL drops below
   300", "tell me when this is under $80: <link>", "let me know when tickets for X in
   Seattle go on sale", or `/watch VOO below 500`. buddy checks on a schedule
@@ -105,7 +105,7 @@ The [Telegram door](docs/stackchan/telegram.md) is **off by default**. With it o
   price data first, then its text, then the page in a headless browser with a
   vision model looking at it. A shop that refuses Python is read again with
   Chrome's TLS handshake (`curl_cffi`). A site that refuses every local reader
-  can be read through Firecrawl if you give it a key. Bare `/watch` lists the
+  can be read through TinyFish if you give it a key. Bare `/watch` lists the
   watches. See
   [watching](docs/stackchan/watch.md).
 - **Takes calls from your phone.** **Call buddy** in the Mini App is push to talk into
@@ -150,7 +150,7 @@ cc-buddy-bridge lesson ideas --text "I think I add the tops"
 cc-buddy-bridge lesson hint     # or: check, step
 ```
 
-Live lessons use OpenAI by default, with OpenRouter opt-in and optional Firecrawl practice
+Live lessons use OpenAI by default, with OpenRouter opt-in and optional TinyFish practice
 references. See [the learning guide](docs/learning.md) for the full workflow,
 think-out-loud mode, configuration and current limits.
 
@@ -210,9 +210,10 @@ Add your credentials to that file, keeping any existing entries:
 
 ```dotenv
 OPENAI_API_KEY=your-key-here
-# Optional: Firecrawl, for web lookups answered in seconds, practice references in
-# live lessons, and watches on sites that refuse every reader on this Mac
-# FIRECRAWL_API_KEY=your-key-here
+# Optional: TinyFish (free search and page reads, agent.tinyfish.ai), for web lookups
+# answered in seconds, practice references in live lessons, and watches on sites that
+# refuse every reader on this Mac
+# TINYFISH_API_KEY=your-key-here
 ```
 
 For watches on shops that refuse Python's own requests, add the optional Chrome-like
@@ -367,15 +368,12 @@ flowchart TB
 Codex drives native apps through its `cua` API while buddy relays progress and
 permission choices.
 
-- **Web lookups go to Firecrawl first (with `FIRECRAWL_API_KEY`):** Jev
+- **Web lookups go to the web reader first (with `TINYFISH_API_KEY`):** Jev
   (`browser_router.py`) sends a task there only when the whole job is reading public
   websites: no accounts, nothing on the Mac, nothing to show on screen, nothing typed
-  into a site. Firecrawl reads the top three pages and a cheap model answers from them
-  with their links, in seconds. The same search also offers Firecrawl's Alexandria data
-  tools (live flight fares, government records, ...); when one fits, buddy runs it and
-  answers from its data (`CC_BUDDY_WEB_READER_ALEXANDRIA=0` turns that off). Anything
-  it can't answer, and every other task, goes to Codex. Blind-tested: 30 of 30 routed correctly, 0 unsafe. See
-  [routing](docs/stackchan/routing.md#public-web-reading-tasks-go-to-firecrawl).
+  into a site. TinyFish searches and reads the top three pages, free, and a cheap model
+  answers from them with their links, in seconds. Anything it can't answer, and every other task, goes to Codex. Blind-tested: 30 of 30 routed correctly, 0 unsafe. See
+  [routing](docs/stackchan/routing.md#public-web-reading-tasks-go-to-the-web-reader).
 - **Your own Chrome first (opt-in):** with `CC_BUDDY_BROWSER_ATTACH=1`, web goals try
   your logged-in Chrome first. Chrome's “Allow remote debugging?” prompt is answered
   from your phone (a no or silence cancels), or pressed by buddy with no question when
@@ -486,10 +484,10 @@ Wake-word detection runs locally. Live voice, tutoring, reasoning and scene anal
 use the configured model providers, and the relevant audio, text, board images or
 camera frames are sent for those requests. Computer tasks send screenshots. Local
 storage does not make those features offline. With the Telegram door on, your texts
-and buddy's replies also pass through Telegram's servers. With a Firecrawl key, a
+and buddy's replies also pass through Telegram's servers. With a TinyFish key, a
 computer task's text goes to Jev (TypeSafe's model, through TypeSafe or OpenRouter) to choose where it runs,
-and a public-web lookup's text goes to Firecrawl as a search. A lesson sends only its
-topic and level to Firecrawl, and the watcher sends only the page you asked it to watch.
+and a public-web lookup's text goes to TinyFish as a search. A lesson sends only its
+topic and level to TinyFish, and the watcher sends only the page you asked it to watch.
 
 Persistent data lives under `~/.config/cc-buddy-bridge/`:
 
@@ -565,7 +563,7 @@ The firmware began as [anthropics/claude-desktop-buddy](https://github.com/anthr
 and the bridge as [SnowWarri0r/cc-buddy-bridge](https://github.com/SnowWarri0r/cc-buddy-bridge).
 Other foundations include FluxGarage RoboEyes, sherpa-onnx, M5Stack's libraries,
 and OpenAI's computer-use sample; the chirps draw on Marcelo Larios' R2D2 sound
-generator. Practice references and web lookups use Firecrawl. Research behind the affect engine and diary
+generator. Practice references and web lookups use TinyFish. Research behind the affect engine and diary
 is cited in [personality.md](docs/stackchan/personality.md).
 
 See the [bridge license](bridge/LICENSE), [canvas attribution](bridge/web-canvas/LICENSE.md),

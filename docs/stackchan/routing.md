@@ -387,36 +387,22 @@ about the Allow dialog and profiles.
   in this mode. The daemon's startup line reads
   `chrome lane: on — web tasks try buddy's own Chrome first … no Allow to press`.
 
-## Public-web reading tasks go to Firecrawl
+## Public-web reading tasks go to the web reader
 
 A task that isn't a reflex goes to your computer: Codex, which drives your
 real Chrome (signed in to your accounts) and the rest of the Mac, or the
 Chrome lane for a web goal. Many tasks don't need any of that. "What's the
 weather in Seattle this weekend", "compare the Linear and Jira team plans",
 "what does the React doc say useEffectEvent does" only need someone to read
-public web pages. Those go to **Firecrawl** (`web_reader.py`): one search that
-also reads the top three pages, then one cheap model call that answers from
-those pages. It takes seconds, needs none of your accounts, and never takes
-over your screen.
+public web pages. Those go to the **web reader** (`web_reader.py`), which uses
+[TinyFish](https://docs.tinyfish.ai): one search, one fetch that reads the top
+three pages, then one cheap model call that answers from those pages. It takes
+seconds, needs none of your accounts, and never takes over your screen.
 
-**Alexandria data tools (on by default).** The same search also asks Firecrawl's
-Alexandria catalogue for data tools that fit the request: Google Flights and
-Skyscanner fares, government records, and so on. The model sees up to four of
-them beside the pages. When one fits and its data would answer more directly
-than the pages, the model picks it with its options, buddy runs it, and a second
-model call answers from its data.
-
-- Only a tool the search offered can run, and only with the options that tool
-  declares. Required options must be present. Anything else is dropped, and the
-  pages answer instead.
-- A link in the answer is kept only if buddy read it: a page it fetched or a link
-  in the tool's own result.
-- A tool that fails, or whose provider's terms you have not accepted, is dropped,
-  and the pages answer. buddy never accepts a provider's terms; that is your call
-  (`firecrawl alexandria terms`).
-- Cost: a tool adds its own credits (Google Flights: 5). A live check on
-  2026-09-28, "cheapest one-way SFO to JFK on Friday October 2", ran Google
-  Flights and answered with a fare in 12.7 s for 10 credits.
+Firecrawl was the web reader until 2026-09-29. It moved to TinyFish because
+TinyFish Search and Fetch are free, while Firecrawl charged a credit a page.
+Firecrawl's Alexandria data tools (flight fares, government records) went with
+it; they had never run on a real task.
 
 **Which body** (`browser_router.py`): Jev decides, asked the way TypeSafe's
 docs recommend for a routing decision:
@@ -431,7 +417,7 @@ docs recommend for a routing decision:
   - Does it need something typed into a site: a form, a code, a date?
   - Is the whole job reading public websites, reported back as text?
 
-  Code combines the answers. Firecrawl gets the task only when every
+  Code combines the answers. The web reader gets the task only when every
   condition holds *and* the choice picks it with probability ≥ 0.95. An error,
   a timeout, or any doubt keeps the task on your computer.
 
@@ -444,43 +430,47 @@ docs recommend for a routing decision:
   as typing). It was reworded, refitted on all 122 seen requests with zero
   unsafe allowed, and scored once on `browser_holdout2.json`. That set is 79
   requests written blind by an agent that never saw the router, 40 of them
-  deliberately hard. Result on 2026-09-26: **30 routed to Firecrawl, 30 right,
+  deliberately hard. Result on 2026-09-26: **30 routed to the web reader, 30 right,
   0 unsafe**, 93.8% coverage, Jev p50 198 ms (`tools/route_eval.py
   --browser`).
 - An unsafe route would be a task that needs you (your accounts, your data,
-  your Mac) sent to Firecrawl. It would fail, and its text would have gone to
+  your Mac) sent to the web reader. It would fail, and its text would have gone to
   a third party.
 - **Known miss:** "look up the population of Lisbon and Porto and tell me the
   difference" scores 0.28 on the typing question, over the 0.2 cut-off, so it
   stays on your computer. The cut-offs lean toward keeping tasks on your
   computer.
 
-**How Firecrawl answers:**
+The questions name no provider, so moving the web reader from Firecrawl to
+TinyFish did not change what Jev is asked, and the fitted cut-offs still hold.
 
-- **One search:** `POST /v2/search`, the request as the query, the top 3
-  results read as markdown in the same call. That costs about 4–5 credits,
-  and pages up to an hour old may come from Firecrawl's cache.
+**How the web reader answers:**
+
+- **One search:** TinyFish Search (`GET api.search.tinyfish.ai`), the request
+  as the query. It returns titles, snippets and links, not page text.
+- **One fetch:** TinyFish Fetch (`POST api.fetch.tinyfish.ai`) reads the top 3
+  results as markdown. Pages up to an hour old may come from TinyFish's cache
+  (`ttl` 3600). A page it cannot read is represented by its search snippet.
+- **Cost:** both are free on every TinyFish plan. Search allows 30 requests a
+  minute per key. Each task is recorded in the spend ledger at $0.
 - **One model call:** `google/gemini-3.1-flash-lite` through OpenRouter,
   told to answer only from those pages, to ignore any instruction inside them,
   and to say when they don't answer.
 - **Links:** only the pages it read. A link the pages talked the model into
   writing is replaced with "(link removed)", the same lesson as the watcher's
   WatchLink model.
-- **Hand-off:** if the pages don't answer, Firecrawl fails, or the day's cap
+- **Hand-off:** if the pages don't answer, TinyFish fails, or the day's cap
   is spent, Codex takes the whole task as before. Nothing is lost by trying
-  Firecrawl first.
-- **Measured live:** about 3–6 s for a weather question (search 1.6–4.5 s,
-  answer about 1.5 s), against tens of seconds to drive a browser.
+  the web reader first.
 
 | Setting | Default | What it does |
 |---|---|---|
-| `CC_BUDDY_WEB_READER` | `auto` | On when `FIRECRAWL_API_KEY` is set and the router's gates passed their blind holdout (`browser_router.SHIPPED`). `0` turns it off, `1` forces it on. |
-| `CC_BUDDY_WEB_READER_TASKS` | 5 a day | Tasks read through Firecrawl per day (about 25 credits). Past it, Codex takes them. |
-| `CC_BUDDY_WEB_READER_ALEXANDRIA` | on | Offer Alexandria data tools beside the pages. `0` keeps to web pages. |
-| `CC_BUDDY_FIRECRAWL_USD` | unset | A credit's price on your plan, for the spend ledger. Unset: recorded unpriced. |
-| `CC_BUDDY_JEV_ROUTE` | (set up for Jev) | Jev's route. Without it, Firecrawl takes no tasks. |
+| `TINYFISH_API_KEY` | unset | Your TinyFish key (sign up at agent.tinyfish.ai). Without it the web reader is off. |
+| `CC_BUDDY_WEB_READER` | `auto` | On when `TINYFISH_API_KEY` is set and the router's gates passed their blind holdout (`browser_router.SHIPPED`). `0` turns it off, `1` forces it on. |
+| `CC_BUDDY_WEB_READER_TASKS` | 100 a day | Tasks read through TinyFish per day. TinyFish is free; the cap bounds the model calls and any runaway loop. Past it, Codex takes them. |
+| `CC_BUDDY_JEV_ROUTE` | (set up for Jev) | Jev's route. Without it, the web reader takes no tasks. |
 
-The body before Firecrawl was an isolated browser: auto-browser, then
+The body before the web reader was an isolated browser: auto-browser, then
 buddy's own Playwright lane. It was retired on 2026-09-23 before it was ever
 wired in. Its research and adapter are in git history (last present at
 `b218808`).

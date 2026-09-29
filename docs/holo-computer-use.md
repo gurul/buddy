@@ -15,7 +15,7 @@ corrected and stopped while it runs; or, when that Python is missing, as one `ho
 per task. H's runtime does the screenshots, clicks and memory; buddy starts the task,
 watches it, corrects it, and stops it.
 
-- **Order of lanes:** the launch reflex ("open Spotify"), the Firecrawl reader and the
+- **Order of lanes:** the launch reflex ("open Spotify"), the web reader (TinyFish) and the
   Chrome lane still take their tasks first. Holo takes what Codex would have taken.
 - **Progress:** buddy reads the run's `events.jsonl` while it works and reports each
   step. A step shows the model's note, or the name of the tool it used. Tool arguments

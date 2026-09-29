@@ -131,26 +131,28 @@ Then the page goes to the cheapest reader that answers:
    check, at most every 15 minutes. This step needs Playwright and its Chromium
    (`pip install -e ".[browser]"` then `python -m playwright install chromium`).
    `CC_BUDDY_WATCH_BROWSER=0` turns it off.
-4. **Firecrawl** (paid, off without a key). A page that refuses every reader
-   on this Mac is read through Firecrawl's hosted browser and proxies. A plain
-   read and the Chrome-like read got a 401/403, and the browser got a 401/403
-   or a bot check. Once a page has needed Firecrawl, it goes straight there on
-   every later check, at most hourly. Firecrawl returns the raw page, which is
-   read like any other: its own data first, then its text by the cheap model.
-   - Each read costs one Firecrawl credit, and buddy makes at most
-     `CC_BUDDY_WATCH_FIRECRAWL_CALLS` a day (default 30, which is Firecrawl's
-     free 1,000 credits a month).
-   - Firecrawl serves pages from a cache up to two days old by default. buddy
-     asks for a fresh read every time (`maxAge: 0`).
-   - A credit is recorded in the spend ledger as unpriced unless you set
-     `CC_BUDDY_FIRECRAWL_USD` to your plan's price per credit.
-   - Firecrawl's own problems never move a watch to search: a bad key, no
-     credits left, or its rate limit. They count as ordinary failures, and
-     "I can't read X" tells you. Only the page's own 401/403, which Firecrawl
-     reports, moves the watch on.
+4. **TinyFish** (free, off without a key). A page that refuses every reader
+   on this Mac is read through TinyFish Fetch, which reads it on TinyFish's
+   side. A plain read and the Chrome-like read got a 401/403, and the browser
+   got a 401/403 or a bot check. Once a page has needed TinyFish, it goes
+   straight there on every later check, at most hourly. The read path is saved
+   as `hosted`.
+   - Fetch returns cleaned HTML with the scripts removed, so a price kept only
+     in the page's structured data (JSON-LD) is lost. The page's text is read
+     by the cheap model instead. (Firecrawl, this step until 2026-09-29,
+     returned the raw page.)
+   - TinyFish Fetch is free. buddy still makes at most
+     `CC_BUDDY_WATCH_HOSTED_CALLS` reads a day (default 100), recorded in the
+     spend ledger at $0.
+   - buddy asks for a live read every time (`ttl: 0`), never TinyFish's cache.
+   - TinyFish's own problems never move a watch to search: a bad key, its rate
+     limit, a timeout or a proxy error. They count as ordinary failures, and
+     "I can't read X" tells you. Only the page's own refusal moves the watch
+     on: an HTTP 401/403/404 that Fetch reports, `bot_blocked` (as 403) or
+     `login_required` (as 401).
 
-   Set `FIRECRAWL_API_KEY` in `~/.config/cc-buddy-bridge/env`.
-   `CC_BUDDY_WATCH_FIRECRAWL=0` turns it off.
+   Set `TINYFISH_API_KEY` in `~/.config/cc-buddy-bridge/env`.
+   `CC_BUDDY_WATCH_HOSTED=0` turns it off.
 5. **Search.** A page that refuses all of the above is watched by web search
    from then on, at most hourly.
 
@@ -207,7 +209,7 @@ How often a watch may be checked, at least:
 | Quote | 1 min |
 | Page | 5 min |
 | Page read in the browser | 15 min |
-| Page read through Firecrawl | 1 h |
+| Page read through TinyFish | 1 h |
 | Ticketmaster | 5 min |
 | Search | 1 h |
 

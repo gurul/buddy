@@ -1,4 +1,4 @@
-"""browser_router.py (Jev picks the body for a task the reflex declined: the owner's computer or Firecrawl) and
+"""browser_router.py (Jev picks the body for a task the reflex declined: the owner's computer or the web reader) and
 the wrapper's body seam in app_reflex.ReflexFirstAgent.
 
 The live, blind evidence is tools/route_eval.py --browser (browser_holdout2.json); these pin the shape of the
@@ -32,7 +32,7 @@ def test_router_needs_every_condition() -> None:
     def route(a: dict[str, Any]) -> str:
         return br.make_router(lambda state, qs: a, lambda: 0.0)("anything")
 
-    assert route(answer(0.99, 0.05, 0.02, 0.93, 0.1)) == br.FIRECRAWL
+    assert route(answer(0.99, 0.05, 0.02, 0.93, 0.1)) == br.WEB
     assert route(answer(0.99, 0.6, 0.02, 0.93, 0.1)) == br.CODEX        # needs the owner's accounts
     assert route(answer(0.99, 0.05, 0.9, 0.93, 0.1)) == br.CODEX        # needs the Mac
     assert route(answer(0.99, 0.05, 0.02, 0.93, 0.8)) == br.CODEX       # wants it on their screen
@@ -65,15 +65,15 @@ def test_router_state_is_the_request_only_and_the_bodies_are_structured() -> Non
 def test_fit_never_allows_an_unsafe_route() -> None:
     answers = [br.BodyAnswer(0.99, 0.05, 0.02, 0.95, 0.1, 0.05), br.BodyAnswer(0.97, 0.25, 0.02, 0.9, 0.1, 0.05),
                br.BodyAnswer(0.99, 0.02, 0.02, 0.95, 0.1, 0.45)]
-    g = br.fit(answers, [br.FIRECRAWL, br.CODEX, br.CODEX])
-    assert [br.decide(a, g) for a in answers] == [br.FIRECRAWL, br.CODEX, br.CODEX]
+    g = br.fit(answers, [br.WEB, br.CODEX, br.CODEX])
+    assert [br.decide(a, g) for a in answers] == [br.WEB, br.CODEX, br.CODEX]
 
 
 def test_the_shipped_gates_are_the_fitted_ones_and_every_set_is_labelled() -> None:
     assert br.SHIPPED and br.GATES.auto <= 1 and br.GATES.public <= 1       # not the route-nothing placeholder
     for name in ("browser_tuning.json", "browser_holdout.json", "browser_holdout2.json"):
         cases = json.loads((ROUTES / name).read_text(encoding="utf-8"))["cases"]
-        assert cases and all(c.get("reader") in (br.FIRECRAWL, br.CODEX) for c in cases), name
+        assert cases and all(c.get("reader") in (br.WEB, br.CODEX) for c in cases), name
     seen = {c["goal"].lower() for n in ("browser_tuning.json", "browser_holdout.json")
             for c in json.loads((ROUTES / n).read_text(encoding="utf-8"))["cases"]}
     blind = [c["goal"].lower() for c in json.loads((ROUTES / "browser_holdout2.json").read_text("utf-8"))["cases"]]
@@ -97,46 +97,46 @@ async def opener(app: str) -> tuple[bool, str]:
 
 
 def test_the_wrapper_sends_a_routed_task_to_its_named_body_and_keeps_reflexes_first() -> None:
-    codex, chrome, reader = Body("codex"), Body("chrome-lane"), Body("firecrawl")
+    codex, chrome, reader = Body("codex"), Body("chrome-lane"), Body("web")
     routed: list[str] = []
 
     async def route_body(goal: str) -> str:
         routed.append(goal)
-        return "firecrawl" if "compare" in goal else "chrome" if "gmail" in goal else "codex"
+        return "web" if "compare" in goal else "chrome" if "gmail" in goal else "codex"
 
     def agent() -> ReflexFirstAgent:
         return ReflexFirstAgent(lambda: codex, lambda ev: None, apps=lambda: ["Spotify"], opener=opener,
                                 make_auto=lambda: chrome, route_body=route_body,
-                                bodies={"firecrawl": lambda: reader})
+                                bodies={"web": lambda: reader})
 
     assert asyncio.run(agent().run("open Spotify")) == "Opened Spotify."        # the reflex never asks the router
     a = agent()
-    assert asyncio.run(a.run("compare three laptops")) == "firecrawl" and a.provider == "firecrawl"
+    assert asyncio.run(a.run("compare three laptops")) == "web" and a.provider == "web"
     assert asyncio.run(agent().run("check my gmail")) == "chrome-lane"          # any other name: make_auto
     assert asyncio.run(agent().run("rename a file")) == "codex"
     assert routed == ["compare three laptops", "check my gmail", "rename a file"]
 
 
 def test_named_bodies_alone_are_enough_and_a_broken_router_keeps_codex() -> None:
-    codex, reader = Body("codex"), Body("firecrawl")
+    codex, reader = Body("codex"), Body("web")
 
     async def to_reader(goal: str) -> str:
-        return "firecrawl"
+        return "web"
 
     only = ReflexFirstAgent(lambda: codex, lambda ev: None, apps=lambda: [], route_body=to_reader,
-                            bodies={"firecrawl": lambda: reader})
-    assert asyncio.run(only.run("weather in denver")) == "firecrawl"
+                            bodies={"web": lambda: reader})
+    assert asyncio.run(only.run("weather in denver")) == "web"
 
     async def unknown(goal: str) -> str:
         return "somewhere-else"
 
     no_auto = ReflexFirstAgent(lambda: codex, lambda ev: None, apps=lambda: [], route_body=unknown,
-                               bodies={"firecrawl": lambda: reader})
+                               bodies={"web": lambda: reader})
     assert asyncio.run(no_auto.run("x")) == "codex"                             # an unknown name without make_auto
 
     async def broken(goal: str) -> str:
         raise RuntimeError
 
     b = ReflexFirstAgent(lambda: codex, lambda ev: None, apps=lambda: [], route_body=broken,
-                         bodies={"firecrawl": lambda: reader})
+                         bodies={"web": lambda: reader})
     assert asyncio.run(b.run("compare laptops")) == "codex"

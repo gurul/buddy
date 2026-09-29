@@ -236,15 +236,14 @@ def test_a_lesson_turn_and_its_reference_search_are_metered(_spend_ledger_in_tmp
     from cc_buddy_bridge.learning.tutor import LiveTutor
 
     monkeypatch.setattr(watch, "http_request", lambda url, **kw: (200, json.dumps(
-        {"success": True, "creditsUsed": 4, "data": {"web": []}})))
+        {"query": "q", "results": [], "total_results": 0, "page": 0})))
     replies = {"https://api.openai.com/v1/responses": {
                    "usage": {"input_tokens": M, "output_tokens": 0},
                    "output": [{"type": "message", "content": [{"type": "output_text", "text": "{}"}]}]}}
     monkeypatch.setattr(urllib.request, "urlopen",
                         lambda req, timeout=0: Resp(json.dumps(replies[req.full_url]).encode()))
     monkeypatch.setenv("OPENAI_API_KEY", "sk-test")
-    monkeypatch.setenv("FIRECRAWL_API_KEY", "fc-test")
-    monkeypatch.setenv("CC_BUDDY_FIRECRAWL_USD", "0.004")
+    monkeypatch.setenv("TINYFISH_API_KEY", "tf-test")
     monkeypatch.delenv("CC_BUDDY_LEARNING_PROVIDER", raising=False)
     monkeypatch.delenv("CC_BUDDY_LEARNING_MODEL", raising=False)
     lsearch.search_problems("fractions", "grade 5")
@@ -254,8 +253,8 @@ def test_a_lesson_turn_and_its_reference_search_are_metered(_spend_ledger_in_tmp
     except ValueError:
         pass                                                       # the fake reply is not a lesson; it was metered
     search, turn = lines(_spend_ledger_in_tmp)
-    assert (search["p"], search["f"], search["usd"], search["note"]) == ("firecrawl", "lessons", pytest.approx(0.016),
-                                                                         "4 credits")
+    assert (search["p"], search["f"], search["usd"], search["note"]) == ("tinyfish", "lessons", 0.0,
+                                                                         "0 pages, free")
     assert (turn["f"], turn["m"], turn["usd"]) == ("lessons", "gpt-6-astra", pytest.approx(10.0))
 
 

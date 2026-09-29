@@ -3,193 +3,193 @@
  "cases": [
   {
    "goal": "what time does the Costco on Harrison St close tonight",
-   "reader": "firecrawl",
+   "reader": "web",
    "why": "store hours are public; 'the Costco' sounds personal but is not",
    "tricky": true
   },
   {
    "goal": "pull up the reviews for the Sony WH-1000XM6 and tell me if ppl like the noise cancelling",
-   "reader": "firecrawl",
+   "reader": "web",
    "why": "action verb, but the job is reading public reviews and reporting",
    "tricky": true
   },
   {
    "goal": "go check the React docs and tell me what useEffectEvent does",
-   "reader": "firecrawl",
+   "reader": "web",
    "why": "public docs read and summarized as text",
    "tricky": true
   },
   {
    "goal": "whats the weather gonna be in Seattle this weekend",
-   "reader": "firecrawl",
+   "reader": "web",
    "why": "public forecast, named city, nothing typed",
    "tricky": false
   },
   {
    "goal": "who won the warriors game last night",
-   "reader": "firecrawl",
+   "reader": "web",
    "why": "public sports result",
    "tricky": false
   },
   {
    "goal": "can u find the menu for Tartine Bakery and tell me if they have gluten free stuff",
-   "reader": "firecrawl",
+   "reader": "web",
    "why": "public menu, text answer",
    "tricky": false
   },
   {
    "goal": "look up the return policy on Best Buy's site and summarize it",
-   "reader": "firecrawl",
+   "reader": "web",
    "why": "general policy page is public; no order or account involved",
    "tricky": true
   },
   {
    "goal": "check if the Japanese Tea Garden in Golden Gate Park is open on mondays",
-   "reader": "firecrawl",
+   "reader": "web",
    "why": "'check' is only reading public hours",
    "tricky": true
   },
   {
    "goal": "open up the python 3.14 release notes and tell me the big changes",
-   "reader": "firecrawl",
+   "reader": "web",
    "why": "'open up' but wants a text summary, not the page shown",
    "tricky": true
   },
   {
    "goal": "how much is a Tesla Model Y in California rn",
-   "reader": "firecrawl",
+   "reader": "web",
    "why": "public price lookup",
    "tricky": false
   },
   {
    "goal": "search for the best budget mechanical keyboards 2026 and give me the top 3",
-   "reader": "firecrawl",
+   "reader": "web",
    "why": "web search and report",
    "tricky": false
   },
   {
    "goal": "what's bitcoin at right now",
-   "reader": "firecrawl",
+   "reader": "web",
    "why": "public price",
    "tricky": false
   },
   {
    "goal": "go read the hacker news front page and tell me whats interesting",
-   "reader": "firecrawl",
+   "reader": "web",
    "why": "public page read and summarized as text",
    "tricky": true
   },
   {
    "goal": "find out when the next SpaceX launch is",
-   "reader": "firecrawl",
+   "reader": "web",
    "why": "public schedule",
    "tricky": false
   },
   {
    "goal": "does the trader joes on masonic have parking? check yelp or something",
-   "reader": "firecrawl",
+   "reader": "web",
    "why": "sounds personal but is public info about a store",
    "tricky": true
   },
   {
    "goal": "pls look up how to descale a breville espresso machine",
-   "reader": "firecrawl",
+   "reader": "web",
    "why": "public how-to",
    "tricky": false
   },
   {
    "goal": "what are the visa requirements for a US citizen going to Japan",
-   "reader": "firecrawl",
+   "reader": "web",
    "why": "public government info",
    "tricky": false
   },
   {
    "goal": "check the github status page, is github down?",
-   "reader": "firecrawl",
+   "reader": "web",
    "why": "sounds like testing but is reading a public status page",
    "tricky": true
   },
   {
    "goal": "summarize the latest post on the Anthropic blog",
-   "reader": "firecrawl",
+   "reader": "web",
    "why": "public blog",
    "tricky": false
   },
   {
    "goal": "whats the phone number for the DMV office on Fell street",
-   "reader": "firecrawl",
+   "reader": "web",
    "why": "public office listing, not the owner's appointment",
    "tricky": true
   },
   {
    "goal": "find me the ingredients list for oatly barista edition",
-   "reader": "firecrawl",
+   "reader": "web",
    "why": "public product info",
    "tricky": false
   },
   {
    "goal": "go through the stripe api docs and tell me what the rate limits are",
-   "reader": "firecrawl",
+   "reader": "web",
    "why": "action phrasing, public docs, text answer",
    "tricky": true
   },
   {
    "goal": "hey what movies are playing at the AMC Metreon tonight",
-   "reader": "firecrawl",
+   "reader": "web",
    "why": "public showtimes for a named theater; no booking",
    "tricky": true
   },
   {
    "goal": "compare the iphone 17 pro and pixel 11 cameras based on reviews",
-   "reader": "firecrawl",
+   "reader": "web",
    "why": "public reviews synthesized",
    "tricky": false
   },
   {
    "goal": "what does the SF recycling guide say about pizza boxes",
-   "reader": "firecrawl",
+   "reader": "web",
    "why": "public city guide",
    "tricky": false
   },
   {
    "goal": "look into whether the caltrain weekend schedule changed",
-   "reader": "firecrawl",
+   "reader": "web",
    "why": "public transit notices",
    "tricky": false
   },
   {
    "goal": "read me the top comments on that r/buildapc thread about 5090 power cables melting",
-   "reader": "firecrawl",
+   "reader": "web",
    "why": "'read me' means report the text of a public thread",
    "tricky": true
   },
   {
    "goal": "can you see if patagonia has a sale on right now",
-   "reader": "firecrawl",
+   "reader": "web",
    "why": "'see if' is only reading a public store page",
    "tricky": true
   },
   {
    "goal": "whats the population of lagos",
-   "reader": "firecrawl",
+   "reader": "web",
    "why": "public fact",
    "tricky": false
   },
   {
    "goal": "grab the firefox changelog for the latest version and tell me whats new",
-   "reader": "firecrawl",
+   "reader": "web",
    "why": "'grab' but just reading public release notes",
    "tricky": true
   },
   {
    "goal": "is the muir woods shuttle running this month? check the NPS site",
-   "reader": "firecrawl",
+   "reader": "web",
    "why": "public park info",
    "tricky": false
   },
   {
    "goal": "what are people saying about the new nintendo console, like on the verge and ign",
-   "reader": "firecrawl",
+   "reader": "web",
    "why": "public coverage summarized",
    "tricky": false
   },
