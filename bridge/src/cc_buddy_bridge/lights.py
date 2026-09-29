@@ -195,6 +195,19 @@ class State:
         return out
 
 
+def change_of(state: State) -> Change:
+    """The change that puts another light in this state: "match the lights" copies one light onto the rest."""
+    if state.on is False:
+        return Change(power=False)
+    color = None
+    if state.kelvin:
+        color = Color(kelvin=state.kelvin, word=f"{state.kelvin}K")
+    elif state.rgb is not None and any(state.rgb):
+        rgb = scale_rgb(state.rgb, 100)     # a Bluetooth controller's level is in its colour: take the hue at full
+        color = Color(rgb=rgb, word=color_word(rgb))
+    return Change(power=True, brightness=state.brightness or None, color=color)
+
+
 @dataclass
 class Light:
     name: str
@@ -794,6 +807,15 @@ TOOLS: list[dict[str, Any]] = [
                                   "description": "A colour name (red, blue, purple, pink, orange...), a #rrggbb, "
                                                  "a white (\"warm white\", \"white\", \"cool white\", "
                                                  "\"daylight\") or a temperature like \"2700K\"; null to leave."}}}},
+    {"type": "function", "name": "lights_match", "strict": True,
+     "description": "Make lights match another light: the same on or off, colour or white, and brightness. "
+                    "Use it for \"make X the same as the others\", \"match the lights\", \"sync the lights\".",
+     "parameters": {"type": "object", "additionalProperties": False, "required": ["target", "source"],
+                    "properties": {
+                        "target": {"type": "string", "description": "The lights to change: \"all\", a light's "
+                                                                    "name, or a room."},
+                        "source": {"type": ["string", "null"],
+                                   "description": "The light to copy, by name; null to copy the other lights."}}}},
     {"type": "function", "name": "lights_status", "strict": True,
      "description": "Whether the owner's lights are on, and their brightness and colour.",
      "parameters": {"type": "object", "additionalProperties": False, "required": ["target"],
@@ -801,8 +823,8 @@ TOOLS: list[dict[str, Any]] = [
 ]
 TOOL_NAMES = tuple(t["name"] for t in TOOLS)
 
-INSTRUCTIONS_HEAD = """You can control the owner's lights with lights_set (on, off, brightness, colour, white) and
-read them with lights_status. For a mood, pick the settings yourself: cozy is warm white around 30%, reading is
+INSTRUCTIONS_HEAD = """You can control the owner's lights with lights_set (on, off, brightness, colour, white),
+make lights match another light with lights_match, and read them with lights_status. For a mood, pick the settings yourself: cozy is warm white around 30%, reading is
 white at 100%, a movie is dim, a party is a colour. Say what you did in a few words."""
 
 
@@ -812,6 +834,7 @@ class Command:
     target: str
     change: Change
     names: tuple[str, ...] = field(default_factory=tuple)
+    source: Optional[str] = None        # set: copy this light ("" for the other lights) instead of change
 
 
 # The words a command may carry besides a target, an on/off, a colour and a level. Anything else — "in ten
@@ -826,6 +849,18 @@ _POWER = {"on": True, "off": False, "out": False}
 DIM_PERCENT = 20
 _NAME_STOPWORDS = frozenset({"the", "my", "a", "of", "and", "in", "on", "off", "to", "at"})
 _PCT = re.compile(r"^(\d{1,3})%?$")
+# "match the lights", "sync the lights", "make wiz match the lamp", "wiz same as the others", "match wiz to the lamp"
+_COPY_ALL = re.compile(r"^(?:match|sync)(?: up)?(?: all)?(?: the| my)? lights?(?: up)?$")
+_COPY_AS = re.compile(r"^(?:make |set |turn |put |change )?(?P<target>.+?) (?:to )?(?:match(?:es)?|"
+                      r"(?:the )?same(?: (?:colou?rs?|lights?|settings?|way))? as|like) (?P<source>.+)$")
+_COPY_TO = re.compile(r"^(?:match|sync) (?P<target>.+?)(?: (?:to|with) (?P<source>.+))?$")
+_COPY_LEAD = re.compile(r"^(?:(?:hey|ok|okay|buddy|please|pls|can you|could you|would you) )+")
+_COPY_TAIL = re.compile(r"(?: (?:please|pls|now|rn|right now|thanks|thank you|too|as well))+$")
+_OTHERS = frozenset({"others", "the others", "other lights", "the other lights", "the other ones", "the rest",
+                     "rest of the lights", "the rest of the lights", "everything else", "everyone else",
+                     "the other light"})
+# a source is read before it is copied: a LAN light answers in milliseconds, Bluetooth has to connect
+_SOURCE_ORDER = ("govee", "wiz", "tuya", "triones")
 
 
 class Lights:
@@ -914,6 +949,53 @@ class Lights:
                 return {**base, "reachable": False, "reason": str(e) or type(e).__name__}
         return {"ok": True, "lights": list(await asyncio.gather(*(one(lt) for lt in lights)))}
 
+    async def copy(self, target: str, source: Optional[str] = None) -> dict[str, Any]:
+        """Put the target lights in the source light's state. No source: the first other light that answers,
+        a Wi-Fi light before a Bluetooth one. With every light as the target, one light is copied onto the rest."""
+        targets, why = self.resolve(target)
+        if not targets:
+            return {"ok": False, "reason": why}
+        if source and _norm(source) not in _OTHERS:
+            sources, why = self.resolve(source)
+            if not sources:
+                return {"ok": False, "reason": why}
+        else:
+            sources = [lt for lt in self.lights if lt not in targets] or list(targets)
+        sources = sorted(sources, key=lambda lt: _SOURCE_ORDER.index(lt.kind) if lt.kind in _SOURCE_ORDER else 9)
+        picked: Optional[Light] = None
+        state: Optional[State] = None
+        tried: list[str] = []
+        for lt in sources:
+            try:
+                state = await asyncio.wait_for(self.driver(lt).state(), self.timeout)
+                picked = lt
+                break
+            except asyncio.CancelledError:
+                raise
+            except Exception as e:  # noqa: BLE001 — try the next light
+                tried.append(f"{lt.name}: {str(e) or type(e).__name__}")
+        if picked is None or state is None:
+            return {"ok": False, "reason": "no light to copy answered (" + "; ".join(tried) + ")"}
+        change = change_of(state)
+        to_set = [lt for lt in targets if lt is not picked]
+        if not to_set:
+            return {"ok": False, "reason": f"{picked.name} is the only light: nothing to match it to"}
+        results = await asyncio.gather(*(self._one(lt, change) for lt in to_set))
+        log.info("lights: match %s -> %d done, %d failed", describe(change),
+                 sum(r["ok"] for r in results), sum(not r["ok"] for r in results))
+        return {"ok": any(r["ok"] for r in results), "source": picked.name, "change": describe(change),
+                "done": [r["name"] for r in results if r["ok"]],
+                "failed": [{"name": r["name"], "reason": r["reason"]} for r in results if not r["ok"]],
+                "line": self.copy_line(picked, to_set, results, change)}
+
+    def copy_line(self, source: Light, lights: Sequence[Light], results: Sequence[dict[str, Any]],
+                  change: Change) -> str:
+        """"Wiz matched to floor lamp: red at 100%." and each light that did not."""
+        done = [r["name"] for r in results if r["ok"]]
+        parts = [f"{_join(done)} matched to {source.name}: {describe(change)}."] if done else []
+        parts += [f"{r['name']}: {r['reason']}." for r in results if not r["ok"]]
+        return " ".join(parts) or "No lights changed."
+
     async def close(self) -> None:
         for d in list(self._drivers.values()):
             try:
@@ -934,6 +1016,10 @@ class Lights:
     async def handle(self, name: str, args: dict[str, Any]) -> dict[str, Any]:
         if name == "lights_status":
             return await self.status(str(args.get("target") or "all"))
+        if name == "lights_match":
+            out = await self.copy(str(args.get("target") or "all"), args.get("source") or None)
+            out.pop("line", None)
+            return out
         if name == "lights_set":
             color = None
             raw = args.get("color")
@@ -960,6 +1046,9 @@ class Lights:
         t = _norm(text)
         if not t or len(t) > 80:
             return None
+        copy = self._match_copy(t)
+        if copy is not None:
+            return copy
         rest = f" {t} "
         # the lights' own words first, longest first, so "bedroom lamp" wins over "lamp"
         phrases = sorted({(w, lt.name) for lt in self.lights for w in self._words_of(lt)}
@@ -1032,8 +1121,29 @@ class Lights:
             chosen += [lt for lt in picked if lt not in chosen]
         return Command(",".join(targets), change, tuple(lt.name for lt in self.lights if lt in chosen))
 
+    def _match_copy(self, t: str) -> Optional[Command]:
+        """"match the lights", "make wiz match the lamp", "wiz same as the others": a Command with a source.
+        Target and source must both name lights, or it is not this command."""
+        t = _COPY_TAIL.sub("", _COPY_LEAD.sub("", t)).strip()
+        if _COPY_ALL.match(t):
+            return Command("all", Change(), tuple(lt.name for lt in self.lights), source="")
+        m = _COPY_AS.match(t) or _COPY_TO.match(t)
+        if m is None:
+            return None
+        target = m.group("target")
+        source = _COPY_TAIL.sub("", m.group("source") or "").strip()
+        targets, _ = self.resolve(target)
+        if not targets:
+            return None
+        if source and source not in _OTHERS and not self.resolve(source)[0]:
+            return None
+        return Command(target, Change(), tuple(lt.name for lt in targets), source=source)
+
     async def run(self, cmd: Command) -> str:
         """Do a matched command; the line to say back."""
+        if cmd.source is not None:
+            out = await self.copy(cmd.target, cmd.source or None)
+            return str(out.get("line") or out.get("reason") or "No lights changed.")
         lights = [lt for lt in self.lights if lt.name in cmd.names]
         results = await asyncio.gather(*(self._one(lt, cmd.change) for lt in lights))
         log.info("lights: by code, %s -> %d done, %d failed", describe(cmd.change),

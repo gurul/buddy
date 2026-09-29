@@ -39,13 +39,23 @@ connect. buddy replies with one line, such as "Lights blue." or
 | "bedroom lights to 30%", "brighten the lamp" | A brightness level (brighten is 100%) |
 | "floor lamp red at 40%" | One light, a colour and a level |
 | "turn off the lamp and the strip" | Several named lights |
+| "match the lights", "sync the lights" | Every light copies one light (see below) |
+| "wiz same as the others", "make wiz match the lamp", "match wiz to the floor lamp" | That light copies another light |
 
 "Lights" with no name means **every** light. A single word that appears in
 only one light's name works as its name, so "the lamp" means "floor lamp".
 A room name means every light in that room.
 
-Everything else goes to the model, which has two tools: `lights_set` and
-`lights_status`. For example, "make it cozy in here", "movie mode", "are the
+**Matching.** A match copies one light's state onto others: on or off, colour
+or white, and brightness. When you name the light to copy ("match the lamp"),
+buddy reads that light. When you do not ("the others", "match the lights"),
+buddy reads the first other light that answers. It tries a Wi-Fi light
+(Govee, WiZ, Tuya) before a Bluetooth one, because a Wi-Fi light answers
+in milliseconds. The reply names the light it copied, for example
+"Wiz matched to floor lamp: red at 100%."
+
+Everything else goes to the model, which has three tools: `lights_set`,
+`lights_match` and `lights_status`. For example, "make it cozy in here", "movie mode", "are the
 lights on?" and "turn the lights off in ten minutes" all go to the model. It
 picks the settings for a mood itself. Cozy is warm white at about 30%.
 

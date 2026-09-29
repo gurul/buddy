@@ -321,7 +321,7 @@ def test_tools_are_strict_and_complete() -> None:
         params = t["parameters"]
         assert t["strict"] is True and params["additionalProperties"] is False
         assert sorted(params["required"]) == sorted(params["properties"])
-    assert set(L.TOOL_NAMES) == {"lights_set", "lights_status"}
+    assert set(L.TOOL_NAMES) == {"lights_set", "lights_match", "lights_status"}
     assert "floor lamp (room: bedroom)" in h.instructions() and "led strip" in h.instructions()
 
 
@@ -340,6 +340,64 @@ def test_handle_set_and_status() -> None:
                                "brightness": 40, "color": "blue", "rgb": "#0000ff"}
     st2 = asyncio.run(h.handle("lights_status", {"target": "office"}))
     assert st2["lights"][0]["reachable"] is False
+
+
+# ---- matching one light to the others ----
+
+def test_change_of_state() -> None:
+    assert L.change_of(L.State(on=False, brightness=50, rgb=(255, 0, 0))) == L.Change(power=False)
+    c = L.change_of(L.State(on=True, brightness=40, rgb=(0, 0, 102)))
+    assert c.power is True and c.brightness == 40 and c.color.rgb == (0, 0, 255) and c.color.word == "blue"
+    w = L.change_of(L.State(on=True, brightness=80, kelvin=2700, rgb=(0, 0, 0)))
+    assert w.color == L.Color(kelvin=2700, word="2700K")
+
+
+@pytest.mark.parametrize("text,names,source", [
+    ("match the lights", "all", ""),
+    ("sync lights", "all", ""),
+    ("desk bulb same as the others", ("desk bulb",), "the others"),
+    ("make the desk bulb the same light as the other lights rn", ("desk bulb",), "the other lights"),
+    ("make the strip match the lamp", ("strip",), "the lamp"),
+    ("match the desk bulb to the floor lamp please", ("desk bulb",), "the floor lamp"),
+    ("match the desk bulb", ("desk bulb",), ""),
+])
+def test_match_copy(text: str, names: Any, source: str) -> None:
+    h, _ = hub()
+    cmd = h.match(text)
+    assert cmd is not None and cmd.source == source, text
+    assert cmd.names == (tuple(lt.name for lt in h.lights) if names == "all" else names)
+
+
+@pytest.mark.parametrize("text", ["make the lights like a sunset", "match the garage to the lamp",
+                                  "the strip is the same as yesterday"])
+def test_match_copy_needs_real_lights(text: str) -> None:
+    h, _ = hub()
+    cmd = h.match(text)
+    assert cmd is None or cmd.source is None
+
+
+def test_copy_reads_a_wifi_light_first_and_sets_the_rest() -> None:
+    h, calls = hub()
+    out = asyncio.run(h.copy("all"))
+    assert out["ok"] and out["source"] == "floor lamp" and out["done"] == ["strip", "desk bulb"]
+    assert calls[0][1] == L.Change(power=True, brightness=40, color=L.Color(rgb=(0, 0, 255), word="blue"))
+    assert out["line"] == "Strip and desk bulb matched to floor lamp: blue at 40%."
+
+
+def test_copy_skips_a_source_that_does_not_answer() -> None:
+    h, calls = hub(fail={"floor lamp"})
+    out = asyncio.run(h.copy("strip"))
+    assert out["source"] == "desk bulb" and [c[0] for c in calls] == ["strip"]
+
+
+def test_copy_by_code_and_by_tool() -> None:
+    h, calls = hub()
+    line = asyncio.run(h.run(h.match("make the strip match the desk bulb")))
+    assert line == "Strip matched to desk bulb: blue at 40%." and [c[0] for c in calls] == ["strip"]
+    out = asyncio.run(h.handle("lights_match", {"target": "desk bulb", "source": None}))
+    assert out["ok"] and out["source"] == "floor lamp" and "line" not in out
+    bad = asyncio.run(h.handle("lights_match", {"target": "garage", "source": None}))
+    assert bad["ok"] is False
 
 
 def test_a_slow_light_times_out_alone() -> None:

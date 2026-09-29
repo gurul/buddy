@@ -482,7 +482,7 @@ Flip it to `ask` if two seconds a command is a price you will pay.
 - **Lights** — a text that is only a light command ("lights off", "lights
   blue", "dim the lamp to 30%") is done by code with no model call, and the
   reply is one line ("Lights blue."). Anything more ("make it cozy") is a model
-  turn with `lights_set` and `lights_status`. Only with lights set up. See
+  turn with `lights_set`, `lights_match` and `lights_status`. Only with lights set up. See
   [lights](../lights.md).
 - **"typing…"** shows while buddy works on a reply, for the whole turn, not only
   the first 5 seconds. It is sent again every 4 s and stops when the reply goes
