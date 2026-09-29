@@ -8,8 +8,10 @@ Brand           How buddy talks to it                                       What
 ==============  ==========================================================  =========================================
 Govee           Govee's LAN API: JSON over UDP (scan on multicast           "LAN Control" on for the light in the
                 239.255.255.250:4001, replies to :4002, commands to :4003)  Govee app. No key.
-WiZ            WiZ's local API: JSON over UDP port 38899 (``getPilot``,      "Allow local communication" on in the
-                ``setPilot``); found by a broadcast ``getPilot``            WiZ app (Settings, Security). No key.
+WiZ            WiZ's local API: JSON over UDP port 38899 (``getPilot``,      Newer firmware refuses unsigned changes:
+                ``setPilot``); found by a broadcast ``getPilot``            the home's signing key, from the WiZ
+                                                                            app's local-integration export
+                                                                            (``lights wiz-import``, docs/lights.md).
 HappyLighting   Bluetooth LE, the "Triones" protocol QH-tek's controllers   Within Bluetooth range of the Mac. No key.
                 speak (``QHM-…`` names): write ``ffd9``, status on ``ffd4``
 Sylvania Smart+ Tuya's local protocol through tinytuya (the ``lights``      The device's local key, once, from Tuya's
@@ -38,7 +40,10 @@ from such a terminal takes ``--no-ble``, and the daemon (or a terminal with the 
 from __future__ import annotations
 
 import asyncio
+import base64
 import colorsys
+import hashlib
+import hmac
 import json
 import logging
 import math
@@ -220,7 +225,7 @@ class Light:
     sku: str = ""
     # triones (a CoreBluetooth UUID on macOS, a MAC elsewhere)
     address: str = ""
-    # tuya
+    # tuya (and a WiZ home's UDP signing key, hex)
     id: str = ""
     key: str = ""
     version: str = "3.3"
@@ -245,7 +250,7 @@ class Light:
             out["room"] = self.room
         if self.aliases:
             out["aliases"] = list(self.aliases)
-        fields = {"govee": ("ip", "device", "sku"), "wiz": ("ip", "device", "sku"), "triones": ("address",),
+        fields = {"govee": ("ip", "device", "sku"), "wiz": ("ip", "device", "sku", "key"), "triones": ("address",),
                   "tuya": ("id", "ip", "key", "version")}
         for f in fields[self.kind]:
             if getattr(self, f):
@@ -439,9 +444,31 @@ def wiz_parse_pilot(result: dict[str, Any]) -> State:
                  rgb=rgb, kelvin=k or None)
 
 
-def _wiz_call(ip: str, method: str, params: dict[str, Any], tries: int = 3, wait: float = 0.7) -> dict[str, Any]:
+def wiz_sign(key_hex: str, params: dict[str, Any]) -> str:
+    """The ``hmac`` a signed WiZ request carries: HMAC-SHA256 of the compact params JSON (``sigTs`` included),
+    keyed by the home's hex ``udp_signing_key``, base64. Found 2026-09-28 by reproducing the bulb's own reply
+    signatures (it signs its ``result`` the same way), then confirmed by a signed setPilot it accepted."""
+    body = json.dumps(params, separators=(",", ":")).encode()
+    return base64.b64encode(hmac.new(bytes.fromhex(key_hex), body, hashlib.sha256).digest()).decode()
+
+
+def wiz_message(method: str, params: dict[str, Any], key_hex: str = "", sig_ts: Optional[int] = None) -> bytes:
+    """A request, signed when there is a key (a read needs none, but a signed one is accepted too)."""
+    msg: dict[str, Any] = {"id": 1, "method": method, "params": params}
+    if key_hex and method.startswith("set"):
+        signed = {**params, "sigTs": int(time.time()) if sig_ts is None else sig_ts}
+        msg = {"id": 1, "method": method, "params": signed, "hmac": wiz_sign(key_hex, signed)}
+    return json.dumps(msg, separators=(",", ":")).encode()
+
+
+class WizRefused(PermissionError):
+    """The bulb answered but refused a change: unsigned, or a stale or wrong signature."""
+
+
+def _wiz_call(ip: str, method: str, params: dict[str, Any], tries: int = 3, wait: float = 0.7, key: str = "",
+              sig_ts: Optional[int] = None) -> dict[str, Any]:
     """One request and its reply. UDP drops, so it resends; the reply's ``error`` becomes an exception."""
-    msg = json.dumps({"id": 1, "method": method, "params": params}).encode()
+    msg = wiz_message(method, params, key, sig_ts)
     with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as s:
         s.settimeout(wait)
         for _ in range(tries):
@@ -463,12 +490,42 @@ def _wiz_call(ip: str, method: str, params: dict[str, Any], tries: int = 3, wait
                 if "error" in reply:
                     err = reply["error"] if isinstance(reply["error"], dict) else {}
                     if err.get("code") == -32602 and method.startswith("set"):
-                        # seen 2026-09-28: reads still answered and every write came back "Invalid params"
-                        raise PermissionError("the WiZ light refused the change; check \"Allow local "
-                                              "communication\" in the WiZ app (Settings, Security)")
+                        # firmware 1.38 refuses an unsigned change (reads still answer): "Invalid params"
+                        raise WizRefused("the WiZ light refused the change: it needs the home's signing key "
+                                         "(cc-buddy-bridge lights wiz-import, docs/lights.md)" if not key else
+                                         "the WiZ light refused the signed change (a new key? run lights "
+                                         "wiz-import again)")
                     raise ConnectionError(f"the WiZ light refused {method}: {err.get('message') or reply['error']}")
                 return reply.get("result") or {}
-    raise TimeoutError("the WiZ light did not answer (is \"Allow local communication\" on in the WiZ app?)")
+    raise TimeoutError("the WiZ light did not answer; is it on the same Wi-Fi?")
+
+
+def wiz_call_signed(ip: str, method: str, params: dict[str, Any], key: str) -> dict[str, Any]:
+    """A change, signed with the Mac's clock; refused once, signed again with the bulb's own clock (its reply
+    to a read carries ``sigTs``), in case the two disagree."""
+    try:
+        return _wiz_call(ip, method, params, key=key)
+    except WizRefused:
+        if not key:
+            raise
+        bulb_ts = _wiz_call(ip, "getPilot", {}, tries=2).get("sigTs")
+        if not isinstance(bulb_ts, int):
+            raise
+        return _wiz_call(ip, method, params, key=key, sig_ts=bulb_ts + 1)
+
+
+def wiz_import(export: dict[str, Any], lights: Sequence[Light]) -> list[str]:
+    """Take the signing key from the WiZ app's local-integration export (``udp_signing_key``, and ``devices``
+    by ``mac_address``) into every WiZ light of that home. Returns the names given the key."""
+    key = str(export.get("udp_signing_key") or "")
+    bytes.fromhex(key)                                    # ValueError when it is not a hex key
+    macs = {str(d.get("mac_address") or "").lower() for d in export.get("devices") or []}
+    done = []
+    for lt in lights:
+        if lt.kind == "wiz" and (not macs or lt.device.lower() in macs):
+            lt.key = key
+            done.append(lt.name)
+    return done
 
 
 def _broadcast_addresses() -> list[str]:
@@ -535,11 +592,18 @@ class WizDriver:
     async def _call(self, method: str, params: dict[str, Any]) -> dict[str, Any]:
         if not self.light.ip and not await asyncio.to_thread(self._rediscover):
             raise ConnectionError("no address for this WiZ light; run `cc-buddy-bridge lights scan`")
+        key = self.light.key
+
+        def call() -> dict[str, Any]:
+            return wiz_call_signed(self.light.ip, method, params, key) if method.startswith("set") \
+                else _wiz_call(self.light.ip, method, params)
         try:
-            return await asyncio.to_thread(_wiz_call, self.light.ip, method, params)
+            return await asyncio.to_thread(call)
+        except WizRefused:
+            raise
         except (OSError, TimeoutError):
             if await asyncio.to_thread(self._rediscover):
-                return await asyncio.to_thread(_wiz_call, self.light.ip, method, params)
+                return await asyncio.to_thread(call)
             raise
 
     async def state(self) -> State:
@@ -1300,7 +1364,7 @@ def merge(existing: Sequence[Light], found: Sequence[Light]) -> tuple[list[Light
 
 
 def cli(argv: Sequence[str], path: Optional[Path] = None, out: Callable[[str], Any] = print) -> int:
-    """``cc-buddy-bridge lights scan [--no-ble] [--no-tuya] | list | name OLD NEW [--room R] [--key K] |
+    """``cc-buddy-bridge lights scan [--no-ble] [--no-tuya] | list | name OLD NEW [--room R] [--key K] | wiz-import FILE |
     set TARGET [on|off] [--brightness N] [--color C]``."""
     import argparse
 
@@ -1315,6 +1379,9 @@ def cli(argv: Sequence[str], path: Optional[Path] = None, out: Callable[[str], A
     n.add_argument("new")
     n.add_argument("--room")
     n.add_argument("--key", help="a Tuya light's local key")
+    wz = sub.add_parser("wiz-import", help="Give WiZ lights their home's signing key, from the WiZ app's "
+                                           "local-integration export (a JSON file)")
+    wz.add_argument("file")
     st = sub.add_parser("set", help="Change lights now")
     st.add_argument("target")
     st.add_argument("power", nargs="?", choices=("on", "off"))
@@ -1336,6 +1403,18 @@ def cli(argv: Sequence[str], path: Optional[Path] = None, out: Callable[[str], A
     if not lights:
         out(f"No lights in {cfg}. Run: cc-buddy-bridge lights scan")
         return 1
+    if a.act == "wiz-import":
+        try:
+            done = wiz_import(json.loads(Path(a.file).expanduser().read_text()), lights)
+        except (OSError, ValueError, AttributeError) as e:
+            out(f"Could not read a WiZ export from {a.file}: {type(e).__name__}")
+            return 1
+        if not done:
+            out("No WiZ light in the lights file matches that export. Run: cc-buddy-bridge lights scan")
+            return 1
+        save(lights, cfg)
+        out(f"Signing key set for: {', '.join(done)}. Restart the daemon to use it.")
+        return 0
     if a.act == "name":
         hub = Lights(lights)
         match, why = hub.resolve(a.old)

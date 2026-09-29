@@ -164,11 +164,90 @@ def test_wiz_error_reply_raises(monkeypatch: Any) -> None:
         L._wiz_call("127.0.0.1", "getPilot", {}, tries=1)
 
 
-def test_wiz_refusing_every_write_names_the_app_setting(monkeypatch: Any) -> None:
-    srv, _ = _fake_wiz({"error": {"code": -32602, "message": "Invalid params"}})
+KEY = "00112233445566778899aabbccddeeff"               # a made-up key, not a real home's
+
+
+def _signing_bulb(bulb_ts: int, clock_ok: bool = True) -> tuple[Any, list]:
+    """A UDP 'bulb' that answers reads, and accepts a change only with a valid hmac over its params (and, when
+    clock_ok is False, only with sigTs == bulb_ts + 1): firmware 1.38's behaviour."""
+    import base64
+    import hashlib
+    import hmac
+    import socket as so
+    import threading
+
+    srv = so.socket(so.AF_INET, so.SOCK_DGRAM)
+    srv.bind(("127.0.0.1", 0))
+    srv.settimeout(3)
+    got: list = []
+
+    def run() -> None:
+        while True:
+            try:
+                data, addr = srv.recvfrom(4096)
+            except OSError:
+                return
+            req = json.loads(data)
+            got.append(req)
+            if req["method"] == "getPilot":
+                out = {"method": "getPilot", "result": {"state": True, "dimming": 50, "sigTs": bulb_ts}}
+            else:
+                body = json.dumps(req["params"], separators=(",", ":")).encode()
+                good = base64.b64encode(hmac.new(bytes.fromhex(KEY), body, hashlib.sha256).digest()).decode()
+                ok = req.get("hmac") == good and (clock_ok or req["params"].get("sigTs") == bulb_ts + 1)
+                out = {"method": req["method"], **({"result": {"success": True}} if ok else
+                                                   {"error": {"code": -32602, "message": "Invalid params"}})}
+            srv.sendto(json.dumps(out).encode(), addr)
+    threading.Thread(target=run, daemon=True).start()
+    return srv, got
+
+
+def test_wiz_sign_is_hmac_sha256_of_compact_params() -> None:
+    import base64
+    import hashlib
+    import hmac
+    params = {"state": True, "r": 0, "g": 255, "b": 0, "sigTs": 5}
+    want = hmac.new(bytes.fromhex(KEY), b'{"state":true,"r":0,"g":255,"b":0,"sigTs":5}', hashlib.sha256).digest()
+    assert base64.b64decode(L.wiz_sign(KEY, params)) == want
+    msg = json.loads(L.wiz_message("setPilot", {"state": False}, KEY, sig_ts=7))
+    assert msg["params"] == {"state": False, "sigTs": 7} and msg["hmac"] == L.wiz_sign(KEY, {"state": False, "sigTs": 7})
+    assert "hmac" not in json.loads(L.wiz_message("getPilot", {}, KEY))       # reads go unsigned
+    assert "hmac" not in json.loads(L.wiz_message("setPilot", {"state": True}))  # no key: unsigned
+
+
+def test_a_signed_change_is_accepted_and_an_unsigned_one_names_the_fix(monkeypatch: Any) -> None:
+    srv, got = _signing_bulb(bulb_ts=1000)
     monkeypatch.setattr(L, "WIZ_PORT", srv.getsockname()[1])
-    with pytest.raises(PermissionError, match="Allow local communication"):
-        L._wiz_call("127.0.0.1", "setPilot", {"state": True}, tries=1)
+    d = L.WizDriver(L.Light("wiz", "wiz", ip="127.0.0.1", device="aabb", key=KEY))
+    asyncio.run(d.apply(L.Change(color=L.parse_color("green"))))
+    assert got[-1]["method"] == "setPilot" and "hmac" in got[-1]
+    bare = L.WizDriver(L.Light("wiz", "wiz", ip="127.0.0.1", device="aabb"))
+    with pytest.raises(L.WizRefused, match="wiz-import"):
+        asyncio.run(bare.apply(L.Change(power=False)))
+    srv.close()
+
+
+def test_a_clock_the_bulb_disagrees_with_is_retried_on_the_bulbs_clock(monkeypatch: Any) -> None:
+    srv, got = _signing_bulb(bulb_ts=1000, clock_ok=False)
+    monkeypatch.setattr(L, "WIZ_PORT", srv.getsockname()[1])
+    L.wiz_call_signed("127.0.0.1", "setPilot", {"state": True}, KEY)
+    assert [r["method"] for r in got] == ["setPilot", "getPilot", "setPilot"]
+    assert got[-1]["params"]["sigTs"] == 1001
+    srv.close()
+
+
+def test_wiz_import_takes_the_key_by_mac(tmp_path: Any) -> None:
+    p = tmp_path / "lights.json"
+    L.save([L.Light("wiz", "wiz", ip="192.0.2.5", device="aabbccddeeff"), L.Light("lamp", "govee", ip="192.0.2.6")], p)
+    export = tmp_path / "export.json"
+    export.write_text(json.dumps({"udp_signing_key": KEY, "devices": [{"mac_address": "AABBCCDDEEFF"}]}))
+    said: list = []
+    assert L.cli(["wiz-import", str(export)], path=p, out=said.append) == 0
+    got = {lt.name: lt for lt in L.load(p)}
+    assert got["wiz"].key == KEY and got["lamp"].key == "" and "wiz" in said[-1]
+    assert stat.S_IMODE(p.stat().st_mode) == 0o600
+    export.write_text(json.dumps({"udp_signing_key": "not hex", "devices": []}))
+    assert L.cli(["wiz-import", str(export)], path=p, out=said.append) == 1
 
 
 def test_wiz_light_roundtrips_and_merges() -> None:
