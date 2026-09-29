@@ -82,6 +82,7 @@ from . import (
     quick_answers,
     rundown,
     second_brain,
+    self_context,
     spend,
     spotify,
     system_context,
@@ -524,8 +525,8 @@ def tools_for(config: TelegramConfig, memory_tools: Sequence[dict[str, Any]] = (
               extra: Sequence[dict[str, Any]] = (), vault: bool = False,
               watch_tools: Sequence[dict[str, Any]] = ()) -> list[dict[str, Any]]:
     """The tools of one turn, in a fixed order (the list is part of the cached prefix): buddy's own, the
-    memory tools whenever a Memory is lent, the web search the engine calls for (websearch.tools_for: Exa
-    through OpenRouter, or the hosted one), the second brain's tools when the vault is on, and the app tools
+    memory tools whenever a Memory is lent, the web search the engine calls for (websearch.tools_for: the
+    OpenRouter function tool, or the hosted one), the second brain's tools when the vault is on, and the app tools
     lent. The memory tools no longer depend on the profile: an empty or missing profile used to hide them,
     and with them everything buddy could look up (owner, 2026-09-23). The watch tools (watch.py) come after the
     vault's when a Watcher is lent."""
@@ -586,7 +587,10 @@ class TelegramConfig:
     idle_close_secs: float = DEFAULT_IDLE_CLOSE_SECS
     ask_permissions: bool = False          # the phone asks about Claude Code's tool calls: off (owner, 2026-09-21)
     drafts: bool = DRAFTS_DEFAULT          # "Thinking…" (sendMessageDraft) while a relayed Claude turn works
-    search: websearch.SearchConfig = field(default_factory=websearch.SearchConfig)   # Exa via OpenRouter, or hosted
+    search: websearch.SearchConfig = field(default_factory=websearch.SearchConfig)   # websearch.configured's engine
+    # What buddy runs on (self_context.py), filled by configured() at boot; "" in a hand-built config, and then the
+    # instructions are what they were before it (owner, 2026-09-29: "proper context of itself").
+    about: str = field(default="", compare=False)
 
     def __repr__(self) -> str:       # a config can end up in a log line or a traceback: never the token
         return (f"TelegramConfig(enabled={self.enabled}, token={'set' if self.token else 'unset'}, "
@@ -630,7 +634,8 @@ def configured(environ: Any = None) -> TelegramConfig:
                                            ("CC_BUDDY_TELEGRAM_OWNER", owners)) if not have]
         log.warning("telegram: asked for (CC_BUDDY_TELEGRAM=1) but off: %s not set", " and ".join(missing))
     return TelegramConfig(enabled=enabled, token=token, owner_ids=owners, model=model, effort=effort,
-                          ask_permissions=ask, drafts=drafts, search=websearch.configured(env))
+                          ask_permissions=ask, drafts=drafts, search=websearch.configured(env),
+                          about=self_context.block(env))
 
 
 # ---- who may speak ----------------------------------------------------------------------------
@@ -909,13 +914,14 @@ def request(config: TelegramConfig, items: list[dict[str, Any]], brief: str = ""
     side and no ``previous_response_id`` is needed.
 
     Ordered for the prompt cache, most stable first (owner, 2026-09-23): the instructions are INSTRUCTIONS,
-    the profile (with a Memory lent), the second brain, the apps, then ``today`` (the day's transcript, which
+    what buddy runs on (``config.about``, self_context.py: fixed from boot to restart, so it is part of the
+    stable prefix; 2026-09-29), the profile (with a Memory lent), the second brain, the apps, then ``today`` (the day's transcript, which
     only grows). What changes every turn — the clock and the opening ``brief`` — is not in them: it
     is one developer message right before the newest user message (``turn_context``; pass ``context`` to
     keep it identical across the rounds of one turn). Before, the clock sat in the middle of the
     instructions and every text paid for the whole prompt again. With no Memory lent the instructions are
     today's, byte for byte, minus the clock."""
-    instructions = INSTRUCTIONS
+    instructions = INSTRUCTIONS + config.about
     if profile:
         instructions += PROFILE_HEADER + "\n" + profile
     elif memory_tools:
@@ -3572,7 +3578,7 @@ class TelegramInlet:
         return result if isinstance(result, dict) else {"ok": False, "reason": f"{name} failed"}
 
     async def _tool_web_search(self, name: str, args: dict[str, Any], chat_id: int) -> dict[str, Any]:
-        # Exa through OpenRouter (websearch.py), off the loop: a second or two of network
+        # websearch.search (the engine, or routed by Jev), off the loop: a second or two of network
         return await asyncio.to_thread(websearch.search, str(args.get("query") or ""), self.config.search)
 
     async def _meet_command(self, chat_id: int, rest: str) -> None:

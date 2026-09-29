@@ -12,6 +12,19 @@ Search engines do not serve a live clock (Exa could not say the time in Seattle,
 either, 2026-09-24), so the answer step is told the local date and time: a clock or "today" question is answered
 from it, not from a page. Without an OpenRouter key, OpenAI's hosted ``web_search`` (on the OpenAI key) is used.
 ``CC_BUDDY_WEB_SEARCH`` = openrouter-perplexity | openrouter-exa | openai | off picks one explicitly.
+
+ROUTED (2026-09-29, search_router.py): when the search router is on (``CC_BUDDY_SEARCH_ROUTER``; auto routes since its
+gates passed a blind holdout on 2026-09-29), ``configured`` lists the providers it may use in ``SearchConfig.providers`` and ``search`` hands
+each query to ``search_router.answer``: Jev sends a one-fact or one-page lookup to TinyFish (free), live fares and
+official records to Firecrawl's Alexandria data tools, and everything else to the engine search below, which is also
+where any failure lands. The result's shape and cost fields are the same whichever provider answered, and the brain's
+``web_search`` tool description says what the routed search can do, so the brain knows its own reach. With
+``providers`` empty, ``search`` is ``engine_search``: exactly the search this module made before the router.
+A routed TinyFish or Firecrawl attempt has ``routed_secs`` (CC_BUDDY_SEARCH_ROUTED_SECS, default 10 s) as an outer
+budget; past it the engine search answers on its own ``timeout_secs``, so a routed search stays within about
+Jev's 2 s + 10 s + 20 s. ``cost_usd`` is a float, or None when a routed answer could not be priced (its answer
+model reported no cost, or Firecrawl credits have no price): None is "unpriced", never a partial sum. The engine
+search keeps its pre-router figure: OpenRouter's usage.cost, else the search fee alone.
 """
 
 from __future__ import annotations
@@ -42,6 +55,7 @@ DEFAULT_MODEL = "google/gemini-3.1-flash-lite"
 DEFAULT_RESULTS = 5
 DEFAULT_MAX_USES = 2                       # searches per question: realtime answers, and at most $0.01 in search fees
 DEFAULT_TIMEOUT_SECS = 20.0
+DEFAULT_ROUTED_SECS = 10.0                 # a routed TinyFish/Firecrawl attempt, then the engine on its own timeout
 MAX_ANSWER_CHARS = 1500
 MAX_SNIPPET_CHARS = 300
 MAX_SOURCES = 8
@@ -61,9 +75,20 @@ WEB_SEARCH_TOOL: dict[str, Any] = {
 }
 HOSTED_TOOL: dict[str, Any] = {"type": "web_search"}      # OpenAI's own, the default
 
-SYSTEM = ("You are a search engine's answer box. Using only the web results provided, answer the query in at most "
-          "four plain sentences with the concrete facts (numbers, names, dates) and say which source each comes "
-          "from by its title. If the results do not answer it, say so in one sentence. No markdown, no lists.")
+# What the routed search adds to the tool's description, per provider it may use: the brain reads its own reach here
+# (a brain that does not know its search can price a flight never asks it to).
+ROUTED_REACH = {
+    "tinyfish": "a single fact or what one specific page says is read straight from the pages",
+    "firecrawl": "live flight fares and official records come from live data services, so give the route, dates or "
+                 "name in the query",
+}
+ROUTED_NOTE = ("Each query is routed to the search that fits it: news and questions that need many sources get a "
+               "many-source search")
+
+SYSTEM = ("You are the answer step of buddy's web search: buddy, the owner's desk-robot assistant, searched the web "
+          "for this query. Using only the web results provided, answer the query in at most four plain sentences "
+          "with the concrete facts (numbers, names, dates) and say which source each comes from by its title. If the "
+          "results do not answer it, say so in one sentence. No markdown, no lists.")
 # The clock the answer step reads: web pages are not a live clock, so the current time comes from here.
 CLOCK = ("The current local date and time is {now}, time zone {zone}. For a question about the current time or date, "
          "or what is happening today, use this clock, converting to another place's time zone when asked; do not "
@@ -77,12 +102,18 @@ class SearchConfig:
     max_results: int = DEFAULT_RESULTS
     timeout_secs: float = DEFAULT_TIMEOUT_SECS
     max_uses: int = DEFAULT_MAX_USES
+    providers: tuple[str, ...] = ()           # search_router's providers when routing is on; () = the engine alone
+    routed_secs: float = DEFAULT_ROUTED_SECS  # outer budget of a routed non-engine attempt (search_router.bounded)
 
 
 def configured(environ: Any = None) -> SearchConfig:
     """CC_BUDDY_WEB_SEARCH = openrouter-perplexity | openrouter-exa | openai | off. Unset: openrouter-perplexity
     when OPENROUTER_API_KEY is set, else openai. CC_BUDDY_WEB_SEARCH_MODEL, _RESULTS and _MAX_USES tune the call.
-    An openai/* answer model is refused (OpenAI models run on the OpenAI key, never through OpenRouter)."""
+    An openai/* answer model is refused (OpenAI models run on the OpenAI key, never through OpenRouter).
+    ``providers`` is search_router.available: () unless CC_BUDDY_SEARCH_ROUTER routes on this engine.
+    CC_BUDDY_SEARCH_ROUTED_SECS (1-60, default 10) is a routed attempt's outer budget."""
+    from . import search_router
+
     env = os.environ if environ is None else environ
     key = (env.get("OPENROUTER_API_KEY") or "").strip()
     raw = (env.get("CC_BUDDY_WEB_SEARCH") or "").strip().lower()
@@ -105,16 +136,28 @@ def configured(environ: Any = None) -> SearchConfig:
         uses = max(1, min(5, int(env.get("CC_BUDDY_WEB_SEARCH_MAX_USES") or DEFAULT_MAX_USES)))
     except ValueError:
         uses = DEFAULT_MAX_USES
-    return SearchConfig(engine=engine, model=model, max_results=n, max_uses=uses)
+    try:
+        routed = max(1.0, min(60.0, float(env.get("CC_BUDDY_SEARCH_ROUTED_SECS") or DEFAULT_ROUTED_SECS)))
+    except ValueError:
+        routed = DEFAULT_ROUTED_SECS
+    return SearchConfig(engine=engine, model=model, max_results=n, max_uses=uses,
+                        providers=search_router.available(env, engine), routed_secs=routed)
 
 
 def tools_for(config: SearchConfig) -> list[dict[str, Any]]:
     """The tool(s) a brain offers for the web: the function tool, the hosted one, or nothing."""
     if config.engine in OPENROUTER_ENGINES:
-        return [WEB_SEARCH_TOOL]
+        return [routed_tool(config.providers) if config.providers else WEB_SEARCH_TOOL]
     if config.engine == "openai":
         return [HOSTED_TOOL]
     return []
+
+
+def routed_tool(providers: tuple[str, ...]) -> dict[str, Any]:
+    """WEB_SEARCH_TOOL with its description telling the brain what the routed search reaches."""
+    reach = [ROUTED_REACH[p] for p in providers if p in ROUTED_REACH]
+    note = ROUTED_NOTE + "".join(f"; {r}" for r in reach) + "."
+    return {**WEB_SEARCH_TOOL, "description": WEB_SEARCH_TOOL["description"] + " " + note}
 
 
 def _clock(environ: Any = None, now: Optional[datetime] = None) -> str:
@@ -128,15 +171,16 @@ def _clock(environ: Any = None, now: Optional[datetime] = None) -> str:
     return CLOCK.format(now=local.strftime("%A %Y-%m-%d %H:%M"), zone=zone.key if zone else local.tzname())
 
 
-def request(config: SearchConfig, query: str, *, environ: Any = None, now: Optional[datetime] = None) -> dict[str, Any]:
+def request(config: SearchConfig, query: str, *, environ: Any = None, now: Optional[datetime] = None,
+            system: str = SYSTEM) -> dict[str, Any]:
     """The exact OpenRouter body: the cheap answer model, the web search server tool on the engine with its budget,
-    the clock and the answer-box rules as the system turn, the query as the user turn."""
+    the clock and the answer-box rules (``system``) as the system turn, the query as the user turn."""
     return {
         "model": config.model,
         "tools": [{"type": "openrouter:web_search",
                    "parameters": {"engine": OPENROUTER_ENGINES.get(config.engine, "perplexity"),
                                   "max_results": config.max_results, "max_uses": config.max_uses}}],
-        "messages": [{"role": "system", "content": SYSTEM + " " + _clock(environ, now)},
+        "messages": [{"role": "system", "content": system + " " + _clock(environ, now)},
                      {"role": "user", "content": " ".join((query or "").split())[:500]}],
         "max_tokens": 400,
         "temperature": 0,
@@ -177,8 +221,23 @@ def parse(payload: Any) -> dict[str, Any]:
 
 def search(query: str, config: Optional[SearchConfig] = None, *, key: str = "",
            opener: Optional[Callable[..., Any]] = None, clock: Callable[[], float] = time.perf_counter) -> dict[str, Any]:
-    """One search, blocking (callers run it off the loop). Never raises: {"ok": False, "reason": …} instead.
-    `key` defaults to OPENROUTER_API_KEY. Logs the shape and the time, never the query."""
+    """The brain's web search, blocking (callers run it off the loop). Never raises: {"ok": False, "reason": …}
+    instead. With ``config.providers`` it is search_router.answer (Jev picks the provider; the same result shape);
+    without, engine_search. `key` defaults to OPENROUTER_API_KEY. Logs the shape and the time, never the query."""
+    cfg = config or configured()
+    if cfg.providers:
+        from . import search_router
+
+        return search_router.answer(query, cfg, key=key, opener=opener, clock=clock)
+    return engine_search(query, cfg, key=key, opener=opener, clock=clock)
+
+
+def engine_search(query: str, config: Optional[SearchConfig] = None, *, key: str = "",
+                  opener: Optional[Callable[..., Any]] = None, clock: Callable[[], float] = time.perf_counter,
+                  system: str = SYSTEM, feature: str = spend.SEARCH) -> dict[str, Any]:
+    """One search on the engine (Perplexity through OpenRouter by default), the search before the router and the
+    router's safe default. ``system`` is the answer step's rules; ``feature`` the spend line (the web reader's
+    searches are its tasks). Never raises."""
     cfg = config or configured()
     api_key = key or (os.environ.get("OPENROUTER_API_KEY") or "").strip()
     if not api_key:
@@ -186,7 +245,7 @@ def search(query: str, config: Optional[SearchConfig] = None, *, key: str = "",
     if not (query or "").strip():
         return {"ok": False, "reason": "empty query"}
     send = opener or urllib.request.urlopen
-    body = json.dumps(request(cfg, query)).encode("utf-8")
+    body = json.dumps(request(cfg, query, system=system)).encode("utf-8")
     req = urllib.request.Request(URL, data=body, method="POST", headers={
         "Authorization": f"Bearer {api_key}", "Content-Type": "application/json",
         "HTTP-Referer": "https://github.com/gurucharan/buddy", "X-Title": "buddy"})
@@ -214,7 +273,7 @@ def search(query: str, config: Optional[SearchConfig] = None, *, key: str = "",
     result["cost_usd"] = round(measured if measured is not None else SEARCH_USD.get(engine, 0.005), 4)
     # The daily meter takes OpenRouter's own figure only: without it the answer model's tokens are unknown, so
     # the line is unpriced rather than the search fee alone passed off as the whole cost.
-    spend.record("openrouter", cfg.model, spend.SEARCH, measured,
+    spend.record("openrouter", cfg.model, feature, measured,
                  tokens={"in": result["usage"].get("in"), "out": result["usage"].get("out")},
                  source="reported" if measured is not None else "priced",
                  note="" if measured is not None else f"no usage.cost; search fee alone ~${SEARCH_USD.get(engine, 0.005)}")

@@ -214,6 +214,9 @@ OPENAI_API_KEY=your-key-here
 # answered in seconds, practice references in live lessons, and watches on sites that
 # refuse every reader on this Mac
 # TINYFISH_API_KEY=your-key-here
+# Optional: Firecrawl, for live fares and official records through its data tools
+# (Jev routes those searches there; at most 5 calls a day unless CC_BUDDY_FIRECRAWL_PER_DAY)
+# FIRECRAWL_API_KEY=your-key-here
 ```
 
 For watches on shops that refuse Python's own requests, add the optional Chrome-like
@@ -354,7 +357,7 @@ flowchart TB
 |---|---|
 | Robot firmware | Arduino C++ on ESP32-S3; M5StackChan BSP and M5Unified for hardware, RoboEyes for the face. Local state machines handle gaze, affect, conversation phases, motion and synthesised chirps. |
 | Host bridge | Python with `asyncio`; `cc-buddy-bridge` is the CLI and daemon entry point. Hooks and CLI commands use local JSON IPC; the robot link is newline-delimited JSON over USB serial. |
-| Voice and reasoning | sherpa-onnx keyword spotting with sounddevice audio input; the configured defaults are `gpt-live-1` for voice, `gpt-6-astra` for the voice's tools and computer tasks, `gpt-6-luna` for Telegram text, and `gpt-6-astra` for deep reasoning (`think_hard`). Captions are the default output. Voice, text and deep reasoning search the web with Perplexity through OpenRouter when an OpenRouter key is set, and with OpenAI's built-in search otherwise (`websearch.py`; [web search](docs/stackchan/telegram.md#web-search)). |
+| Voice and reasoning | sherpa-onnx keyword spotting with sounddevice audio input; the configured defaults are `gpt-live-1` for voice, `gpt-6-astra` for the voice's tools and computer tasks, `gpt-6-luna` for Telegram text, and `gpt-6-astra` for deep reasoning (`think_hard`). Captions are the default output. Voice, text and deep reasoning search the web through Jev, which routes each search: a settled one-fact or one-page lookup to TinyFish (free), live fares and official records to Firecrawl's data tools, and everything else to Perplexity through OpenRouter, which also takes any search the others fail (`search_router.py`; [search routing](docs/stackchan/routing.md#web-searches-go-to-the-provider-that-fits)). Without an OpenRouter key it is OpenAI's built-in search. buddy's prompts carry a short live summary of its own models and providers (`self_context.py`), so it answers questions about its setup from the running code, not from memory. |
 | Desktop control | The voice and text `start_task` tool delegates to Codex app-server and its installed `cua_repl.js` Computer Use plugin. Progress, explicit permissions, results, steering and cancellation return through buddy. |
 | Vision and memory | macOS Vision for face detection, host-side identity/following logic, model-assisted scene observations and reflections, plus a separate conversation memory: transcripts, records rewritten by a nightly dream, and a mem0 index. |
 | Learning | Python HTTP service on `127.0.0.1:48766`, SQLite persistence, and a React/TypeScript tldraw canvas built with Vite. Tutor responses use a validated JSON shape for problems, feedback, steps and completion state. |

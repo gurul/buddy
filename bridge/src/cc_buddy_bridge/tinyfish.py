@@ -8,8 +8,9 @@ Two calls, both with ``X-API-Key: $TINYFISH_API_KEY``, both through watch.http_r
   each with its own error code when it fails; ``ttl`` 0 is a live read, a positive ``ttl`` accepts a cached copy
   that young.
 
-Used by the web reader (web_reader.py: search, then read the top pages), the watcher's hosted reader for sites
-that refuse this Mac (watch.py), and the tutor's practice references (learning/search.py). Every TinyFish
+Used by the web reader (web_reader.py: search, then read the top pages), buddy's routed web search
+(search_router.py sends a one-fact or one-page lookup here, the brain's and the web reader's alike), the watcher's
+hosted reader for sites that refuse this Mac (watch.py), and the tutor's practice references (learning/search.py). Every TinyFish
 refusal (a bad key, its rate limit, its outage) carries ``host``, so the watcher never mistakes it for the watched
 site refusing; a page's own refusal, which Fetch reports per URL, does not.
 """

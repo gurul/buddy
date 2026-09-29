@@ -20,7 +20,7 @@ from test_daemon_membus import _daemon as _bus_daemon
 from test_daemon_membus import _install_fakes
 
 from cc_buddy_bridge import daemon as daemon_mod
-from cc_buddy_bridge import mem0_memory, records, telegram, transcripts
+from cc_buddy_bridge import mem0_memory, records, self_context, telegram, transcripts
 from cc_buddy_bridge import memory as memory_mod
 from cc_buddy_bridge import recall as recall_mod
 from cc_buddy_bridge.daemon import Daemon
@@ -300,7 +300,13 @@ def test_with_memory_off_the_brains_get_nothing_and_prompts_are_unchanged(monkey
     try:
         assert inlet is not None and inlet._memory is None and inlet._brief() == ""
         body = telegram.request(inlet.config, [], inlet._brief())
-        assert body["instructions"] == telegram.INSTRUCTIONS
+        # The instructions are the generic ones plus what buddy runs on (self_context.py, 2026-09-29: not memory,
+        # so it rides whether memory is on or off), and nothing after it: no profile, no memory hint, no today.
+        about = inlet.config.about
+        assert about.startswith(self_context.HEADER) and about.endswith(self_context.RULE)
+        assert body["instructions"] == telegram.INSTRUCTIONS + about
+        for memory_part in (telegram.PROFILE_HEADER, telegram.MEMORY_HINT, telegram.TODAY_HEADER):
+            assert memory_part not in body["instructions"]
         assert not any(t.get("name") == "memory_search" for t in body["tools"])
     finally:
         asyncio.run(inlet.api.close())

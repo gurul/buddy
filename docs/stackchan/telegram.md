@@ -681,6 +681,93 @@ After ten quiet minutes the chat is over: its turns are cleared from RAM and its
 transcript gets a close marker. Nothing is handed anywhere, because with memory on
 every line was already written down the moment it was typed or sent.
 
+## What buddy knows about itself
+
+On 2026-09-29 the owner texted "what do you use for search", and buddy answered
+from an old memory record with an engine it had stopped using five days before.
+No prompt described buddy's own setup, so the brain answered from memory, and
+memory goes out of date.
+
+Now `self_context.py` writes a short block about buddy's live setup. It has one
+line for each area: the model for each door (the Telegram brain, the voice's two
+halves, `think_hard`, the Mini App builder), web search, tasks on the Mac, the
+watcher's reading ladder, the lights by brand, the memory stores, the doors that
+are on, and the git commit the code runs from. Each value comes from the same
+`configured()` call the daemon uses to build that door. No value is typed into the
+block, and it names only what is live now.
+
+Two lines follow the daemon's own switches (fixed 2026-09-29):
+
+- **Web search** names only the providers that are usable on this machine. It
+  reads `search_router.available(env, engine)` under `search_router.mode(env)`:
+  with the mode `off`, or `auto` before the router's `SHIPPED` is true, or fewer
+  than two usable providers, the line is the one engine ("Perplexity through
+  OpenRouter; <model> writes the answer"). Only when searches really are routed
+  does it say "Jev picks per query among …", and then it lists the providers that
+  have their keys. Jev is shown all three options either way; the code masks the
+  ones without a key, so the option list is not what the block reports. The
+  router is imported defensively: a tree without it still builds the block.
+- **Tasks on the Mac** names the agent `daemon._make_agent` builds, read from the
+  same switch: Holo (with its model, `CC_BUDDY_HOLO_MODEL`) when
+  `CC_BUDDY_COMPUTER=holo`, otherwise Codex; "off" with
+  `CC_BUDDY_COMPUTER_CONTROL=0`. With the web reader on, the same line says what a
+  web reading task tries first (TinyFish, or the routed search). Before this fix
+  the block said Codex while the owner's daemon ran Holo. A test builds the agent
+  through `_make_agent` for each setting and checks the line against it.
+
+The block goes in three places:
+
+| Door | Where |
+|---|---|
+| Telegram brain | `telegram.request`: right after `INSTRUCTIONS`, before the profile |
+| Voice | `voice_agent.session_config`: right after `INSTRUCTIONS` (the Live front) and after `BACKEND_INSTRUCTIONS` and the memory rules (the backend); also in the think-out-loud update |
+| `think_hard` | `think.request`: right after `INSTRUCTIONS`, before the owner's background and the clock |
+
+It ends with one rule, scoped to what the block is: the source of truth for the
+models, services and providers buddy runs on, above memory and past chats. For
+those, when the block does not name one, buddy says it does not know instead of
+guessing. What buddy can do is its tool list, not this block, so a question about
+the calendar, Spotify or the camera is answered from the tools. (The first rule
+covered "tools" too, and would have made the brain say it did not know about its
+own tools.)
+
+Each door's config carries the block (`about`). Its `configured()` builds the
+block once at boot, from the same environment and lights file as the daemon's live
+objects. The block does not change from turn to turn, so it stays in the stable
+prefix that the prompt cache reuses. The clock stays in the turn note. A config
+built by hand, as in the tests, has an empty block, and the prompt stays the same
+as before. With memory off, the Telegram instructions are `INSTRUCTIONS` plus the
+block and nothing after it (`tests/test_daemon_transcripts.py`).
+
+Size: under 1,100 characters (`self_context.BUDGET`; 1,000 before the tasks line).
+Measured on 2026-09-29, the block was 859 characters on the owner's setup and
+1,022 characters with every component on (Holo, routed search, voice, all four
+light brands). `tests/test_self_context.py` covers the budget, checks that each
+door carries the block, and greps every prompt the three doors send (tools
+included) for the retired engine name.
+
+Memory was fixed at the same time, so no retired engine name reaches a prompt
+through the profile (it rides every Telegram prompt with its record index):
+
+- The stale preference record is now `preference-web-search-routing`. Its line is
+  the owner's preference (routing with Jev across TinyFish, Perplexity via
+  OpenRouter and Firecrawl), not a claim about what is live; it points to the
+  self-context block for that. Its line in `profile.md` says the same.
+- The 2026-09-21 conversation record was renamed to
+  `conversation-websearch-and-spotify-control-2026-09-21`, and the aliases that
+  named the engine were dropped. Its body is history and was kept as it was. The
+  profile's record index was regenerated with `records._reindex_profile`, not by
+  hand.
+- The copies from before each change are in
+  `~/.config/cc-buddy-bridge/memory/backup-2026-09-29-self-context/`.
+
+Checked on 2026-09-29 with the real profile and the owner's environment: the
+Telegram, think and voice requests had 0 hits for the retired name. The positive
+controls found it (the block on a setup that runs that engine, and the profile
+from before the rename). Still outside these fixes: today's transcript quotes
+buddy's own wrong answers (history, gone from the prompt when the day ends), and
+the mem0 index still holds one memory from 2026-09-21 that names the engine.
+
 ## Memory
 
 With `CC_BUDDY_MEMORY=1` the text brain shares one memory with the voice. The full

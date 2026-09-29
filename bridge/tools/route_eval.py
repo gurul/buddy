@@ -6,6 +6,7 @@
     .venv/bin/python tools/route_eval.py --model laya         # a typed-decision model asked the same thing
     .venv/bin/python tools/route_eval.py --model jev          # the contrast: one relative question (sends the request TEXT out)
     .venv/bin/python tools/route_eval.py --model jev --native # Jev asked in its own idiom (typed_ask.py), alone and after the rules
+    .venv/bin/python tools/route_eval.py --search             # which provider answers a web search (search_router.py)
 
 The dataset (tests/fixtures/routes/requests.json) is the owner's own computer-use requests from
 the run logs, de-duplicated and with personal details replaced, plus authored hard cases. Each
@@ -408,6 +409,107 @@ def browser_eval(data_dir: Path) -> int:
     return 0
 
 
+# PRE-REGISTERED BAR (written 2026-09-29 before any scoring of the fresh holdout): on the fresh blind holdout,
+# (a) at least 20 requests routed away from perplexity, (b) zero wrong routes to firecrawl, (c) precision on routes
+# to tinyfish >= 95%. Pass all three -> SHIPPED=True. Otherwise SHIPPED=False. Scored exactly once; nothing tuned
+# after seeing it. search_router.SHIPPED carries the same text; this is the one place that computes it.
+SEARCH_MIN_ROUTED = 20
+SEARCH_MIN_TINYFISH_PRECISION = 0.95
+SEARCH_SEEN = ("search_tuning.json", "search_holdout.json")    # both seen: the first holdout was scored once
+SEARCH_BLIND = "search_holdout2.json"
+
+
+def search_bar(said: list[str], truth: list[str]) -> dict[str, Any]:
+    """The pre-registered bar, exactly: {"routed", "firecrawl_wrong", "tinyfish", "tinyfish_right",
+    "tinyfish_precision", "a", "b", "c", "shipped"}. No routes to tinyfish leaves (c) with nothing to be wrong
+    about: it holds (precision None)."""
+    from cc_buddy_bridge import search_router as sr
+
+    routed = sum(1 for s_ in said if s_ != sr.PERPLEXITY)
+    fc_wrong = sum(1 for s_, t in zip(said, truth, strict=True) if s_ == sr.FIRECRAWL and t != sr.FIRECRAWL)
+    tf = [t for s_, t in zip(said, truth, strict=True) if s_ == sr.TINYFISH]
+    tf_right = sum(1 for t in tf if t == sr.TINYFISH)
+    precision = tf_right / len(tf) if tf else None
+    a, b = routed >= SEARCH_MIN_ROUTED, fc_wrong == 0
+    c = precision is None or precision >= SEARCH_MIN_TINYFISH_PRECISION
+    return {"routed": routed, "firecrawl_wrong": fc_wrong, "tinyfish": len(tf), "tinyfish_right": tf_right,
+            "tinyfish_precision": precision, "a": a, "b": b, "c": c, "shipped": a and b and c}
+
+
+def search_eval(data_dir: Path, seen_names: tuple[str, ...] = SEARCH_SEEN, holdout_name: str = SEARCH_BLIND,
+                predict: Any = None) -> int:
+    """Which provider answers a web search (search_router.py): Jev's cut-offs fitted (zero wrong routes allowed)
+    on every SEEN set (search_tuning.json + search_holdout.json), then scored ONCE on the blind
+    search_holdout2.json against each case's ``provider`` label and the pre-registered bar above; the printed
+    ``SHIPPED=`` line is its verdict. ``predict`` is a test seam; unset, Jev on CC_BUDDY_JEV_ROUTE (the request
+    TEXT leaves the Mac)."""
+    import os
+    import statistics
+    import time
+
+    from cc_buddy_bridge import search_router as sr
+
+    if predict is None:
+        from cc_buddy_bridge import jev
+        from cc_buddy_bridge.envfile import load_env_file
+
+        load_env_file()
+        url, key, model = jev.route_config(os.environ)
+        predict = jev.make_predict(url, key, model, timeout_s=8.0)
+
+    def text(c: dict[str, Any]) -> str:
+        return str(c.get("goal") or c.get("query") or c.get("request") or "")
+
+    tuning: list[dict[str, Any]] = []
+    for name in seen_names:
+        if (data_dir / name).exists():
+            tuning += json.loads((data_dir / name).read_text(encoding="utf-8"))["cases"]
+    fit = [sr.ask(predict, text(c), time.perf_counter) for c in tuning]
+    gates = sr.fit(fit, [c["provider"] for c in tuning])
+    print(f"search router: cut-offs fitted on {len(tuning)} seen requests ({' + '.join(seen_names)}; zero wrong "
+          f"routes allowed): {gates}")
+    path = data_dir / holdout_name
+    if not path.exists():
+        print("NO_HOLDOUT")
+        return 0
+    print(f"   scored once on the blind {path.name}")
+    cases = json.loads(path.read_text(encoding="utf-8"))["cases"]
+    answers = [sr.ask(predict, text(c), time.perf_counter) for c in cases]
+    ms = [a.ms for a in answers]
+    print(f"   Jev latency ms p50 {statistics.median(ms):.0f}  p95 {sorted(ms)[int(0.95 * (len(ms) - 1))]:.0f}; "
+          f"errors {sum(1 for a in answers if a.error)}")
+    said = [sr.decide(a, gates) for a in answers]
+    truth = [c["provider"] for c in cases]
+    bar = search_bar(said, truth)
+    print(f"== search router / holdout: n={len(cases)}")
+    for provider in (sr.TINYFISH, sr.FIRECRAWL, sr.PERPLEXITY):
+        sent = [i for i, s_ in enumerate(said) if s_ == provider]
+        wanted = [i for i, t in enumerate(truth) if t == provider]
+        print(f"   routed to {provider}: {len(sent)}, right {sum(1 for i in sent if truth[i] == provider)}; "
+              f"labelled {provider}: {len(wanted)}")
+    tp = bar["tinyfish_precision"]
+    print(f"   (a) routed away from perplexity {bar['routed']} (need >= {SEARCH_MIN_ROUTED}): "
+          f"{'pass' if bar['a'] else 'FAIL'}")
+    print(f"   (b) wrong routes to firecrawl {bar['firecrawl_wrong']} (need 0): {'pass' if bar['b'] else 'FAIL'}")
+    print(f"   (c) precision on routes to tinyfish {'n/a' if tp is None else _pct(tp)} ({bar['tinyfish_right']} of "
+          f"{bar['tinyfish']}; need >= {_pct(SEARCH_MIN_TINYFISH_PRECISION)}): {'pass' if bar['c'] else 'FAIL'}")
+    for i, s_ in enumerate(said):
+        if sr.wrong(s_, truth[i]):
+            a = answers[i]
+            print(f"   WRONG  {text(cases[i])!r}: said {s_}, truth {truth[i]} (tinyfish {a.p_tinyfish:.2f} "
+                  f"firecrawl {a.p_firecrawl:.2f} structured {a.structured:.2f} changes {a.changes:.2f} many "
+                  f"{a.many:.2f} single {a.single:.2f})")
+    for i, t in enumerate(truth):
+        if t != sr.PERPLEXITY and said[i] == sr.PERPLEXITY:
+            a = answers[i]
+            print(f"   miss   {text(cases[i])!r} → {t} (tinyfish {a.p_tinyfish:.2f} firecrawl {a.p_firecrawl:.2f} "
+                  f"structured {a.structured:.2f} changes {a.changes:.2f} many {a.many:.2f} single {a.single:.2f})")
+    print(f"SHIPPED={bar['shipped']}")
+    print(f"SEARCH DECISION: {'ship' if bar['shipped'] else 'hold'} {gates}")
+    print("SEARCH_EVAL_COMPLETE")
+    return 0
+
+
 def _rows(cases: list[dict[str, Any]], apps: list[str], args: argparse.Namespace, choose: Any) -> list[Scored]:
     if args.model:
         return [score_model(c, choose) for c in cases]
@@ -423,6 +525,9 @@ def main(argv: Optional[list[str]] = None) -> int:
                         "list; laya: one short ranking, the app from a code shortlist), cut-offs fitted on the tuning sets "
                         "only; alone and with the rules")
     p.add_argument("--browser", action="store_true", help="score the owner-computer / web-reader router (browser_holdout.json)")
+    p.add_argument("--search", action="store_true",
+                   help="score the web-search provider router (search_tuning.json + search_holdout.json fit, "
+                        "search_holdout2.json decides once)")
     p.add_argument("--quit", action="store_true", help="score quitting: rules, Jev, rules then Jev (holdout_quit.json)")
     p.add_argument("--check-default", action="store_true", help="assert task_router.REFLEX_DEFAULT equals the decision")
     p.add_argument("--results-out")
@@ -431,6 +536,8 @@ def main(argv: Optional[list[str]] = None) -> int:
         return quit_eval(Path(args.data).parent)
     if args.browser:
         return browser_eval(Path(args.data).parent)
+    if args.search:
+        return search_eval(Path(args.data).parent)
     tuning = json.loads(Path(args.data).read_text(encoding="utf-8"))
     apps = list(tuning["apps"])
     holdout_path = Path(args.data).with_name("holdout.json")

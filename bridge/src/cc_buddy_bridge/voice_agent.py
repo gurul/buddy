@@ -90,7 +90,7 @@ from typing import TYPE_CHECKING, Any, Awaitable, Callable, Optional
 
 from . import head as head_mod
 from . import lights as lights_mod
-from . import spend, system_context, websearch
+from . import self_context, spend, system_context, websearch
 from . import spotify as spotify_mod
 from .agent_contract import AgentEvent
 from .caption_pager import CaptionPager, Event, PagerConfig, caption_instructions
@@ -463,7 +463,9 @@ class VoiceConfig:
     output: str = "captions"      # "captions" (text → robot screen + beeps) or "audio" (Mac speaker)
     caption_cps: float = DEFAULT_CAPTION_CPS   # reading rate the caption page holds derive from (5..30)
     web_search: bool = True       # the backend may search the web
-    search: websearch.SearchConfig = field(default_factory=websearch.SearchConfig)   # Exa via OpenRouter, or hosted
+    search: websearch.SearchConfig = field(default_factory=websearch.SearchConfig)   # websearch.configured's engine
+    # What buddy runs on (self_context.py), filled by configured() at boot; "" in a hand-built config
+    about: str = field(default="", compare=False, repr=False)
 
 
 def configured(environ: Any = None) -> VoiceConfig:
@@ -497,7 +499,7 @@ def configured(environ: Any = None) -> VoiceConfig:
             log.warning("voice: CC_BUDDY_CAPTION_CPS=%r is not a number; using %s", raw, cps)
     return VoiceConfig(model=model, backend_model=backend, backend_effort=effort, voice=voice,
                        idle_timeout_secs=idle, output=out, caption_cps=cps, web_search=web,
-                       search=websearch.configured(env))
+                       search=websearch.configured(env), about=self_context.block(env))
 
 
 def session_config(config: VoiceConfig, brief: str = "",
@@ -521,6 +523,10 @@ def session_config(config: VoiceConfig, brief: str = "",
     the backend's. The profile and today go before the clock, the brief after it. Every block is "" when
     empty, so with no memory both instructions are byte-identical to a memory-less session. Think out loud
     gets none of it and no memory tools: a learner's lesson is not a conversation to remember.
+
+    What buddy runs on (``config.about``, self_context.py; owner, 2026-09-29) goes right after the fixed
+    instructions of both halves, so "what do you use for search" is answered from the live wiring, never from a
+    memory. It is not memory, so a lesson keeps it; "" in a hand-built config.
     """
     captions = config.output == "captions"
     listening = think_aloud is not None
@@ -538,7 +544,8 @@ def session_config(config: VoiceConfig, brief: str = "",
     lights_block += "" if not music_tools else "\n\n" + spotify.instructions()
     return {
         "model": config.model,
-        "instructions": INSTRUCTIONS + profile_block(profile) + today_block(today) + context + memory_block(brief)
+        "instructions": INSTRUCTIONS + config.about + profile_block(profile) + today_block(today) + context
+                        + memory_block(brief)
                         + (caption_instructions(PagerConfig(read_cps=config.caption_cps))
                            if captions else "")
                         + (think_aloud_mod.voice_instructions(think_aloud) if listening else ""),
@@ -550,7 +557,7 @@ def session_config(config: VoiceConfig, brief: str = "",
             "type": "responses",
             "responses": {
                 "model": config.backend_model,
-                "instructions": BACKEND_INSTRUCTIONS + (BACKEND_MEMORY_RULES if extra else "")
+                "instructions": BACKEND_INSTRUCTIONS + (BACKEND_MEMORY_RULES if extra else "") + config.about
                                 + backend_profile_block(backend_profile)
                                 + today_block(backend_today, BACKEND_TODAY_HEADER) + context
                                 + (think_aloud_mod.backend_instructions(think_aloud) if listening else "")
@@ -1162,7 +1169,7 @@ class VoiceSession:
         await self._quiet(think_aloud_mod.voice_instructions(lesson))
         try:
             await self.conn.session.update(session={"delegation": {"type": "responses", "responses": {
-                "instructions": BACKEND_INSTRUCTIONS + system_context.context()
+                "instructions": BACKEND_INSTRUCTIONS + self.config.about + system_context.context()
                                 + think_aloud_mod.backend_instructions(lesson)}}})
         except Exception as e:  # noqa: BLE001
             # The voice still has the rules; the backend keeps its lesson rules from BACKEND_INSTRUCTIONS.
@@ -1634,7 +1641,7 @@ class VoiceSession:
                 elif name == "think_hard":
                     result = await self._think_hard(str(args.get("question", "")))
                 elif name == websearch.TOOL_NAME:
-                    # Exa through OpenRouter (websearch.py), off the loop: a second or two of network
+                    # websearch.search (the engine, or routed by Jev), off the loop: a second or two of network
                     result = await asyncio.to_thread(websearch.search, str(args.get("query", "")), self.config.search)
                 elif name == "take_photo":
                     result = await self._take_photo(str(args.get("note", "")))

@@ -143,3 +143,81 @@ def test_search_posts_once_and_never_raises(monkeypatch: pytest.MonkeyPatch) -> 
         raise TimeoutError()
 
     assert ws.search("x", key="r", opener=slow)["reason"] == "the search timed out"
+
+
+# ---- routed (search_router.py): the same tool, the same result, whichever provider answers ------------------------
+
+ROUTER_KEYS = {"OPENROUTER_API_KEY": "r", "TYPESAFE_API_KEY": "ts-test", "TINYFISH_API_KEY": "tf-test",
+               "FIRECRAWL_API_KEY": "fc-test", "CC_BUDDY_SEARCH_ROUTER": "on"}
+
+
+@pytest.mark.parametrize("shipped", [False, True])
+def test_configured_lists_the_routed_providers_and_the_tool_says_what_they_reach(
+        monkeypatch: pytest.MonkeyPatch, shipped: bool) -> None:
+    from cc_buddy_bridge import search_router
+
+    monkeypatch.setattr(search_router, "SHIPPED", shipped)             # "on" routes either way
+    cfg = ws.configured(ROUTER_KEYS)
+    assert cfg.providers == ("perplexity", "tinyfish", "firecrawl")
+    tool = ws.tools_for(cfg)[0]
+    assert tool["name"] == ws.TOOL_NAME and tool["parameters"] == ws.WEB_SEARCH_TOOL["parameters"]
+    assert "many-source" in tool["description"] and "flight fares" in tool["description"]
+    no_fc = ws.configured({k: v for k, v in ROUTER_KEYS.items() if k != "FIRECRAWL_API_KEY"})
+    assert "flight fares" not in ws.tools_for(no_fc)[0]["description"]      # it never claims a reach it lacks
+    # the off switch always, and auto until the gates ship: the engine alone, the tool exactly as before
+    off = ws.configured({**ROUTER_KEYS, "CC_BUDDY_SEARCH_ROUTER": "off"})
+    assert off.providers == () and ws.tools_for(off) == [ws.WEB_SEARCH_TOOL]
+    auto = ws.configured({**ROUTER_KEYS, "CC_BUDDY_SEARCH_ROUTER": "auto"})
+    assert auto.providers == (("perplexity", "tinyfish", "firecrawl") if shipped else ())
+    assert (ws.tools_for(auto) == [ws.WEB_SEARCH_TOOL]) is not shipped
+    assert ws.configured({**ROUTER_KEYS, "CC_BUDDY_WEB_SEARCH": "openai"}).providers == ()
+
+
+def _routed(monkeypatch: pytest.MonkeyPatch, provider: str) -> list[str]:
+    """Every provider faked at its module seam, Jev faked to pick ``provider``; returns what ran."""
+    from cc_buddy_bridge import firecrawl, search_router, spend, watch, web_reader
+
+    ran: list[str] = []
+    firecrawl._CALLS.clear()                                             # today's Firecrawl cap, fresh
+    monkeypatch.delenv("CC_BUDDY_FIRECRAWL_PER_DAY", raising=False)
+    monkeypatch.setenv("CC_BUDDY_FIRECRAWL_USD", "0.004")                # priced, so every provider's cost is a number
+    monkeypatch.setattr(spend, "record", lambda *a, **k: None)
+    monkeypatch.setattr(spend, "record_chat_completion", lambda *a, **k: None)
+    monkeypatch.setattr(search_router, "jev_router",
+                        lambda environ=None: lambda text, available: search_router.Route(provider, 0.9, 150.0))
+    page = {"url": "https://p.example/a", "title": "Page A", "markdown": "The fact is 42."}
+    monkeypatch.setattr(web_reader, "search_and_read", lambda q: ran.append("tinyfish") or {"pages": [page]})
+    monkeypatch.setattr(firecrawl, "search", lambda q, tools=False: ran.append("firecrawl") or {
+        "pages": [page], "tools": [], "credits": 4})
+    monkeypatch.setattr(watch, "openrouter", lambda body: {
+        "choices": [{"message": {"content": json.dumps({"answered": True, "answer": "42.", "sources": [1]})}}],
+        "usage": {"prompt_tokens": 700, "completion_tokens": 20, "cost": 0.0001}})
+    return ran
+
+
+@pytest.mark.parametrize("provider", ["tinyfish", "firecrawl", "perplexity"])
+def test_search_keeps_its_shape_and_cost_fields_for_every_provider(monkeypatch: pytest.MonkeyPatch,
+                                                                  provider: str) -> None:
+    ran = _routed(monkeypatch, provider)
+    engine_calls: list[str] = []
+
+    def opener(req, timeout):
+        engine_calls.append(req.full_url)
+        return Reply(PAYLOAD)
+
+    cfg = ws.SearchConfig(engine="openrouter-perplexity", providers=("perplexity", "tinyfish", "firecrawl"))
+    out = ws.search("what is the answer", cfg, key="r", opener=opener)
+    assert set(out) == {"ok", "answer", "sources", "usage", "ms", "cost_usd"} and out["ok"]
+    assert all(set(s) == {"title", "url", "snippet"} for s in out["sources"]) and out["sources"]
+    assert {"in", "out"} <= set(out["usage"]) and isinstance(out["cost_usd"], float)
+    assert ran == ([provider] if provider != "perplexity" else [])
+    assert engine_calls == ([ws.URL] if provider == "perplexity" else [])
+
+
+def test_the_off_switch_is_todays_engine_search_exactly(monkeypatch: pytest.MonkeyPatch) -> None:
+    ran = _routed(monkeypatch, "tinyfish")
+    cfg = ws.configured({**ROUTER_KEYS, "CC_BUDDY_SEARCH_ROUTER": "off"})
+    out = ws.search("who won", cfg, key="r", opener=lambda req, timeout: Reply(PAYLOAD),
+                    clock=iter([0.0, 0.42]).__next__)
+    assert ran == [] and out["ms"] == 420 and out["cost_usd"] == 0.005
+    assert out["answer"] == "Warriors beat the Lakers 112 to 104 last night, per ESPN."

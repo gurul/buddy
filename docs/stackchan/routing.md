@@ -401,8 +401,12 @@ seconds, needs none of your accounts, and never takes over your screen.
 
 Firecrawl was the web reader until 2026-09-29. It moved to TinyFish because
 TinyFish Search and Fetch are free, while Firecrawl charged a credit a page.
-Firecrawl's Alexandria data tools (flight fares, government records) went with
-it; they had never run on a real task.
+Firecrawl came back the same day as one of three search providers, kept for
+what only it has: the Alexandria data tools (flight fares, government
+records). With the search router on, the web reader answers through it like
+every other search ([below](#web-searches-go-to-the-provider-that-fits)).
+With it off (the default until its gates pass a blind holdout), the web
+reader is TinyFish alone, exactly as described here.
 
 **Which body** (`browser_router.py`): Jev decides, asked the way TypeSafe's
 docs recommend for a routing decision:
@@ -461,19 +465,133 @@ TinyFish did not change what Jev is asked, and the fitted cut-offs still hold.
   WatchLink model.
 - **Hand-off:** if the pages don't answer, TinyFish fails, or the day's cap
   is spent, Codex takes the whole task as before. Nothing is lost by trying
-  the web reader first.
+  the web reader first. With the search router on, a provider that fails is
+  followed by one many-source search first, and only then does Codex take it.
 
 | Setting | Default | What it does |
 |---|---|---|
 | `TINYFISH_API_KEY` | unset | Your TinyFish key (sign up at agent.tinyfish.ai). Without it the web reader is off. |
 | `CC_BUDDY_WEB_READER` | `auto` | On when `TINYFISH_API_KEY` is set and the router's gates passed their blind holdout (`browser_router.SHIPPED`). `0` turns it off, `1` forces it on. |
-| `CC_BUDDY_WEB_READER_TASKS` | 100 a day | Tasks read through TinyFish per day. TinyFish is free; the cap bounds the model calls and any runaway loop. Past it, Codex takes them. |
+| `CC_BUDDY_WEB_READER_TASKS` | 100 a day | Tasks the web reader takes per day, whichever provider answers them. It counts tasks, and bounds the model calls and any runaway loop; paid Firecrawl calls have their own, smaller cap shared with the brain's searches (`CC_BUDDY_FIRECRAWL_PER_DAY`, [below](#web-searches-go-to-the-provider-that-fits)). Past it, Codex takes them. |
 | `CC_BUDDY_JEV_ROUTE` | (set up for Jev) | Jev's route. Without it, the web reader takes no tasks. |
 
 The body before the web reader was an isolated browser: auto-browser, then
 buddy's own Playwright lane. It was retired on 2026-09-23 before it was ever
 wired in. Its research and adapter are in git history (last present at
 `b218808`).
+
+## Web searches go to the provider that fits
+
+Every web search buddy makes can be routed to one of three providers
+(`search_router.py`, 2026-09-29): the brain's `web_search` tool (voice,
+Telegram, think) and the web reader's tasks go through the same router, and
+the same entry point (`search_router.answer`).
+
+| Provider | What it is | Goes there for | Cost |
+|---|---|---|---|
+| `tinyfish` | One TinyFish search, one fetch of the top pages, one cheap model answering only from them (`web_reader.search_and_read` + `answer_from`) | One fact, opening hours, a definition, a price on a public page, what one page or doc says, a simple comparison from a few pages | Free (docs.tinyfish.ai, 2026-09-29), plus the answer model |
+| `perplexity` | OpenRouter's `web_search` server tool on the configured engine (`websearch.engine_search`), today's search | Many sources, news and today's events, multi-step research, anything vague, **and every doubt**: it is the safe default | About $0.005 a search plus the answer model |
+| `firecrawl` | Firecrawl search with Alexandria's live data tools (`firecrawl.py`): the model may pick one tool and its options, buddy runs it and answers from its data | Live fares for a route and dates, prices from a data service, official records | Paid credits, recorded under `firecrawl` |
+
+**How Jev is asked** (the same idiom as the web-reader router above):
+
+- **State:** the request, and one line saying buddy is about to search for
+  its owner and the text is either the brain's query or the owner's words.
+- **Options:** all three providers as one Choice (`quick_page_read`,
+  `deep_web_research`, `live_data_service`), each with its `what`, `for` and
+  `not_for`, the quick-read boundary written on both sides (a settled fact
+  that stays the same over time is the quick reader's; an answer that
+  changes over time is the many-source search's). The words name the job,
+  never a brand. **Jev always sees all three**, whichever keys this Mac
+  holds, so the question never varies and the fitted gates hold on every
+  machine; a pick whose key is missing is turned into the many-source search
+  in code.
+- **Yes/no questions**, one judgment each: `needs_live_structured_data`,
+  `answer_changes_over_time` (does the correct answer change over time or
+  hang on recent news, so a page may be stale),
+  `needs_many_sources_or_searches` (many sources weighed together, or
+  several searches in a row), `single_lookup_or_page_read`.
+- **Code decides:** Firecrawl only when its Choice probability and the
+  structured-data answer both clear their gates; TinyFish only when its
+  probability and the single-lookup answer clear theirs *and* both the
+  changes-over-time answer and the many-sources answer are under their
+  maximums (`SearchGates`: `firecrawl`, `structured`, `tinyfish`, `single`,
+  `many_max`, `changes_max`); everything else is the many-source search. An
+  error, a 2 s Jev timeout, a missing key, today's Firecrawl cap spent, or a
+  provider that fails, doesn't answer or runs past its time budget: one
+  many-source search.
+- **Wrong routes** are the costly direction only: a request that needs many
+  sources, a current answer or a data service sent to the quick reader, or
+  anything that doesn't need a data service sent to Firecrawl. The gates
+  are fitted with zero wrong routes allowed on the seen sets
+  (`tools/route_eval.py --search`: `search_tuning.json` +
+  `search_holdout.json`) and scored once on the blind
+  `search_holdout2.json`.
+- **The bar** (pre-registered 2026-09-29, before the fresh holdout was
+  scored): at least 20 requests routed away from the many-source search,
+  zero wrong routes to Firecrawl, and at least 95% precision on routes to
+  TinyFish. All three: `SHIPPED=True`; otherwise `False`. `route_eval.py`
+  prints exactly this verdict.
+- **Result** (2026-09-29, one run on live Jev, 90 blind requests): 37 routed
+  away from the many-source search (need 20), 0 wrong routes to Firecrawl,
+  21 of 22 TinyFish routes right (95.5%, need 95%). The one wrong route:
+  "what's the tallest building in the world" went to TinyFish. Jev p50 189 ms.
+  `SHIPPED=True`. Caveat: the holdout repeats two already-seen requests word
+  for word; without them TinyFish precision is 20 of 21 (95.2%), still a
+  pass by one route. Write a new blind set before any refit.
+- **Firecrawl fares, measured live:** three one-way fare questions answered
+  from Google Flights data in 6.9–7.8 s each, inside the brain's 10 s budget.
+  A data tool whose required option is an id that another tool must look up
+  first (named `…_id`) is never offered: the answer model picked one and it
+  failed.
+
+The first fit (on `search_tuning.json` alone) was scored on
+`search_holdout.json` and sent one request whose answer changes ("who's the
+CEO" of a company) to the quick reader. That split the old many-sources-or-news
+question into the two above.
+
+**Time budget:** a routed TinyFish or Firecrawl attempt runs in a worker and
+is waited on for at most its budget: `CC_BUDDY_SEARCH_ROUTED_SECS` (10 s) for
+the brain's `web_search`, and 90 s for the web reader, whose tasks can run a
+data tool. This is an outer timeout, not the per-call HTTP timeouts: past it
+the router stops waiting, the worker is told to stop at its next step, and
+the many-source search answers on its own 20 s timeout. A voice or Telegram
+search is therefore about 2 s (Jev) + 10 s + 20 s at worst.
+
+**Firecrawl's daily cap:** `CC_BUDDY_FIRECRAWL_PER_DAY` Firecrawl calls a
+local day (default 5), counted in one place (`firecrawl.py`) for both the
+brain and the web reader. Each search and each data-tool run takes one before
+it is sent. Once the day's calls are spent, a Firecrawl route goes to the
+many-source search, and the reason is logged.
+
+**What stays the same:** the brain's tool result has the same shape and cost
+fields whichever provider answered (`ok`, `answer`, `sources`, `usage`, `ms`,
+`cost_usd`). `cost_usd` is a number only when every part was priced. When the
+answer model reported no cost, or Firecrawl credits have no price
+(`CC_BUDDY_FIRECRAWL_USD` unset), it is `null` ("unpriced", as the spend
+ledger records it), never a partial figure that looks complete. The
+many-source search keeps its pre-router figure: OpenRouter's reported cost,
+else the search fee alone. Only links buddy read survive: pages it fetched,
+sources the search cited, links a data tool returned; any other becomes
+"(link removed)". With routing on, the `web_search` tool's description tells
+the brain what the search can reach (quick page reads, and live fares and
+records when Firecrawl is set up), so it writes queries that name the route,
+dates or name. Each routed search logs one line: the provider, the Choice's
+probability and Jev's milliseconds, never the query.
+
+| Setting | Default | What it does |
+|---|---|---|
+| `CC_BUDDY_SEARCH_ROUTER` | `auto` | `auto`: routes when `search_router.SHIPPED` is true and a Jev route is set up. `on`: routes before the fit, for a live trial. `off`: the brain searches on `CC_BUDDY_WEB_SEARCH`'s engine and the web reader reads through TinyFish, exactly as before the router. |
+| `CC_BUDDY_SEARCH_ROUTED_SECS` | 10 | The brain's time budget for a routed TinyFish or Firecrawl attempt (1 to 60 s). Past it, the many-source search answers. The web reader's budget is at least 90 s. |
+| `OPENROUTER_API_KEY` | unset | The many-source search and every provider's answer model run through OpenRouter. Without it, or with `CC_BUDDY_WEB_SEARCH=openai`/`off`, nothing is routed. |
+| `TINYFISH_API_KEY` | unset | Lets a quick-read pick run. Without it, that pick goes to the many-source search. Jev is asked the same question either way. |
+| `FIRECRAWL_API_KEY` | unset | Lets a live-data pick run. Without it, that pick goes to the many-source search. |
+| `CC_BUDDY_FIRECRAWL_PER_DAY` | 5 | Firecrawl calls a local day (a search or a data-tool run each count one), shared by the brain and the web reader. `0` stops them all. |
+| `CC_BUDDY_FIRECRAWL_USD` | unset | One Firecrawl credit's price on your plan, for the spend ledger and `cost_usd`. Unset: Firecrawl lines are recorded unpriced, and a Firecrawl answer's `cost_usd` is `null`, never guessed. |
+| `CC_BUDDY_JEV_ROUTE` | (set up for Jev) | Jev's route. Without it, nothing is routed. |
+
+The request's words go to TypeSafe or OpenRouter (Jev) when routing is on,
+as they already do for the web-reader router.
 
 ## Head moves
 

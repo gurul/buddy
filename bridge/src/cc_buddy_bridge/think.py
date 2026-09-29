@@ -7,9 +7,9 @@ comparison — deserves more than that, so the backend's ``think_hard`` tool
 hands it here: one Responses call at high effort, with web search available,
 that may take tens of seconds while the voice keeps the owner company.
 
-Web search uses OpenAI's hosted tool by default. Explicitly selecting Exa in
-websearch.py enables function-call rounds: the model asks, this module searches
-off the loop, the sources go back, and the model answers.
+Web search is websearch.py's engine. An OpenRouter engine is a function tool,
+so it runs in rounds: the model asks, this module searches off the loop, the
+sources go back, and the model answers. OpenAI's hosted tool needs no rounds.
 
 Two halves, as in scene.py: a pure core (``request`` builds the exact body,
 ``parse_answer`` reads it, ``parse_calls`` finds the searches) that runs in
@@ -23,6 +23,11 @@ So a caller may pass ``context`` — what buddy knows about the owner and what w
 said today, at most CONTEXT_MAX_CHARS — and it goes into the instructions after
 the generic ones, framed as background, before the clock. Without it the body is
 byte-identical to the context-blind one (owner, 2026-09-23).
+
+What buddy itself runs on (self_context.py: models, search, memory, doors) goes right after the generic
+instructions, ahead of that background: it is ``ThinkConfig.about``, filled once by ``configured`` at boot, so a
+question about buddy's own setup is answered from its live wiring, not from memory (owner, 2026-09-29). A config
+built by hand has none, and the body is what it was.
 """
 
 from __future__ import annotations
@@ -34,7 +39,7 @@ import os
 from dataclasses import dataclass, field
 from typing import Any, Awaitable, Callable, Optional
 
-from . import spend, system_context, websearch
+from . import self_context, spend, system_context, websearch
 
 log = logging.getLogger(__name__)
 
@@ -69,6 +74,7 @@ class ThinkConfig:
     effort: str = DEFAULT_EFFORT
     timeout_secs: float = DEFAULT_TIMEOUT_SECS
     search: websearch.SearchConfig = field(default_factory=websearch.SearchConfig)
+    about: str = field(default="", compare=False, repr=False)   # self_context.block, from configured()
 
 
 def configured(environ: Any = None, backend_model: str = "") -> ThinkConfig:
@@ -88,7 +94,7 @@ def configured(environ: Any = None, backend_model: str = "") -> ThinkConfig:
         except ValueError:
             log.warning("think: CC_BUDDY_THINK_TIMEOUT_SECS=%r is not a number; using %s", raw, timeout)
     return ThinkConfig(enabled=enabled, model=model, effort=effort, timeout_secs=timeout,
-                       search=websearch.configured(env))
+                       search=websearch.configured(env), about=self_context.block(env))
 
 
 def question_items(question: str) -> list[dict[str, Any]]:
@@ -109,10 +115,11 @@ def context_block(context: str) -> str:
 def request(config: ThinkConfig, items: list[dict[str, Any]], context: str = "") -> dict[str, Any]:
     """The exact Responses body for one round (tests check store=False, the effort and the search tool).
     `items` is the question, then, on a later round, the carried reasoning, the calls and their outputs.
-    `context` (the owner's profile and today) goes after the instructions and before the clock."""
+    `context` (the owner's profile and today) goes after the instructions and what buddy runs on
+    (``config.about``), and before the clock."""
     return {
         "model": config.model,
-        "instructions": INSTRUCTIONS + context_block(context) + system_context.context(),
+        "instructions": INSTRUCTIONS + config.about + context_block(context) + system_context.context(),
         "input": items,
         "reasoning": {"effort": config.effort},
         "tools": websearch.tools_for(config.search),
