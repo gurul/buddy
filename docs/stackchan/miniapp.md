@@ -114,7 +114,13 @@ home page:
   change is sent at a time, and only the newest colour waits behind it, so a
   Bluetooth light never replays the whole drag. The colour you let go on is
   always sent last. With a keyboard, the arrow keys turn the hue and set how
-  deep the colour is. The reply names the nearest colour: "Lights cyan
+  deep the colour is. The wheel is [iro.js](https://github.com/jaames/iro.js)
+  5.5.2 (MPL-2.0). It is copied into the package
+  (`bridge/src/cc_buddy_bridge/miniapp_iro.min.js`, with its licence beside
+  it) and buddy serves it at `/iro.js`, never from a CDN, because the home page
+  holds your signed Telegram data. A test pins the file's SHA-256. When buddy
+  does not serve it, the rainbow swatch does not appear and the other swatches
+  still work. The reply names the nearest colour: "Lights cyan
   (#19ffff)."
 - The line under the card shows each light's state when the page opens, and
   after a tap it shows what changed ("Lights green.") and which light did not

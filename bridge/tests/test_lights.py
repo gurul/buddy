@@ -164,6 +164,13 @@ def test_wiz_error_reply_raises(monkeypatch: Any) -> None:
         L._wiz_call("127.0.0.1", "getPilot", {}, tries=1)
 
 
+def test_wiz_refusing_every_write_names_the_app_setting(monkeypatch: Any) -> None:
+    srv, _ = _fake_wiz({"error": {"code": -32602, "message": "Invalid params"}})
+    monkeypatch.setattr(L, "WIZ_PORT", srv.getsockname()[1])
+    with pytest.raises(PermissionError, match="Allow local communication"):
+        L._wiz_call("127.0.0.1", "setPilot", {"state": True}, tries=1)
+
+
 def test_wiz_light_roundtrips_and_merges() -> None:
     lt = L.Light.from_dict({"name": "bulb", "kind": "wiz", "ip": "192.0.2.5", "device": "aabb", "sku": "ESP"})
     assert lt.to_dict() == {"name": "bulb", "kind": "wiz", "ip": "192.0.2.5", "device": "aabb", "sku": "ESP"}

@@ -461,7 +461,12 @@ def _wiz_call(ip: str, method: str, params: dict[str, Any], tries: int = 3, wait
                 if reply.get("method") != method:
                     continue
                 if "error" in reply:
-                    raise ConnectionError(f"the WiZ light refused {method}: {reply['error']}")
+                    err = reply["error"] if isinstance(reply["error"], dict) else {}
+                    if err.get("code") == -32602 and method.startswith("set"):
+                        # seen 2026-09-28: reads still answered and every write came back "Invalid params"
+                        raise PermissionError("the WiZ light refused the change; check \"Allow local "
+                                              "communication\" in the WiZ app (Settings, Security)")
+                    raise ConnectionError(f"the WiZ light refused {method}: {err.get('message') or reply['error']}")
                 return reply.get("result") or {}
     raise TimeoutError("the WiZ light did not answer (is \"Allow local communication\" on in the WiZ app?)")
 

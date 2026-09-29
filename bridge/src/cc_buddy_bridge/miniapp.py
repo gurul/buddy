@@ -106,6 +106,9 @@ TUNNEL_URL_RE = re.compile(r"https://[a-z0-9-]+\.trycloudflare\.com")
 TUNNEL_START_SECS = 45.0
 TUNNEL_RETRY_SECS = 10.0
 PAGE_PATH = Path(__file__).with_name("miniapp_page.html")
+# iro.js 5.5.2 (MPL-2.0, github.com/jaames/iro.js), the Lights card's colour wheel. Vendored from the npm tarball
+# (sha512 matched the registry) and served from here, never a CDN: the home page holds the owner's initData.
+IRO_PATH = Path(__file__).with_name("miniapp_iro.min.js")
 CAP_LINE = "Today's Claude budget is used up (${cap:.2f}). It resets at midnight."
 LEDGER_DAYS = 400                      # how many days of spend the ledger keeps
 CORS = {"Access-Control-Allow-Origin": "*"}            # an app page's load and save come from an opaque origin
@@ -425,6 +428,9 @@ class MiniAppServer:
         path, _, query = target.partition("?")
         if method == "GET" and path in ("/", "/index.html"):
             await self._send(writer, 200, self.page(), "text/html; charset=utf-8")
+            return
+        if method == "GET" and path == "/iro.js":
+            await self._send(writer, 200, IRO_PATH.read_bytes(), "application/javascript; charset=utf-8")
             return
         if method == "GET" and path == "/healthz":
             await self._send(writer, 200, b"ok", "text/plain")

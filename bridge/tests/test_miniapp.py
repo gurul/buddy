@@ -167,6 +167,25 @@ def test_the_page_is_served_and_unknown_paths_are_not(tmp_path: Path) -> None:
     assert page.status_code == 200 and b"PAGE" in page.content and missing.status_code == 404
 
 
+def test_the_colour_wheel_script_is_served_as_vendored(tmp_path: Path) -> None:
+    """iro.js comes from buddy itself, byte for byte the npm 5.5.2 release (a changed file fails here)."""
+    import hashlib
+
+    async def go():
+        srv = run_server(tmp_path)
+        port = await srv.start()
+        try:
+            async with httpx.AsyncClient(base_url=f"http://127.0.0.1:{port}") as c:
+                return await c.get("/iro.js")
+        finally:
+            await srv.close()
+
+    r = asyncio.run(go())
+    assert r.status_code == 200 and r.headers["content-type"].startswith("application/javascript")
+    assert hashlib.sha256(r.content).hexdigest() == "5d08eedbac9af7212f5fdf7e336aeb2da87ac47b2364818ad4bbd7fcbdd18d0d"
+    assert r.content.startswith(b"/*!\n * iro.js v5.5.2")
+
+
 def test_anyone_else_gets_nothing_and_the_chat_route_is_gone(tmp_path: Path) -> None:
     async def go():
         srv = run_server(tmp_path)

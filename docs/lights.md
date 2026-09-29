@@ -175,6 +175,11 @@ tools, and "lights off" goes to the model like any other text.
 - **A Govee light does not answer:** check that LAN Control is on in the Govee
   app and that the Mac is on the same network. `cc-buddy-bridge lights scan`
   shows what answers.
+- **"The WiZ light refused the change":** the bulb still answers reads, but
+  every change comes back "Invalid params". Check **Allow local
+  communication** in the WiZ app (Settings → Security). It happened on
+  2026-09-28 with firmware 1.38.0, after changes had worked earlier the same
+  evening.
 - **A WiZ light does not answer:** check that **Allow local communication**
   is on in the WiZ app and that the bulb is on the same 2.4 GHz network as
   the Mac.
