@@ -17,7 +17,7 @@ The code is `bridge/src/cc_buddy_bridge/lights.py`.
 ## The Mini App's Lights card
 
 In Telegram, open buddy's Mini App (the **Open buddy** button pinned in the
-chat, or `/apps`). The **Lights** card at the top has On, Off, colour swatches
+chat, or `/apps`). The **Lights** card at the top has On, Off, colour swatches, a colour wheel
 and a brightness slider. By default a tap changes every light, and you can
 pick a room or one light instead. See
 [the Mini App](stackchan/miniapp.md#lights).

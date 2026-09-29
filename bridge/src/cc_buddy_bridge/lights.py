@@ -1201,7 +1201,10 @@ def describe(change: Change) -> str:
         return "off"
     bits = []
     if c.color is not None:
-        bits.append(c.color.word or "that colour")
+        word = c.color.word or "that colour"
+        if word.startswith("#") and c.color.rgb is not None:
+            word = f"{color_word(c.color.rgb)} ({word})"     # a picked colour: "cyan (#19ffff)" says what it is
+        bits.append(word)
     if c.brightness is not None:
         bits.append(f"at {c.brightness}%")
     return " ".join(bits) if bits else "on"

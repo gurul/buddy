@@ -201,6 +201,17 @@
   .swatches button { aspect-ratio: 1; min-height: 44px; border-radius: 50%; border: 2px solid var(--code); padding: 0; }
   .swatches button:focus-visible, .lights .ideas button:focus-visible, .lights .power button:focus-visible {
     outline: 2px solid var(--link); outline-offset: 2px; }
+  .swatches button.custom { background: conic-gradient(red, yellow, lime, cyan, blue, magenta, red); }
+  .swatches button.custom[aria-expanded="true"] { border-color: var(--link); }
+  /* the colour wheel: hue round the ring, white at the centre; the owner drags and the lights follow */
+  .wheel-wrap { display: flex; flex-direction: column; align-items: center; gap: 8px; margin: 0 0 12px; }
+  .wheel { position: relative; width: min(240px, 70vw); aspect-ratio: 1; border-radius: 50%; touch-action: none;
+    cursor: crosshair; background: radial-gradient(circle closest-side, #fff, rgba(255,255,255,0)),
+    conic-gradient(red, yellow, lime, cyan, blue, magenta, red); border: 2px solid var(--code); }
+  .wheel:focus-visible { outline: 2px solid var(--link); outline-offset: 3px; }
+  .wheel .dot { position: absolute; width: 26px; height: 26px; margin: -13px 0 0 -13px; border-radius: 50%;
+    border: 3px solid #fff; box-shadow: 0 0 0 1px rgba(0,0,0,.5), 0 1px 4px rgba(0,0,0,.4); pointer-events: none; }
+  .wheel-wrap .picked { font-size: 13px; color: var(--hint); font-variant-numeric: tabular-nums; }
   .lights .level { display: flex; align-items: center; gap: 10px; }
   .lights .level label { font-weight: 400; margin: 0; font-size: 14px; color: var(--hint); flex: none; }
   .lights input[type="range"] { flex: 1; accent-color: var(--accent); min-height: 44px; }
@@ -280,6 +291,10 @@
         <button type="button" class="btn" id="lights-off">Off</button></div></div>
     <div class="ideas" id="light-targets" role="radiogroup" aria-label="Which lights"></div>
     <div class="swatches" id="swatches" role="group" aria-label="Colour"></div>
+    <div class="wheel-wrap" id="wheel-wrap" hidden>
+      <div class="wheel" id="wheel" role="slider" tabindex="0" aria-label="Colour wheel: arrow keys turn the hue,
+        up and down set how deep the colour is" aria-valuemin="0" aria-valuemax="359" aria-valuenow="0"><div class="dot" id="wheel-dot"></div></div>
+      <div class="picked" id="wheel-picked"></div></div>
     <div class="level"><label for="level">Brightness</label>
       <input type="range" id="level" min="1" max="100" step="1" value="100"><output id="level-out" for="level">100%</output></div>
     <p class="said" id="lights-said" role="status" aria-live="polite"></p>
@@ -417,6 +432,16 @@
       b.onclick = () => setLights({ color: name });
       swatches.append(b);
     });
+    const custom = el("button", "custom");
+    custom.type = "button"; custom.setAttribute("aria-label", "Pick any colour"); custom.title = "Pick any colour";
+    custom.setAttribute("aria-expanded", "false"); custom.setAttribute("aria-controls", "wheel-wrap");
+    custom.onclick = () => {
+      const open = $("wheel-wrap").hidden;
+      $("wheel-wrap").hidden = !open; custom.setAttribute("aria-expanded", String(open));
+      if (open) paintWheel();
+    };
+    swatches.append(custom);
+    wireWheel();
     const level = $("level"), out = $("level-out");
     level.oninput = () => { out.textContent = level.value + "%"; };
     level.onchange = () => setLights({ brightness: Number(level.value) });
@@ -433,6 +458,67 @@
         : !l.on ? "off" : [l.color || (l.white_kelvin ? "white" : ""), typeof l.brightness === "number" ? l.brightness + "%" : ""]
           .filter(Boolean).join(" "))).join(" · ");
     }).catch(() => {});
+  }
+  // ---- the colour wheel: hue is the angle (red at the top, clockwise), saturation the distance from the centre
+  let wheelHue = 0, wheelSat = 1, wheelBusy = false, wheelNext = null;
+  function hsvHex(h, s) {
+    const f = (n) => { const k = (n + h / 60) % 6; return 1 - s * Math.max(0, Math.min(k, 4 - k, 1)); };
+    return "#" + [f(5), f(3), f(1)].map((v) => Math.round(v * 255).toString(16).padStart(2, "0")).join("");
+  }
+  function paintWheel() {
+    const w = $("wheel"), dot = $("wheel-dot"), a = wheelHue * Math.PI / 180, r = wheelSat * 50;
+    dot.style.left = (50 + r * Math.sin(a)) + "%"; dot.style.top = (50 - r * Math.cos(a)) + "%";
+    const hex = hsvHex(wheelHue, wheelSat);
+    dot.style.background = hex;
+    w.setAttribute("aria-valuenow", String(Math.round(wheelHue)));
+    w.setAttribute("aria-valuetext", hex + ", " + Math.round(wheelSat * 100) + "% deep");
+    $("wheel-picked").textContent = hex;
+    return hex;
+  }
+  // while a drag goes on, one request is in flight and only the newest colour waits behind it: a Bluetooth
+  // light takes a moment, and a queue of every colour passed on the way would replay the whole drag
+  async function sendWheel(hex, done) {
+    if (wheelBusy) { wheelNext = { hex, done: done || (wheelNext && wheelNext.done) }; return; }
+    wheelBusy = true;
+    try {
+      const j = await reply(await post("api/lights", { action: "set", target: lightTarget, color: hex }));
+      $("lights-said").textContent = j.line || j.error || "Something went wrong.";
+      if (done && tg && tg.HapticFeedback) tg.HapticFeedback.notificationOccurred(j.ok ? "success" : "error");
+    } catch (e) {
+      $("lights-said").textContent = "buddy didn't answer. Is the Mac awake?";
+    } finally {
+      wheelBusy = false;
+      const n = wheelNext; wheelNext = null;
+      if (n) sendWheel(n.hex, n.done);
+    }
+  }
+  function wireWheel() {
+    const w = $("wheel");
+    let dragging = false;
+    const at = (e) => {
+      const b = w.getBoundingClientRect(), dx = e.clientX - (b.left + b.width / 2), dy = e.clientY - (b.top + b.height / 2);
+      wheelHue = (Math.atan2(dx, -dy) * 180 / Math.PI + 360) % 360;
+      wheelSat = Math.min(1, Math.hypot(dx, dy) / (b.width / 2));
+      return paintWheel();
+    };
+    w.addEventListener("pointerdown", (e) => {
+      dragging = true; w.setPointerCapture(e.pointerId);
+      if (tg && tg.HapticFeedback) tg.HapticFeedback.impactOccurred("light");
+      sendWheel(at(e), false);
+    });
+    w.addEventListener("pointermove", (e) => { if (dragging) sendWheel(at(e), false); });
+    const end = (e) => { if (!dragging) return; dragging = false; sendWheel(at(e), true); };
+    w.addEventListener("pointerup", end);
+    w.addEventListener("pointercancel", () => { dragging = false; });
+    w.addEventListener("keydown", (e) => {
+      const step = { ArrowRight: [10, 0], ArrowLeft: [-10, 0], ArrowUp: [0, 0.1], ArrowDown: [0, -0.1] }[e.key];
+      if (!step) return;
+      e.preventDefault();
+      wheelHue = (wheelHue + step[0] + 360) % 360;
+      wheelSat = Math.max(0, Math.min(1, wheelSat + step[1]));
+      sendWheel(paintWheel(), true);
+    });
+    paintWheel();
   }
   async function setLights(change) {
     const said = $("lights-said");

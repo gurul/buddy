@@ -66,6 +66,11 @@ def test_scale_rgb_keeps_hue_and_sets_level() -> None:
     assert L.rgb_percent((0, 0, 128)) == 50
 
 
+def test_describe_names_a_picked_colour() -> None:
+    assert L.describe(L.Change(color=L.parse_color("#19ffff"), brightness=50)) == "cyan (#19ffff) at 50%"
+    assert L.describe(L.Change(color=L.parse_color("blue"))) == "blue"
+
+
 def test_color_word() -> None:
     assert L.color_word((224, 0, 0)) == "red"
     assert L.color_word((0, 0, 200)) == "blue"

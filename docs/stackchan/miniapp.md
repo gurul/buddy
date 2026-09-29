@@ -108,6 +108,14 @@ home page:
 - **On** and **Off**, ten colour swatches (the last two are warm white and
   white), and a **Brightness** slider. The slider sends its value when you let
   go.
+- The last swatch, the rainbow one, opens a **colour wheel**: the hue goes
+  round the ring (red at the top) and the colour is deepest at the edge and
+  white at the centre. Drag on it and the lights follow while you drag. One
+  change is sent at a time, and only the newest colour waits behind it, so a
+  Bluetooth light never replays the whole drag. The colour you let go on is
+  always sent last. With a keyboard, the arrow keys turn the hue and set how
+  deep the colour is. The reply names the nearest colour: "Lights cyan
+  (#19ffff)."
 - The line under the card shows each light's state when the page opens, and
   after a tap it shows what changed ("Lights green.") and which light did not
   answer, and why.
