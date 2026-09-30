@@ -557,7 +557,10 @@ it returned; pass the session_id it gives you to every later call. Gmail is read
 search mail, never send, reply, label, archive or delete; say so if asked. The calendar may be changed. Some
 actions are asked of the owner first in this chat by code; you do not need to ask twice. If an app is not
 connected, COMPOSIO_MANAGE_CONNECTIONS returns a sign-in link: send the owner that link as it is. Summarise
-what came back in your own few words; never paste a raw record."""
+what came back in your own few words; never paste a raw record. The COMPOSIO tools are for the owner's own
+accounts. Anything on the public web (a course page, opening hours, a product, the news) is looked up with
+web_search, which reads the pages and answers in one step; a job that needs both, like finding times on a
+website and putting them in the calendar, is web_search for the finding and COMPOSIO for the calendar."""
 
 
 def tools_for(config: TelegramConfig, memory_tools: Sequence[dict[str, Any]] = (),
@@ -4119,6 +4122,13 @@ class TelegramInlet:
     async def _app_tool(self, name: str, args: dict[str, Any], chat_id: int) -> dict[str, Any]:
         """One Composio call under the owner's policy (composio_tools.decide): a reading call runs; a writing
         call is refused (Gmail), runs (the calendar) or is the owner's yes/no in this chat first (the rest)."""
+        web = composio_tools.web_toolkit_slugs(name, args)
+        if web:
+            # The public web is buddy's own web_search, one round; through Composio it cost the office-hours
+            # turns of 2026-09-30 every round they had (composio_tools.DISABLED_TOOLKITS).
+            log.info("telegram: apps: refused web toolkit %s; web_search instead", ", ".join(web))
+            return {"ok": False, "reason": f"{', '.join(web)} is not used here: look the web up with "
+                                           f"{websearch.TOOL_NAME}, which answers in one step."}
         decision = composio_tools.decide(name, args, self._app_policy)
         if decision.action == "refuse":
             log.info("telegram: apps: refused %s (%s)", name, ", ".join(decision.slugs))
