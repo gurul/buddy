@@ -17,7 +17,10 @@ daemon builds its doors from, so it cannot drift from what runs:
   while the owner's daemon ran Holo), and what a web reading task tries first (web_reader.py);
 * the watcher's reading ladder (watch.py), in the order the watcher climbs it;
 * the lights by brand (lights.py's file, as the daemon loads it at boot), the memory stores, the doors that are
-  on, and the git commit the code runs from.
+  on, and the git commit the code runs from;
+* the chief of staff (chief.py), one short line and only while it is on (``chief.enabled``: CC_BUDDY_CHIEF=on, or
+  auto once its capture eval has passed). Off, the block is byte for byte what it was (P4, 2026-09-29). What the
+  chief is doing lives in each turn's note (chief.for_turn), never here: this block is fixed from boot.
 
 No value is typed here: every model, engine and brand comes from the module that uses it, and a component that
 is off says so. The only fixed words are how each thing is described. Names are only ever the ones that are live
@@ -59,7 +62,7 @@ PROVIDER_WORDS = {"tinyfish": "TinyFish", "firecrawl": "Firecrawl"}
 # The modules whose configured() this reads: their warnings were already logged once when the daemon built them.
 _QUIET = ("telegram", "voice_agent", "think", "miniapp", "websearch", "web_reader", "watch", "lights", "ears",
           "meet", "transcripts", "mem0_memory", "second_brain", "recall", "search_router", "jev", "tinyfish",
-          "firecrawl", "browser_router", "computer_agent", "holo_computer")
+          "firecrawl", "browser_router", "computer_agent", "holo_computer", "chief")
 
 _building = threading.local()          # a configured() that builds the block reads other configured()s: no loop
 
@@ -239,6 +242,14 @@ def _doors(env: Mapping[str, str]) -> str:
     return f"Doors on: {_join(doors)}." if doors else "Doors on: none."
 
 
+def _chief(env: Mapping[str, str]) -> list[str]:
+    """One line while the chief of staff is on, else none (chief.enabled reads the same switch the daemon builds
+    it from)."""
+    from . import chief
+
+    return ["Chief of staff: on."] if chief.enabled(env) else []
+
+
 def lines(environ: Optional[Mapping[str, str]] = None, *, lights_path: Optional[Path] = None,
           commit: Optional[str] = None) -> list[str]:
     """The block's lines, in order. `lights_path` and `commit` are lent by tests (the lights file and the sha)."""
@@ -246,7 +257,7 @@ def lines(environ: Optional[Mapping[str, str]] = None, *, lights_path: Optional[
     sha = running_commit() if commit is None else commit
     with _quiet():
         out = _models(env) + [_search(env), _computer(env), _watch(env), _lights(env, lights_path), _memory(env),
-                              _doors(env)]
+                              _doors(env)] + _chief(env)
     if sha:
         out.append(f"Running code: git commit {sha}.")
     return out

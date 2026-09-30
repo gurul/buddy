@@ -344,7 +344,7 @@ def test_forget_preview_counts_every_store_and_never_returns_the_words(
     assert out["ok"] is True
     assert out["layers"] == {"transcripts": 1, "records": 1, "index": 1, "archive": 2, "meetings": 1}
     assert out["total"] == 6 and out["expires_in"] == 600 and out["token"]
-    assert out["not_covered"] == ["claude-mem", "vault"]
+    assert out["not_covered"] == ["claude-mem", "vault", "chief ledger"]
     assert SENTINEL.lower() not in json.dumps(out).lower()
     # a preview changes nothing (control: the words are still everywhere)
     assert SENTINEL in files["archive"].read_text() and SENTINEL in files["meeting"].read_text()

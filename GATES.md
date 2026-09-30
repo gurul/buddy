@@ -1,73 +1,147 @@
-# Gates: Meet — buddy joins a Google Meet call, listens, and texts the notes
+# Gates: the chief of staff (cards, proof, attention, Reflexion, Lean)
 
-OWNS: bridge/src/cc_buddy_bridge/meet.py, bridge/src/cc_buddy_bridge/meet_page.js, bridge/tests/test_meet.py, bridge/tests/test_meet_page.py, bridge/src/cc_buddy_bridge/telegram.py, bridge/tests/test_telegram.py, bridge/src/cc_buddy_bridge/voice_agent.py, bridge/tests/test_voice_agent.py, bridge/src/cc_buddy_bridge/daemon.py, bridge/src/cc_buddy_bridge/spend.py, bridge/tools/meet_smoke.py, docs/stackchan/meet.md, docs/stackchan/telegram.md, README.md, GATES.md
+OWNS: bridge/src/cc_buddy_bridge/chief*.py, bridge/src/cc_buddy_bridge/{telegram,daemon,self_context,spend,memory,search_router}.py, bridge/tests/test_chief*.py, bridge/tests/test_telegram_chief.py, bridge/tests/fixtures/chief/**, bridge/tools/chief_eval.py, bridge/tools/check_telegram_docs.py, verification/Buddy/Chief.lean, verification/Buddy.lean, docs/**, README.md, GATES.md
 
-Scope: The owner asks buddy — `/meet <link>` on Telegram, "join my 3pm" in the chat (the link found on the owner's calendar), or out loud — to join a Google Meet call. Buddy opens its own tab in the owner's Chrome (attach mode, the owner's Google account), turns the microphone and the camera off and verifies both are off before it presses Join, presses only "Join now", "Ask to join" or "Join here too" (never "Switch here", which would take the call away from the owner's other device), waits in the lobby while telling the owner once, reads Meet's live captions with speaker names, keeps them in a transcript as they settle, and when the call ends or the owner says leave writes the notes into transcripts/meetings and texts a summary. Listen only, permanently: no code path unmutes, speaks or turns a camera on. The page scripts are a port of OpenClaw's google-meet plugin (MIT). The previous ledger (the watcher) is in git at 2e52bb8. No type-checker is configured for the bridge (pyproject has ruff and pytest only).
+Scope: the chief design of 2026-09-29 (intent-first) and its build addendum, phases P1-P4, P8 and the E1 capture eval: cards and their ledger, the oracles and receipts, the attention desk, the chief loop with fake-tested executors, Reflexion lessons and retries, the Telegram wiring, the Lean model with its replay, and the blind capture eval that set `chief.SHIPPED`. P5 (build steps), P6 (dream proposals) and P7 (the readiness critic) are out of scope, so their gates G5.x-G7.2 are absent. The previous ledger (Meet) is in git at origin/main. The bridge has no type-checker (pyproject configures ruff and pytest only). Every CHECK below ran with the owner's `CC_BUDDY_*` and `*_API_KEY` variables unset; EVIDENCE is the exit code and the last line of output.
 
-- [x] G1: The whole bridge test suite passes.
-  CHECK: .venv/bin/python -m pytest -q -p no:cacheprovider --ignore=tests/test_desktop_live.py && echo PYTEST_OK
+## P1 Record
+
+- [x] G1.1: One bad phase refuses the whole card; "order the picked desk" is one-way and "compare desks" two-way; the door is add-only; a failed os.replace keeps the old file; an unreadable file moves to .bad-<ts>; ids are never reused; the ledger is in a temp folder under test (positive control: unset, it is ~/.config/cc-buddy-bridge/chief).
+  CHECK: .venv/bin/python -m pytest -q -p no:cacheprovider tests/test_chief_record.py && echo CHIEF_RECORD_OK
   CWD: bridge
-  EXPECT: PYTEST_OK
-  EVIDENCE: exit=0; shell=/bin/sh; cwd=/Users/gurucharan/Documents/personal/buddy/bridge; path=574d30059456/19 entries; output=3112 passed, 13 skipped in 493.44s (0:08:13) | PYTEST_OK
+  EXPECT: CHIEF_RECORD_OK
+  EVIDENCE: exit=0; output=56 passed in 0.23s | CHIEF_RECORD_OK
 
-- [x] G2: Ruff reports nothing on src, tests and tools.
+- [x] G1.2: Forget's tests still pass with the chief ledger named under not_covered.
+  CHECK: .venv/bin/python -m pytest -q -p no:cacheprovider tests/test_memory.py && echo MEMORY_OK
+  CWD: bridge
+  EXPECT: MEMORY_OK
+  EVIDENCE: exit=0; output=31 passed in 1.38s | MEMORY_OK
+
+- [x] G1.3: Ruff reports nothing on src, tests and tools.
   CHECK: .venv/bin/ruff check src/ tests/ tools/ && echo RUFF_CLEAN
   CWD: bridge
   EXPECT: RUFF_CLEAN
-  EVIDENCE: exit=0; shell=/bin/sh; cwd=/Users/gurucharan/Documents/personal/buddy/bridge; path=574d30059456/19 entries; output=All checks passed! | RUFF_CLEAN
+  EVIDENCE: exit=0; output=All checks passed! | RUFF_CLEAN
 
-- [x] G3: Only a Google Meet link is joined: meet.google.com/<abc-defg-hij> (with or without https, a lookup path, authuser kept) is normalised with hl=en; any other host, a lookalike host, a non-https scheme or a bare word is refused with a reason.
-  CHECK: .venv/bin/python -m pytest -q -p no:cacheprovider tests/test_meet.py -k "link" && echo LINKS_OK
+## P2 Proof and attention
+
+- [x] G2.1: Every done kind has a confirming and a non-confirming fixture; the executor's sentence alone is unverifiable; one unverifiable check makes the card unverified, never done.
+  CHECK: .venv/bin/python -m pytest -q -p no:cacheprovider tests/test_chief_receipt.py && echo CHIEF_RECEIPT_OK
   CWD: bridge
-  EXPECT: LINKS_OK
-  EVIDENCE: exit=0; shell=/bin/sh; cwd=/Users/gurucharan/Documents/personal/buddy/bridge; path=574d30059456/19 entries; output=21 passed, 38 deselected in 0.03s | LINKS_OK
+  EXPECT: CHIEF_RECEIPT_OK
+  EVIDENCE: exit=0; output=22 passed in 0.04s | CHIEF_RECEIPT_OK
 
-- [x] G4: The join decision, run by the real page script in real Chromium on fixture pages: with the mic or camera on, the script turns them off and does not press Join in that pass; with both off it presses Join now / Ask to join; offered "Join here too" and "Switch here" it presses only Join here too (positive control: the Switch here button's click counter stays 0 while Join here too's is 1); an in-call page with the mic on is muted again.
-  CHECK: .venv/bin/python -m pytest -q -p no:cacheprovider tests/test_meet_page.py && echo PAGE_OK
+- [x] G2.2: 23:00 batches and 10:00 sends; the third push of a day is batched; backoff doubles; the owner's own action cancels queued nudges; an expired decision takes the option that does not act; the push count survives a reload; no breakpoint in 45 min moves the item on; any error batches.
+  CHECK: .venv/bin/python -m pytest -q -p no:cacheprovider tests/test_chief_desk.py && echo CHIEF_DESK_OK
   CWD: bridge
-  EXPECT: PAGE_OK
-  EVIDENCE: exit=0; shell=/bin/sh; cwd=/Users/gurucharan/Documents/personal/buddy/bridge; path=574d30059456/19 entries; output=14 passed in 2.40s | PAGE_OK
+  EXPECT: CHIEF_DESK_OK
+  EVIDENCE: exit=0; output=25 passed in 0.10s | CHIEF_DESK_OK
 
-- [x] G5: The session's state machine against a scripted page: lobby tells the owner once and keeps waiting up to the lobby limit; admitted turns into in-call; denied, removed, meeting ended, the tab closed, a sign-in page and a join timeout each end the session with a reason the owner is told; "leave" presses Leave and closes only buddy's tab.
-  CHECK: .venv/bin/python -m pytest -q -p no:cacheprovider tests/test_meet.py -k "session" && echo SESSION_OK
+- [x] G2.3: docs/stackchan/chief.md names every CC_BUDDY_CHIEF* setting the code reads, and its documented defaults equal the constants.
+  CHECK: .venv/bin/python -m pytest -q -p no:cacheprovider tests/test_chief_desk.py -k docs && echo CHIEF_DOCS_OK
   CWD: bridge
-  EXPECT: SESSION_OK
-  EVIDENCE: exit=0; shell=/bin/sh; cwd=/Users/gurucharan/Documents/personal/buddy/bridge; path=574d30059456/19 entries; output=14 passed, 45 deselected in 0.80s | SESSION_OK
+  EXPECT: CHIEF_DOCS_OK
+  EVIDENCE: exit=0; output=3 passed, 22 deselected in 0.09s | CHIEF_DOCS_OK
 
-- [x] G6: Captions become a transcript: a growing line is one line, not many; a line replaced by a non-prefix commits; buddy's own tile is never transcribed; the transcript file is appended as lines settle (a crash mid-call keeps what was heard); at the end the notes are written under transcripts/meetings/<date>/ with speakers kept, and the summary is texted; an empty call texts that nothing was said and makes no model call.
-  CHECK: .venv/bin/python -m pytest -q -p no:cacheprovider tests/test_meet.py -k "caption or notes" && echo NOTES_OK
+## P3 The chief, with fake executors
+
+- [x] G3.1: A whole job runs (take_on, backbrief, research, assess, Go yes, act, receipt done); a Go timeout and an exhausted budget each make the card wait with 0 dispatches; a restart after an act dispatch says "I may have done" with 0 new dispatches; research runs again after a restart; "buy it now" on a page adds no phase; a one-way act asks for floor="codex"; a busy slot queues the phase; plus every reviewer attack after P3 and P4.
+  CHECK: .venv/bin/python -m pytest -q -p no:cacheprovider tests/test_chief.py && echo CHIEF_LOOP_OK
   CWD: bridge
-  EXPECT: NOTES_OK
-  EVIDENCE: exit=0; shell=/bin/sh; cwd=/Users/gurucharan/Documents/personal/buddy/bridge; path=574d30059456/19 entries; output=11 passed, 48 deselected in 0.03s | NOTES_OK
+  EXPECT: CHIEF_LOOP_OK
+  EVIDENCE: exit=0; output=66 passed in 0.62s | CHIEF_LOOP_OK
 
-- [x] G7: The calendar finds the link: of the owner's events, the one in progress or starting within the window with a Meet link is chosen ("now", "next", a time like 3pm); an event without a Meet link is skipped; no match is a plain reason.
-  CHECK: .venv/bin/python -m pytest -q -p no:cacheprovider tests/test_meet.py -k "calendar" && echo CALENDAR_OK
+- [x] G3.2: Tool enums and instructions hold only live names (positive control: a planted non-live name is caught); a sentinel word from the owner's message reaches no model payload, spend row, event, attention line or log line.
+  CHECK: .venv/bin/python -m pytest -q -p no:cacheprovider tests/test_chief.py -k "names or privacy" && echo CHIEF_GUARDS_OK
   CWD: bridge
-  EXPECT: CALENDAR_OK
-  EVIDENCE: exit=0; shell=/bin/sh; cwd=/Users/gurucharan/Documents/personal/buddy/bridge; path=574d30059456/19 entries; output=15 passed, 44 deselected in 0.02s | CALENDAR_OK
+  EXPECT: CHIEF_GUARDS_OK
+  EVIDENCE: exit=0; output=5 passed, 61 deselected in 0.06s | CHIEF_GUARDS_OK
 
-- [x] G8: Telegram: `/meet <link>` joins by code with no model call, relay on or off; bare `/meet` answers the status by code; `/meet leave` leaves; "join my 3pm" is a model turn offered the meet tools, and its meet_join call reaches the session; the lobby and the end are texted to the owner.
-  CHECK: .venv/bin/python -m pytest -q -p no:cacheprovider tests/test_telegram.py -k "meet" && echo TELEGRAM_MEET_OK
+- [x] G3.3: Spend rows written inside spend.job("c7") carry the tag, rows outside do not, and asyncio.to_thread keeps it.
+  CHECK: .venv/bin/python -m pytest -q -p no:cacheprovider tests/test_spend.py && echo SPEND_OK
   CWD: bridge
-  EXPECT: TELEGRAM_MEET_OK
-  EVIDENCE: exit=0; shell=/bin/sh; cwd=/Users/gurucharan/Documents/personal/buddy/bridge; path=574d30059456/19 entries; output=4 passed, 217 deselected in 0.16s | TELEGRAM_MEET_OK
+  EXPECT: SPEND_OK
+  EVIDENCE: exit=0; output=30 passed in 0.12s | SPEND_OK
 
-- [x] G9: Voice: the live session is offered join_meeting and leave_meeting; "join my meeting" calls join_meeting, which reaches the same Meeter (link or calendar); with no Meeter the tool says why.
-  CHECK: .venv/bin/python -m pytest -q -p no:cacheprovider tests/test_voice_agent.py -k "meeting" && echo VOICE_MEET_OK
+- [x] GR: Reflexion (addendum): a lesson is written only on a failed or unverifiable check, a failed or over-budget result, or a looping executor, and at most 3 are read per key; a retry carries the lessons in the delimited notes field; a one-way act never retries by itself; a reflection error is no lesson and no retry; injected executor text cannot change the next goal beyond the notes field.
+  CHECK: .venv/bin/python -m pytest -q -p no:cacheprovider tests/test_chief_reflect.py && echo CHIEF_REFLECT_OK
   CWD: bridge
-  EXPECT: VOICE_MEET_OK
-  EVIDENCE: exit=0; shell=/bin/sh; cwd=/Users/gurucharan/Documents/personal/buddy/bridge; path=574d30059456/19 entries; output=3 passed, 104 deselected in 0.04s | VOICE_MEET_OK
+  EXPECT: CHIEF_REFLECT_OK
+  EVIDENCE: exit=0; output=17 passed in 0.18s | CHIEF_REFLECT_OK
 
-- [x] G10: Listen only, by construction: no source line in meet.py or meet_page.js presses an unmute or camera-on control, and the page script's only clicks are the named safe ones (checked by the page test's click log across every fixture).
-  CHECK: .venv/bin/python -m pytest -q -p no:cacheprovider tests/test_meet_page.py -k "only_safe" && echo LISTEN_ONLY_OK
+- [ ] G3.4: FULL: the whole bridge suite, then ruff.
+  CHECK: .venv/bin/python -m pytest -q -p no:cacheprovider --ignore=tests/test_desktop_live.py && echo PYTEST_OK
   CWD: bridge
-  EXPECT: LISTEN_ONLY_OK
-  EVIDENCE: exit=0; shell=/bin/sh; cwd=/Users/gurucharan/Documents/personal/buddy/bridge; path=574d30059456/19 entries; output=2 passed, 12 deselected in 0.30s | LISTEN_ONLY_OK
+  EXPECT: PYTEST_OK
+  EVIDENCE: exit=1; output=4 failed, 4027 passed, 13 skipped in 556.30s (0:09:16), after the fix (no PYTEST_OK); ruff then: All checks passed! | RUFF_CLEAN. The 4: tests/test_ears.py::test_real_model_hears_hey_buddy_and_ignores_a_control_sentence, ::test_real_model_custom_phrase, ::test_real_model_through_ears_fanout (ImportError: dlopen, the wake-word model's native library; also fails on origin/main), tests/test_voice_agent.py::test_while_listening_only_goodbye_and_mute_act_and_nothing_is_starred (also fails on origin/main). None touches the chief; G3.4b is the same run without them.
 
-- [x] G11: Live: buddy joins a real Meet in the owner's Chrome, with the mic and camera off, reads at least one caption line, leaves, and writes the notes file (bridge/tools/meet_smoke.py against a meeting the owner opens).
-  EVIDENCE: manual, 2026-09-25 17:41 and 17:48 PT, `tools/meet_smoke.py 6pm` against the owner's real 6pm "Meeting" (found on the personal calendar through Composio). Both runs printed MEET_SMOKE_OK (in the call, lines > 0, notes file written): run 1 lines=4, run 2 lines=3; click log both times exactly ['mic-off', 'camera-off', 'join', 'captions-on']; a screenshot at 17:42 showed the mic and camera icons crossed out and captions on. Run 2's texted summary named the decision ("ship the deck on Friday") and the speaker. Run 1 exposed the real caption markup and run 2 Meet's rewrites: both fixed after, with regression tests (test_meet_page.py real-markup fixture; test_meet.py live revision sequence). Not seen live: "Join here too"; the post-fix parser was checked against the captured live caption HTML, not a third live call.
+- [x] G3.4b: FULL without the tests that also fail on untouched origin/main or are known flakes that do not touch the chief (3 x test_ears real-model dlopen, the codex-computer daemon factory env test, the voice-agent listening test, the daemon-lesson caption test).
+  CHECK: .venv/bin/python -m pytest -q -p no:cacheprovider --ignore=tests/test_desktop_live.py --deselect tests/test_ears.py::test_real_model_hears_hey_buddy_and_ignores_a_control_sentence --deselect tests/test_ears.py::test_real_model_custom_phrase --deselect tests/test_ears.py::test_real_model_through_ears_fanout --deselect tests/test_codex_computer.py::test_daemon_factory_routes_shared_task_contract_to_codex --deselect tests/test_voice_agent.py::test_while_listening_only_goodbye_and_mute_act_and_nothing_is_starred --deselect tests/test_daemon_lesson.py::test_a_dispatch_notice_is_the_only_caption && echo PYTEST_OK
+  CWD: bridge
+  EXPECT: PYTEST_OK
+  EVIDENCE: exit=0; output=4024 passed, 13 skipped, 6 deselected, 1 xfailed in 554.76s (0:09:14) | PYTEST_OK (before the fix; after it the undeselected run above has 0 new failures)
 
-- [x] G12: The docs say what shipped: docs/stackchan/meet.md exists and names /meet, the listen-only rule and "Join here too"; telegram.md lists /meet; the README links meet.md.
-  CHECK: node -e "const f=require('fs');const m=f.readFileSync('docs/stackchan/meet.md','utf8');const t=f.readFileSync('docs/stackchan/telegram.md','utf8');const r=f.readFileSync('README.md','utf8');if(!/\/meet/.test(m)||!/Join here too/.test(m)||!/listen/i.test(m)||!/\/meet/.test(t)||!/meet\.md/.test(r))process.exit(1);console.log('DOCS_OK')"
-  EXPECT: DOCS_OK
-  EVIDENCE: exit=0; shell=/bin/sh; cwd=/Users/gurucharan/Documents/personal/buddy; path=574d30059456/19 entries; output=DOCS_OK
+## P4 Wiring
+
+- [x] G4.1: Off: take_on is absent and a stray call gets the OFF reason, never think_hard; take_on makes no second model call; /jobs and the id words make 0 model calls; turn_context carries the chief's line; a Mac step queues while a task runs or the desk has the Mac; "go c12" approves only c12's pending act at its revision; with Holo as the floor the approved act is built on codex; the self_context block stays under BUDGET with everything on.
+  CHECK: .venv/bin/python -m pytest -q -p no:cacheprovider tests/test_telegram_chief.py tests/test_self_context.py && echo TG_CHIEF_OK
+  CWD: bridge
+  EXPECT: TG_CHIEF_OK
+  EVIDENCE: exit=0; output=37 passed in 0.42s | TG_CHIEF_OK
+
+- [x] G4.2: telegram.md documents the door's chief (FULL is G3.4 above).
+  CHECK: .venv/bin/python tools/check_telegram_docs.py
+  CWD: bridge
+  EXPECT: TELEGRAM_DOCS_OK
+  EVIDENCE: exit=0; output=18 names documented: CC_BUDDY_COMMAND_RISK, CC_BUDDY_COMPOSIO, CC_BUDDY_COMPOSIO_POLICY, CC_BUDDY_COMPOSIO_STATE, CC_BUDDY_COMPOSIO_TIMEOUT_SECS, CC_BUDDY_SECOND_BRAIN, CC_BUDDY_TELEGRAM, CC_BUDDY_TELEGRAM_ASK, CC_BUDDY_TELEGRAM_DRAFTS, CC_BUDDY_TELEGRAM_EFFORT, CC_BUDDY_TELEGRAM_MODEL, CC_BUDDY_TELEGRAM_OWNER, CC_BUDDY_TELEGRAM_TOKEN, CC_BUDDY_VAULT, CC_BUDDY_WEB_SEARCH, CC_BUDDY_WEB_SEARCH_MAX_USES, CC_BUDDY_WEB_SEARCH_MODEL, CC_BUDDY_WEB_SEARCH_RESULTS | TELEGRAM_DOCS_OK
+
+- [ ] G4.3: MANUAL, owner live, with the chief on: one research-only card runs end to end; one one-way card stops at the Go and No leaves nothing done; one approved act runs on Codex while Holo is the floor. The owner says what he saw on the phone.
+  WHY MANUAL: it needs the owner's own Telegram, his Mac with Holo as the live floor, Codex signed in, and his taps and eyes on the phone; no command can stand in for "what the owner saw". Not run: the owner is asleep and the daemon was not restarted onto this branch.
+  EVIDENCE: pending (owner)
+
+- [ ] G4.4: MANUAL, owner live: wall time per E7 from the logs, 10 card turns against 10 start_task turns: p50 overhead <= 300 ms and the backbrief <= 1.5 s after the tool call. The push shadow week starts when P4 lands.
+  WHY MANUAL: it needs 20 real turns from the owner on the live daemon, which is not running this branch.
+  EVIDENCE: pending (owner)
+
+## E1 The capture eval (the G7.3 check for chief.SHIPPED)
+
+- [x] G7.3: chief.SHIPPED equals the pre-registered E1 bar recomputed from the kept per-case rows of the single blind scoring (no model call); the set's sha256 matches the committed one.
+  CHECK: .venv/bin/python tools/chief_eval.py --capture --check-default && echo CAPTURE_EVAL_OK
+  CWD: bridge
+  EXPECT: CAPTURE_EVAL_OK
+  EVIDENCE: exit=0; output=DEFAULT_CONSISTENT | CAPTURE_EVAL_OK
+
+- [x] G7.3b: the eval tool's own tests (the bar, the scoring rules, the one-scoring lock, the sha256 refusal).
+  CHECK: .venv/bin/python -m pytest -q -p no:cacheprovider tests/test_chief_eval.py && echo CHIEF_EVAL_TESTS_OK
+  CWD: bridge
+  EXPECT: CHIEF_EVAL_TESTS_OK
+  EVIDENCE: exit=0; output=14 passed in 0.05s | CHIEF_EVAL_TESTS_OK
+
+## P8 Proof
+
+- [x] G8.1: Chief.lean's code_invariant is kernel-checked, with standard axioms only.
+  CHECK: node verification/check.mjs Buddy/Chief.lean Buddy.Chief.code_invariant
+  CWD: .
+  EXPECT: LEAN_CHECK_OK
+  EVIDENCE: exit=0; output=LEAN_CHECK_OK Buddy/Chief.lean (1 theorems)
+
+- [x] G8.2: Every Lean model and theorem checks.
+  CHECK: cd verification && node check-all.mjs | tail -1
+  CWD: .
+  EXPECT: ALL_MODELS_OK
+  EVIDENCE: exit=0; output=ALL_MODELS_OK 290 theorems
+
+- [x] G8.3: The Python chief agrees with Chief.lean's rules on 240 generated traces and 36 desk traces; the transliteration reproduces every Lean worked trace; positive control: a variant that closes a card on the executor's word disagrees (and agrees with the naive oracle instead).
+  CHECK: .venv/bin/python -m pytest -q -p no:cacheprovider tests/test_chief_lean.py && echo CHIEF_LEAN_REPLAY_OK
+  CWD: bridge
+  EXPECT: CHIEF_LEAN_REPLAY_OK
+  EVIDENCE: exit=0; output=287 passed (the closed-then-reopened xfail fixed and passing) | CHIEF_LEAN_REPLAY_OK
+
+## Before any push
+
+- [x] GP: No email, long digit id, token-shaped string or the owner's name in the branch's diff against origin/main or its untracked files, apart from the reviewed allowlist (the check-kind identifiers guru_says_done and needs_guru from the design's closed sets, and test_chief_desk.py's own reserved-domain positive control and name guard). GATES.md is left out: it holds this gate's own planted strings. Positive control: the same pattern finds all 4 of them.
+  CHECK: P='[A-Za-z0-9._%-][A-Za-z0-9._%+-]*@[A-Za-z0-9.-]+\.[A-Za-z]{2,}|\b[0-9]{9,}\b|(sk|ghp|gho|xox[bp])[-_][A-Za-z0-9]{10,}|[Gg]uru|[Ll]ingamallu'; c=$(printf 'mail: someone.else@mail.example.com\nid 12345678901\nkey sk-abcdefghijk1\nGuru\n' | grep -cE "$P"); n=$({ git diff origin/main -- . ':!GATES.md'; git ls-files -z --others --exclude-standard | xargs -0 cat; } | sed -E 's/guru_says_done|needs_guru|someone@example\.org|"Guru" not in text//g' | grep -cE "$P"); echo "control=$c hits=$n"; [ "$c" = 4 ] && [ "$n" = 0 ] && echo DIFF_CLEAN
+  CWD: .
+  EXPECT: DIFF_CLEAN
+  EVIDENCE: exit=0; output=control=4 hits=0 | DIFF_CLEAN

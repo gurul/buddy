@@ -120,6 +120,17 @@ The [Telegram door](docs/stackchan/telegram.md) is **off by default**. With it o
 - **A `/` menu** of the code words (`/claude_on`, `/new_claude`, `/codex`,
   `/rundown`, `/watch`, `/meet`, `/screenshot`, `/stealth`, `/wake`, `/stop` and more), in your
   chat only.
+- **Works like a chief of staff** (in the Telegram chat, on since its capture
+  eval passed on 2026-09-29; `CC_BUDDY_CHIEF=off` turns it off; `/jobs` and `go c12`). Work with more than one step becomes a card: buddy
+  says back what it intends ("I intend to read 3 or more store pages, pick one,
+  then order it after your Go. Up to $1 and 30 min."), runs the steps through
+  the web reader, one options call and the Mac, and asks your Go before anything
+  that cannot be undone and before every act on the Mac (a plain yes or a tap;
+  "ok, also …" is a new message, not a yes). A card is done only when checks that read real
+  evidence (pages read, text seen on screen, a watch set) say so. A step that
+  fails gets one short written lesson for the next try ([Reflexion](https://arxiv.org/abs/2303.11366)).
+  Messages it would send on its own wait for a break in your day, stay out of
+  22:30-08:00 and are only logged for now. See [chief of staff](docs/stackchan/chief.md).
 - **Keeps your personal notes.** With the [second brain](docs/stackchan/second-brain.md)
   on, a text saves a note, updates a list, checks off a todo, or undoes an edit in
   your Markdown vault. A saved note gets a ✍ on your message instead of a reply,
@@ -359,7 +370,7 @@ flowchart TB
 | Host bridge | Python with `asyncio`; `cc-buddy-bridge` is the CLI and daemon entry point. Hooks and CLI commands use local JSON IPC; the robot link is newline-delimited JSON over USB serial. |
 | Voice and reasoning | sherpa-onnx keyword spotting with sounddevice audio input; the configured defaults are `gpt-live-1` for voice, `gpt-6-astra` for the voice's tools and computer tasks, `gpt-6-luna` for Telegram text, and `gpt-6-astra` for deep reasoning (`think_hard`). Captions are the default output. Voice, text and deep reasoning search the web through Jev, which routes each search: a settled one-fact or one-page lookup to TinyFish (free), live fares and official records to Firecrawl's data tools, and everything else to Perplexity through OpenRouter, which also takes any search the others fail (`search_router.py`; [search routing](docs/stackchan/routing.md#web-searches-go-to-the-provider-that-fits)). Without an OpenRouter key it is OpenAI's built-in search. buddy's prompts carry a short live summary of its own models and providers (`self_context.py`), so it answers questions about its setup from the running code, not from memory. |
 | Desktop control | The voice and text `start_task` tool delegates to Codex app-server and its installed `cua_repl.js` Computer Use plugin. Progress, explicit permissions, results, steering and cancellation return through buddy. |
-| Vision and memory | macOS Vision for face detection, host-side identity/following logic, model-assisted scene observations and reflections, plus a separate conversation memory: transcripts, records rewritten by a nightly dream, and a mem0 index. |
+| Vision and memory | macOS Vision for face detection, host-side identity/following logic, model-assisted scene observations and reflections, plus a separate conversation memory: transcripts, records rewritten by a nightly dream (`records.py`), and a mem0 index. |
 | Learning | Python HTTP service on `127.0.0.1:48766`, SQLite persistence, and a React/TypeScript tldraw canvas built with Vite. Tutor responses use a validated JSON shape for problems, feedback, steps and completion state. |
 | Native UI | SwiftUI menu-bar app and diary window, with a WidgetKit extension. The helper mirrors local data into an App Group snapshot for the widget. |
 | Memory integrations | In-process publish/subscribe bus; optional rosbridge-compatible WebSocket endpoint and claude-mem sink/recall. Neither is required. |
@@ -446,13 +457,16 @@ mode (`CC_BUDDY_BROWSER_ATTACH=1`), or buddy's own Chrome with no Allow prompt
 See [routing](docs/stackchan/routing.md) for switches and measured evaluations, and
 [voice and computer control](docs/stackchan/voice.md) for worker details.
 
-Fourteen state machines are **formally verified in Lean 4** (`verification/`, 199
+Twenty-one state machines are **formally verified in Lean 4** (`verification/`, 290
 theorems): the Bash allow tier, the Telegram question slot and Stop, forget against the
-nightly dream, the serial link to the robot, the voice turn state, and eight for the
+nightly dream, the serial link to the robot, the voice turn state, eight for the
 watcher (its rate limiter, conditions, scheduler and reading ladder, connection safety,
-links, routing and Ticketmaster). Each is either a kernel-checked counterexample on the
-old code plus a proof for every trace of the fix, or a proof of the code as it stands.
-See [formal verification](docs/verification.md).
+links, routing and Ticketmaster), four for the Voice PE controller, Holo's steering and
+the OpenAI stream retry, and the chief of staff's cards (done needs evidence, one yes per
+act, the budget, quiet hours and the push budget, no act run again after a restart). Each
+is either a kernel-checked counterexample on the old code plus a proof for every trace of
+the fix, or a proof of the code as it stands. The chief's model is also replayed against
+its Python on generated traces. See [formal verification](docs/verification.md).
 
 </details>
 
@@ -503,6 +517,7 @@ Persistent data lives under `~/.config/cc-buddy-bridge/`:
 | `agent-runs/` | Desktop-task run logs |
 | `lights.json` | Your lights: names, rooms, local addresses and Tuya keys (mode 600). See [lights](docs/lights.md). |
 | `spotify.json` | The Spotify login: the app's client id and the refresh token (mode 600). See [Spotify](docs/spotify.md). |
+| `chief/` | The chief of staff's cards (each job's title, steps and checks as buddy summarised them, with a pointer to where you said it rather than your words), their event and attention logs (ids, numbers and short code words), and the lessons from failed steps. Mode 600. See [chief of staff](docs/stackchan/chief.md). |
 | `spend/` | The daily spend ledger (one JSONL file per local day: provider, model, feature, dollars, token counts, never words) and `providers.json`, the providers' own figures. See [what buddy spends](docs/stackchan/spending.md). |
 
 - `cc-buddy-bridge mic off` disables microphone capture until re-enabled.

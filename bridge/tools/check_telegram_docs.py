@@ -42,8 +42,9 @@ def main() -> int:
         problems.append("telegram.py imports httpx but pyproject.toml does not declare it")
     if not re.search(r"^TELEGRAM_DEFAULT = False\b", source, re.M):
         problems.append("TELEGRAM_DEFAULT is not False: the docs say it ships off")
-    if not re.search(r"^RECORDS_DEFAULT = False\b", records_source, re.M):
-        problems.append("RECORDS_DEFAULT is not False: the docs say it ships off")
+    # records.py has had no switch of its own since ba746a7 (the records are part of memory, CC_BUDDY_MEMORY): its
+    # old RECORDS_DEFAULT check failed on main from then on (found 2026-09-29, chief P4). A CC_BUDDY_RECORDS* name
+    # it reads again must still be documented (``names`` above).
     if "records.py" not in readme or "memory_search" not in doc:
         problems.append("the records layer is not in README.md / the doc")
     for line in problems:

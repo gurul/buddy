@@ -18,3 +18,4 @@ import Buddy.WatchStarve
 import Buddy.WatchSsrf
 import Buddy.WatchLink
 import Buddy.WatchRoute
+import Buddy.Chief

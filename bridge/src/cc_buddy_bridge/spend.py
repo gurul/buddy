@@ -17,7 +17,10 @@ that price a provider's usage object), and one line goes into a per-day JSONL fi
 * A model with no rate is recorded with ``usd: null`` and ``unpriced: true`` (logged once per model): a wrong
   figure is worse than a blank one, so nothing is guessed. The dashboard counts those calls separately.
 * Tiny records, never a prompt, never an answer: provider, model, feature, dollars, token counts, an optional
-  short note. Nothing else leaves the call site.
+  short note, and the chief's card id when the call was made for one. Nothing else leaves the call site.
+* ``job("c7")`` tags every row written inside it with ``"job": "c7"`` (chief design 3.2, 2026-09-29: a context
+  variable, so no call site has to pass a card id; ``asyncio.to_thread`` and ``contextvars.copy_context`` carry
+  it into worker threads). ``job_total`` sums one card's rows: what the chief's budget reads.
 * ``record`` never raises and is thread-safe: a failed write is one log line, never a failed turn.
 
 The reader (``day_rows``, ``totals``, ``summary``) aggregates by day, provider, feature and model for the Mini App's
@@ -27,14 +30,17 @@ admin key is set) are kept by spend_sync.py beside this ledger, never mixed into
 
 from __future__ import annotations
 
+import contextlib
+import contextvars
 import json
 import logging
 import os
+import re
 import threading
 import time
 from datetime import date, datetime, timedelta
 from pathlib import Path
-from typing import Any, Iterable, Optional
+from typing import Any, Iterable, Iterator, Optional
 
 from . import pricing
 
@@ -61,6 +67,11 @@ CODEX = "codex"
 WATCH = "watching"
 MEET = "meet notes"
 CALLS = "phone calls"
+CHIEF = "chief of staff"
+
+# The chief card a call is made for ("c7"), or "". Set only through ``job``.
+_JOB: contextvars.ContextVar[str] = contextvars.ContextVar("spend_job", default="")
+_JOB_ID = re.compile(r"^c[1-9]\d{0,8}$")
 
 _lock = threading.Lock()
 _dir_override: Optional[Path] = None
@@ -78,6 +89,21 @@ def spend_dir() -> Path:
         return _dir_override
     raw = (os.environ.get("CC_BUDDY_SPEND_DIR") or "").strip()
     return Path(raw or DEFAULT_DIR).expanduser()
+
+
+@contextlib.contextmanager
+def job(card_id: str) -> Iterator[None]:
+    """Every spend row written inside this block, on this task or a thread it hands off to with the context
+    (``asyncio.to_thread``), carries ``"job": card_id``. A card id that is not ``c<N>`` tags nothing."""
+    token = _JOB.set(card_id if isinstance(card_id, str) and _JOB_ID.match(card_id) else "")
+    try:
+        yield
+    finally:
+        _JOB.reset(token)
+
+
+def current_job() -> str:
+    return _JOB.get()
 
 
 def _once(key: str, msg: str, *args: Any) -> None:
@@ -116,6 +142,9 @@ def record(provider: str, model: str, feature: str, usd: Optional[float], *,
             row["tok"] = tok
         if note:
             row["note"] = " ".join(str(note).split())[:80]
+        tag = _JOB.get()
+        if tag:
+            row["job"] = tag
         line = json.dumps(row, separators=(",", ":")) + "\n"
         folder = spend_dir()
         with _lock:
@@ -287,6 +316,17 @@ def totals(rows: Iterable[dict[str, Any]]) -> dict[str, Any]:
     return {"usd": round(total, 6), "calls": calls, "unpriced": unpriced,
             "unpriced_models": sorted(unpriced_models),
             "by_provider": ordered(splits["p"]), "by_feature": ordered(splits["f"]), "by_model": ordered(splits["m"])}
+
+
+def job_total(card_id: str, since: date, today: Optional[date] = None, folder: Optional[Path] = None) -> float:
+    """The dollars of every row tagged with this card, from ``since`` to ``today`` (at most KEEP_DAYS days).
+    Unpriced rows count nothing, as in ``totals``."""
+    today = today or date.today()
+    d, total = max(since, today - timedelta(days=KEEP_DAYS)), 0.0
+    while d <= today:
+        total += sum(_usd(r) for r in day_rows(d.isoformat(), folder) if r.get("job") == card_id)
+        d += timedelta(days=1)
+    return round(total, 8)
 
 
 def day_total(day: str, folder: Optional[Path] = None) -> float:

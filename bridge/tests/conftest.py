@@ -38,3 +38,12 @@ def _watch_list_in_tmp(tmp_path_factory: pytest.TempPathFactory, monkeypatch: py
     """Every test's watch list (watch.py) is a temporary file, never the owner's real one: the daemon builds a
     Watcher whenever the Telegram door is on, and a Watcher reads its file when it is made."""
     monkeypatch.setenv("CC_BUDDY_WATCH_FILE", str(tmp_path_factory.mktemp("watch") / "watches.json"))
+
+
+@pytest.fixture(autouse=True)
+def _chief_ledger_in_tmp(tmp_path_factory: pytest.TempPathFactory, monkeypatch: pytest.MonkeyPatch):
+    """Every test's chief ledger (chief_ledger.py: cards, events, attention) is a temporary folder, never the
+    owner's real ~/.config/cc-buddy-bridge/chief."""
+    folder = tmp_path_factory.mktemp("chief")
+    monkeypatch.setenv("CC_BUDDY_CHIEF_DIR", str(folder))
+    yield folder

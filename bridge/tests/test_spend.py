@@ -320,3 +320,64 @@ def test_the_loop_syncs_at_start_and_stops_on_shutdown(monkeypatch) -> None:
 
     asyncio.run(go())
     assert calls == [{}]
+
+
+# ---- the chief's card tag (spend.job; chief design G3.3, 2026-09-29) ---------------------------------------
+
+def test_rows_written_inside_a_job_carry_its_card_id_and_rows_outside_do_not(_spend_ledger_in_tmp: Path) -> None:
+    spend.record("openai", "gpt-6-luna", spend.CHAT, 0.001, now=noon(DAY))
+    with spend.job("c7"):
+        assert spend.current_job() == "c7"
+        spend.record("openrouter", "m", spend.CHIEF, 0.002, now=noon(DAY))
+        with spend.job("c8"):
+            spend.record("openrouter", "m", spend.CHIEF, 0.003, now=noon(DAY))
+        spend.record("openrouter", "m", spend.CHIEF, 0.004, now=noon(DAY))
+    spend.record("openai", "gpt-6-luna", spend.CHAT, 0.005, now=noon(DAY))
+    assert spend.current_job() == ""
+    got = [(r.get("job"), r["usd"]) for r in rows(_spend_ledger_in_tmp, DAY)]
+    assert got == [(None, 0.001), ("c7", 0.002), ("c8", 0.003), ("c7", 0.004), (None, 0.005)]
+    assert "job" not in json.loads((_spend_ledger_in_tmp / "2026-09-24.jsonl").read_text().splitlines()[0])
+
+
+def test_a_job_tag_survives_asyncio_to_thread_and_is_gone_after(_spend_ledger_in_tmp: Path) -> None:
+    import asyncio
+
+    async def go() -> None:
+        with spend.job("c7"):
+            await asyncio.to_thread(spend.record, "openrouter", "m", spend.CHIEF, 0.01, now=noon(DAY))
+        await asyncio.to_thread(spend.record, "openrouter", "m", spend.CHIEF, 0.02, now=noon(DAY))
+
+    asyncio.run(go())
+    assert [r.get("job") for r in rows(_spend_ledger_in_tmp, DAY)] == ["c7", None]
+
+
+def test_a_job_tag_survives_the_search_routers_worker_thread(_spend_ledger_in_tmp: Path) -> None:
+    from cc_buddy_bridge import search_router
+
+    def work(abandoned: Any) -> dict[str, Any]:
+        spend.record("openrouter", "m", spend.CHIEF, 0.01, now=noon(DAY))
+        return {"ok": True}
+
+    with spend.job("c9"):
+        assert search_router.bounded(work, 5.0) == {"ok": True}
+    # positive control: a bare thread started inside the job loses the tag, which is why bounded copies it
+    with spend.job("c9"):
+        t = threading.Thread(target=spend.record, args=("openrouter", "m", spend.CHIEF, 0.02), kwargs={"now": noon(DAY)})
+        t.start()
+        t.join()
+    assert [r.get("job") for r in rows(_spend_ledger_in_tmp, DAY)] == ["c9", None]
+
+
+def test_a_bad_card_id_tags_nothing_and_job_total_sums_one_cards_rows(_spend_ledger_in_tmp: Path) -> None:
+    with spend.job("c7; rm -rf ~"):
+        spend.record("openrouter", "m", spend.CHIEF, 0.5, now=noon(DAY))
+    with spend.job("c7"):
+        spend.record("openrouter", "m", spend.CHIEF, 0.25, now=noon(DAY))
+        spend.record("openrouter", "m", spend.CHIEF, None, now=noon(DAY))           # unpriced: counts nothing
+        spend.record("openrouter", "m", spend.CHIEF, 0.125, now=noon(DAY + timedelta(days=1)))
+    with spend.job("c70"):
+        spend.record("openrouter", "m", spend.CHIEF, 1.0, now=noon(DAY))
+    assert "job" not in rows(_spend_ledger_in_tmp, DAY)[0]
+    assert spend.job_total("c7", DAY, DAY + timedelta(days=1), _spend_ledger_in_tmp) == 0.375
+    assert spend.job_total("c7", DAY + timedelta(days=1), DAY + timedelta(days=1), _spend_ledger_in_tmp) == 0.125
+    assert spend.totals(rows(_spend_ledger_in_tmp, DAY))["by_feature"] == {"chief of staff": 1.75}

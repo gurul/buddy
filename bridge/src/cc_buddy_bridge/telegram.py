@@ -41,6 +41,12 @@ today's transcript, both channels, in an order the prompt cache can reuse
 (``request``); the memory tools come from the Memory and run through it. With
 no Memory lent nothing is written and the prompt is what it always was.
 
+The chief of staff (chief.py, 2026-09-29), when the daemon lends one (CC_BUDDY_CHIEF on): its tools ride the
+watcher's slot, its line rides the turn's note, /jobs and "<word> c<N>" are code words, its Go is a Yes/No
+question, and its Mac steps run through the task slot with their receipt in place of "Task result". With no chief
+lent every request, reply and menu is byte for byte what it was (tests/test_telegram_chief.py compares them with
+origin/main's).
+
 Every message leaves through ``BotApi.send_message``, which composes it with
 telegram_format.py (one shape: a bold title where the voice is not buddy's own,
 a blank line, short paragraphs as Telegram HTML, split at 4096 on a paragraph
@@ -66,13 +72,14 @@ import tempfile
 import textwrap
 import time
 from dataclasses import dataclass, field
-from datetime import datetime
+from datetime import datetime, timedelta
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Awaitable, Callable, Collection, Optional, Sequence
 
 from . import (
     app_reflex,
     apps_maker,
+    chief_card,
     claude_launch,
     codex_chat,
     composio_tools,
@@ -90,6 +97,7 @@ from . import (
     watch,
     websearch,
 )
+from . import chief as chief_mod
 from . import telegram_format as fmt
 from .agent_contract import AgentEvent
 from .telegram_format import MAX_MESSAGE_CHARS, plain  # the names other modules and tests use
@@ -140,6 +148,17 @@ WATCH_WORDS = ("/watch", "/watches", "watches", "/watchlist", "watchlist", "my w
 # (owner, 2026-09-25: "make this /watch on telegram"). Bare "/watch" lists, by code.
 WATCH_COMMAND = re.compile(r"^/watch(?:@\w+)?\s+(.+)$", re.I | re.S)
 WATCH_TITLE = "Watch"                 # an alert's title: not a reply to anything the owner just said
+# The chief of staff (chief.py), when CC_BUDDY_CHIEF has it on: "/jobs" and "/jobs c12" list the cards and one card,
+# and "<word> c<N>" acts on one card, all by code with no model call, relay or not (design 3.2, P4, 2026-09-29).
+# With the chief off none of these is a code word: the words go where they always went.
+JOBS_COMMAND = re.compile(r"^/jobs(?:@\w+)?(?:\s+(c\d{1,6}))?$", re.I)
+CHIEF_WORD = re.compile(r"^/?(go|drop|keep|done|raise|reopen|change|happened|didnt|didn't|tomorrow)\s+(c\d{1,6})$",
+                        re.I)
+CHIEF_TITLE = "Chief of staff"        # a card's backbrief, its Go, its receipt: buddy doing a job it took on
+CHIEF_OFF_REASON = "the chief of staff is off on this computer (CC_BUDDY_CHIEF)"
+JOBS_MENU = ("jobs", "Your jobs and reminders, and what waits on you")
+CHIEF_SNOOZE_AT = "09:00"             # "Tomorrow 9:00" on a reminder
+MAX_CHIEF_STEPS = 200                 # a Mac step's progress lines kept for the reflection's loop check
 # "/meet <link>", "/meet 6pm", "/meet leave", bare "/meet": the Meet notetaker (meet.py), answered by code with no
 # model call, relay or not. "join my 3pm" in words is a model turn with the meet tools.
 MEET_COMMAND = re.compile(r"^/meet(?:@\w+)?(?:\s+(.*))?$", re.I | re.S)
@@ -1442,6 +1461,9 @@ class _Question:
     strict: bool
     words: frozenset[str] = frozenset()
     text: str = ""                                  # the question as asked: what a spoken answer is judged against
+    # Firm: answered only by a bare yes or no or a button, relay or not, typed or spoken, as a permission prompt
+    # is. The chief's Go (a one-way act): a sentence that opens with "ok" is a new request, never a yes.
+    firm: bool = False
 
 
 @dataclass(eq=False)
@@ -1498,6 +1520,12 @@ class TelegramInlet:
                           markdown vault (PARA+), captured from this chat and read back, or None
     * ``watcher``       — watch.Watcher: prices, quotes and ticket releases watched on a schedule; its tools are
                           offered, /watches lists them, and its alerts reach this chat through ``tell_owner``
+    * ``chief``         — chief.Chief, or None (CC_BUDDY_CHIEF off: then nothing below changes a byte of any
+                          request, reply or tool list). On: take_on and jobs_list ride the watcher's slot, the
+                          card line rides the turn's note, /jobs and "<word> c<N>" are code words, and its Mac
+                          steps run through ``_start_task`` (``chief_start``), their result going to the chief
+                          as a receipt in place of "Task result" (design 3.2, 2026-09-29). The daemon lends it
+                          after the inlet exists, because it is built from the inlet's own sends and asks
     * ``screen``        — () -> Path | None: a JPEG of the screen (capture_screen); tests hand in a fake
     * ``scene``, ``head`` — the daemon's SceneWatcher and Head, for look / look_around / find / move_head
     * ``on_explore``    — () -> None: "go explore" (daemon._request_explore)
@@ -1544,6 +1572,7 @@ class TelegramInlet:
                  on_state: Callable[[str], None] = lambda state: None,
                  memory: Optional[Memory] = None, apps: Any = None, vault: Any = None,
                  watcher: Optional[watch.Watcher] = None,
+                 chief: Optional[chief_mod.Chief] = None,
                  meeter: Optional[meet.Meeter] = None,
                  lights: Optional[lights.Lights] = None,
                  spotify: Optional[spotify.Spotify] = None,
@@ -1580,6 +1609,9 @@ class TelegramInlet:
         self._app_policy = composio_tools.toolkit_policy()
         self._vault = vault                                # second_brain.VaultConfig (enabled), or None
         self._watcher = watcher                            # watch.Watcher, or None (CC_BUDDY_WATCH=0)
+        self.chief = chief                                 # chief.Chief, or None (CC_BUDDY_CHIEF off)
+        self._turn_said = ""                               # the owner's words in the running turn: take_on's door
+        self._chief_task: Optional[tuple[str, int]] = None   # (card id, step) of the running task, when a chief's
         self._meeter = meeter                              # meet.Meeter, or None (CC_BUDDY_MEET=0, no Chrome attach)
         self._lights = lights                              # lights.Lights, or None (CC_BUDDY_LIGHTS=0, no lights file)
         self._spotify = spotify                            # spotify.Spotify, or None (CC_BUDDY_SPOTIFY=0, no login)
@@ -1651,6 +1683,8 @@ class TelegramInlet:
         # A strict prompt's own button words, typed ("always allow", "allow for task"): an answer as well as a
         # bare yes or no is. Empty when the prompt has no buttons beyond yes and no.
         self._pending_words: frozenset[str] = frozenset()
+        # The pending question is firm (``_Question.firm``, the chief's Go): strict with or without a relay.
+        self._pending_firm = False
         # The permission prompt waiting on the owner, when the pending question is one. It belongs to the
         # relayed session: when the relay goes off or moves to another session it is settled as "no answer"
         # (the Mac dialog decides), so it never lingers to take the owner's next message, meant for buddy,
@@ -1784,9 +1818,11 @@ class TelegramInlet:
         """buddy's code words in the / menu of each owner's private chat (a private chat's id is its user's
         id). Once per start, and fail-soft: a menu Telegram refuses leaves every word working when typed."""
         done = 0
+        # /jobs only while the chief is on: the menu never offers a dead word
+        commands = BOT_COMMANDS if self.chief is None else BOT_COMMANDS[:-1] + (JOBS_MENU, BOT_COMMANDS[-1])
         for owner in sorted(self.config.owner_ids):
             try:
-                await self.api.set_commands(BOT_COMMANDS, owner)
+                await self.api.set_commands(commands, owner)
             except asyncio.CancelledError:
                 raise
             except Exception as e:  # noqa: BLE001 — a missing menu is cosmetic
@@ -1968,17 +2004,20 @@ class TelegramInlet:
         with a yes-word but is a message for Claude, and it must not allow an rm on the way (owner,
         2026-09-23). Other text is not the answer only while a relay (Claude or Codex) is on to take it: with
         no relay, the next message answers even a prompt with buttons, as it always has, so a task's
-        "yes, but the cheaper one" is still its answer. ``None`` (an image) never is."""
+        "yes, but the cheaper one" is still its answer. ``None`` (an image) never is. A firm question (the
+        chief's Go) is strict like a permission prompt, relay or not, buttons or not: with no relay on, "ok, also
+        what's the weather tomorrow?" approved a one-way act and never reached the brain (reviewer after P4,
+        2026-09-29)."""
         if not self._awaiting_answer:
             return False
-        if not self._pending_strict:
+        if not self._pending_strict and not self._pending_firm:
             return True
         if text is None:
             return False
         if consent.bare_decision(text) or text.strip().lower().rstrip(".!") in self._pending_words:
             return True
-        if self._permission_future is self._pending_answer:
-            return False                                  # a permission prompt stays strict, relay or not
+        if self._permission_future is self._pending_answer or self._pending_firm:
+            return False                                  # a permission prompt and a Go stay strict, relay or not
         return not (self.claude or self._codex_chat is not None)
 
     def _strict_answer(self, text: str) -> str:
@@ -1986,7 +2025,7 @@ class TelegramInlet:
         any wording ("ok", "sure", "nope"): it is handed on as the buttons' own "yes" or "no", so the words
         the owner typed do what a tap does. A Codex command's prompt accepts only "yes" (ONCE_ANSWERS), and
         a typed "ok" used to decline it (review, 2026-09-23). Any other answer goes on as it was typed."""
-        if not self._pending_strict or text.strip().lower().rstrip(".!") in self._pending_words:
+        if not (self._pending_strict or self._pending_firm) or text.strip().lower().rstrip(".!") in self._pending_words:
             return text
         bare = consent.bare_decision(text)
         return {"allow": "yes", "deny": "no"}.get(bare, text)
@@ -2115,6 +2154,7 @@ class TelegramInlet:
                 and word not in STEALTH_ON + STEALTH_OFF + APPS_WORDS + SPEND_WORDS + WATCH_WORDS
                 and not watch_ask
                 and not SCREEN_NOW.match(inbound.text)
+                and self._chief_word(inbound.text) is None
                 and not self._answers_pending(inbound.text)):
             for_buddy = BUDDY_PREFIX.match(inbound.text)
             if for_buddy is None:
@@ -2132,7 +2172,8 @@ class TelegramInlet:
                         "telegram-claude")
             return
         if (word in STEALTH_ON or word in STEALTH_OFF or word in APPS_WORDS or word in SPEND_WORDS
-                or word in WATCH_WORDS or SCREEN_NOW.match(inbound.text)):
+                or word in WATCH_WORDS or SCREEN_NOW.match(inbound.text)
+                or self._chief_word(inbound.text) is not None):
             pass                                          # buddy's own code words, relay or not
         elif self.claude and not watch_ask and not self._answers_pending(inbound.text):
             # Relay on: the chat IS the terminal. A yes/no while Claude is asking answers Claude (below);
@@ -2154,6 +2195,12 @@ class TelegramInlet:
         if word in SPEND_WORDS:
             self._note("user", inbound.text, "command")
             self._spawn(self._spend_now(inbound.chat_id), "telegram-spend")
+            return
+        chief_word = self._chief_word(inbound.text)
+        if chief_word is not None:
+            # the chief's own words, by code: never a model call, never an answer to a question waiting
+            self._note("user", inbound.text, "command")
+            self._spawn(self._chief_command(inbound, *chief_word), "telegram-chief")
             return
         if word in WATCH_WORDS:
             self._note("user", inbound.text, "command")
@@ -3325,11 +3372,13 @@ class TelegramInlet:
             # "typing…" for the whole turn, not only its first 5 s (owner, 2026-09-23), gone before the reply.
             self._keep_typing(chat_id, "turn", TYPING_TURN_SECS)
             usage = {"in": 0, "cached": 0, "out": 0, "instr": 0}
+            self._turn_said = inbound.text                # take_on's door floor reads it; gone with the turn
             try:
                 try:
                     reply, rounds = await self._think(items, chat_id, daily=daily, tail=tail, usage=usage)
                 finally:
                     self._stop_typing(chat_id, "turn")
+                    self._turn_said = ""
             except asyncio.CancelledError:
                 raise
             except Exception as e:  # noqa: BLE001 — the type only: a message can quote what was asked
@@ -3339,6 +3388,7 @@ class TelegramInlet:
             if reply:
                 self._note("buddy", reply)
                 await self._say(chat_id, reply)
+            await self._chief_heard(chat_id, inbound.text)
             # Counts and seconds only: never what was asked, never what was answered. The token counts say
             # whether the cache-ordered prompt pays off (cached of in), and instr how big the prefix is.
             log.info("telegram: turn answered in %.1f s (%d model call%s; in=%d cached=%d out=%d instr=%d chars)",
@@ -3366,6 +3416,9 @@ class TelegramInlet:
         # One developer note for the whole turn: the clock and the brief, identical in every round of it; on a
         # phone call, also how to answer out loud (it rides the turn's note, so the cached prefix is untouched).
         note = turn_context(self._brief())
+        line = self._chief_line()
+        if line:                                        # the chief's open cards: after the history, cache-free
+            note += "\n\n" + line
         if self._call_say is not None:
             note += "\n\n" + CALL_NOTE
         parts, allowed, app_tools = await self._turn_parts(tail)
@@ -3415,6 +3468,11 @@ class TelegramInlet:
                 # Its progress message already says "On it" (_start_task), so only the model's own words,
                 # if it wrote any, go as a reply as well.
                 return text, round_no
+            if all(c["name"] == "take_on" for c in calls) and all(r.get("ok") and r.get("end_turn") for r in results):
+                # take_on ends the turn as start_task does: the backbrief, composed by code, went out from the
+                # tool (_chief_tool) with its buttons; one Telegram refused goes as the reply instead.
+                unsent = [str(r.get("backbrief") or "") for r in results if not r.get("sent")]
+                return "\n".join(x for x in (text, *unsent) if x), round_no
             receipts = [RECEIPT_TOOLS.get(c["name"]) for c in calls]
             if all(receipts) and all(r.get("ok") for r in results):
                 # Kept in the vault or starred: a ✍ or 🏆 on the owner's message is the receipt (owner,
@@ -3452,16 +3510,21 @@ class TelegramInlet:
             set(watch.TOOL_NAMES) if self._watcher is not None else set()) | (
             set(meet.TOOL_NAMES) if self._meeter is not None else set()) | (
             set(lights.TOOL_NAMES) if self._lights is not None else set()) | (
-            set(spotify.TOOL_NAMES) if self._spotify is not None else set())
-        # the watcher's tools and block, then the Meet notetaker's, the lights' and Spotify's: all ride one slot
+            set(spotify.TOOL_NAMES) if self._spotify is not None else set()) | (
+            set(chief_mod.TOOL_NAMES) if self.chief is not None else set())
+        # the watcher's tools and block, then the Meet notetaker's, the lights', Spotify's and the chief's: all
+        # ride one slot (the chief's enums and block name only its live steps and checks, chief.tools)
         watch_tools = (self._watcher.tools() if self._watcher is not None else []) + (
             self._meeter.tools() if self._meeter is not None else []) + (
             self._lights.tools() if self._lights is not None else []) + (
-            self._spotify.tools() if self._spotify is not None else [])
+            self._spotify.tools() if self._spotify is not None else []) + (
+            chief_mod.tools(self.chief.live) if self.chief is not None else [])
         watch_block = "\n\n".join(b for b in (self._watcher.instructions() if self._watcher is not None else "",
                                                 self._meeter.instructions() if self._meeter is not None else "",
                                                 self._lights.instructions() if self._lights is not None else "",
-                                                self._spotify.instructions() if self._spotify is not None else "")
+                                                self._spotify.instructions() if self._spotify is not None else "",
+                                                chief_mod.instructions(self.chief.live) if self.chief is not None
+                                                else "")
                                                 if b)
         parts = {"profile": prof, "app_tools": app_tools, "vault": self._vault is not None, "today": today,
                  "memory_tools": mem_tools, "watch_tools": watch_tools, "watch_block": watch_block}
@@ -3518,6 +3581,10 @@ class TelegramInlet:
                 if self._watcher is None:
                     return {"ok": False, "reason": watch.OFF_REASON}
                 return await self._watcher.handle(name, args)
+            if name in chief_mod.TOOL_NAMES:
+                if self.chief is None:                  # a stray call never falls through to think_hard
+                    return {"ok": False, "reason": CHIEF_OFF_REASON}
+                return await self._chief_tool(name, args)
             if name in second_brain.SECOND_BRAIN_TOOL_NAMES:
                 if self._vault is None:
                     return {"ok": False, "reason": "the second brain is off on this computer (CC_BUDDY_SECOND_BRAIN)"}
@@ -3534,6 +3601,13 @@ class TelegramInlet:
         return self._start_task(str(args.get("goal") or "").strip(), chat_id)
 
     async def _tool_steer_task(self, name: str, args: dict[str, Any], chat_id: int) -> dict[str, Any]:
+        if self._chief_task is not None and self.task_running:
+            # a chief's step runs what its card says (and an act, what its Go showed): the turn may hold web text
+            # from its own searches, so it never steers one; the owner changes the card (reviewer after P4,
+            # 2026-09-29: steer_task reached an approved act mid-run). Stop still works.
+            cid = self._chief_task[0]
+            return {"ok": False, "reason": f"that is step {self._chief_task[1]} of {cid}; it cannot be steered. "
+                                           f"The owner can say change {cid}, or stop it"}
         ok = self._agent is not None and self.task_running and self._agent.steer(str(args.get("text") or ""))
         return {"ok": bool(ok)} if ok else {"ok": False, "reason": "no task is running"}
 
@@ -3640,13 +3714,15 @@ class TelegramInlet:
         """A spoken answer to a question with choices. The exact choice or a plain yes/no counts at once; a
         Claude permission prompt takes nothing else. Other words are read against the question by the model
         ("Can you search, bro?" to "press Return?" is a yes); when it cannot tell, buddy asks again, and the
-        words never start a new request while the question waits."""
+        words never start a new request while the question waits. A firm question (the chief's Go) is read as a
+        permission prompt is: a model's reading of the owner's words never approves a one-way act (design
+        principle 3; reviewer after P4, 2026-09-29: "hmm, I'll think about it after lunch" was judged a yes)."""
         choices = sorted(asked.words)
         said = text.lower().strip().rstrip(".!?")
         pick = said if said in asked.words else None
         if pick is None and {"yes", "no"} <= asked.words:
             pick = {"allow": "yes", "deny": "no"}.get(consent.bare_decision(text))
-        strict = asked.future is self._permission_future
+        strict = asked.future is self._permission_future or asked.firm
         if pick is None and not strict:
             pick = await self._judge_answer(asked.text, choices, text)
         if asked.future.done():
@@ -3693,17 +3769,38 @@ class TelegramInlet:
         except Exception:  # noqa: BLE001 — a call that cannot read costs the reading, never the message
             log.exception("telegram: could not read a message out on the call")
 
-    async def tell_owner(self, text: str, about: str = "", title: str = WATCH_TITLE) -> bool:
+    async def tell_owner(self, text: str, about: str = "", title: str = WATCH_TITLE,
+                         buttons: Sequence[Choice] = ()) -> bool:
         """A watch alert (watch.Watcher.notify): a new message in the owner's chat, unasked. It goes into the
         chat's history and transcript as buddy's, so "stop watching that" in reply has something to point at.
         Stealth does not hold it back: stealth is the desk's, and this is the phone. Returns whether it was sent:
         the watcher keeps an alert Telegram refused and sends it again (``_say`` would swallow the refusal).
         The history and the transcript get ``about``, a line the watcher builds from the watch alone: the alert
         itself can carry words from the web, and the brain reading them as its own words was a stored prompt
-        injection (re-verification, 2026-09-25)."""
+        injection (re-verification, 2026-09-25).
+
+        ``buttons`` (the chief's, 2026-09-29): SAY buttons under the message, whose tap types their words, so a
+        tap and the typed code word take one path (``_on_tap``). A keyboard Telegram refuses leaves the message
+        plain, never unsent."""
         if self._chat_id is None:
             return False
         self._to_call(self._chat_id, text, title)
+        if buttons:
+            board = _Keyboard(self._chat_id, SAY, list(buttons)[:MAX_INLINE_BUTTONS])
+            self._register(board)
+            rows = [[(c.label, key, c.style) for c, key in zip(board.choices, board.keys, strict=True)]]
+            try:
+                board.message_id = int(await self.api.send_inline(self._chat_id, text, rows, title=title) or 0)
+            except asyncio.CancelledError:
+                self._retire(board)
+                raise
+            except Exception as e:  # noqa: BLE001 — no buttons is a plain message, never no message
+                self._retire(board)
+                log.warning("telegram: buttons not sent (%s); sent as a plain message",
+                            e if isinstance(e, BotApiError) else type(e).__name__)
+            else:
+                self._note("buddy", about or text)
+                return True
         try:
             await self.api.send_message(self._chat_id, text, title=title)
         except asyncio.CancelledError:
@@ -3713,6 +3810,180 @@ class TelegramInlet:
             return False
         self._note("buddy", about or text)
         return True
+
+    # ---- the chief of staff (chief.py): lent by the daemon when CC_BUDDY_CHIEF has it on ----
+    def _chief_word(self, text: str) -> Optional[tuple[str, str]]:
+        """("jobs", "" | card id) or (word, card id) for a chief code word, or None: always None while the chief is
+        off, so the words go where they always went."""
+        if self.chief is None:
+            return None
+        said = (text or "").strip().rstrip(".! ")
+        jobs = JOBS_COMMAND.fullmatch(said)
+        if jobs:
+            return "jobs", (jobs.group(1) or "").lower()
+        word = CHIEF_WORD.fullmatch(said)
+        if word:
+            return word.group(1).lower().replace("'", ""), word.group(2).lower()
+        return None
+
+    async def _chief_command(self, inbound: Inbound, verb: str, cid: str) -> None:
+        """/jobs, "/jobs c12" and "<word> c12", by code (chief.py's own methods), never a model call. A word that
+        sends its own message (done, happened: the receipt) is answered only when it could not act."""
+        chief, chat = self.chief, inbound.chat_id
+        if chief is None:
+            return
+        line = ""
+        try:
+            if verb == "jobs":
+                line = chief.details(cid) if cid else chief.listing()
+            elif verb == "go":
+                r = chief.approve(cid, via="id")
+                line = f"Go: {cid}, step {r['phase']}, runs now." if r.get("ok") else str(r.get("reason"))
+            elif verb == "drop":
+                r = chief.drop(cid)
+                line = f"Dropped {cid}." if r.get("ok") else str(r.get("reason"))
+            elif verb == "keep":
+                r = chief.keep(cid)
+                line = f"Kept {cid}." if r.get("ok") else str(r.get("reason"))
+            elif verb == "done":
+                r = await chief.done(cid)
+                line = "" if r.get("ok") else str(r.get("reason"))
+            elif verb == "raise":
+                r = chief.raise_budget(cid)
+                line = (f"{cid} may now spend ${r['usd']:.2f} and {r['minutes']} min." if r.get("ok")
+                        else str(r.get("reason")))
+            elif verb == "reopen":
+                r = chief.reopen(cid)
+                line = f"Reopened {cid}." if r.get("ok") else str(r.get("reason"))
+            elif verb == "happened":
+                r = await chief.happened(cid)
+                card = chief.ledger.get(cid)
+                line = (str(r.get("reason")) if not r.get("ok")
+                        else "" if card is None or card.terminal else f"Noted. {cid} goes on.")
+            elif verb == "didnt":
+                r = chief.didnt(cid)
+                line = str(r.get("say") or "") if r.get("ok") else str(r.get("reason"))
+            elif verb == "tomorrow":
+                day = (datetime.fromtimestamp(self._wall()) + timedelta(days=1)).date().isoformat()
+                r = chief.snooze(cid, f"{day} {CHIEF_SNOOZE_AT}", said=inbound.text)
+                line = f"Moved {cid} to {r['at']}." if r.get("ok") else str(r.get("reason"))
+            elif verb == "change":
+                # A correction in the owner's words needs a model to become a card; the chat's tools are take_on
+                # and jobs_list, and a changed card is a new one: the card as it stands, and how.
+                card = chief.ledger.get(cid)
+                line = (f"There is no open card {cid}." if card is None or card.terminal else
+                        chief_card.backbrief(card) + f"\nTo change it: drop {cid}, then tell me the job again "
+                                                     "the way you want it.")
+        except asyncio.CancelledError:
+            raise
+        except Exception as e:  # noqa: BLE001 — a card word that breaks is a line, never a silence
+            log.warning("telegram: the chief's %s failed (%s)", verb, type(e).__name__)
+            line = "I couldn't do that just now."
+        if line:
+            await self._say(chat, line, title=CHIEF_TITLE)
+
+    async def _chief_tool(self, name: str, args: dict[str, Any]) -> dict[str, Any]:
+        """take_on or jobs_list. take_on gets this turn's own words (``_turn_said``, taken by code from the
+        owner's message, never from the model) for its door floor, and a reference to them (the transcript day
+        and time). Its backbrief, composed by code, goes out here with Change and Drop; the turn then ends
+        (``_think``)."""
+        assert self.chief is not None
+        ref = datetime.fromtimestamp(self._wall()).strftime("%Y-%m-%d %H:%M:%S")
+        result = await self.chief.handle(name, args, said=self._turn_said, said_ref=ref, door="telegram")
+        if name == "take_on" and result.get("ok") and result.get("backbrief"):
+            cid, text = str(result.get("id")), str(result["backbrief"])
+            buttons = (Choice("Change", f"change {cid}", "primary"), Choice("Drop", f"drop {cid}", "danger"))
+            result = {**result, "sent": await self.tell_owner(text, text, title=CHIEF_TITLE, buttons=buttons)}
+        return result
+
+    def _chief_line(self) -> str:
+        """The chief's line for the turn's note (open cards, what waits on the owner), or ""."""
+        if self.chief is None:
+            return ""
+        try:
+            return self.chief.for_turn()
+        except Exception as e:  # noqa: BLE001 — a ledger that cannot be read costs the line, never the turn
+            log.warning("telegram: the chief's turn line is unavailable (%s)", type(e).__name__)
+            return ""
+
+    async def _chief_heard(self, chat_id: int, text: str) -> None:
+        """The owner wrote: the chief hears it (their action cancels a queued nudge, 90 s later is a moment), and
+        the day's first message gets the brief after the reply, with any problem the ledger had."""
+        if self.chief is None:
+            return
+        try:
+            extra = self.chief.heard(text)
+        except Exception as e:  # noqa: BLE001
+            log.warning("telegram: the chief could not hear the turn (%s)", type(e).__name__)
+            return
+        if extra:
+            self._note("buddy", extra)
+            await self._say(chat_id, extra, title=CHIEF_TITLE)
+
+    async def _chief_result(self, card: tuple[str, int], final: str, *, ok: bool, secs: float,
+                            steps: Sequence[str]) -> None:
+        """A chief's Mac step ended: its closing sentence and the agent's UI states go to the chief, which reads
+        the evidence (chief_receipt) and sends the receipt. The wrappers hand ``ui_evidence`` on from whoever
+        ran (app_reflex, chrome_lane, web_reader)."""
+        if self.chief is None:
+            return
+        evidence = getattr(self._agent, "ui_evidence", None)
+        evidence = list(evidence) if isinstance(evidence, (list, tuple)) else []
+        try:
+            await self.chief.on_agent_result(card[0], card[1], final, evidence, ok=ok, secs=max(0.0, secs),
+                                             steps=list(steps))
+        except asyncio.CancelledError:
+            raise
+        except Exception as e:  # noqa: BLE001 — a result the chief cannot take leaves the step for its ceiling
+            log.warning("telegram: the chief could not take %s step %d's result (%s)", card[0], card[1],
+                        type(e).__name__)
+
+    def chief_start(self, goal: str, *, card_id: str, n: int, floor: Optional[str] = None) -> dict[str, Any]:
+        """The chief's Mac step (chief.StartTask): the same slot, the same agent and the same Stop as a texted task."""
+        if self._chat_id is None:
+            return {"ok": False, "reason": "there is no owner chat"}
+        return self._start_task(goal, self._chat_id, card=(card_id, n), floor=floor)
+
+    def chief_stop(self, card_id: str, n: int) -> None:
+        """Stop the chief's step at its ceiling (chief.StopTask): only that step, never another task."""
+        if self._chief_task == (card_id, n) and self._agent is not None and self.task_running \
+                and not self._task_returned:
+            self._agent.cancel(reason="the job's step reached its time limit")
+
+    def chief_mac_free(self) -> bool:
+        """The Mac can take a chief's step: tasks are on, no task runs, and the desk does not have it."""
+        try:
+            busy = bool(self._busy())
+        except Exception:  # noqa: BLE001 — a slot that cannot be read is busy
+            busy = True
+        return (self._agent_enabled and self._agent_factory is not None and self._chat_id is not None
+                and not self.task_running and not busy)
+
+    async def chief_ask(self, text: str) -> str:
+        """The chief's Go (chief.Ask), with Yes and No. Never while another question waits: its typed yes would
+        answer this one. The history gets a line naming the card, not the Go's quoted pick. Firm: only a bare yes
+        or no or a tap answers it, typed or spoken, relay or not; other words go on as a new message."""
+        chat = self._chat_id
+        if chat is None:
+            raise RuntimeError("there is no owner chat to ask in")
+        if self._awaiting_answer:
+            raise RuntimeError("another question is waiting for the owner")
+        cid = re.match(r"(c\d+),", text or "")
+        about = f"(I asked your Go for {cid.group(1)}.)" if cid else "(I asked your Go.)"
+        return await self._ask_user(text, chat, title=CHIEF_TITLE, choices=YES_NO, about=about, firm=True)
+
+    async def chief_notify(self, text: str, about: str = "") -> bool:
+        """The chief's messages (chief.Notify), through ``tell_owner``, with the buttons the card has now
+        (chief.choices). The card is the first id in ``about``, a line the chief composes from the card."""
+        cid = re.search(r"\bc\d+\b", about or "")
+        buttons: tuple[Choice, ...] = ()
+        if cid and self.chief is not None:
+            try:
+                buttons = tuple(Choice(label, word, "danger" if word.startswith("drop") else "")
+                                for label, word in self.chief.choices(cid.group(0)))
+            except Exception as e:  # noqa: BLE001 — no buttons is a plain message
+                log.warning("telegram: the chief's buttons are unavailable (%s)", type(e).__name__)
+        return await self.tell_owner(text, about, title=CHIEF_TITLE, buttons=buttons)
 
     async def _spend_now(self, chat_id: int) -> None:
         """/spend: today, yesterday, this month, the top features and OpenRouter's own figure, from the ledgers on
@@ -3760,12 +4031,19 @@ class TelegramInlet:
                 return {"ok": False, "reason": "the owner said no; do not retry it"}
         return await asyncio.to_thread(self._apps.execute, name, args)
 
-    def _start_task(self, goal: str, chat_id: int) -> dict[str, Any]:
+    def _start_task(self, goal: str, chat_id: int, *, card: Optional[tuple[str, int]] = None,
+                    floor: Optional[str] = None) -> dict[str, Any]:
+        """A computer task. ``card`` (card id, step) makes it a chief's step (``chief_start``): its goal is the
+        chief's own, exactly as the owner's Go showed it, so no link from the chat is added; ``floor`` is the
+        agent it must run on ("codex" for a one-way act: it can stop and ask, and Holo cannot); its result goes
+        to the chief, which sends the receipt, in place of "Task result"."""
         if not goal:
             return {"ok": False, "reason": "empty goal"}
-        # "Use Google search to open it up" after the owner shared a link: the model writes only this message's
-        # words, so the link the owner means is carried in from their recent messages (app_reflex, 2026-09-24).
-        goal = app_reflex.with_referenced_links(goal, [text for who, text in self.turns if who == "user"])
+        if card is None:
+            # "Use Google search to open it up" after the owner shared a link: the model writes only this
+            # message's words, so the link the owner means is carried in from their recent messages
+            # (app_reflex, 2026-09-24).
+            goal = app_reflex.with_referenced_links(goal, [text for who, text in self.turns if who == "user"])
         if not self._agent_enabled or self._agent_factory is None:
             return {"ok": False, "reason": "computer control is disabled (CC_BUDDY_COMPUTER_CONTROL=0)"}
         if self.task_running:
@@ -3776,18 +4054,39 @@ class TelegramInlet:
         self._stopped_from_chat = self._task_returned = False
         # One message for the task's progress, "On it" with a Stop button, edited as steps come (owner,
         # 2026-09-23). It stands for the "On it" reply a started task used to get.
+        head = ON_IT_LINE if card is None else f"On it: {card[0]}, step {card[1]}."
         progress = self._task_progress = self._open_progress(
-            chat_id, ON_IT_LINE, lambda cid: self._spawn(self._stop_task(progress, cid), "telegram-stop"),
-            request_id=self._turn_request)
-        self._note("buddy", ON_IT_LINE)
-        self._agent = self._agent_factory(lambda ev: self._on_agent_event(ev, chat_id, progress),
-                                          lambda question: self._ask_user(question, chat_id))
+            chat_id, head, lambda cid: self._spawn(self._stop_task(progress, cid), "telegram-stop"),
+            request_id=self._turn_request if card is None else 0)
+        self._note("buddy", head)
+        if card is None:
+            self._agent = self._agent_factory(lambda ev: self._on_agent_event(ev, chat_id, progress),
+                                              lambda question: self._ask_user(question, chat_id))
+        else:
+            steps: list[str] = []                         # the step lines, for the reflection's loop check
+            broke: list[str] = []                         # an error or a stop the agent reported, not raised
+
+            def on_event(ev: AgentEvent) -> None:
+                if ev.kind == "progress" and len(steps) < MAX_CHIEF_STEPS:
+                    steps.append(str(ev.text or "")[:200])
+                if ev.kind in ("error", "cancelled"):
+                    broke.append(ev.kind)
+                self._on_agent_event(ev, chat_id, progress)
+
+            ask = (lambda question: self._ask_user(question, chat_id))  # noqa: E731
+            self._agent = (self._agent_factory(on_event, ask) if floor is None
+                           else self._agent_factory(on_event, ask, floor=floor))
+        self._chief_task = card
         self._task_chat, self._task_goal = chat_id, goal
         self._task_started = time.time()                  # a file the task writes after this is the owner's to get
-        self._agent_task = self._spawn(self._run_agent(goal, chat_id, progress), "telegram-agent")
+        self._agent_task = self._spawn(
+            self._run_agent(goal, chat_id, progress) if card is None
+            else self._run_agent(goal, chat_id, progress, card=card, steps=steps, broke=broke), "telegram-agent")
         return {"ok": True, "goal": goal, "note": "started, not finished; the result is texted when it is done"}
 
-    async def _run_agent(self, goal: str, chat_id: int, progress: Optional[_Progress] = None) -> None:
+    async def _run_agent(self, goal: str, chat_id: int, progress: Optional[_Progress] = None, *,
+                         card: Optional[tuple[str, int]] = None, steps: Sequence[str] = (),
+                         broke: Sequence[str] = ()) -> None:
         since = getattr(self, "_task_started", time.time())
         try:
             # The hint goes beside the goal, never in it: the router reads only the owner's words (app_reflex.run).
@@ -3803,12 +4102,23 @@ class TelegramInlet:
             failed = False
         self._task_returned = True                       # before any await: a stop from here on is too late
         final = str(final or "").strip() or "The task ended without a result."
-        self._note("buddy", final)
+        # A chief's step: the owner never sees its sentence (the receipt goes instead), and it may carry web text,
+        # so the history gets a line composed by code, never the executor's words as buddy's own (reviewer after
+        # P4, 2026-09-29; tell_owner's ``about`` pattern).
+        self._note("buddy", final if card is None else f"(Step {card[1]} of {card[0]} ended.)")
         self._show(None, final)
         if self._task_progress is progress:
             self._task_progress = None
         await self._close_progress(progress, PROGRESS_STOPPED_LINE if self._stopped_from_chat else PROGRESS_DONE_LINE)
-        if not self._stopped_from_chat:
+        if card is not None:
+            # a chief's step: the chief reads the evidence and sends the receipt (never the agent's sentence)
+            if self._chief_task == card:
+                self._chief_task = None
+            # Codex returns its failure sentence instead of raising (codex_computer.py:585-588): the error or stop
+            # it reported is a failed step, never "ok" (reviewer after P4, 2026-09-29: such a run closed done)
+            await self._chief_result(card, final, ok=not failed and not self._stopped_from_chat and not broke,
+                                     secs=time.time() - since, steps=steps)
+        elif not self._stopped_from_chat:
             # The result arrives minutes after the request: the goal under the title says which one, and it
             # is a new message (an edit would not notify) replying to the owner's request.
             await self._say(chat_id, final, title=TASK_FAILED_TITLE if failed else TASK_DONE_TITLE, subtitle=goal,
@@ -3821,6 +4131,11 @@ class TelegramInlet:
                 result = await self._send_screen(chat_id, "the screen when the task ended")
                 if not result.get('ok'):
                     await self._say(chat_id, "I couldn't send the task picture: " + str(result.get('reason')))
+        if self.chief is not None:
+            try:
+                self.chief.breakpoint("task_end")        # a queued step or a held reminder may go now
+            except Exception as e:  # noqa: BLE001 — the chief never costs a task its close
+                log.warning("telegram: the chief's task breakpoint failed (%s)", type(e).__name__)
         self._spawn(self._settle_board(), "telegram-board")
 
     async def _settle_board(self) -> None:
@@ -3858,11 +4173,11 @@ class TelegramInlet:
             self._show(state)
 
     def _open_question(self, future: asyncio.Future, chat_id: Optional[int], *, strict: bool,
-                       words: frozenset[str] = frozenset()) -> _Question:
+                       words: frozenset[str] = frozenset(), firm: bool = False) -> _Question:
         """A new question waiting on the owner: the newest, so the slot names it. When its future is
         settled (an answer, a tap, a timeout, its asker gone) the slot moves on at once, not only when the
         asker's ``finally`` runs (``_close_question``)."""
-        asked = _Question(future, chat_id, strict, words)
+        asked = _Question(future, chat_id, strict, words, firm=firm)
         self._questions.append(asked)
         future.add_done_callback(lambda _f: self._show_question())
         self._show_question()
@@ -3879,13 +4194,14 @@ class TelegramInlet:
         live = next((q for q in reversed(self._questions) if not q.future.done()), None)
         if live is None:
             self._pending_answer, self._pending_answer_chat = None, None
-            self._pending_strict, self._pending_words = False, frozenset()
+            self._pending_strict, self._pending_words, self._pending_firm = False, frozenset(), False
         else:
             self._pending_answer, self._pending_answer_chat = live.future, live.chat_id
-            self._pending_strict, self._pending_words = live.strict, live.words
+            self._pending_strict, self._pending_words, self._pending_firm = live.strict, live.words, live.firm
 
     async def _ask_user(self, question: str, chat_id: int, title: str = TASK_ASKS_TITLE,
-                        choices: Optional[Sequence[Choice]] = None) -> str:
+                        choices: Optional[Sequence[Choice]] = None, about: Optional[str] = None,
+                        firm: bool = False) -> str:
         """A question for the owner from a task, an app or Codex. A free question needs words: the owner's
         next message is its answer, whatever it says. A question whose answers are known (``choices``, or
         what ``answer_choices`` reads off its wording: a yes/no, Codex's app-access choices) also gets
@@ -3900,14 +4216,19 @@ class TelegramInlet:
         A question already waiting (a Claude permission prompt, another task's question) gets the slot back
         once every question asked after it has ended, in whatever order they end: a typed yes then reaches
         it again, instead of going to Claude while the prompt waits out its timeout (review, 2026-09-23;
-        ``_questions``)."""
+        ``_questions``).
+
+        ``about``: the history's line in place of the question (the chief's Go, whose pick is quoted from the web:
+        as tell_owner's ``about``, web words never become buddy's own words in the history). ``firm``: only a bare
+        yes or no or a button answers it, relay or not, on a call too (``_Question.firm``)."""
         loop = asyncio.get_running_loop()
         future = loop.create_future()
         choices = tuple(answer_choices(question) if choices is None else choices)
         # A free question: any next message answers it.
-        asked = self._open_question(future, chat_id, strict=bool(choices), words=frozenset(c.value for c in choices))
+        asked = self._open_question(future, chat_id, strict=bool(choices), words=frozenset(c.value for c in choices),
+                                    firm=firm)
         asked.text = question
-        self._note("buddy", question)
+        self._note("buddy", question if about is None else about)
         board = _Keyboard(chat_id, ANSWER, list(choices), future=future) if choices else None
         # Waiting on the owner is not working: no "typing…" under the question. It comes back with the answer,
         # except a reason that ended while the question waited (_stop_typing drops it from the paused set).

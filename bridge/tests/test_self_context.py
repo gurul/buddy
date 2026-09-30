@@ -103,7 +103,7 @@ def test_a_different_environment_gives_different_lines(lights_file: Path, tmp_pa
     voice = [ln for ln in changed if ln.startswith("Voice:")]
     assert voice == [f"Voice: {voice_agent.DEFAULT_MODEL} talks; {voice_agent.DEFAULT_BACKEND_MODEL} "
                      f"({voice_agent.DEFAULT_BACKEND_EFFORT} effort) answers behind it."]
-    assert "voice (wake word)" in changed[-1]
+    assert "voice (wake word)" in next(ln for ln in changed if ln.startswith("Doors on:"))
     # every door off: the block still says so, in plain words
     bare = self_context.lines({"CC_BUDDY_LIGHTS": "0", "CC_BUDDY_VOICE": "0"}, commit="")
     assert "Lights: off." in bare and "Doors on: none." in bare and "Web search: OpenAI's hosted web search." in bare

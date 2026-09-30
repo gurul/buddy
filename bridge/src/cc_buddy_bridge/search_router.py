@@ -53,6 +53,7 @@ was: the brain on websearch's engine, the web reader on TinyFish.
 
 from __future__ import annotations
 
+import contextvars
 import logging
 import os
 import re
@@ -542,7 +543,9 @@ def bounded(work: Callable[[Callable[[], bool]], dict[str, Any]], budget: float)
         finally:
             done.set()
 
-    threading.Thread(target=run, name="search-router", daemon=True).start()
+    # The caller's context goes with the work: the spend rows a chief card's search writes keep its card id
+    # (spend.job; a bare Thread starts with an empty context, 2026-09-29).
+    threading.Thread(target=contextvars.copy_context().run, args=(run,), name="search-router", daemon=True).start()
     if not done.wait(max(0.0, budget)):
         gone.set()
         return {"ok": False, "reason": f"no answer within {budget:g} s"}

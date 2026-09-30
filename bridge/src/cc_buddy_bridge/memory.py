@@ -24,8 +24,8 @@ the index, the archive, meeting notes — and hands back a single-use token that
 bound to that query. It never returns the matched words: a preview is a count, so the owner decides on
 numbers, not on buddy reading their secret back to them. ``forget_apply`` runs only with the token, after
 the owner confirms in a new message. The git histories that held the words are squashed to one commit, so
-the words are gone from history too. claude-mem and the Obsidian vault are not buddy's stores; the preview
-names them as not covered rather than pretending.
+the words are gone from history too. claude-mem and the Obsidian vault are not buddy's stores, and the chief of
+staff's ledger is not reached yet; the preview names them as not covered rather than pretending.
 
 ### The move, once
 
@@ -69,7 +69,10 @@ FORGET_TTL_SECS = 600.0                        # a forget token lives ten minute
 MAX_PENDING_TOKENS = 16
 RECENT_CHARS = VOICE_CHARS                     # recent_conversation: the other channel, newest kept
 MIGRATED_FILE = ".migrated"
-NOT_COVERED = ("claude-mem", "vault")          # places buddy cannot forget in: named, never pretended
+# Places buddy cannot forget in: named, never pretended. The chief ledger (chief_ledger.py, the cards and their
+# events under ~/.config/cc-buddy-bridge/chief) holds card titles and goals; it is named here until a forget
+# layer covers it (chief design, 2026-09-29, P6).
+NOT_COVERED = ("claude-mem", "vault", "chief ledger")
 LAYERS = ("transcripts", "records", "index", "archive", "meetings")
 # The retired debrief store seeds HIGHLIGHTS.md with a worked example; only buddy's own section is the owner's.
 OWN_SECTION = "from talking"

@@ -214,7 +214,7 @@ other places. Now it is two calls and one confirmation.
    ```json
    {"ok": true, "total": 7,
     "layers": {"transcripts": 4, "records": 1, "index": 1, "archive": 1, "meetings": 0},
-    "token": "…", "expires_in": 600, "not_covered": ["claude-mem", "vault"]}
+    "token": "…", "expires_in": 600, "not_covered": ["claude-mem", "vault", "chief ledger"]}
    ```
 
    It **never returns the matched words**: the owner decides on numbers, not on
@@ -239,7 +239,8 @@ character must be in the line, a "quoted phrase" as written.
 
 **Not covered**, and named as such rather than pretended: **claude-mem** and the
 owner's **Obsidian vault** ([second-brain.md](second-brain.md)). Neither is buddy's
-store. Words already sent to a model provider or to Telegram are not reachable
+store. The **chief ledger** ([chief.md](chief.md)) is buddy's, but forget does not
+reach it yet: its card titles and goals stay until a card is removed. Words already sent to a model provider or to Telegram are not reachable
 either (see [Privacy](#privacy)).
 
 ## The one-time move from the old store

@@ -1,9 +1,10 @@
 # Formal verification (Lean 4)
 
-Twenty models of buddy's state machines are in Lean 4 under `verification/`: six from
+Twenty-one models of buddy's state machines are in Lean 4 under `verification/`: six from
 the first pass, eight for the watcher (2026-09-25), four for the Voice PE controller
-(2026-09-26), and two for the Holo lane and the OpenAI seam (2026-09-28, below). A model
-of code that had a bug has two kernel-checked theorems:
+(2026-09-26), two for the Holo lane and the OpenAI seam (2026-09-28), and one for the
+chief of staff (2026-09-29, below). A model of code that had a bug has two kernel-checked
+theorems:
 
 - **`current_violates`** — a concrete trace on a model of the code *as it was* on
   2026-09-25 (commit `0b7d36d`) after which the property is false: the bug, proved.
@@ -105,6 +106,83 @@ proves the obvious alternative wrong. The replays are `bridge/tests/test_holo_le
 | `Buddy/HoloSteer.lean` | `holo_computer.py` `steer`, `cancel`, `_run_client`; `holo_driver.py` `Turn.announce`, `Turn.steer` | a correction given while the task runs (and no stop was asked) is never refused; a stop that was asked never lets a result be certified, even when Holo finished first; a certified result has no correction still waiting | `[start, steer]`: the cli driver returned False for every correction, so the owner's words were dropped while the task went on. Also proved: a correction before the session exists is delivered when the session is announced; a stop then a completed final is "stopped" |
 | `Buddy/ResponseRetry.lean` | `computer_agent.py` `make_response_creator`, `make_stream_creator` | no text is read out twice; a turn fails only after two drops, or a drop after text was read out | `[drop]`: one `ssl.SSLError` mid-read killed the turn (three phone-call turns on 2026-09-28). The naive cure, "always retry once", is proved wrong too: `[text, drop, text]` reads the sentence out twice. The fix retries once, only while nothing has been read out |
 
+## The chief of staff (2026-09-29)
+
+`Buddy/Chief.lean` was written before the chief's Python, from its design, so it has the
+third shape: one `code_invariant`, proved over every trace. There was never a buggy version
+to put a `current_violates` on.
+
+The model is one card, the Desk it shares with every other card, and the lesson store. It
+has one step function over 23 events:
+- the owner's taps and words: a Go, "go c<N>", Change, Reopen, Drop, "done c<N>", a raise;
+- the executors' results, and the oracles' readings of the evidence;
+- a restart, and "It happened" / "It didn't";
+- Reflexion: a lesson, and a retry;
+- the clock, a new date, breakpoints, and `Desk.offer`.
+
+`code_invariant` is the conjunction of seven properties:
+
+| Property | What it says |
+|---|---|
+| DoneNeedsEvidence | A card is done only on the owner's word, or when every done check is confirmed. Every confirmation must rest on evidence the oracle saw outside the executor's own sentence. |
+| OneYesOneAct | Every one-way dispatch spends its own yes, given for that phase at the card's revision at that moment. A no, a hold word or a 180 s timeout is never a yes. A revision cancels a yes that has not been spent. |
+| BudgetBeforeDispatch | What the card spent, plus the ceiling held by its running phase, never exceeds the cap. The only excess allowed is what an executor ran past its own ceiling. |
+| PushBudgetQuiet | An unprompted push, or a reminder the owner asked for, goes out now only outside 22:30–08:00 and at a breakpoint. An unprompted push also needs pushes on, and at most 2 go out a day. The day's count survives a restart. No Go is asked, and no act or one-way phase starts, in quiet hours. |
+| NoActReplayAfterRestart | A one-way act that was in flight at a restart never runs again without a yes given after the restart. |
+| OneWayNeverAutoRetried | A one-way phase's attempt count rises only with a fresh yes. A two-way phase retries itself at most twice (3 trials). |
+| LessonsBounded | At most 3 lessons are kept per (executor, phase kind) key: Reflexion's Omega (Shinn et al., NeurIPS 2023). |
+
+The positive control is `naive_violates`. The same machine with an oracle that takes the
+executor's "done" as evidence closes a research card as done with no evidence. With the
+code's oracle, `executor_word_is_unverified` shows the same trace ends unverified.
+
+Worked traces, each checked by `decide +kernel`:
+- the standing-desk job of the design closes as done, with one yes for one act;
+- a timed-out Go approves nothing;
+- a revision cancels the yes;
+- after a restart, "It didn't" runs nothing until a new yes;
+- a failed one-way act waits for a Go even when the reflection says retry;
+- a two-way phase stops after three trials;
+- the third unprompted push of a day is batched, across a restart;
+- an approved act does not start at 23:00.
+
+The replay, `bridge/tests/test_chief_lean.py`, holds the Python to the model:
+
+- **The rules.** The model's step function is copied into Python, rule by rule, each citing
+  its line in `Chief.lean`. The constants (quiet hours, push budget, retries, Omega) are read
+  from the `.lean` file and compared with the code's. The copy must reproduce every worked
+  trace above, and `quiet` must equal the desk's reading for all 1,440 minutes of a day.
+- **The traces.** 240 seeded traces, of 40 moves each, drive the real `Chief` with fakes.
+  The moves are:
+  - each executor's result: a web read with four links, a failed read, an options sheet, a
+    reply that is not one, an act that saw the confirmation on screen, an act whose only claim
+    is its own sentence, and a failed act;
+  - every owner answer and code word;
+  - the clock across the quiet-hour edges;
+  - restarts.
+
+  Every ledger line becomes a model event. After every move, the step started, every yes and
+  every Go asked, each check's verdict (set against the evidence the fakes produced), the
+  card's status, revision, steps, attempts, retries and lessons must agree, and the model's
+  `Spec` must hold. A coverage test checks that the traces reached every rule.
+- **The desk.** 36 traces of 120 events run each of the three push modes through the model's
+  `offer` and a desk reloaded from the same folder.
+- **The positive control.** A variant of the code takes the Mac executor's sentence for a
+  screen state. The replay stops at `ui_seen`: the code says confirmed, the model
+  unverifiable. The same variant agrees with the model's `naiveVerdict`, and its end state
+  breaks DoneNeedsEvidence, as `naive_violates` proves.
+
+Where the code and the model differ in shape but not in the properties, the replay maps one
+onto the other. Its docstring lists each case. Two examples:
+- after a failed act, the model waits for a Go, while the code closes the card as unverified
+  until Reopen;
+- "go c12" on an act in doubt is It didn't then a Go in the model, and a Go by id in the code.
+
+The replay also found a liveness gap, now fixed. A card closed while a web step ran, then
+reopened, kept the step marked running and did not move until a restart. The step's late result
+is now held and put on the step at Reopen, as the model does
+(`test_a_card_closed_during_a_web_step_then_reopened_moves_on`).
+
 ## Running it
 
 ```bash
@@ -154,3 +232,9 @@ Stated assumptions, per model:
   - (C) treats request ids as distinct. On the wire a chunk is identified by (type, bytes
     written to the file so far), and other ack types still match by type.
 - **Voice.** The model covers captions mode, the default.
+- **Chief.** One card at a time is modelled; cards share only the Desk and the lesson store,
+  which are modelled whole. A card runs one phase at a time. The door floor (the verb
+  regex), the choice of executor, the Codex floor for acts and the one Mac slot are outside
+  the model; they are unit-tested. A door only rises, and only before the phase first ran.
+  A reflection that errors is no event: no lesson, no retry. Money and wall time are two
+  whole-number counters.

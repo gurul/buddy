@@ -451,7 +451,8 @@ Flip it to `ask` if two seconds a command is a price you will pay.
 - **The `/` menu.** At startup buddy sets its code words as bot commands in
   your own chat only (`setMyCommands`, scoped to your chat): `/apps`, `/spend`,
   `/claude_on`, `/claude_off`, `/new_claude`, `/codex`, `/rundown`, `/watch`,
-  `/meet`, `/screenshot`, `/stealth`, `/wake` and `/stop`. Each works exactly like the
+  `/meet`, `/screenshot`, `/stealth`, `/wake` and `/stop`, plus `/jobs` before `/stop`
+  while the chief of staff is on (below). Each works exactly like the
   typed word. If Telegram refuses the menu, the words still work when typed.
 - **`/spend`** (or `spend`, `spending`) — what buddy has spent: today,
   yesterday, this month, the top three features today and OpenRouter's own
@@ -466,6 +467,8 @@ Flip it to `ask` if two seconds a command is a price you will pay.
   watch can be paused, or kept only for a while). An alert arrives as a new message titled
   **Watch** and joins the chat's history, so "stop watching that" in reply
   works. See [watching](watch.md).
+- **The chief of staff** (`chief.py`, [the chief](chief.md)), only while
+  `CC_BUDDY_CHIEF` has it on. See the next section.
 - **Files a task makes are sent to you.** A texted task on the Mac (a Photo Booth picture, an export, a
   screenshot saved to disk) is told to name the file's full path in its result, and buddy sends every
   file the result names that the task made or changed while it ran, as `send_file` does: inside your
@@ -681,6 +684,96 @@ After ten quiet minutes the chat is over: its turns are cleared from RAM and its
 transcript gets a close marker. Nothing is handed anywhere, because with memory on
 every line was already written down the moment it was typed or sent.
 
+## The chief of staff in the chat
+
+The chief of staff ([the chief](chief.md)) takes on jobs with several steps and
+reminders you ask for, as cards. It is wired into this door (2026-09-29). `CC_BUDDY_CHIEF` is
+`auto` by default, which is on only once the capture eval has passed its bar.
+The eval passed on 2026-09-29 (see [the capture eval](chief.md#the-capture-eval)),
+so the chief is on by default. Set `off` to turn it off.
+
+**With the chief off, nothing changes.** The daemon lends the door no chief. Every
+request body, reply, tool list and `/` menu is byte for byte what it was before
+the chief. A test runs one session on origin/main's `telegram.py` and on this
+one, and compares everything each sends. `take_on` and `jobs_list` are not
+offered. A stray call to either gets "the chief of staff is off on this computer"
+and never reaches `think_hard`. `/jobs` and `go c12` are ordinary messages for the
+text brain.
+
+**With the chief on:**
+
+- **The tools.** `take_on` and `jobs_list` ride the slot the watcher, Meet, the
+  lights and Spotify share. Their lists name only the live step kinds and checks.
+- **`take_on` ends the turn.** The chief files the card and composes the
+  backbrief in code ("On it: … I intend to … Done when … Up to $1 and 30
+  min."). It goes out at once titled **Chief of staff**, with **Change** and
+  **Drop** buttons, and there is no second model call. It joins the chat's
+  history. If Telegram refuses the buttons, the backbrief goes as a plain message.
+- **Your words decide the door, and then they are dropped.** `take_on` gets this
+  turn's own message, taken by code, never from the model. It uses the message
+  only to mark whether a one-way step is in your own words. The card keeps the
+  day and time, never the words.
+- **The turn's note.** Each turn's developer note ends with the chief's line
+  ("Open jobs: 2 (c12 waiting on your Go: …)"), at most 300 characters. The note
+  sits after the history, so the line costs the prompt cache nothing.
+- **The code words**, answered by code with no model call, relay or not:
+
+  | Word | What it does |
+  |---|---|
+  | `/jobs` | The open cards and what each waits on |
+  | `/jobs c12` | One card: each step, who ran it and why, each check, the money |
+  | `go c12` | Your yes for c12's next one-way step, at the card's current revision. It is refused before the steps that decide the act (the pick) have run |
+  | `drop c12` | Drop the card |
+  | `keep c12` | Keep it (a proposal becomes active) |
+  | `done c12` | Close it on your word; the receipt says "your call" |
+  | `raise c12` | Double its budget; a card waiting on the budget goes on |
+  | `reopen c12` | Reopen it; a step that failed runs again, and a one-way step needs a new Go |
+  | `happened c12` / `didnt c12` | After "I may have done: …": close the act on your word, or wait for a new Go |
+  | `tomorrow c12` | Move a reminder to tomorrow at 9:00 |
+  | `change c12` | Shows the card and how to change it: drop it and describe the job again. A correction in your own words needs the text brain, whose only card tool is `take_on` |
+
+  A bare "yes" approves nothing that was not asked.
+- **The Go.** A one-way step (every act is one) waits for your Go. The question
+  names the exact act, the pick it will use and your limits, and has **Yes** and
+  **No** buttons. No, a hold word or silence is never a yes. The Go is strict,
+  like a permission prompt, relay or not: only a tap, or a reply that is wholly
+  a yes or a no, answers it. Any other message goes to the brain as usual, and
+  the Go keeps waiting. Before this, with no relay on, "ok, also what's the
+  weather tomorrow?" approved the act and never reached the brain (reviewer,
+  2026-09-29). On a call it is the same: the exact choice or a plain yes or no.
+  No model judges the words, and anything else is asked again. The history gets "(I asked your Go
+  for c12.)", never the question, because the pick's name comes from the web.
+  A Go is never asked while another question waits for you, because your yes
+  would answer the wrong one. The card then waits, and `go c12` works.
+- **The Mac.** A step on the Mac uses the same slot, agent, progress message and
+  Stop button as a texted task ("On it: c12, step 3."). It never starts while a
+  task runs or while someone has the Mac at the desk: the card waits in the
+  ledger until the Mac is free. The step's goal is the chief's own, as the Go
+  showed it, and no link from the chat is added. The brain cannot steer it:
+  `steer_task` on a chief step is refused and names the card, so the owner
+  changes the card. Stop still works.
+- **Every act runs on Codex.** An approved act asks the daemon for
+  `floor="codex"`. `_make_agent` then builds Codex alone, even when Holo is the
+  floor (`CC_BUDDY_COMPUTER=holo`), because Holo cannot stop and ask. There is no
+  launch reflex and no other body (the web reader, the Chrome lane).
+- **The receipt replaces "Task result".** When a step on the Mac ends, its
+  closing sentence and the agent's screen text go to the chief. The chief reads
+  the evidence and sends the receipt. A step past its ten minutes is stopped
+  through the same agent. An error or a stop that the agent reports makes the
+  step failed, even when the agent returns a sentence instead of raising. The
+  history gets "(Step 3 of c12 ended.)", never the agent's sentence. You never
+  saw that sentence, and it may hold web text.
+- **The chief's other messages** (a receipt, "Raise to $X?", "I may have done:
+  …. Check?", a reminder) go through `tell_owner`, titled **Chief of staff**. The
+  buttons match the card as it is at that moment: Reopen; Yes, done and Reopen;
+  Done, Tomorrow 9:00 and Drop; Raise and Drop; It happened and It didn't. A tap
+  types the button's words, so it takes the same path as the typed word. A Go
+  button is never offered on an older message, because the act may have changed
+  since.
+- **Moments.** A task ending and a wake-word session ending count as breakpoints,
+  so a held reminder or a queued Mac step may go then. The first message of the
+  day gets the chief's brief after the reply.
+
 ## What buddy knows about itself
 
 On 2026-09-29 the owner texted "what do you use for search", and buddy answered
@@ -714,6 +807,12 @@ Two lines follow the daemon's own switches (fixed 2026-09-29):
   web reading task tries first (TinyFish, or the routed search). Before this fix
   the block said Codex while the owner's daemon ran Holo. A test builds the agent
   through `_make_agent` for each setting and checks the line against it.
+
+- **Chief of staff** is one line, "Chief of staff: on.", present only while the
+  chief is on (`chief.enabled`). With the chief off there is no line, and the
+  block is byte for byte what it was. What the chief is doing goes in each
+  turn's note, never here, because this block is fixed from boot. With everything
+  on the block measured 1044 of 1100 characters (2026-09-29).
 
 The block goes in three places:
 
@@ -837,6 +936,9 @@ to Anthropic, and traffic passes through a Cloudflare tunnel
 ([the Mini App](miniapp.md#what-leaves-the-mac)).
 
 ## Not done
+
+- The chief of staff on the voice door: the voice has only the self-context
+  line, and keeps its own `start_task`.
 
 - No evaluation set for the text brain exists, so it ships off (`GATES.md`).
 - Voice notes, animations and non-image incoming documents are not supported.

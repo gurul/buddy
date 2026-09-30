@@ -417,6 +417,11 @@ class Daemon:
             if watcher is not None:
                 watcher.notify = self._telegram.tell_owner
                 tasks.append(asyncio.create_task(watcher.run(), name="watch"))
+            # The chief of staff (chief.py), when CC_BUDDY_CHIEF has it on: its loop, beside the watcher's. It sends
+            # through the door's own tell_owner (chief_notify), built with it in _make_telegram.
+            chief = getattr(self._telegram, "chief", None)
+            if chief is not None:
+                tasks.append(asyncio.create_task(chief.run(), name="chief"))
             # The Meet notetaker (meet.py) texts through the same door: in the call, the lobby, the notes.
             meeter = getattr(self, "_meeter", None)
             if meeter is not None:
@@ -1171,6 +1176,12 @@ class Daemon:
             self._voice_session = None
             if getattr(self, "_think_aloud_state", "off") != "off":
                 Daemon._on_think_aloud(self, False, None)
+            chief = getattr(getattr(self, "_telegram", None), "chief", None)
+            if chief is not None:
+                try:
+                    chief.breakpoint("wake_end")         # a held reminder or a queued Mac step may go now
+                except Exception as e:  # noqa: BLE001 — the chief never costs the conversation its close
+                    log.warning("chief: the wake breakpoint failed (%s)", type(e).__name__)
             self._on_agent_state("idle")
             wish = getattr(self, "_think_aloud_wish", None)
             if wish is not None and not self._shutdown.is_set():
@@ -1267,7 +1278,7 @@ class Daemon:
         self._watcher = watcher
         apps = Daemon._make_apps(self, tg.owner_ids) if tg.enabled else None
         self._meeter = Daemon._make_meeter(self, apps) if tg.enabled else None
-        return telegram_mod.make_inlet(
+        inlet = telegram_mod.make_inlet(
             tg, watcher=watcher, meeter=self._meeter, lights=Daemon._lights_hub(self),
             spotify=Daemon._spotify_hub(self),
             apps=apps,
@@ -1284,16 +1295,51 @@ class Daemon:
             # Live sessions only: one whose terminal died without a SessionEnd is dropped (claude_live).
             # Awaited by the inlet: the ps/lsof probe runs on a worker thread, never on this loop.
             claude_sessions=lambda: claude_live.picker_sessions_off_loop(self.state))
+        if inlet is not None:
+            inlet.chief = Daemon._make_chief(self, inlet, watcher)
+        return inlet
 
-    def _make_agent(self, on_event: Any, ask_user: Any) -> Any:
+    def _make_chief(self, inlet: Any, watcher: Any) -> Any:
+        """The chief of staff (chief.py) when CC_BUDDY_CHIEF has it on, else None (today's behaviour: the door is
+        byte for byte what it was). It is built from the door itself: a Mac step runs through the door's task slot
+        (chief_start, chief_stop, chief_mac_free), a Go is the door's question (chief_ask), a message goes through
+        tell_owner (chief_notify), and the options call through the door's own Responses creator. A chief that
+        cannot be built costs the chief, never the door."""
+        from . import chief as chief_mod
+
+        if not chief_mod.enabled():
+            log.info("chief: off (CC_BUDDY_CHIEF=%s)", chief_mod.mode())
+            return None
+        try:
+            chief = chief_mod.make_chief(start_task=inlet.chief_start, stop_task=inlet.chief_stop,
+                                         mac_free=inlet.chief_mac_free, watcher=watcher, create=inlet._create,
+                                         ask=inlet.chief_ask, notify=inlet.chief_notify)
+        except Exception:  # noqa: BLE001
+            log.exception("chief: could not start; it is off this run")
+            return None
+        if chief is not None:
+            log.info("chief: on (CC_BUDDY_CHIEF=%s); %d open card(s)", chief_mod.mode(), len(chief.ledger.open()))
+        return chief
+
+    def _make_agent(self, on_event: Any, ask_user: Any, *, floor: Optional[str] = None) -> Any:
         """Codex computer use, behind the launch reflex (app_reflex.py): "open Spotify" is `open -a`,
         with Jev for wording the rules do not know; everything else is Codex's, as before — or Holo's
-        (holo_computer.py) when CC_BUDDY_COMPUTER=holo."""
+        (holo_computer.py) when CC_BUDDY_COMPUTER=holo.
+
+        ``floor="codex"`` (the chief's one-way act, 2026-09-29): Codex and nothing else, whatever the floor is set
+        to: no Holo (it cannot stop and ask, holo_computer.py:15), no reflex and no other body (the web reader,
+        the Chrome lane), so the act the owner approved goes whole to the agent that asks before a consequential
+        step."""
         from . import app_reflex
 
         warm = getattr(self, "_codex_warm", None)       # codex_warm.py: a Codex agent already started
         make_inner = ((lambda: warm.take(on_event, ask_user)) if warm is not None
                       else (lambda: CodexComputerAgent(on_event=on_event, ask_user=ask_user)))
+        if floor == "codex":
+            agent = app_reflex.ReflexFirstAgent(make_inner, on_event, enabled=False,
+                                                on_done=warm.kick if warm is not None else (lambda: None))
+            self._active_agent = agent
+            return agent
         holo = holo_computer.configured()
         if holo.enabled:                                # CC_BUDDY_COMPUTER=holo: Holo is the floor, not Codex
             # One warm runtime for the daemon's life (holo_computer.HoloRuntime), started by the first task.
