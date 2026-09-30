@@ -28,9 +28,10 @@ import asyncio
 import glob
 import json
 import logging
+import os
 import re
 import time
-from typing import Any, Awaitable, Callable, Optional
+from typing import Any, Awaitable, Callable, Mapping, Optional
 
 import serial  # pyserial
 
@@ -118,6 +119,17 @@ def _read_chunk(ser: serial.Serial) -> bytes:
 
 
 USB_SERIAL_PREFIX = "usbsn:"
+
+
+def serial_skip(environ: Optional[Mapping[str, str]] = None) -> frozenset[str]:
+    """``CC_BUDDY_SERIAL_SKIP``: USB serial numbers, comma-separated, that the robot's glob never opens.
+
+    Other ESP32-S3 boards share the robot's ``/dev/cu.usbmodem*`` glob. On 2026-09-30, with the StackChan
+    unplugged, the daemon opened the buddy stick (docs/stick-link.md) on its charging cable as the robot, sent it
+    status polls and RTS-reset it every two minutes. The stick talks to the phone over Bluetooth and has nothing
+    to say on USB, so it is named here and left alone."""
+    env = os.environ if environ is None else environ
+    return frozenset(s.strip().lower() for s in (env.get("CC_BUDDY_SERIAL_SKIP") or "").split(",") if s.strip())
 
 
 def _resolve_port(pattern: str, skip_serials: frozenset[str] = frozenset()) -> Optional[str]:

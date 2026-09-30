@@ -119,12 +119,13 @@ class Daemon:
             # different pipe. Kept on the .ble attribute so the rest of the
             # daemon doesn't care which transport is live.
             from .controller import Controller, controller_serial
-            from .serial_transport import BuddySerial
+            from .serial_transport import BuddySerial, serial_skip
             # A controller board (controller.py, the Voice PE) is named by its
-            # USB serial; the robot's glob must never open it.
+            # USB serial; the robot's glob must never open it, nor any board in
+            # CC_BUDDY_SERIAL_SKIP (the buddy stick on its charging cable).
             ctl_serial = controller_serial()
-            self.ble = BuddySerial(on_message=self._handle_ble, port=serial_port,
-                                   skip_serials=frozenset({ctl_serial}) if ctl_serial else frozenset())
+            skip = serial_skip() | (frozenset({ctl_serial.lower()}) if ctl_serial else frozenset())
+            self.ble = BuddySerial(on_message=self._handle_ble, port=serial_port, skip_serials=skip)
             # A board reboot under an unbroken CH340 link never fires the
             # on-connect resync — replay it when the boot banner scrolls past,
             # or the reborn board keeps "--:--" and "No Claude" indefinitely.
