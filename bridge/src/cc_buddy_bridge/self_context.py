@@ -18,6 +18,8 @@ daemon builds its doors from, so it cannot drift from what runs:
 * the watcher's reading ladder (watch.py), in the order the watcher climbs it;
 * the lights by brand (lights.py's file, as the daemon loads it at boot), the memory stores, the doors that are
   on, and the git commit the code runs from;
+* Canvas (canvas.py), one short line and only while it is set up (2026-09-30), so the owner's "can you see my
+  Canvas" is answered from what runs;
 * the chief of staff (chief.py), one short line and only while it is on (``chief.enabled``: CC_BUDDY_CHIEF=on, or
   auto once its capture eval has passed). Off, the block is byte for byte what it was (P4, 2026-09-29). What the
   chief is doing lives in each turn's note (chief.for_turn), never here: this block is fixed from boot.
@@ -62,7 +64,7 @@ PROVIDER_WORDS = {"tinyfish": "TinyFish", "firecrawl": "Firecrawl"}
 # The modules whose configured() this reads: their warnings were already logged once when the daemon built them.
 _QUIET = ("telegram", "voice_agent", "think", "miniapp", "websearch", "web_reader", "watch", "lights", "ears",
           "meet", "transcripts", "mem0_memory", "second_brain", "recall", "search_router", "jev", "tinyfish",
-          "firecrawl", "browser_router", "computer_agent", "holo_computer", "chief")
+          "firecrawl", "browser_router", "computer_agent", "holo_computer", "chief", "canvas")
 
 _building = threading.local()          # a configured() that builds the block reads other configured()s: no loop
 
@@ -242,6 +244,15 @@ def _doors(env: Mapping[str, str]) -> str:
     return f"Doors on: {_join(doors)}." if doors else "Doors on: none."
 
 
+def _canvas(env: Mapping[str, str]) -> list[str]:
+    """One line while Canvas is set up (canvas.configured: CANVAS_BASE_URL and CANVAS_API_TOKEN), else none, so a
+    buddy without it has the block it had. The school's address is not named: the line says what, not where."""
+    from . import canvas, telegram
+
+    on = canvas.configured(env).enabled and telegram.configured(env).enabled
+    return ["Canvas (school courses): on, read only."] if on else []
+
+
 def _chief(env: Mapping[str, str]) -> list[str]:
     """One line while the chief of staff is on, else none (chief.enabled reads the same switch the daemon builds
     it from)."""
@@ -257,7 +268,7 @@ def lines(environ: Optional[Mapping[str, str]] = None, *, lights_path: Optional[
     sha = running_commit() if commit is None else commit
     with _quiet():
         out = _models(env) + [_search(env), _computer(env), _watch(env), _lights(env, lights_path), _memory(env),
-                              _doors(env)] + _chief(env)
+                              _doors(env)] + _canvas(env) + _chief(env)
     if sha:
         out.append(f"Running code: git commit {sha}.")
     return out

@@ -79,6 +79,7 @@ from typing import TYPE_CHECKING, Any, Awaitable, Callable, Collection, Optional
 from . import (
     app_reflex,
     apps_maker,
+    canvas,
     chief_card,
     claude_launch,
     codex_chat,
@@ -219,6 +220,7 @@ DELIVERED_REACTION = TYPED_REACTION  # 👍 it reached the terminal or Codex
 STARRED_LINE = "Starred for good."   # the words a failed 🏆 stands for
 # The text brain's tools whose success is a receipt, not news: a round of only these, all ok, ends the turn
 # with the reaction and no second model call (the round that only said "Saved." cost a model call).
+CANVAS_RUNDOWN_SECS = 12.0          # the rundown waits this long for Canvas's deadlines, then goes without them
 RECEIPT_TOOLS = {"capture_note": VAULT_REACTION, "remember": STAR_REACTION}
 MAX_BUTTON_CHARS = 64
 # Inline buttons (owner, 2026-09-23): a tap sends nothing to the chat, so a yes/no or a pick can never be
@@ -1576,6 +1578,7 @@ class TelegramInlet:
                  meeter: Optional[meet.Meeter] = None,
                  lights: Optional[lights.Lights] = None,
                  spotify: Optional[spotify.Spotify] = None,
+                 canvas: Optional[canvas.Canvas] = None,
                  screen: Callable[[], Optional[Path]] = capture_screen,
                  scene: Any = None, head: Any = None,
                  on_explore: Optional[Callable[[], Any]] = None,
@@ -1615,6 +1618,7 @@ class TelegramInlet:
         self._meeter = meeter                              # meet.Meeter, or None (CC_BUDDY_MEET=0, no Chrome attach)
         self._lights = lights                              # lights.Lights, or None (CC_BUDDY_LIGHTS=0, no lights file)
         self._spotify = spotify                            # spotify.Spotify, or None (CC_BUDDY_SPOTIFY=0, no login)
+        self._canvas = canvas                              # canvas.Canvas, or None (no CANVAS_BASE_URL/CANVAS_API_TOKEN)
         self._call_say: Optional[Callable[[str], None]] = None   # a phone call's reader (phone_call.Call.say)
         self._quick = quick_answers.QuickAnswers()               # the time, the weather, a sum: by code
         self._stream_create = stream_create                # responses streamed a sentence at a time, on a call
@@ -3362,8 +3366,9 @@ class TelegramInlet:
             shown = self._turn_kinds[-HISTORY_TURNS:]       # the history's lines, as the transcript has them
             daily = image is None and rundown.matches(inbound.text)
             if daily:
+                school = await self._canvas_rundown()
                 skill = await asyncio.to_thread(rundown.context, self._vault.root if self._vault else None,
-                                                datetime.fromtimestamp(self._wall()).astimezone())
+                                                datetime.fromtimestamp(self._wall()).astimezone(), canvas=school)
                 items = [message_item("user", inbound.text), message_item("developer", skill)]
                 shown = []
             self._note("user", inbound.text + (" [image attached]" if image else ""),
@@ -3497,6 +3502,19 @@ class TelegramInlet:
                 return "\n".join(x for x in (text, *others) if x), round_no
         return text or "I got tangled up in that one. Ask me again?", MAX_TOOL_ROUNDS
 
+    async def _canvas_rundown(self) -> Optional[dict[str, Any]]:
+        """The rundown's Canvas part (canvas.Canvas.rundown: the next three days' unsubmitted deadlines), read by code
+        before the turn so the rundown's tools stay what they were; None without Canvas. Never raises."""
+        if self._canvas is None:
+            return None
+        try:
+            return await asyncio.wait_for(asyncio.to_thread(self._canvas.rundown), CANVAS_RUNDOWN_SECS)
+        except asyncio.CancelledError:
+            raise
+        except Exception as e:  # noqa: BLE001 — a slow Canvas costs the rundown its deadlines, nothing more
+            log.info("telegram: canvas for the rundown failed (%s)", type(e).__name__)
+            return {"available": False, "reason": "Canvas did not answer in time"}
+
     async def _turn_parts(self, tail: int) -> tuple[dict[str, Any], set[str], list[dict[str, Any]]]:
         """What every round of a turn sends besides its items: request()'s keyword arguments, the tool names the
         model may call, and the app tools (the rundown narrows them). The cache warm-up sends the same."""
@@ -3511,18 +3529,21 @@ class TelegramInlet:
             set(meet.TOOL_NAMES) if self._meeter is not None else set()) | (
             set(lights.TOOL_NAMES) if self._lights is not None else set()) | (
             set(spotify.TOOL_NAMES) if self._spotify is not None else set()) | (
+            set(canvas.TOOL_NAMES) if self._canvas is not None else set()) | (
             set(chief_mod.TOOL_NAMES) if self.chief is not None else set())
-        # the watcher's tools and block, then the Meet notetaker's, the lights', Spotify's and the chief's: all
-        # ride one slot (the chief's enums and block name only its live steps and checks, chief.tools)
+        # the watcher's tools and block, then the Meet notetaker's, the lights', Spotify's, Canvas's and the chief's:
+        # all ride one slot (the chief's enums and block name only its live steps and checks, chief.tools)
         watch_tools = (self._watcher.tools() if self._watcher is not None else []) + (
             self._meeter.tools() if self._meeter is not None else []) + (
             self._lights.tools() if self._lights is not None else []) + (
             self._spotify.tools() if self._spotify is not None else []) + (
+            self._canvas.tools() if self._canvas is not None else []) + (
             chief_mod.tools(self.chief.live) if self.chief is not None else [])
         watch_block = "\n\n".join(b for b in (self._watcher.instructions() if self._watcher is not None else "",
                                                 self._meeter.instructions() if self._meeter is not None else "",
                                                 self._lights.instructions() if self._lights is not None else "",
                                                 self._spotify.instructions() if self._spotify is not None else "",
+                                                self._canvas.instructions() if self._canvas is not None else "",
                                                 chief_mod.instructions(self.chief.live) if self.chief is not None
                                                 else "")
                                                 if b)
@@ -3577,6 +3598,10 @@ class TelegramInlet:
                 if self._spotify is None:
                     return {"ok": False, "reason": spotify.OFF_REASON}
                 return await self._spotify.handle(name, args)
+            if name in canvas.TOOL_NAMES:
+                if self._canvas is None:
+                    return {"ok": False, "reason": canvas.OFF_REASON}
+                return await self._canvas.handle(name, args)
             if name in watch.TOOL_NAMES:
                 if self._watcher is None:
                     return {"ok": False, "reason": watch.OFF_REASON}

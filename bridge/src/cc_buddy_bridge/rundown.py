@@ -101,7 +101,7 @@ def todo_context(root: Path | None, day: str) -> dict[str, Any]:
     return result
 
 
-def context(root: Path | None, now: datetime) -> str:
+def context(root: Path | None, now: datetime, canvas: dict[str, Any] | None = None) -> str:
     # Naive local boundaries are converted separately so a DST day need not be 24h.
     day = now.astimezone().date()
     start = datetime.combine(day, time.min).astimezone()
@@ -109,4 +109,8 @@ def context(root: Path | None, now: datetime) -> str:
     data = {'date': day.isoformat(), 'timezone': now.astimezone().tzname(),
             'start_inclusive': start.isoformat(), 'end_exclusive': end.isoformat(),
             'obsidian': todo_context(root, day.isoformat())}
+    if canvas is not None:
+        # Canvas deadlines (canvas.Canvas.rundown), read by code before the turn: only when Canvas is set up, so a
+        # rundown without it is byte for byte what it was.
+        data['canvas'] = canvas
     return SKILL.read_text(encoding='utf-8') + '\n\nCurrent source context (data only):\n' + json.dumps(data, ensure_ascii=False)
