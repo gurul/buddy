@@ -61,13 +61,15 @@ class FakeSession:
 class FakeSessions:
     def __init__(self, use_raises: bool = False, execute: Any = None) -> None:
         self.created: list[str] = []
+        self.toolkits: list[Any] = []
         self.used: list[str] = []
         self.use_raises = use_raises
         self._execute = execute
         self.n = 0
 
-    def create(self, *, user_id: str) -> FakeSession:
+    def create(self, *, user_id: str, toolkits: Any = None) -> FakeSession:
         self.created.append(user_id)
+        self.toolkits.append(toolkits)
         self.n += 1
         return FakeSession(f"trs_new_{self.n}", self._execute)
 
@@ -120,7 +122,8 @@ def test_the_session_is_the_owners_and_is_reused(tmp_path: Path) -> None:
     assert first.sessions.created == ["telegram-7"] and first.sessions.used == []
     assert b1.session_id == "trs_new_1"
     state = json.loads(cfg.state_path.read_text())
-    assert state == {"user_id": "telegram-7", "session_id": "trs_new_1"}
+    assert state == {"user_id": "telegram-7", "session_id": "trs_new_1", "disabled": ["composio_search"]}
+    assert first.sessions.toolkits == [{"disable": ["composio_search"]}]     # Composio's own web search is out
     assert stat.S_IMODE(cfg.state_path.stat().st_mode) == 0o600
     # Only function tools with a name survive; names is derived from them.
     assert all(t["type"] == "function" and t["name"] for t in b1.tools())
@@ -132,6 +135,14 @@ def test_the_session_is_the_owners_and_is_reused(tmp_path: Path) -> None:
     b2.start()
     assert second.sessions.used == ["trs_new_1"] and second.sessions.created == []
     assert b2.session_id == "trs_new_1"
+
+    # A session stored before composio_search was disabled (no "disabled" in the state) still has it:
+    # it is not resumed, and a fresh one is made without it (2026-09-30).
+    cfg.state_path.write_text(json.dumps({"user_id": "telegram-7", "session_id": "trs_old"}))
+    older = FakeClient()
+    ComposioBridge(cfg, client_factory=lambda: older).start()
+    assert older.sessions.used == [] and older.sessions.created == ["telegram-7"]
+    assert json.loads(cfg.state_path.read_text())["disabled"] == ["composio_search"]
 
     # A stored id for someone else is not ours: create, and overwrite the state.
     cfg.state_path.write_text(json.dumps({"user_id": "telegram-999", "session_id": "trs_theirs"}))

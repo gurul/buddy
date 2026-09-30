@@ -44,6 +44,12 @@ DEFAULT_TIMEOUT_SECS = 60.0
 _ON = frozenset({"1", "true", "yes", "on"})
 
 MULTI_EXECUTE = "COMPOSIO_MULTI_EXECUTE_TOOL"
+# Toolkits kept out of buddy's session. composio_search is Composio's own web search and page fetch: on
+# 2026-09-30 the brain used it (COMPOSIO_SEARCH_WEB, COMPOSIO_SEARCH_FETCH_URL_CONTENT, per Composio's execution
+# log) to find a course's office hours, which costs a tool search plus a multi-execute per lookup, and ran out
+# of rounds one step before adding the events. buddy's own web_search (websearch.py, routed by Jev) is one round.
+DISABLED_TOOLKITS: tuple[str, ...] = ("composio_search",)
+WEB_TOOLKITS = frozenset(DISABLED_TOOLKITS)
 RUNS_CODE = frozenset({"COMPOSIO_REMOTE_BASH_TOOL", "COMPOSIO_REMOTE_WORKBENCH"})
 
 # A slug is TOOLKIT_WORDS. A call only looks when one of its words is a reading verb and none is a writing
@@ -372,16 +378,19 @@ class ComposioBridge:
         state = _read_state(self.config.state_path)
         stored = str(state.get("session_id") or "")
         session = None
-        if stored and state.get("user_id") == self.config.user_id:
+        # A session made with other toolkits disabled is not resumed: which toolkits it has is fixed at creation.
+        if stored and state.get("user_id") == self.config.user_id \
+                and list(state.get("disabled") or []) == list(DISABLED_TOOLKITS):
             try:
                 session = sessions.use(stored)
                 log.info("composio: resumed the session for %s", self.config.user_id)
             except Exception as e:  # noqa: BLE001 — the type only
                 log.warning("composio: stored session unusable (%s); creating a fresh one", type(e).__name__)
         if session is None:
-            session = sessions.create(user_id=self.config.user_id)
+            session = sessions.create(user_id=self.config.user_id, toolkits={"disable": list(DISABLED_TOOLKITS)})
             _write_state(self.config.state_path, {"user_id": self.config.user_id,
-                                                  "session_id": str(getattr(session, "session_id", ""))})
+                                                  "session_id": str(getattr(session, "session_id", "")),
+                                                  "disabled": list(DISABLED_TOOLKITS)})
             log.info("composio: created a session for %s", self.config.user_id)
         self._session = session
         self._tools = self._load_tools()
