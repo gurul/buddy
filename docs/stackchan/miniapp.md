@@ -82,11 +82,20 @@ Turbo 1.32 s, both uploaded), so the ears stay on OpenAI.
 ### When a turn fails
 
 If the model call itself fails, buddy says "Something went wrong on my side. Try me again in a moment." and
-the log has `telegram: turn failed: <error>`. One cause is fixed in code (2026-09-28: three call turns in
-one morning): a TLS connection dropped while the answer was being read comes out of the OpenAI SDK as a
-bare `SSLError` that it does not retry. `make_response_creator` and `make_stream_creator` now retry it
-once (`responses: TLS dropped … once more` in the log). The streamed call retries only while nothing has
-been read out yet; a drop after the first sentence still fails the turn rather than repeat it.
+the log has `telegram: turn failed: <error>`. When the failure is the connection to the model breaking (a
+TLS drop, a reset socket, or the SDK's own connection error), the reply says so instead: "My connection to
+the model dropped before I could answer. Send that again and I'll pick it up." (`DROPPED_LINE`,
+`computer_agent.is_connection_drop`).
+
+A TLS connection dropped while the answer was being read comes out of the OpenAI SDK as a bare `SSLError`
+that it does not retry (2026-09-28: three call turns in one morning). `make_response_creator` and
+`make_stream_creator` retry it themselves, up to twice, after a pause of 0.3 s and then 1 s
+(`TLS_BACKOFF`), and each retry goes out on a new OpenAI client, so a new connection pool and a new TLS
+connection (`responses: TLS dropped … retrying in 0.3 s on a new connection` in the log). The first version
+retried once, at once, on the same client: on 2026-09-30 the retry went out 120 ms later on that client's
+pool and dropped the same way, and the owner got the generic line. The dropped client is closed once no
+other call is still using it. The streamed call retries only while nothing has been read out yet; a drop
+after the first sentence still fails the turn rather than repeat it.
 
 Code: `bridge/src/cc_buddy_bridge/phone_call.py` (the WebSocket, the call, the ears and the voice),
 `TelegramInlet.listen` / `hear`, `split_for_call` and `SentenceStream` in `telegram.py`,
