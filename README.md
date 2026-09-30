@@ -108,6 +108,10 @@ The [Telegram door](docs/stackchan/telegram.md) is **off by default**. With it o
   can be read through TinyFish if you give it a key. Bare `/watch` lists the
   watches. See
   [watching](docs/stackchan/watch.md).
+- **Rides in your pocket.** An M5StickS3 is a push-to-talk button that works wherever
+  your phone has signal: hold, talk, let go, and buddy answers from the stick's speaker.
+  The stick talks Bluetooth to the **Buddy Link** iPhone app, which carries each press
+  to the daemon as a call. `/stick` pairs it. See [the stick link](docs/stick-link.md).
 - **Takes calls from your phone.** **Call buddy** in the Mini App is push to talk into
   the same brain you text, so a call can do everything a text can. Replies are spoken,
   not texted, except what you need in writing (links, codes, alerts, screenshots). See
@@ -538,6 +542,7 @@ Persistent data lives under `~/.config/cc-buddy-bridge/`:
 | `bridge/web-canvas/` | React/TypeScript whiteboard source and browser checks | [Whiteboard details](docs/learning.md#the-whiteboard-tldraw) |
 | `bridge/tests/`, `bridge/tools/` | Python tests, fixtures and routing/desktop evaluation tools | [Routing evaluations](docs/stackchan/routing.md) |
 | `widget/` | SwiftUI app, shared data readers, WidgetKit extension and Xcode project | [Widget setup](docs/stackchan/widget.md) |
+| `firmware/buddy_stick/`, `ios/BuddyLink/`, `tools/stick_link/` | M5StickS3 push-to-talk firmware, the Buddy Link iPhone app and bench probe, the shared audio codec | [The stick link](docs/stick-link.md) |
 | `tools/` | Firmware flashing, standalone learning launcher and demo utilities | [Build](docs/stackchan/build.md), [learning](docs/learning.md) |
 | `docs/stackchan/` | Hardware notes, personality, vision and integration details | [Personality](docs/stackchan/personality.md), [vision](docs/stackchan/vision.md), [memory](docs/stackchan/memory.md), [Claude Code](docs/stackchan/claude-code-integration.md) |
 | `docs/launch-video/` | Launch films (Remotion), script and reference material | [Video project](docs/launch-video/remotion/README.md) |

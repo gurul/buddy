@@ -2173,6 +2173,12 @@ def _check_apps(rig: Rig) -> None:
     assert rig.api.sent[-1] == (OWNER, telegram.APPS_OFF_LINE)          # no Mini App in this rig: says so
 
 
+def _check_stick(rig: Rig) -> None:
+    from cc_buddy_bridge.stick_link import OFF_LINE
+    assert rig.api.sent[-1] == (OWNER, OFF_LINE)                        # no Mini App in this rig: says so, by code
+    assert rig.create.requests == []
+
+
 def _check_spend(rig: Rig) -> None:
     assert rig.api.sent[-1][1].startswith("Spending (buddy's own meter)")   # answered by code: no model turn
     assert rig.create.requests == []
@@ -2192,6 +2198,7 @@ MENU_CHECKS = {
     "watch": ([], _check_watches),
     "meet": ([], _check_meet),
     "spend": ([], _check_spend),
+    "stick": ([], _check_stick),
     "claude_on": ([], _check_claude_on),
     "claude_off": (["/claude_on"], _check_claude_off),
     "new_claude": ([], _check_new_claude),

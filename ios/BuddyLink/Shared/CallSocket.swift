@@ -1,0 +1,152 @@
+// The phone's end of the call: the daemon's /api/stick WebSocket (bridge/src/cc_buddy_bridge/stick_link.py and
+// phone_call.py), through the Mini App's tunnel.
+//
+// The wire is the Mini App's "Call buddy": 24 kHz mono 16-bit PCM in binary frames both ways; JSON text frames
+// {"type": "talk" | "done" | "end" | "ping"} up, {"type": "state" | "heard" | "flush" | "ended"} down. The first
+// message proves the owner: here {"token": …}, the link token /stick made.
+import Foundation
+
+enum CallEvent {
+    case open
+    case state(String, note: String?)
+    case heard(String)
+    case audio([Int16])
+    case flush
+    case ended(String)
+    case failed(String)
+}
+
+@MainActor
+final class CallSocket {
+    var onEvent: ((CallEvent) -> Void)?
+    private var task: URLSessionWebSocketTask?
+    private var opened = false
+    private var waiting: [URLSessionWebSocketTask.Message] = []   // sent before the call was up
+    private var pinger: Task<Void, Never>?
+    private let session = URLSession(configuration: .default)
+
+    var isOpen: Bool { task != nil }
+
+    func open(base: URL, token: String) {
+        guard task == nil else { return }
+        var comps = URLComponents(url: base, resolvingAgainstBaseURL: false)!
+        comps.scheme = comps.scheme == "http" ? "ws" : "wss"
+        comps.path = "/api/stick"
+        let t = session.webSocketTask(with: comps.url!)
+        task = t
+        opened = false
+        t.resume()
+        t.send(.string(Self.json(["token": token]))) { _ in }
+        receive(t)
+        pinger = Task { [weak self] in
+            while !Task.isCancelled {
+                try? await Task.sleep(for: .seconds(10))     // the daemon ends a call quiet for 30 s
+                self?.sendNow(.string(Self.json(["type": "ping"])))
+            }
+        }
+    }
+
+    func talk() { send(.string(Self.json(["type": "talk"]))) }
+    func done() { send(.string(Self.json(["type": "done"]))) }
+
+    func audio(_ pcm: [Int16]) {
+        let data = pcm.withUnsafeBufferPointer { Data(buffer: $0) }   // little-endian on every Apple chip
+        send(.data(data))
+    }
+
+    func hangUp() {
+        guard let t = task else { return }
+        t.send(.string(Self.json(["type": "end"]))) { _ in }
+        close(t, reason: nil)
+    }
+
+    private func send(_ m: URLSessionWebSocketTask.Message) {
+        if opened { sendNow(m) } else { waiting.append(m) }
+    }
+
+    private func sendNow(_ m: URLSessionWebSocketTask.Message) {
+        guard let t = task else { return }
+        t.send(m) { [weak self] error in
+            guard let error else { return }
+            Task { @MainActor in self?.close(t, reason: "The connection to buddy dropped (\(error.localizedDescription)).") }
+        }
+    }
+
+    private func receive(_ t: URLSessionWebSocketTask) {
+        t.receive { [weak self] result in
+            Task { @MainActor in
+                guard let self, self.task === t else { return }
+                switch result {
+                case .failure(let error):
+                    self.close(t, reason: Self.explain(error, t))
+                case .success(let message):
+                    self.handle(message)
+                    if self.task === t { self.receive(t) }
+                }
+            }
+        }
+    }
+
+    private func handle(_ message: URLSessionWebSocketTask.Message) {
+        switch message {
+        case .data(let data):
+            let pcm = data.withUnsafeBytes { Array($0.bindMemory(to: Int16.self)) }
+            onEvent?(.audio(pcm))
+        case .string(let text):
+            guard let obj = try? JSONSerialization.jsonObject(with: Data(text.utf8)) as? [String: Any],
+                  let type = obj["type"] as? String else { return }
+            switch type {
+            case "state":
+                let state = obj["state"] as? String ?? ""
+                if state == "connected", !opened {
+                    opened = true
+                    let queued = waiting
+                    waiting.removeAll()
+                    queued.forEach(sendNow)
+                    onEvent?(.open)
+                } else {
+                    onEvent?(.state(state, note: obj["note"] as? String))
+                }
+            case "heard": onEvent?(.heard(obj["text"] as? String ?? ""))
+            case "flush": onEvent?(.flush)
+            case "ended":
+                if let t = task { close(t, reason: obj["reason"] as? String ?? "The call ended.") }
+            default: break
+            }
+        @unknown default: break
+        }
+    }
+
+    private func close(_ t: URLSessionWebSocketTask, reason: String?) {
+        guard task === t else { return }
+        t.cancel(with: .normalClosure, reason: nil)
+        task = nil
+        opened = false
+        waiting.removeAll()
+        pinger?.cancel()
+        pinger = nil
+        if let reason { onEvent?(.ended(reason)) }
+    }
+
+    private static func explain(_ error: Error, _ t: URLSessionWebSocketTask) -> String {
+        if let http = t.response as? HTTPURLResponse {
+            switch http.statusCode {
+            case 404, 530, 502: return "buddy's address changed. Tap Update Buddy Link in Telegram."
+            case 403: return "buddy refused the app. Send /stick to buddy and tap its button."
+            default: return "buddy answered \(http.statusCode)."
+            }
+        }
+        let ns = error as NSError
+        if ns.domain == NSURLErrorDomain, [NSURLErrorCannotFindHost, NSURLErrorDNSLookupFailed].contains(ns.code) {
+            return "buddy's address changed. Tap Update Buddy Link in Telegram."
+        }
+        if ns.domain == NSURLErrorDomain, ns.code == NSURLErrorNotConnectedToInternet {
+            return "The phone is offline."
+        }
+        return "Couldn't reach buddy (\(error.localizedDescription))."
+    }
+
+    private static func json(_ obj: [String: Any]) -> String {
+        String(decoding: (try? JSONSerialization.data(withJSONObject: obj)) ?? Data(), as: UTF8.self)
+    }
+}

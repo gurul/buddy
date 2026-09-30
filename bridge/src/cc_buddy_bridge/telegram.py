@@ -140,6 +140,9 @@ STOP_WORDS = ("stop", "/stop", "cancel", "/cancel")
 # The Mini App's way in from the chat (miniapp.py): an Open button, answered by code like the stealth words, relay
 # or not (owner, 2026-09-24: the menu button stays the / commands, "i want both").
 APPS_WORDS = ("/apps", "apps", "my apps", "open apps", "open buddy")
+# /stick: pair Buddy Link, the stick's phone app (stick_link.py); "/stick new" replaces its token. By code.
+STICK_WORDS = ("/stick", "stick", "buddy link", "pair stick", "pair buddy link")
+STICK_NEW_WORDS = ("/stick new", "stick new", "/stick_new", "new stick link")
 # /spend: what buddy has spent, answered by code like /apps (no model call, relay or not). spend.brief writes it.
 SPEND_WORDS = ("/spend", "spend", "spending", "/spending", "what did i spend", "how much did i spend")
 # /watches: what buddy is watching (watch.py), answered by code like /spend. Stopping or adding one is a model turn.
@@ -262,6 +265,7 @@ FATAL_CODES = (401, 404, 409)       # bad token, malformed token, another poller
 # (owner, 2026-09-23).
 BOT_COMMANDS: tuple[tuple[str, str], ...] = (
     ("apps", "Your apps, and build a new one"),
+    ("stick", "Pair Buddy Link, the stick's phone app"),
     ("spend", "What buddy has spent today and this month"),
     ("claude_on", "Join a running Claude Code session"),
     ("claude_off", "Stop relaying Claude Code"),
@@ -1386,6 +1390,11 @@ class BotApi:
         rows = [[{"text": label[:MAX_BUTTON_CHARS], "web_app": {"url": url}}] for label, url in buttons]
         await self._call("sendMessage", {"chat_id": chat_id, "text": text, "reply_markup": {"inline_keyboard": rows}})
 
+    async def send_url_buttons(self, chat_id: int, text: str, buttons: Sequence[tuple[str, str]]) -> None:
+        """A message with inline ``url`` buttons, one per row: each opens its link in the browser."""
+        rows = [[{"text": label[:MAX_BUTTON_CHARS], "url": url}] for label, url in buttons]
+        await self._call("sendMessage", {"chat_id": chat_id, "text": text, "reply_markup": {"inline_keyboard": rows}})
+
     async def send_photo_web_apps(self, chat_id: int, jpeg: bytes, caption: str,
                                   buttons: Sequence[tuple[str, str]]) -> None:
         """A picture (JPEG bytes, not a file) with inline ``web_app`` buttons under it: a finished app's
@@ -2152,6 +2161,7 @@ class TelegramInlet:
         # and reaches the brain (verification/Buddy/WatchRoute.lean). It used to be typed into the session.
         if (self._codex_chat == inbound.chat_id
                 and word not in STEALTH_ON + STEALTH_OFF + APPS_WORDS + SPEND_WORDS + WATCH_WORDS
+                and word not in STICK_WORDS + STICK_NEW_WORDS
                 and not watch_ask
                 and not SCREEN_NOW.match(inbound.text)
                 and self._chief_word(inbound.text) is None
@@ -2172,6 +2182,7 @@ class TelegramInlet:
                         "telegram-claude")
             return
         if (word in STEALTH_ON or word in STEALTH_OFF or word in APPS_WORDS or word in SPEND_WORDS
+                or word in STICK_WORDS or word in STICK_NEW_WORDS
                 or word in WATCH_WORDS or SCREEN_NOW.match(inbound.text)
                 or self._chief_word(inbound.text) is not None):
             pass                                          # buddy's own code words, relay or not
@@ -2195,6 +2206,10 @@ class TelegramInlet:
         if word in SPEND_WORDS:
             self._note("user", inbound.text, "command")
             self._spawn(self._spend_now(inbound.chat_id), "telegram-spend")
+            return
+        if word in STICK_WORDS or word in STICK_NEW_WORDS:
+            self._note("user", inbound.text, "command")
+            self._spawn(self._stick_link(inbound.chat_id, word in STICK_NEW_WORDS), "telegram-stick")
             return
         chief_word = self._chief_word(inbound.text)
         if chief_word is not None:
@@ -3996,6 +4011,20 @@ class TelegramInlet:
             log.warning("telegram: /spend failed (%s)", type(e).__name__)
             text = "I couldn't read the spend ledger just now."
         await self._say(chat_id, text)
+
+    async def _stick_link(self, chat_id: int, rotate: bool) -> None:
+        """/stick: Buddy Link's pairing link, a URL button (it opens a page that hands off to the app)."""
+        from .stick_link import NEW_LINE, OFF_LINE, PAIR_LINE, UPDATE_TEXT
+
+        try:
+            url = await self._maker.stick_link(rotate) if self._maker is not None else ""
+        except Exception as e:  # noqa: BLE001 — a token that cannot be written is a line, not a silence
+            log.warning("telegram: /stick failed (%s)", type(e).__name__)
+            url = ""
+        if not url:
+            await self._say(chat_id, OFF_LINE)
+            return
+        await self.api.send_url_buttons(chat_id, NEW_LINE if rotate else PAIR_LINE, [(UPDATE_TEXT, url)])
 
     async def _open_apps(self, chat_id: int) -> None:
         """/apps: the Mini App's Open button, at its address right now."""

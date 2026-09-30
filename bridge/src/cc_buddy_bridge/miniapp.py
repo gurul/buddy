@@ -353,6 +353,7 @@ class MiniAppServer:
         self.notify = notify
         self.public_url = ""                              # the tunnel's address: the origin app pages are bound to
         self.calls: Any = None                            # phone_call.PhoneCalls: "Call buddy", or None
+        self.stick: Any = None                            # stick_link.LinkToken: the Buddy Link app's, or None
         self.lights: Any = None                           # lights.Lights: the Lights card, or None (no lights)
         self.spotify: Any = None                          # spotify.Spotify: the Music card, or None (no login)
         self._conns: set[asyncio.Task] = set()
@@ -439,6 +440,24 @@ class MiniAppServer:
             from .apps_maker import BUDDY_JS
 
             await self._send(writer, 200, BUDDY_JS.encode(), "application/javascript; charset=utf-8")
+            return
+        if method == "GET" and path == "/stick":
+            # Buddy Link's pairing page (stick_link.py): static, the token stays in the fragment.
+            from .stick_link import PAIR_HEADERS, PAIR_PAGE
+
+            await self._send(writer, 200, PAIR_PAGE.encode(), "text/html; charset=utf-8", PAIR_HEADERS)
+            return
+        if method == "GET" and path == "/api/stick":
+            # The Buddy Link app's call (stick_link.py): the same call as "Call buddy", proven by the link token.
+            # Browsers send an Origin on every WebSocket and the app sends none: a page cannot use this door.
+            from .phone_call import is_upgrade
+
+            if self.calls is None or self.stick is None or not is_upgrade(headers):
+                await self._send(writer, 404, b"not found", "text/plain")
+            elif headers.get("origin"):
+                await self._send(writer, 403, b"the Buddy Link app only", "text/plain")
+            else:
+                await self.calls.serve(reader, writer, headers, token_check=self.stick.check)
             return
         if method == "GET" and path == "/api/call":
             # "Call buddy" (phone_call.py): a WebSocket, from the home page only; the owner is checked on it.
@@ -850,8 +869,15 @@ def bot_caller(token: str) -> Bot:
     return call
 
 
-def open_button(url: str) -> dict[str, Any]:
-    return {"inline_keyboard": [[{"text": OPEN_TEXT, "web_app": {"url": url}}]]}
+def open_button(url: str, stick_url: str = "") -> dict[str, Any]:
+    """The pinned message's buttons: Open, and once Buddy Link is paired, its tap-to-update link (stick_link.py),
+    a plain URL button because it opens a page that hands off to the app, not a Mini App."""
+    rows: list[list[dict[str, Any]]] = [[{"text": OPEN_TEXT, "web_app": {"url": url}}]]
+    if stick_url:
+        from .stick_link import UPDATE_TEXT
+
+        rows.append([{"text": UPDATE_TEXT, "url": stick_url}])
+    return {"inline_keyboard": rows}
 
 
 class Pins:
@@ -882,16 +908,17 @@ class Pins:
                  str(reply.get("description") if isinstance(reply, dict) else reply)[:120])
         return None
 
-    async def show(self, chat_id: int, url: str) -> None:
-        """The / menu on the menu button, and the pinned message's button pointing at ``url``."""
+    async def show(self, chat_id: int, url: str, stick_url: str = "") -> None:
+        """The / menu on the menu button, and the pinned message's button pointing at ``url`` (and Buddy Link's
+        update button at ``stick_url``, when it is paired)."""
         await self._ok("setChatMenuButton", {"chat_id": chat_id, "menu_button": {"type": "commands"}})
         pins = self._load()
         old = pins.get(str(chat_id))
         if old and await self._ok("editMessageText", {"chat_id": chat_id, "message_id": old, "text": PIN_TEXT,
-                                                      "reply_markup": open_button(url)}):
+                                                      "reply_markup": open_button(url, stick_url)}):
             return
         sent = await self._ok("sendMessage", {"chat_id": chat_id, "text": PIN_TEXT, "disable_notification": True,
-                                              "reply_markup": open_button(url)})
+                                              "reply_markup": open_button(url, stick_url)})
         if not sent:
             return
         mid = int(sent["result"]["message_id"])
@@ -940,6 +967,9 @@ class MiniApp:
         self._tunnel_factory = tunnel_factory or ((lambda: QuickTunnel(binary)) if binary else None)
         self._bot = bot or bot_caller(cfg.token)
         self.pins = Pins(pins_path or cfg.ledger_path.with_name("miniapp-pin.json"), self._bot)
+        from .stick_link import LinkToken
+
+        self.server.stick = LinkToken(cfg.ledger_path.with_name("stick-link.json"))
         self.url = ""
         self._notes: set[asyncio.Task] = set()
         self.ledger.on_cross = self._spend_note
@@ -1001,9 +1031,29 @@ class MiniApp:
         self._notes.add(task)
         task.add_done_callback(self._notes.discard)
 
+    def stick_url(self) -> str:
+        """Buddy Link's tap-to-update link at the tunnel's address now; "" before pairing or with no tunnel."""
+        from .stick_link import pair_url
+
+        token = self.server.stick.current() if self.server.stick is not None else ""
+        return pair_url(self.url, token) if token and self.url else ""
+
+    async def stick_link(self, rotate: bool = False) -> str:
+        """The owner's /stick: the link token (a new one with ``rotate``), and the pinned message's Update
+        button pointing at it. Returns the pairing link, or "" while the tunnel is down."""
+        if not self.url or self.server.stick is None:
+            return ""
+        if rotate:
+            self.server.stick.rotate()
+        else:
+            self.server.stick.ensure()
+        await self._point_pins(self.url + "/")
+        return self.stick_url()
+
     async def _point_pins(self, url: str) -> None:
+        stick = self.stick_url() if url else ""
         for chat in sorted(self.cfg.owner_ids):           # a private chat's id is the owner's user id
-            await (self.pins.show(chat, url) if url else self.pins.offline(chat))
+            await (self.pins.show(chat, url, stick) if url else self.pins.offline(chat))
 
     async def run(self) -> None:
         if self._tunnel_factory is None:

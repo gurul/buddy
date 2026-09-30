@@ -520,6 +520,14 @@ two journeys that do not add an expense still passed. The untouched copy passed
 … journeys not run (Jev did not answer: HTTP 401 …)`: the build is not
 blocked, and nothing but the journeys would have caught it.
 
+### From the stick
+
+The M5StickS3 makes the same call through the Buddy Link iPhone app, at
+`/api/stick`. That door takes the link token `/stick` makes instead of initData, and
+refuses any request that carries an Origin, so no page can use it. Once paired,
+the pinned message has a second button, **Update Buddy Link**, which is edited to the
+tunnel's new address on every start. See [the stick link](../stick-link.md).
+
 ## Turning it on
 
 ```sh

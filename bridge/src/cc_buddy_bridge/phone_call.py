@@ -620,22 +620,30 @@ class PhoneCalls:
         self.check_owner, self.brain, self.voice, self.clock = check_owner, brain, voice, clock
         self.active: Optional[Call] = None
 
-    async def serve(self, reader: asyncio.StreamReader, writer: asyncio.StreamWriter, headers: dict[str, str]) -> None:
+    async def serve(self, reader: asyncio.StreamReader, writer: asyncio.StreamWriter, headers: dict[str, str],
+                    token_check: Optional[Callable[[str], bool]] = None) -> None:
+        """One call. With ``token_check`` it is the Buddy Link app's (stick_link.py): its first message carries
+        ``token`` instead of ``initData``, and only that is accepted."""
         ws = await WebSocket.accept(reader, writer, headers)
         try:
-            await self._serve(ws)
+            await self._serve(ws, token_check)
         except Closed:
             pass
         finally:
             await ws.close()
 
-    async def _serve(self, ws: WebSocket) -> None:
+    async def _serve(self, ws: WebSocket, token_check: Optional[Callable[[str], bool]] = None) -> None:
         try:
             op, data = await asyncio.wait_for(ws.recv(), AUTH_SECS)
             hello = json.loads(data.decode("utf-8")) if op == OP_TEXT else {}
         except (asyncio.TimeoutError, ValueError, UnicodeDecodeError):
             hello = {}
-        user = self.check_owner(str(hello.get("initData") or "")) if isinstance(hello, dict) else None
+        user: Any = None
+        if isinstance(hello, dict):
+            if token_check is not None:
+                user = "buddy link" if token_check(str(hello.get("token") or "")) else None
+            else:
+                user = self.check_owner(str(hello.get("initData") or ""))
         if user is None:
             await ws.send_json({"type": "ended", "reason": "Only buddy's owner can call."})
             return

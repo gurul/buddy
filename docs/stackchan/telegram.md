@@ -449,11 +449,16 @@ Flip it to `ask` if two seconds a command is a price you will pay.
   no sign (2026-09-24). This is best effort. All of these lines together get at
   most 2 seconds, so a slow Telegram never holds up the restart.
 - **The `/` menu.** At startup buddy sets its code words as bot commands in
-  your own chat only (`setMyCommands`, scoped to your chat): `/apps`, `/spend`,
+  your own chat only (`setMyCommands`, scoped to your chat): `/apps`, `/stick`, `/spend`,
   `/claude_on`, `/claude_off`, `/new_claude`, `/codex`, `/rundown`, `/watch`,
   `/meet`, `/screenshot`, `/stealth`, `/wake` and `/stop`, plus `/jobs` before `/stop`
   while the chief of staff is on (below). Each works exactly like the
   typed word. If Telegram refuses the menu, the words still work when typed.
+- **`/stick`** (or `stick`, `buddy link`, `pair stick`) — pairs the Buddy Link
+  iPhone app with this Mac: a reply with an **Update Buddy Link** button that
+  hands the tunnel's address and the link token to the app. `/stick new` (or
+  `stick new`) replaces the token; the old one stops working. Answered by code,
+  and it works while a relay is on. See [the stick link](../stick-link.md).
 - **`/spend`** (or `spend`, `spending`) — what buddy has spent: today,
   yesterday, this month, the top three features today and OpenRouter's own
   figure for today. It is answered by code from the spend ledger, with no model

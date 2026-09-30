@@ -276,6 +276,12 @@ def test_off_every_request_body_reply_and_menu_is_byte_for_byte_origin_main(tmp_
         sys.modules.pop("cc_buddy_bridge._origin_telegram", None)
     after = _off_session(tmp_path / "new", telegram)
     assert len(after["requests"]) == 4 and after["goals"] == ["open the calculator"]
+    # The one change since origin/main that this session sees: /stick joined the menu (stick_link.py,
+    # 2026-09-30). Only that entry is taken out; anything else that differs still fails below.
+    stick = ("stick", "Pair Buddy Link, the stick's phone app")
+    if not any(stick in menu for menu, _ in before["commands"]):
+        assert all(stick in menu for menu, _ in after["commands"])
+        after["commands"] = [(tuple(c for c in menu if c != stick), chat) for menu, chat in after["commands"]]
     assert json.dumps(after, sort_keys=True, default=str) == json.dumps(before, sort_keys=True, default=str)
     # positive control: the same comparison sees one byte of difference in a request body
     after["requests"][0]["instructions"] += " "

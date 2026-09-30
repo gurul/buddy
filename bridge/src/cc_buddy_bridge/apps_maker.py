@@ -1759,6 +1759,10 @@ class ChatMaker:
         """The Mini App's home screen right now ("" while the tunnel is down)."""
         return f"{self._app.url}/" if self.live else ""
 
+    async def stick_link(self, rotate: bool = False) -> str:
+        """The owner's /stick (stick_link.py): Buddy Link's pairing link, "" while the tunnel is down."""
+        return await self._app.stick_link(rotate) if self.live else ""
+
     def _missing(self, target: str, candidates: Optional[list[AppInfo]] = None) -> dict[str, Any]:
         """Nothing was done: the name fits no app, or more than one. The brain asks the owner which."""
         if candidates:
