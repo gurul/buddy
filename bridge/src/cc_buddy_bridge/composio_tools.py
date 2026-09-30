@@ -48,8 +48,28 @@ MULTI_EXECUTE = "COMPOSIO_MULTI_EXECUTE_TOOL"
 # 2026-09-30 the brain used it (COMPOSIO_SEARCH_WEB, COMPOSIO_SEARCH_FETCH_URL_CONTENT, per Composio's execution
 # log) to find a course's office hours, which costs a tool search plus a multi-execute per lookup, and ran out
 # of rounds one step before adding the events. buddy's own web_search (websearch.py, routed by Jev) is one round.
-DISABLED_TOOLKITS: tuple[str, ...] = ("composio_search",)
+# With composio_search off, the tool search offered other providers' web search and scrapers instead (Exa,
+# SerpAPI, then Apify and a browser tool), so these are off together: every one checked to exist with
+# client.toolkits.get on 2026-09-30 (a name Composio does not know could fail the session's creation).
+# WEB_TOOLKITS also backs web_toolkit_slugs, which refuses any that still get through, pointing at web_search.
+DISABLED_TOOLKITS: tuple[str, ...] = (
+    "composio_search", "exa", "serpapi", "serper", "tavily", "linkup", "perplexityai", "firecrawl", "brightdata",
+    "scrapingbee", "zenrows", "scrapegraph_ai", "olostep", "agentql", "apify", "hyperbrowser", "browserless",
+    "browserbase_tool", "browser_tool")
 WEB_TOOLKITS = frozenset(DISABLED_TOOLKITS)
+
+
+def web_toolkit_slugs(name: str, args: Mapping[str, Any]) -> list[str]:
+    """The slugs in a multi-execute that belong to a web search or scraping toolkit (the toolkit is the slug's
+    prefix, and some toolkit names hold an underscore, so the prefix is matched, not the first word)."""
+    if name != MULTI_EXECUTE:
+        return []
+    out = []
+    for tool in _multi_execute_tools(args):
+        slug = str(tool.get("tool_slug") or "").strip().upper()
+        if any(slug.startswith(t.upper() + "_") for t in WEB_TOOLKITS):
+            out.append(slug)
+    return out
 RUNS_CODE = frozenset({"COMPOSIO_REMOTE_BASH_TOOL", "COMPOSIO_REMOTE_WORKBENCH"})
 
 # A slug is TOOLKIT_WORDS. A call only looks when one of its words is a reading verb and none is a writing

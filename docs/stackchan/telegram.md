@@ -752,11 +752,20 @@ Each round's tools are logged by name, and a multi-execute's slugs too
 (`telegram: round 3: COMPOSIO_MULTI_EXECUTE_TOOL[GOOGLECALENDAR_CREATE_EVENT]`),
 never the arguments.
 
-**Composio's web search is off.** buddy's Composio session is created with the
-`composio_search` toolkit disabled. Public-web lookups go through buddy's own
-`web_search`, which takes one round, where a Composio lookup takes a tool
-search plus a multi-execute. A session stored before this change is not
-resumed; a new one is made.
+**The public web is `web_search`, never Composio.** A Composio lookup takes a
+tool search plus a multi-execute. buddy's own `web_search` takes one round. The
+split is enforced three ways:
+
+- **The instructions:** Composio is for your accounts; the public web is
+  `web_search`. A job that needs both uses both, for example finding times on
+  a course page, then adding them to the calendar.
+- **The session:** buddy's Composio session is created with the web-search
+  and scraping toolkits disabled (`composio_tools.DISABLED_TOOLKITS`, 19 of
+  them, each checked to exist). With only `composio_search` off, Composio's
+  tool search offered Exa, SerpAPI, Apify and a browser tool instead. A
+  session stored with a different list is not resumed; a new one is made.
+- **A guard:** a multi-execute that still names one of those toolkits is
+  refused before it reaches Composio, with a reply pointing at `web_search`.
 
 Before 2026-09-30 the limit was 6, and running out threw the whole turn away
 with "I got tangled up in that one". That happened twice in a row on "find the

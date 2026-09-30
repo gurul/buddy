@@ -1525,6 +1525,28 @@ def multi(*slugs: str) -> dict[str, Any]:
             "thought": "t", "sync_response_to_workbench": False, "current_step": "GO"}
 
 
+def test_a_web_lookup_through_composio_is_refused_and_pointed_at_web_search() -> None:
+    """2026-09-30: office-hours lookups went through Composio's web search, a round or two each, and the turn ran
+    out. The instructions send the public web to web_search; a web toolkit call that still comes is refused."""
+    apps = FakeApps()
+    api = FakeApi([update("find the office hours on the course page", update_id=1)])
+    rig = Rig(api, FakeCreate(call("COMPOSIO_MULTI_EXECUTE_TOOL", multi("SERPAPI_GOOGLE_LIGHT_SEARCH")),
+                              say("Looking it up with my own search.")), apps=apps)
+    run_rig(rig)
+    assert apps.executed == []                                             # never reached Composio
+    refused = json.loads(rig.create.requests[1]["input"][-1]["output"])
+    assert refused["ok"] is False and "web_search" in refused["reason"]
+    first = rig.create.requests[0]
+    assert "public web" in first["instructions"] and "web_search" in first["instructions"]
+    # control: the owner's calendar through the same door still runs
+    apps = FakeApps()
+    api = FakeApi([update("put it in my calendar", update_id=1)])
+    rig = Rig(api, FakeCreate(call("COMPOSIO_MULTI_EXECUTE_TOOL", multi("GOOGLECALENDAR_CREATE_EVENT")), say("Added.")),
+              apps=apps)
+    run_rig(rig)
+    assert [n for n, _ in apps.executed] == ["COMPOSIO_MULTI_EXECUTE_TOOL"]
+
+
 def test_composio_tools_are_offered_and_executed_through_the_session() -> None:
     apps = FakeApps()
     # 1. a reading call runs at once and its result goes back to the model

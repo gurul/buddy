@@ -15,11 +15,13 @@ import pytest
 
 from cc_buddy_bridge.composio_tools import (
     COMPOSIO_DEFAULT,
+    DISABLED_TOOLKITS,
     ComposioBridge,
     configured,
     consequential_slugs,
     describe_for_confirmation,
     is_read_only,
+    web_toolkit_slugs,
 )
 
 META_TOOLS = [
@@ -122,8 +124,9 @@ def test_the_session_is_the_owners_and_is_reused(tmp_path: Path) -> None:
     assert first.sessions.created == ["telegram-7"] and first.sessions.used == []
     assert b1.session_id == "trs_new_1"
     state = json.loads(cfg.state_path.read_text())
-    assert state == {"user_id": "telegram-7", "session_id": "trs_new_1", "disabled": ["composio_search"]}
-    assert first.sessions.toolkits == [{"disable": ["composio_search"]}]     # Composio's own web search is out
+    assert state == {"user_id": "telegram-7", "session_id": "trs_new_1", "disabled": list(DISABLED_TOOLKITS)}
+    assert first.sessions.toolkits == [{"disable": list(DISABLED_TOOLKITS)}]   # the web search toolkits are out
+    assert "composio_search" in DISABLED_TOOLKITS and "exa" in DISABLED_TOOLKITS
     assert stat.S_IMODE(cfg.state_path.stat().st_mode) == 0o600
     # Only function tools with a name survive; names is derived from them.
     assert all(t["type"] == "function" and t["name"] for t in b1.tools())
@@ -142,7 +145,7 @@ def test_the_session_is_the_owners_and_is_reused(tmp_path: Path) -> None:
     older = FakeClient()
     ComposioBridge(cfg, client_factory=lambda: older).start()
     assert older.sessions.used == [] and older.sessions.created == ["telegram-7"]
-    assert json.loads(cfg.state_path.read_text())["disabled"] == ["composio_search"]
+    assert json.loads(cfg.state_path.read_text())["disabled"] == list(DISABLED_TOOLKITS)
 
     # A stored id for someone else is not ours: create, and overwrite the state.
     cfg.state_path.write_text(json.dumps({"user_id": "telegram-999", "session_id": "trs_theirs"}))
@@ -304,3 +307,16 @@ def test_label_is_a_write_only_as_the_verb(slug: str, read: bool) -> None:
     from cc_buddy_bridge.composio_tools import is_read_only
 
     assert is_read_only(slug) is read
+
+
+def test_web_toolkit_slugs_catch_web_search_and_scrapers_by_prefix() -> None:
+    web = {"tools": [{"tool_slug": "EXA_SEARCH", "arguments": {}}, {"tool_slug": "GMAIL_FETCH_EMAILS", "arguments": {}},
+                     {"tool_slug": "BROWSER_TOOL_CREATE_TASK", "arguments": {}},
+                     {"tool_slug": "SCRAPEGRAPH_AI_SMART_SCRAPE", "arguments": {}}]}
+    assert web_toolkit_slugs("COMPOSIO_MULTI_EXECUTE_TOOL", web) == [
+        "EXA_SEARCH", "BROWSER_TOOL_CREATE_TASK", "SCRAPEGRAPH_AI_SMART_SCRAPE"]
+    # the owner's own apps are never caught, nor a toolkit that only starts with the same letters
+    apps = {"tools": [{"tool_slug": "GOOGLECALENDAR_CREATE_EVENT", "arguments": {}},
+                      {"tool_slug": "EXAMPLEAPP_GET_THING", "arguments": {}}]}
+    assert web_toolkit_slugs("COMPOSIO_MULTI_EXECUTE_TOOL", apps) == []
+    assert web_toolkit_slugs("COMPOSIO_SEARCH_TOOLS", web) == []
