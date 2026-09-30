@@ -355,8 +355,26 @@ SLACK_SEND_MESSAGE with to: …, subject: …? yes / no?" with **Allow** and **D
 buttons. A tap answers it, or a typed yes or no. With the relay off, your next
 message answers it, as before. With the relay on, other text goes to Claude and
 nothing runs until you answer. A call mixing toolkits takes the strictest. `CC_BUDDY_COMPOSIO_POLICY`
-changes any of this. The remote code tools (Composio's sandbox bash and
-workbench) always ask.
+changes any of this. Composio's sandbox bash always asks.
+
+**The workbench** (Python in Composio's sandbox) runs without a question when its
+code only computes (owner, 2026-09-30: "I don't want it to ask me permissions
+regarding this"). buddy reads the script before it runs, without running it
+(`composio_tools.workbench_slugs`):
+
+- **Runs without asking:** standard data modules (json, re, datetime, pandas,
+  numpy…), files in the sandbox, and the read-only helpers `invoke_llm`,
+  `web_search` and `smart_file_extract`.
+- **Judged like any other call:** each `run_composio_tool("SLUG", …)` in the
+  script. A read runs; `GMAIL_SEND_EMAIL` is refused; a Drive write asks, as
+  "Run GOOGLEDRIVE_UPLOAD_FILE from a workbench script?".
+- **Still asks:**
+  - `upload_local_file` and `proxy_execute`;
+  - any other import (requests, os, subprocess…);
+  - `eval`/`exec`/`getattr`/`__import__`, or any `__dunder__` attribute;
+  - a slug that is not written out as a string, or the helper passed around
+    under another name;
+  - code that does not parse.
 
 Proven live 2026-09-21 from this code path: Gmail, Google Calendar and Google
 Drive connected; `GMAIL_FETCH_EMAILS`, `GOOGLECALENDAR_EVENTS_LIST_ALL_CALENDARS`
