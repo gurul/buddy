@@ -466,6 +466,8 @@ class Daemon:
                 await self._music_mode.close()
             if getattr(self, "_spotify", None) is not None:
                 await self._spotify.close()
+            if getattr(self, "_canvas", None) is not None:
+                await self._canvas.close()
             if getattr(self, "_chrome_lane", None) is not None:
                 await self._chrome_lane.close()             # buddy's tab only; the owner's Chrome stays
             if getattr(self, "_holo_runtime", None) is not None:
@@ -1281,7 +1283,7 @@ class Daemon:
         self._meeter = Daemon._make_meeter(self, apps) if tg.enabled else None
         inlet = telegram_mod.make_inlet(
             tg, watcher=watcher, meeter=self._meeter, lights=Daemon._lights_hub(self),
-            spotify=Daemon._spotify_hub(self),
+            spotify=Daemon._spotify_hub(self), canvas=Daemon._make_canvas(self),
             apps=apps,
             vault=vault if tg.enabled and vault.enabled else None,
             agent_factory=self._make_agent, agent_enabled=self._agent_cfg.enabled,
@@ -1435,6 +1437,19 @@ class Daemon:
                 log.exception("lights: could not load; lights are off this run")
                 self._lights = None
         return self._lights
+
+    def _make_canvas(self) -> Any:
+        """The owner's Canvas (canvas.py), read only, for the Telegram brain; None when CANVAS_BASE_URL or
+        CANVAS_API_TOKEN is unset. Made once per daemon."""
+        if not hasattr(self, "_canvas"):
+            from . import canvas as canvas_mod
+
+            try:
+                self._canvas = canvas_mod.make_canvas()
+            except Exception:  # noqa: BLE001 — a Canvas that cannot load costs Canvas, never the daemon
+                log.exception("canvas: could not load; Canvas is off this run")
+                self._canvas = None
+        return self._canvas
 
     def _spotify_hub(self) -> Any:
         """The owner's Spotify (spotify.py), made once and shared by the chat, the voice and the Mini App; None

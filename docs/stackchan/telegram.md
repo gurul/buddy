@@ -88,6 +88,8 @@ outright, is named rather than treated as empty. Result limits, pagination and
 clipping are never mentioned: the rundown reports what it retrieved (owner,
 2026-09-23). Rundown exposes only read/search tools and rejects mutations before execution.
 It does not send messages, mark mail read, change calendar events or edit todos.
+With [Canvas](canvas.md) set up, unsubmitted Canvas work due in the next three days
+is read by code before the turn and listed under Todos.
 The retrieved content is summarized by Buddy's configured OpenAI text model.
 
 ## Receiving images
@@ -171,6 +173,8 @@ token without an owner id is off. A door with no allowlist never opens.
 | `CC_BUDDY_COMPOSIO_POLICY` | `gmail=read,googlecalendar=write,googledrive=ask` | What a WRITING app call may do, per toolkit: `read` refuses it, `write` runs it, `ask` is your yes/no in the chat (the default for any toolkit not named). Reads always run. |
 | `CC_BUDDY_COMPOSIO_STATE` | `~/.config/cc-buddy-bridge/composio.json` | Where the session id is kept between restarts. |
 | `CC_BUDDY_COMPOSIO_TIMEOUT_SECS` | `60` | One app call's timeout. |
+| `CANVAS_BASE_URL` | unset | Your school's Canvas, `https://<school>.instructure.com` or its own domain; https only ([canvas.md](canvas.md)). |
+| `CANVAS_API_TOKEN` | unset | A Canvas access token (Account → Settings → New Access Token). With both set, the brain can read Canvas; with either unset, it has no Canvas tools. `CC_BUDDY_CANVAS=0` turns it off. |
 | `CC_BUDDY_SECOND_BRAIN` | `0` | `1`: your own notes, todos and journals as a local markdown vault, captured from this chat ([second-brain.md](second-brain.md)). |
 | `CC_BUDDY_VAULT` | `~/Documents/Second Brain` | The vault's folder (open it in Obsidian). |
 | `CC_BUDDY_COMMAND_RISK` | `shadow` | The Auto Mode gate behind the Claude relay ([below](#the-auto-mode-gate-jev-judges-a-relayed-command)): `off`, `shadow` (judged and logged, never acted on), `ask` (a risky verdict is your yes/no). |
@@ -383,6 +387,14 @@ Drive connected; `GMAIL_FETCH_EMAILS`, `GOOGLECALENDAR_EVENTS_LIST_ALL_CALENDARS
 and `GOOGLEDRIVE_FIND_FILE` each returned a real result with a Composio log id.
 Install: `pip install -e ".[composio]"` (composio 0.22.0, composio-openai 0.22.0;
 `composio-core` is deprecated). The key lives in the env file, never in source.
+
+## Canvas
+
+With `CANVAS_BASE_URL` and `CANVAS_API_TOKEN` set, the brain gets four read-only
+tools from `canvas.py`: `canvas_courses`, `canvas_due` (what is due, submitted or
+not, in your time zone), `canvas_announcements` and `canvas_find_link` (links to
+assignments, pages, files and modules). Only GET requests can leave. Setup,
+endpoints and privacy: [canvas.md](canvas.md).
 
 ## The second brain
 
@@ -838,6 +850,11 @@ Two lines follow the daemon's own switches (fixed 2026-09-29):
   block is byte for byte what it was. What the chief is doing goes in each
   turn's note, never here, because this block is fixed from boot. With everything
   on the block measured 1044 of 1100 characters (2026-09-29).
+
+- **Canvas** is one line, "Canvas (school courses): on, read only.", present
+  only while [Canvas](canvas.md) is set up and the Telegram door is on. The
+  school's address is not in it. With everything on, Canvas and the chief
+  included, the block measured 1086 of 1100 characters (2026-09-30).
 
 The block goes in three places:
 

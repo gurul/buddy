@@ -218,10 +218,12 @@ def test_the_block_stays_under_its_budget_with_everything_on(monkeypatch: pytest
                  lights.Light(name="c", kind="triones", address="u"), lights.Light(name="d", kind="tuya", id="x")], path)
     fake_router(monkeypatch, ("perplexity", "tinyfish", "firecrawl"))
     env = owner_env(CC_BUDDY_VOICE="1", CC_BUDDY_WEB_READER="1", TINYFISH_API_KEY="test-tinyfish",
-                    CC_BUDDY_WATCH_TLS="1", CC_BUDDY_WATCH_BROWSER="1", CC_BUDDY_COMPUTER="holo")
+                    CC_BUDDY_WATCH_TLS="1", CC_BUDDY_WATCH_BROWSER="1", CC_BUDDY_COMPUTER="holo",
+                    CC_BUDDY_CHIEF="on", CANVAS_BASE_URL="https://canvas.example.edu", CANVAS_API_TOKEN="test-canvas")
     text = self_context.block(env, lights_path=path, commit="abcdef123456")
     assert len(text) < self_context.BUDGET, len(text)
     assert "Voice:" in text and "Jev picks" in text and "Sylvania (Tuya)" in text and "Holo (" in text
+    assert "Canvas (" in text and "Chief of staff: on." in text
 
 
 # ---- the three doors carry it ----------------------------------------------------------------------

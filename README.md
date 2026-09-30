@@ -135,6 +135,11 @@ The [Telegram door](docs/stackchan/telegram.md) is **off by default**. With it o
   fails gets one short written lesson for the next try ([Reflexion](https://arxiv.org/abs/2303.11366)).
   Messages it would send on its own wait for a break in your day, stay out of
   22:30-08:00 and are only logged for now. See [chief of staff](docs/stackchan/chief.md).
+- **Reads your Canvas.** With a Canvas access token in the env file, "what's due
+  this week", "any announcements in 447?" or "send me the HW3 link" is answered
+  from your school's Canvas, times in your time zone, and `rundown` lists what is
+  due in the next three days. Read only: it cannot submit or post. See
+  [Canvas](docs/stackchan/canvas.md).
 - **Keeps your personal notes.** With the [second brain](docs/stackchan/second-brain.md)
   on, a text saves a note, updates a list, checks off a todo, or undoes an edit in
   your Markdown vault. A saved note gets a ✍ on your message instead of a reply,
