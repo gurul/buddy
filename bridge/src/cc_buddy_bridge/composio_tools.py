@@ -26,6 +26,7 @@ repr's it. Tool arguments may hold mail text, so logs carry names, counts and ex
 
 from __future__ import annotations
 
+import ast
 import json
 import logging
 import os
@@ -147,8 +148,79 @@ def _multi_execute_tools(args: Mapping[str, Any]) -> list[dict[str, Any]]:
     return [t for t in tools if isinstance(t, Mapping)] if isinstance(tools, list) else []
 
 
+# -- the workbench: code that only computes runs without a question (owner, 2026-09-30) --
+#
+# "I don't want it to ask me permissions regarding this": buddy asked before a workbench script that read the
+# calendar results it had just fetched and picked out the NLP lectures. The workbench runs Python in Composio's
+# sandbox with helpers preloaded (docs.composio.dev/docs/workbench, 2026-09-30): run_composio_tool, invoke_llm,
+# upload_local_file, proxy_execute, web_search, smart_file_extract. run_composio_tool can call any connected
+# tool, GMAIL_SEND_EMAIL included, so a blanket yes would walk around the per-toolkit policy. Instead the code is
+# read here (parsed, never run): a script that only computes runs; each run_composio_tool slug it names is judged
+# like a multi-execute slug; anything that reaches out another way, or hides what it calls, still asks.
+WORKBENCH = "COMPOSIO_REMOTE_WORKBENCH"
+WORKBENCH_TOOL_HELPER = "run_composio_tool"
+WORKBENCH_READ_HELPERS = frozenset({"invoke_llm", "web_search", "smart_file_extract"})
+WORKBENCH_ASK_HELPERS = frozenset({"upload_local_file", "proxy_execute"})     # publish a file / a raw API call
+# Standard modules for working on data; anything else imported (requests, subprocess, os, socket…) asks.
+WORKBENCH_IMPORTS = frozenset({
+    "json", "re", "math", "statistics", "datetime", "zoneinfo", "time", "calendar", "collections", "itertools",
+    "functools", "operator", "string", "textwrap", "difflib", "decimal", "fractions", "random", "csv", "html",
+    "unicodedata", "dataclasses", "typing", "enum", "copy", "pprint", "heapq", "bisect", "base64", "hashlib",
+    "uuid", "pandas", "numpy", "dateutil"})
+# Names that reach outside the data, or that hide what the code calls. Present at all: ask.
+WORKBENCH_BLOCKED_NAMES = frozenset({
+    "exec", "eval", "compile", "__import__", "getattr", "setattr", "delattr", "globals", "locals", "vars",
+    "importlib", "os", "sys", "subprocess", "socket", "shutil", "requests", "httpx", "urllib", "http",
+    "aiohttp", "ftplib", "smtplib", "pathlib", "builtins", "ctypes", "multiprocessing", "threading", "asyncio",
+    "pickle", "marshal", "composio", "pd_read_url"})
+
+
+def workbench_slugs(code: Any) -> Optional[list[str]]:
+    """The tool slugs a workbench script calls through run_composio_tool, in order, when the script is plain
+    enough to judge; None when it must be asked about (unparseable, a blocked name or import, a helper that
+    reaches out, a slug that is not a string literal, or any dunder attribute)."""
+    if not isinstance(code, str) or not code.strip():
+        return None
+    try:
+        tree = ast.parse(code)
+    except (SyntaxError, ValueError):
+        return None
+    slugs: list[str] = []
+    for node in ast.walk(tree):
+        if isinstance(node, (ast.Import, ast.ImportFrom)):
+            mods = [a.name for a in node.names] if isinstance(node, ast.Import) else [node.module or ""]
+            if isinstance(node, ast.ImportFrom) and node.level:
+                return None
+            if any(m.split(".")[0] not in WORKBENCH_IMPORTS for m in mods):
+                return None
+        elif isinstance(node, ast.Name):
+            if node.id in WORKBENCH_BLOCKED_NAMES or node.id in WORKBENCH_ASK_HELPERS:
+                return None
+        elif isinstance(node, ast.Attribute):
+            if node.attr.startswith("_") or node.attr in WORKBENCH_ASK_HELPERS or node.attr == WORKBENCH_TOOL_HELPER:
+                return None
+        elif isinstance(node, ast.Call) and isinstance(node.func, ast.Name) and node.func.id == WORKBENCH_TOOL_HELPER:
+            first = node.args[0] if node.args else next(
+                (k.value for k in node.keywords if k.arg in ("tool_slug", "slug", "action")), None)
+            if not (isinstance(first, ast.Constant) and isinstance(first.value, str) and first.value.strip()):
+                return None
+            slugs.append(first.value.strip())
+    # The helper's name used any way but a direct call (aliased, passed around) hides which tool runs.
+    direct = sum(1 for n in ast.walk(tree) if isinstance(n, ast.Call) and isinstance(n.func, ast.Name)
+                 and n.func.id == WORKBENCH_TOOL_HELPER)
+    named = sum(1 for n in ast.walk(tree) if isinstance(n, ast.Name) and n.id == WORKBENCH_TOOL_HELPER)
+    if named != direct:
+        return None
+    return slugs
+
+
 def consequential_slugs(name: str, args: Mapping[str, Any]) -> list[str]:
     """The slugs in this call that change something, in call order. Empty means the call only looks."""
+    if name == WORKBENCH:
+        inner = workbench_slugs(args.get("code_to_execute") if isinstance(args, Mapping) else None)
+        if inner is None:
+            return [name]
+        return [slug for slug in inner if not is_read_only(slug)]
     if name in RUNS_CODE:
         return [name]
     if name == MULTI_EXECUTE:
@@ -223,6 +295,8 @@ def describe_for_confirmation(name: str, args: Mapping[str, Any]) -> str:
             slug = str(tool.get("tool_slug") or "a tool")
             pairs = _pairs(tool.get("arguments"))
             parts.append(f"{slug} with {pairs}" if pairs else slug)
+    elif name == WORKBENCH and (inner := consequential_slugs(name, args)) and inner != [name]:
+        parts.append(", ".join(dict.fromkeys(inner)) + " from a workbench script")   # the tools it calls, not the code
     else:
         pairs = _pairs(args)
         parts.append(f"{name} with {pairs}" if pairs else name)
