@@ -5289,3 +5289,55 @@ def test_a_music_command_without_a_spotify_login_says_how_to_set_it_up() -> None
     # anything that is not a music command still goes to the brain
     run_rig(rig := Rig(FakeApi([update("what's the plan today")]), FakeCreate(say("ok"))))
     assert rig.create.requests
+
+
+# ---- a turn that uses every round (2026-09-30: the office-hours turns) ----------------------------------------
+
+def test_a_turn_that_uses_every_round_says_what_it_found_instead_of_giving_up(caplog: pytest.LogCaptureFixture) -> None:
+    """Live 2026-09-30: "find the office hours for my classes and add them to my calendar" used all 6 rounds,
+    the last one looking up the calendar tool, and came back as "I got tangled up in that one", twice. Now the
+    budget is 10 and a turn that still runs out gets one more call, with tools off, that says what it found."""
+    rounds = [call("take_photo", {}, f"c{i}") for i in range(telegram.MAX_TOOL_ROUNDS)]
+    summary = say("I found the office hours: Mon 2:30 PM, Allen breakout. Adding them is left; say keep going.")
+    api = FakeApi([update("find the office hours for my classes and add them to my calendar", update_id=1)])
+    rig = Rig(api, FakeCreate(*rounds, summary))
+    with caplog.at_level(logging.INFO, logger="cc_buddy_bridge.telegram"):
+        run_rig(rig)
+    assert rig.api.sent[-1] == (OWNER, "I found the office hours: Mon 2:30 PM, Allen breakout. Adding them is "
+                                       "left; say keep going.")
+    reqs = rig.create.requests
+    assert len(reqs) == telegram.MAX_TOOL_ROUNDS + 1 == 11
+    assert all(r["tool_choice"] == "auto" for r in reqs[:-1])
+    last = reqs[-1]
+    assert last["tool_choice"] == "none" and last["tools"] == reqs[0]["tools"]      # same prefix, nothing callable
+    assert telegram.OUT_OF_ROUNDS_NOTE in last["input"][0]["content"][0]["text"]
+    assert telegram.OUT_OF_ROUNDS_NOTE not in reqs[0]["input"][0]["content"][0]["text"]
+    assert all(telegram.TANGLED_LINE not in text for _, text in rig.api.sent)
+    # every round's tools are in the log, by name only
+    rounds_logged = [r.getMessage() for r in caplog.records if ": round " in r.getMessage()]
+    assert len(rounds_logged) == telegram.MAX_TOOL_ROUNDS and rounds_logged[0].endswith("round 1: take_photo")
+
+
+def test_when_the_summary_itself_fails_the_old_line_still_goes() -> None:
+    rounds = [call("take_photo", {}, f"c{i}") for i in range(telegram.MAX_TOOL_ROUNDS)]
+    api = FakeApi([update("do a long thing", update_id=1)])
+    rig = Rig(api, FakeCreate(*rounds, RuntimeError("model down")))
+    run_rig(rig)
+    assert rig.api.sent[-1] == (OWNER, telegram.TANGLED_LINE)
+
+
+def test_a_turn_that_finishes_in_time_makes_no_extra_call() -> None:
+    api = FakeApi([update("one photo please", update_id=1)])
+    rig = Rig(api, FakeCreate(call("take_photo", {}, "c1"), say("No camera here.")))
+    run_rig(rig)
+    assert len(rig.create.requests) == 2 and rig.api.sent[-1] == (OWNER, "No camera here.")
+
+
+def test_call_names_log_slugs_never_arguments() -> None:
+    calls = [{"name": "COMPOSIO_MULTI_EXECUTE_TOOL", "args": {"tools": [
+                 {"tool_slug": "GMAIL_FETCH_EMAILS", "arguments": {"query": "from:sam secret words"}},
+                 {"tool_slug": "GOOGLECALENDAR_CREATE_EVENT", "arguments": {"summary": "private"}}]}},
+             {"name": "web_search", "args": {"query": "private query"}}]
+    line = telegram.call_names(calls)
+    assert line == "COMPOSIO_MULTI_EXECUTE_TOOL[GMAIL_FETCH_EMAILS,GOOGLECALENDAR_CREATE_EVENT], web_search"
+    assert "secret" not in line and "private" not in line

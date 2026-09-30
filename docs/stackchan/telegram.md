@@ -739,6 +739,32 @@ After ten quiet minutes the chat is over: its turns are cleared from RAM and its
 transcript gets a close marker. Nothing is handed anywhere, because with memory on
 every line was already written down the moment it was typed or sent.
 
+## When a turn runs long
+
+A text turn may call the model up to **10 times with tools**. If the work is
+still not done after that, buddy makes **one more call with tools off** that
+says what it found and did so far, with the specific facts (times, places,
+names, links), and what is left. It ends with "keep going", and your reply
+carries on from that message. The next turn sees only the text, not the tool
+results, which is why the facts go in the message.
+
+Each round's tools are logged by name, and a multi-execute's slugs too
+(`telegram: round 3: COMPOSIO_MULTI_EXECUTE_TOOL[GOOGLECALENDAR_CREATE_EVENT]`),
+never the arguments.
+
+**Composio's web search is off.** buddy's Composio session is created with the
+`composio_search` toolkit disabled. Public-web lookups go through buddy's own
+`web_search`, which takes one round, where a Composio lookup takes a tool
+search plus a multi-execute. A session stored before this change is not
+resumed; a new one is made.
+
+Before 2026-09-30 the limit was 6, and running out threw the whole turn away
+with "I got tangled up in that one". That happened twice in a row on "find the
+office hours for my classes and add them to my calendar". Composio's own
+execution log showed every round going to its web search and page fetch. The
+last round was looking up the calendar tool, one step short of adding the
+events.
+
 ## The chief of staff in the chat
 
 The chief of staff ([the chief](chief.md)) takes on jobs with several steps and

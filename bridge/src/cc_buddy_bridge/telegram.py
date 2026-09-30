@@ -133,7 +133,17 @@ PROMPT_CACHE_KEY = "buddy-telegram"  # every turn shares one prefix: route them 
 TRANSCRIBED_TOOLS = ("web_search", "think_hard", "look", "look_around", "find", "take_photo", "remember",
                      "capture_note", "watch_add", "watch_remove", "watch_pause", "watch_resume", "watch_set_end",
                      "meet_join", "meet_leave")
-MAX_TOOL_ROUNDS = 6                 # model calls in one turn, at most
+# Model calls in one turn that may use tools, at most; then one more that may not (OUT_OF_ROUNDS_NOTE). It was 6
+# until 2026-09-30, when "find the office hours for my classes and add them to my calendar" ran out one call
+# before adding the events and the whole turn came back as "I got tangled up in that one", twice.
+MAX_TOOL_ROUNDS = 10
+TANGLED_LINE = "I got tangled up in that one. Ask me again?"
+# The last call of a turn that used every round: tools off, what was found said, so nothing is thrown away and
+# "keep going" carries on from it (the next turn sees only this text, not the tool results).
+OUT_OF_ROUNDS_NOTE = ("You have used every step this message allows, so no more tools can run now. In a few "
+                      "sentences, tell the owner what you found and what you did so far, with the specific facts "
+                      "(times, places, names, links), since the next message sees only what you write here, and "
+                      "what is still left to do. End by saying they can reply \"keep going\" to finish it.")
 MAX_OUTPUT_TOKENS = 1200
 BACKOFF_MAX_SECS = 60.0
 DONE_HOLD_SECS = 3.0                # the board shows "done" this long after a texted task, then idle
@@ -931,6 +941,19 @@ class SentenceStream:
     def _emit(self, piece: str) -> None:
         if piece.strip():
             self.say(piece.strip())
+
+
+def call_names(calls: Sequence[dict[str, Any]]) -> str:
+    """The tools of one round, for the log: names only, and a multi-execute's slugs (never arguments, which can
+    hold mail text). The office-hours turns of 2026-09-30 had to be read back from Composio's own log."""
+    out = []
+    for c in calls:
+        name = str(c.get("name") or "?")
+        if name == composio_tools.MULTI_EXECUTE:
+            slugs = [str(t.get("tool_slug") or "?") for t in composio_tools._multi_execute_tools(c.get("args") or {})]
+            name += "[" + ",".join(slugs) + "]"
+        out.append(name)
+    return ", ".join(out)
 
 
 def request(config: TelegramConfig, items: list[dict[str, Any]], brief: str = "",
@@ -3470,6 +3493,7 @@ class TelegramInlet:
             calls, text, carry = parse_response(response, allowed)
             if not calls:
                 return text, round_no
+            log.info("telegram: round %d: %s", round_no, call_names(calls))
             if self._call_say is not None and not text.strip() and not said_on_call:
                 said_on_call = True                   # a call is never silent while buddy works
                 self._to_call(chat_id, CALL_ON_IT if any(c["name"] == "start_task" for c in calls) else CALL_CHECKING,
@@ -3521,7 +3545,22 @@ class TelegramInlet:
                 others = [receipt_line(c["name"], r) for c, r in zip(calls, results, strict=True)
                           if RECEIPT_TOOLS[c["name"]] != emoji]
                 return "\n".join(x for x in (text, *others) if x), round_no
-        return text or "I got tangled up in that one. Ask me again?", MAX_TOOL_ROUNDS
+        # Every round used and the work not finished: one more call, with tools off, says what was found.
+        log.info("telegram: turn used all %d rounds; asking for what was found so far", MAX_TOOL_ROUNDS)
+        payload = request(self.config, items, context=note + "\n\n" + OUT_OF_ROUNDS_NOTE, **parts)
+        if daily:
+            payload["tools"] = [t for t in app_tools if t["name"] in rundown.READ_META_TOOLS
+                                or t["name"] == composio_tools.MULTI_EXECUTE]
+        payload["tool_choice"] = "none"
+        try:
+            response = await self._create(payload)
+        except Exception as e:  # noqa: BLE001 — the summary is a courtesy; the turn's own failure line still goes
+            log.warning("telegram: the out-of-rounds summary failed (%s)", type(e).__name__)
+            return text or TANGLED_LINE, MAX_TOOL_ROUNDS
+        self._count_usage(response, usage)
+        spend.record_response(spend.CHAT, response, model=str(payload.get("model") or ""))
+        _calls, summary, _carry = parse_response(response, allowed)
+        return summary or text or TANGLED_LINE, MAX_TOOL_ROUNDS + 1
 
     async def _canvas_rundown(self) -> Optional[dict[str, Any]]:
         """The rundown's Canvas part (canvas.Canvas.rundown: the next three days' unsubmitted deadlines), read by code
