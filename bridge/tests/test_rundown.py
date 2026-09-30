@@ -1,7 +1,8 @@
 import asyncio
 import json
-from datetime import datetime
+from datetime import date, datetime
 
+import pytest
 from test_telegram import FakeApi, FakeCreate, Rig, call, run_rig, say, update
 
 from cc_buddy_bridge import rundown, second_brain
@@ -26,6 +27,7 @@ def test_obsidian_dates_completed_fences_and_symlinks(tmp_path):
     context = rundown.todo_context(root, '2026-09-22')
     assert {t['text'] for t in context['today']} == {'Today 📅 2026-09-22', 'Daily plan'}
     assert [t['text'] for t in context['overdue']] == ['Overdue [due:: 2026-09-20]']
+    assert [t['text'] for t in context['upcoming']] == ['Future ⏳ 2026-09-23']
     assert [t['text'] for t in context['undated']] == ['Backlog']
     assert not rundown.todo_context(None, '2026-09-22')['available']
     text = rundown.context(root, datetime.now().astimezone())
@@ -42,6 +44,72 @@ def test_rundown_tool_policy_reads_four_sources_and_refuses_mutations():
         assert not rundown.allows(name, {})
     assert not rundown.allows('COMPOSIO_MULTI_EXECUTE_TOOL', {'tools': []})
     assert not rundown.allows('COMPOSIO_MULTI_EXECUTE_TOOL', {'tools': [None]})
+
+
+TODAY = date(2026, 9, 30)
+# 2026-09-30 the rundown called "Oct 22: go to Mount Tam" undated backlog. A date written in words or
+# numbers, with or without a year, is a due date.
+DATED = [
+    ('Oct 22: go to Mount Tam', date(2026, 10, 22)),
+    ('October 22 go to Mount Tam', date(2026, 10, 22)),
+    ('Oct 22nd: go to Mount Tam', date(2026, 10, 22)),
+    ('Oct. 22 go to Mount Tam', date(2026, 10, 22)),
+    ('22 Oct go to Mount Tam', date(2026, 10, 22)),
+    ('22nd of October go to Mount Tam', date(2026, 10, 22)),
+    ('go to Mount Tam on oct 22', date(2026, 10, 22)),
+    ('Oct 22, 2027: go to Mount Tam', date(2027, 10, 22)),
+    ('October 22nd 2027 go to Mount Tam', date(2027, 10, 22)),
+    ('10/22: go to Mount Tam', date(2026, 10, 22)),
+    ('go to Mount Tam by 10/22', date(2026, 10, 22)),
+    ('go to Mount Tam 10/22/2027', date(2027, 10, 22)),
+    ('go to Mount Tam 10/22/27', date(2027, 10, 22)),
+    ('2026-10-22 go to Mount Tam', date(2026, 10, 22)),
+    ('go to Mount Tam 2026-10-22 (added 2026-09-01)', date(2026, 10, 22)),
+    ('Sep 28: renew the permit', date(2026, 9, 28)),        # a few days back: overdue, not next year
+    ('Sept 30 call the vet', date(2026, 9, 30)),
+    ('Jan 5 file taxes', date(2027, 1, 5)),                 # nearer ahead than behind
+    ('Aug 1 send the report', date(2026, 8, 1)),            # nearer behind than ahead
+    ('May 3 book flights', date(2026, 5, 3)),               # 150 days back beats 215 ahead
+    ('May 3 2027 book flights', date(2027, 5, 3)),
+    ('Oct 22 or Oct 20 go to Mount Tam', date(2026, 10, 20)),  # the earliest date wins
+    ('Mount Tam 📅 2026-10-25 (Oct 22 tentative)', date(2026, 10, 25)),  # a Tasks marker wins
+]
+UNDATED = [
+    'go to Mount Tam', 'Mount Tam 22', 'go to Mount Tam (added 2026-09-20)', 'buy 1/2 gallon of milk',
+    'you may 3 times ask', 'Feb 30 is not a day', 'run a marathon 22 times', 'read chapter 13/14',
+    'go to Mount Tam ➕ 2026-09-20', 'Octopus 22 legs',
+]
+
+
+@pytest.mark.parametrize(('text', 'due'), DATED)
+def test_written_dates_are_due_dates(text, due):
+    assert rundown.task_date(text, TODAY) == due
+
+
+@pytest.mark.parametrize('text', UNDATED)
+def test_lines_without_a_date_stay_undated(text):
+    assert rundown.task_date(text, TODAY) is None
+
+
+def test_mount_tam_is_upcoming_with_its_date_not_backlog(tmp_path):
+    todos = tmp_path / '02-todos'
+    todos.mkdir()
+    (todos / 'master.md').write_text('''## P2
+- [ ] Oct 22: go to Mount Tam (added 2026-09-29)
+- [ ] Sep 28: renew the permit
+- [ ] Sept 30 call the vet
+- [ ] Oct 5 pick up the bike
+- [ ] Call the dentist (added 2026-09-01)
+''')
+    context = rundown.todo_context(tmp_path, TODAY.isoformat())
+    assert [(t['text'], t['date']) for t in context['upcoming']] == [
+        ('Oct 5 pick up the bike', '2026-10-05'), ('Oct 22: go to Mount Tam (added 2026-09-29)', '2026-10-22')]
+    assert [(t['date'], t['line']) for t in context['overdue']] == [('2026-09-28', 3)]
+    assert [t['text'] for t in context['today']] == ['Sept 30 call the vet']
+    assert [t['text'] for t in context['undated']] == ['Call the dentist (added 2026-09-01)']
+    assert 'date' not in context['undated'][0]
+    text = rundown.context(tmp_path, datetime(2026, 9, 30, 8).astimezone())
+    assert '"upcoming": [{"text": "Oct 5 pick up the bike"' in text
 
 
 class Apps:

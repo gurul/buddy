@@ -59,10 +59,30 @@ and older unread items needing attention; Slack focuses on mentions, DMs, and
 recent requests. Calendar queries use local midnight through the next midnight.
 
 Todos come from open markdown checkboxes in `CC_BUDDY_VAULT` (the existing
-Second Brain/Obsidian vault). Dated due/scheduled/start markers and today's daily
-note identify today's items; overdue and undated items are separate. Completed
-items, future items, hidden folders, archives and symlinks are excluded. The scan
-is bounded to 5,000 files, 1 MiB per file and 200 tasks. `CC_BUDDY_SECOND_BRAIN=1` supplies the vault; Composio supplies connected
+Second Brain/Obsidian vault). The bridge, not the model, groups each open item as
+**today**, **overdue**, **upcoming** or **undated** (`rundown.task_date`), and
+hands the model an ISO `date` on every dated item:
+
+- Obsidian Tasks markers (`📅`, `⏳`, `🛫`, `due::`, `scheduled::`, `start::`) win
+  when present.
+- Otherwise a date written anywhere in the line counts: `Oct 22`, `October 22nd`,
+  `Oct. 22`, `22 Oct`, `22nd of October`, `Oct 22, 2027`, `2026-10-22`,
+  `10/22/2026`, `10/22/27`. Numbers are month/day. A yearless `10/22` counts only
+  at the start of the line or after on/by/due/before/until, so `1/2 gallon` stays
+  a quantity. A lowercase `may` is a verb, not the month.
+- A date with no year is its occurrence nearest today (a tie goes forward): up to
+  about six months back it is overdue, up to about six months ahead it is upcoming.
+- The earliest date in a line wins. Invalid dates such as `Feb 30` are ignored.
+- The date an item was written down or finished is not a due date: `(added
+  YYYY-MM-DD)` from capture, `created::`/`done::` and the `➕`/`✅`/`❌` stamps are
+  removed before the dates are read.
+- An open item in today's daily note with no date of its own is due today.
+
+Upcoming and overdue items are sorted by date. Completed items, hidden folders,
+archives and symlinks are excluded. (Until 2026-09-30 only Tasks markers were
+read, so "Oct 22: go to Mount Tam" was reported as undated backlog, and every
+future item was dropped.) The scan is bounded to 5,000 files, 1 MiB per file and
+200 tasks. `CC_BUDDY_SECOND_BRAIN=1` supplies the vault; Composio supplies connected
 Gmail/Calendar/Slack accounts. A source that is not connected, or whose read failed
 outright, is named rather than treated as empty. Result limits, pagination and
 clipping are never mentioned: the rundown reports what it retrieved (owner,

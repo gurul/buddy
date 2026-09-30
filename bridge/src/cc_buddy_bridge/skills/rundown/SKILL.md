@@ -18,9 +18,11 @@ time window, and Obsidian checkbox evidence. This is a read-only summary.
    supported. Include all-day events, times in the owner's timezone, overlaps,
    and the next event. Exclude cancelled events. Do not create or change events.
 4. Todos: use the supplied Obsidian evidence, including source note and line.
-   Separate today's explicit items from overdue items and undated backlog.
-   Undated items are not automatically due today. Completed and future items
-   are omitted by the reader. Do not invent todos from email or calendar, tick
+   The reader has already grouped them by the date written in each line: today,
+   overdue, upcoming and undated. Keep those groups exactly as supplied and never
+   move an item between them. Give each overdue and upcoming item its date.
+   Undated items are not automatically due today. Completed items are omitted by
+   the reader. Do not invent todos from email or calendar, tick
    boxes, edit notes, or write a daily note.
 5. Slack: check unread mentions and DMs plus today's relevant messages that need
    attention. Prioritize direct requests, decisions, and deadlines; include the
