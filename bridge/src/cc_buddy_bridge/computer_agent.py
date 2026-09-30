@@ -1518,44 +1518,138 @@ def _openai_client(api_key: Optional[str], client: Any) -> Any:
 # The SDK retries its own connection errors, but a TLS read that fails AFTER the handshake comes out of anyio
 # as a bare ssl.SSLError (anyio/streams/tls.py re-raises everything but an EOF), which httpcore2 leaves unmapped
 # and the SDK neither wraps nor retries (openai/_httpx2.py request_exceptions: httpx2.RequestError only). Live,
-# 2026-09-28: three phone-call turns in one morning died on one each, "telegram: turn failed: SSLError", and
-# the owner heard FAILED_LINE. One retry is the whole cure; a second failure in a row is a real outage.
-TLS_RETRIES = 1
+# 2026-09-28: three phone-call turns in one morning died on one each, "telegram: turn failed: SSLError".
+#
+# One immediate retry on the same client was not enough. Live, 2026-09-30 11:11:31: "TLS dropped mid-request
+# (SSLV3_ALERT_BAD_RECORD_MAC); once more", then 120 ms later "turn failed: SSLError". The retry went back into
+# the same AsyncOpenAI client, so the same httpx connection pool, with no pause. httpcore2 closes only the one
+# connection that raised (http11.py _response_closed); any other keep-alive connection in that pool is handed
+# out first, and one opened in the same window is as stale as the one that just failed. The cure: each retry
+# waits a moment and goes out on a NEW client (a new pool, so a new TCP and TLS connection), and the old
+# client is closed once nothing is using it.
+TLS_BACKOFF: tuple[float, ...] = (0.3, 1.0)     # the wait before each retry, one entry per retry
+TLS_RETRIES = len(TLS_BACKOFF)                  # so at most three tries
 
 
-def make_response_creator(api_key: Optional[str] = None, client: Any = None) -> Callable[[dict[str, Any]],
-                                                                                          Awaitable[dict[str, Any]]]:
-    """responses.create as a dict-in/dict-out coroutine (the seam tests fake). ``client`` is for tests."""
-    client = _openai_client(api_key, client)
+def is_connection_drop(e: BaseException) -> bool:
+    """The connection to the model broke before its answer arrived: a TLS drop, a reset socket, or the SDK's
+    own connection error after its retries. Not an API refusal, not a bug in buddy."""
+    if isinstance(e, (ssl.SSLError, ConnectionError)):
+        return True
+    try:
+        from openai import APIConnectionError
+    except ImportError:  # pragma: no cover — openai is a dependency
+        return False
+    return isinstance(e, APIConnectionError)
+
+
+class _ClientSlot:
+    """The client the next call uses, and a way to swap it for a fresh one after a TLS drop.
+
+    A swapped-out client is closed as soon as no call is still using it (a concurrent turn that is mid-request
+    on the old client finishes there first). With a fixed ``client`` (tests) and no factory, a swap hands back
+    the same object, as before."""
+
+    def __init__(self, factory: Callable[[], Any]) -> None:
+        self._factory = factory
+        self.client = factory()
+        self._busy: dict[int, int] = {}
+        self._retired: dict[int, Any] = {}
+
+    def lease(self) -> Any:
+        c = self.client
+        self._busy[id(c)] = self._busy.get(id(c), 0) + 1
+        return c
+
+    async def release(self, c: Any) -> None:
+        n = self._busy.get(id(c), 1) - 1
+        if n > 0:
+            self._busy[id(c)] = n
+            return
+        self._busy.pop(id(c), None)
+        old = self._retired.pop(id(c), None)
+        if old is not None:
+            await _close_quietly(old)
+
+    def replace(self, bad: Any) -> None:
+        """Called by a call whose request on ``bad`` dropped: the next lease is a new client. A second call
+        that dropped on the same ``bad`` finds it already replaced and shares the new one."""
+        if self.client is not bad:
+            return
+        fresh = self._factory()
+        if fresh is bad:
+            return
+        self.client = fresh
+        self._retired[id(bad)] = bad            # closed by the release of its last lease
+
+
+async def _close_quietly(client: Any) -> None:
+    close = getattr(client, "close", None)
+    if close is None:
+        return
+    try:
+        result = close()
+        if asyncio.iscoroutine(result):
+            await result
+    except Exception as e:  # noqa: BLE001 — a broken pool failing to close is not the caller's problem
+        log.debug("responses: closing a dropped client failed: %s", type(e).__name__)
+
+
+def _slot(api_key: Optional[str], client: Any, client_factory: Optional[Callable[[], Any]]) -> _ClientSlot:
+    if client_factory is not None:
+        return _ClientSlot(client_factory)
+    if client is not None:
+        return _ClientSlot(lambda: client)
+    return _ClientSlot(lambda: _openai_client(api_key, None))
+
+
+def make_response_creator(api_key: Optional[str] = None, client: Any = None, *,
+                          client_factory: Optional[Callable[[], Any]] = None,
+                          sleep: Callable[[float], Awaitable[None]] = asyncio.sleep,
+                          ) -> Callable[[dict[str, Any]], Awaitable[dict[str, Any]]]:
+    """responses.create as a dict-in/dict-out coroutine (the seam tests fake). ``client``, ``client_factory``
+    and ``sleep`` are for tests. A TLS drop is retried after TLS_BACKOFF on a fresh client. That is safe: the
+    request is a model call with no side effect of its own, and a tool call it asks for runs only after its
+    answer has arrived, which a dropped request never did."""
+    slot = _slot(api_key, client, client_factory)
 
     async def create(request: dict[str, Any]) -> dict[str, Any]:
         for attempt in range(TLS_RETRIES + 1):
+            c = slot.lease()
             try:
-                r = await client.responses.create(**request)
+                r = await c.responses.create(**request)
             except ssl.SSLError as e:
                 if attempt == TLS_RETRIES:
                     raise
-                log.warning("responses: TLS dropped mid-request (%s); once more", e.reason or type(e).__name__)
-                continue
-            return r.model_dump(exclude_none=True)
+                slot.replace(c)
+                log.warning("responses: TLS dropped mid-request (%s); retrying in %.1f s on a new connection",
+                            e.reason or type(e).__name__, TLS_BACKOFF[attempt])
+            else:
+                return r.model_dump(exclude_none=True)
+            finally:
+                await slot.release(c)
+            await sleep(TLS_BACKOFF[attempt])
         raise AssertionError("unreachable")
 
     return create
 
 
-def make_stream_creator(api_key: Optional[str] = None, client: Any = None) -> Callable[
-        [dict[str, Any], Callable[[str], None]], Awaitable[dict[str, Any]]]:
+def make_stream_creator(api_key: Optional[str] = None, client: Any = None, *,
+                        client_factory: Optional[Callable[[], Any]] = None,
+                        sleep: Callable[[float], Awaitable[None]] = asyncio.sleep,
+                        ) -> Callable[[dict[str, Any], Callable[[str], None]], Awaitable[dict[str, Any]]]:
     """responses.create, streamed: ``on_text`` gets each piece of the reply's text as it is written, and the
     finished response comes back as the same dict ``make_response_creator`` returns (the Telegram call reads a
-    reply out a sentence at a time, telegram.SentenceStream). A TLS drop is retried only while nothing has been
-    handed to ``on_text``: once a sentence is being read out, a retry would read it out twice."""
-    client = _openai_client(api_key, client)
+    reply out a sentence at a time, telegram.SentenceStream). A TLS drop is retried as there, but only while
+    nothing has been handed to ``on_text``: once a sentence is being read out, a retry would read it out twice."""
+    slot = _slot(api_key, client, client_factory)
 
     async def create(request: dict[str, Any], on_text: Callable[[str], None]) -> dict[str, Any]:
         for attempt in range(TLS_RETRIES + 1):
             spoke = False
+            c = slot.lease()
             try:
-                async with client.responses.stream(**request) as stream:
+                async with c.responses.stream(**request) as stream:
                     async for event in stream:
                         if getattr(event, "type", "") == "response.output_text.delta":
                             spoke = True
@@ -1564,9 +1658,14 @@ def make_stream_creator(api_key: Optional[str] = None, client: Any = None) -> Ca
             except ssl.SSLError as e:
                 if attempt == TLS_RETRIES or spoke:
                     raise
-                log.warning("responses: TLS dropped mid-stream (%s); once more", e.reason or type(e).__name__)
-                continue
-            return plain_response(final.model_dump(exclude_none=True))
+                slot.replace(c)
+                log.warning("responses: TLS dropped mid-stream (%s); retrying in %.1f s on a new connection",
+                            e.reason or type(e).__name__, TLS_BACKOFF[attempt])
+            else:
+                return plain_response(final.model_dump(exclude_none=True))
+            finally:
+                await slot.release(c)
+            await sleep(TLS_BACKOFF[attempt])
         raise AssertionError("unreachable")
 
     return create

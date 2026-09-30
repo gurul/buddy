@@ -90,11 +90,27 @@ def test_holo_steer_stop_then_finish_is_stopped(tmp_path):
 
 # -- ResponseRetry.lean --
 
+async def _no_wait(_secs: float) -> None:
+    return None
+
+
+def _stream(client):
+    return make_stream_creator(client=client, sleep=_no_wait)
+
+
 def test_response_retry_fixed_replays_counterexample():
     """[drop, text, done]: succeeded, not failed, nothing read out twice."""
     client = FakeClient([tls_drop()], ['It is ', 'four.'])
     heard: list[str] = []
-    out = asyncio.run(make_stream_creator(client=client)({}, heard.append))
+    out = asyncio.run(_stream(client)({}, heard.append))
+    assert text_of(out) == 'It is four.' and heard == ['It is ', 'four.']
+
+
+def test_response_retry_fixed_survives_two_drops():
+    """[drop, drop, text, done]: the 2026-09-30 trace (a drop, then a drop on the retry) now succeeds."""
+    client = FakeClient([tls_drop()], [tls_drop()], ['It is ', 'four.'])
+    heard: list[str] = []
+    out = asyncio.run(_stream(client)({}, heard.append))
     assert text_of(out) == 'It is four.' and heard == ['It is ', 'four.']
 
 
@@ -103,13 +119,13 @@ def test_response_retry_fixed_never_repeats():
     client = FakeClient(['It is ', tls_drop()], ['It is ', 'four.'])
     heard: list[str] = []
     with pytest.raises(ssl.SSLError):
-        asyncio.run(make_stream_creator(client=client)({}, heard.append))
+        asyncio.run(_stream(client)({}, heard.append))
     assert heard == ['It is ']
 
 
-def test_response_retry_two_drops_fail():
-    """[drop, drop]: failed with droppedTwice — the only other way a turn may fail."""
-    client = FakeClient([tls_drop()], [tls_drop()], ['never'])
+def test_response_retry_three_drops_fail():
+    """[drop, drop, drop]: failed with droppedEvery — the only other way a turn may fail."""
+    client = FakeClient([tls_drop()], [tls_drop()], [tls_drop()], ['never'])
     with pytest.raises(ssl.SSLError):
-        asyncio.run(make_stream_creator(client=client)({}, lambda t: None))
-    assert client.responses.calls == 2
+        asyncio.run(_stream(client)({}, lambda t: None))
+    assert client.responses.calls == 3

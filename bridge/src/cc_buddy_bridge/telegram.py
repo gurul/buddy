@@ -344,6 +344,10 @@ TURN_RESTART_SECS = 2.0              # all of those lines together: a restart is
 NOTHING_TO_STOP_LINE = "Nothing is running."
 ON_IT_LINE = "On it. I'll text you the result."
 FAILED_LINE = "Something went wrong on my side. Try me again in a moment."
+# A turn lost because the connection to the model broke after the seam's retries (computer_agent.TLS_BACKOFF):
+# say what happened and that sending it again is the fix. Live, 2026-09-30 11:11: "Send me the links" got
+# FAILED_LINE after a TLS drop, which told the owner nothing.
+DROPPED_LINE = "My connection to the model dropped before I could answer. Send that again and I'll pick it up."
 
 INSTRUCTIONS = """You are buddy, a small desk robot with a cheerful, curious personality. Your owner is texting
 you from their phone, so they are probably not at the desk and cannot see the Mac's screen or hear you.
@@ -3402,8 +3406,10 @@ class TelegramInlet:
             except asyncio.CancelledError:
                 raise
             except Exception as e:  # noqa: BLE001 — the type only: a message can quote what was asked
+                from .computer_agent import is_connection_drop
+
                 log.warning("telegram: turn failed: %s", type(e).__name__)
-                await self._say(chat_id, FAILED_LINE)
+                await self._say(chat_id, DROPPED_LINE if is_connection_drop(e) else FAILED_LINE)
                 return
             if reply:
                 self._note("buddy", reply)
