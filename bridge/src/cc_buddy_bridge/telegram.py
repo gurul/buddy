@@ -4125,7 +4125,7 @@ class TelegramInlet:
         web = composio_tools.web_toolkit_slugs(name, args)
         if web:
             # The public web is buddy's own web_search, one round; through Composio it cost the office-hours
-            # turns of 2026-09-30 every round they had (composio_tools.DISABLED_TOOLKITS).
+            # turns of 2026-09-30 every round they had (composio_tools.TOOLKITS, WEB_TOOLKITS).
             log.info("telegram: apps: refused web toolkit %s; web_search instead", ", ".join(web))
             return {"ok": False, "reason": f"{', '.join(web)} is not used here: look the web up with "
                                            f"{websearch.TOOL_NAME}, which answers in one step."}

@@ -171,6 +171,7 @@ token without an owner id is off. A door with no allowlist never opens.
 | `CC_BUDDY_COMPOSIO` | `0` | `1`: the owner's apps through Composio ([below](#the-apps-composio)). Needs `COMPOSIO_API_KEY` in the env file. |
 | `CC_BUDDY_CODEX_BIN` | desktop app bundled Codex, then `codex` on PATH | Executable for computer-task delegation. Computer Use must be enabled in its installed plugins. |
 | `CC_BUDDY_COMPOSIO_POLICY` | `gmail=read,googlecalendar=write,googledrive=ask` | What a WRITING app call may do, per toolkit: `read` refuses it, `write` runs it, `ask` is your yes/no in the chat (the default for any toolkit not named). Reads always run. |
+| `CC_BUDDY_COMPOSIO_TOOLKITS` | Google's apps, Slack, Notion, GitHub, Linear, Todoist, Outlook, Dropbox, Zoom, Discord, Trello, Asana, Airtable, plus every app you have connected | The apps buddy's Composio session may use (an allow-list, comma-separated). `all` removes the limit. Web search and scraping toolkits are never used either way; buddy's own `web_search` covers the public web. |
 | `CC_BUDDY_COMPOSIO_STATE` | `~/.config/cc-buddy-bridge/composio.json` | Where the session id is kept between restarts. |
 | `CC_BUDDY_COMPOSIO_TIMEOUT_SECS` | `60` | One app call's timeout. |
 | `CANVAS_BASE_URL` | unset | Your school's Canvas, `https://<school>.instructure.com` or its own domain; https only ([canvas.md](canvas.md)). |
@@ -759,13 +760,20 @@ split is enforced three ways:
 - **The instructions:** Composio is for your accounts; the public web is
   `web_search`. A job that needs both uses both, for example finding times on
   a course page, then adding them to the calendar.
-- **The session:** buddy's Composio session is created with the web-search
-  and scraping toolkits disabled (`composio_tools.DISABLED_TOOLKITS`, 19 of
-  them, each checked to exist). With only `composio_search` off, Composio's
-  tool search offered Exa, SerpAPI, Apify and a browser tool instead. A
-  session stored with a different list is not resumed; a new one is made.
+- **The session:** buddy's Composio session is made with an allow-list
+  (`composio_tools.TOOLKITS`): Google's apps, Slack, Notion, GitHub, Linear,
+  Todoist, Outlook, Dropbox, Zoom, Discord, Trello, Asana and Airtable, plus
+  every app you have connected. Nothing on the public web is on it. A deny-list
+  did not hold: with Composio's search off, its tool search offered Exa and
+  SerpAPI, then Apify, a browser tool, Tavily's MCP variant and Agenty. With
+  the allow-list, a tool search for "search the web for a course's office
+  hours" offers no web toolkit (checked live 2026-09-30).
+  `CC_BUDDY_COMPOSIO_TOOLKITS=gmail,notion` replaces the list, and `all`
+  removes the limit. A session stored with a different list (for example after
+  you connect a new app) is not resumed; a new one is made at the next start.
 - **A guard:** a multi-execute that still names one of those toolkits is
-  refused before it reaches Composio, with a reply pointing at `web_search`.
+  refused before it reaches Composio, with a reply pointing at `web_search`
+  (`composio_tools.WEB_TOOLKITS`). This is what holds under `all`.
 
 Before 2026-09-30 the limit was 6, and running out threw the whole turn away
 with "I got tangled up in that one". That happened twice in a row on "find the

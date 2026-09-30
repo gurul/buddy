@@ -48,15 +48,21 @@ MULTI_EXECUTE = "COMPOSIO_MULTI_EXECUTE_TOOL"
 # 2026-09-30 the brain used it (COMPOSIO_SEARCH_WEB, COMPOSIO_SEARCH_FETCH_URL_CONTENT, per Composio's execution
 # log) to find a course's office hours, which costs a tool search plus a multi-execute per lookup, and ran out
 # of rounds one step before adding the events. buddy's own web_search (websearch.py, routed by Jev) is one round.
-# With composio_search off, the tool search offered other providers' web search and scrapers instead (Exa,
-# SerpAPI, then Apify and a browser tool), so these are off together: every one checked to exist with
-# client.toolkits.get on 2026-09-30 (a name Composio does not know could fail the session's creation).
-# WEB_TOOLKITS also backs web_toolkit_slugs, which refuses any that still get through, pointing at web_search.
-DISABLED_TOOLKITS: tuple[str, ...] = (
+# Disabling them one by one does not hold: with composio_search off, the tool search offered Exa and SerpAPI; with
+# those off, Apify, a browser tool, Tavily's MCP variant and Agenty. So the session is made with an allow-list
+# instead (TOOLKITS): the owner's kind of apps plus whatever is connected, and nothing on the public web. Checked
+# live 2026-09-30: with it, a tool search for "search the web for a course's office hours" offers no web toolkit.
+# WEB_TOOLKITS stays as the guard behind it (web_toolkit_slugs), for CC_BUDDY_COMPOSIO_TOOLKITS=all.
+WEB_TOOLKITS: frozenset[str] = frozenset((
     "composio_search", "exa", "serpapi", "serper", "tavily", "linkup", "perplexityai", "firecrawl", "brightdata",
     "scrapingbee", "zenrows", "scrapegraph_ai", "olostep", "agentql", "apify", "hyperbrowser", "browserless",
-    "browserbase_tool", "browser_tool")
-WEB_TOOLKITS = frozenset(DISABLED_TOOLKITS)
+    "browserbase_tool", "browser_tool", "tavily_mcp", "agenty"))
+# The owner's kind of apps (each checked to exist with client.toolkits.get, 2026-09-30); connected toolkits are
+# added at start. CC_BUDDY_COMPOSIO_TOOLKITS="gmail,notion" replaces this list; "all" puts no limit on it.
+TOOLKITS: tuple[str, ...] = (
+    "gmail", "googlecalendar", "googledrive", "googledocs", "googlesheets", "googleslides", "googletasks",
+    "googlemeet", "slack", "notion", "github", "linear", "todoist", "outlook", "dropbox", "zoom", "discord",
+    "trello", "asana", "airtable")
 
 
 def web_toolkit_slugs(name: str, args: Mapping[str, Any]) -> list[str]:
@@ -110,6 +116,7 @@ class ComposioConfig:
     user_id: str
     state_path: Path = DEFAULT_STATE_PATH
     timeout_secs: float = DEFAULT_TIMEOUT_SECS
+    toolkits: Optional[tuple[str, ...]] = TOOLKITS      # the allow-list; None: no limit ("all")
 
 
 def _truthy(value: Optional[str]) -> bool:
@@ -134,7 +141,14 @@ def configured(environ: Optional[Mapping[str, str]] = None, owner_ids: frozenset
         timeout = DEFAULT_TIMEOUT_SECS
     if timeout <= 0:
         timeout = DEFAULT_TIMEOUT_SECS
-    return ComposioConfig(enabled=enabled, user_id=user_id, state_path=state_path, timeout_secs=timeout)
+    raw = (env.get("CC_BUDDY_COMPOSIO_TOOLKITS") or "").strip().lower()
+    toolkits: Optional[tuple[str, ...]] = TOOLKITS
+    if raw == "all":
+        toolkits = None
+    elif raw:
+        toolkits = tuple(dict.fromkeys(t.strip() for t in raw.split(",") if t.strip()))
+    return ComposioConfig(enabled=enabled, user_id=user_id, state_path=state_path, timeout_secs=timeout,
+                          toolkits=toolkits)
 
 
 # -- pure: which calls ask first, and how the question reads --
@@ -398,22 +412,45 @@ class ComposioBridge:
         state = _read_state(self.config.state_path)
         stored = str(state.get("session_id") or "")
         session = None
-        # A session made with other toolkits disabled is not resumed: which toolkits it has is fixed at creation.
-        if stored and state.get("user_id") == self.config.user_id \
-                and list(state.get("disabled") or []) == list(DISABLED_TOOLKITS):
+        # Which toolkits a session has is fixed when it is made, so one made with another list is not resumed.
+        allowed = self._allowed_toolkits()
+        if stored and state.get("user_id") == self.config.user_id and state.get("toolkits") == allowed:
             try:
                 session = sessions.use(stored)
                 log.info("composio: resumed the session for %s", self.config.user_id)
             except Exception as e:  # noqa: BLE001 — the type only
                 log.warning("composio: stored session unusable (%s); creating a fresh one", type(e).__name__)
         if session is None:
-            session = sessions.create(user_id=self.config.user_id, toolkits={"disable": list(DISABLED_TOOLKITS)})
+            if allowed is None:
+                session = sessions.create(user_id=self.config.user_id)
+            else:
+                session = sessions.create(user_id=self.config.user_id, toolkits={"enable": allowed})
             _write_state(self.config.state_path, {"user_id": self.config.user_id,
                                                   "session_id": str(getattr(session, "session_id", "")),
-                                                  "disabled": list(DISABLED_TOOLKITS)})
+                                                  "toolkits": allowed})
             log.info("composio: created a session for %s", self.config.user_id)
         self._session = session
         self._tools = self._load_tools()
+
+    def _allowed_toolkits(self) -> Optional[list[str]]:
+        """The session's allow-list: the configured toolkits plus every one the owner has connected (an app
+        connected outside this list still works), sorted; None when unlimited. A failed lookup of the connected
+        accounts leaves the configured list alone."""
+        if self.config.toolkits is None:
+            return None
+        allowed = set(self.config.toolkits)
+        try:
+            listing = self._client.connected_accounts.list(user_ids=[self.config.user_id])
+            for item in getattr(listing, "items", None) or []:
+                data = item if isinstance(item, Mapping) else _as_dict(item)
+                kit = data.get("toolkit")
+                slug = kit.get("slug") if isinstance(kit, Mapping) else getattr(kit, "slug", kit)
+                if isinstance(slug, str) and slug and data.get("status") == "ACTIVE":
+                    allowed.add(slug.lower())
+        except Exception as e:  # noqa: BLE001 — the type only
+            log.info("composio: connected accounts not listed (%s); the configured toolkits only", type(e).__name__)
+        allowed -= WEB_TOOLKITS
+        return sorted(allowed)
 
     def _load_tools(self) -> list[dict[str, Any]]:
         raw = self._session.tools()
