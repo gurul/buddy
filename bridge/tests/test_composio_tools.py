@@ -9,13 +9,15 @@ import json
 import logging
 import stat
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Any
 
 import pytest
 
 from cc_buddy_bridge.composio_tools import (
     COMPOSIO_DEFAULT,
-    DISABLED_TOOLKITS,
+    TOOLKITS,
+    WEB_TOOLKITS,
     ComposioBridge,
     configured,
     consequential_slugs,
@@ -82,9 +84,20 @@ class FakeSessions:
         return FakeSession(session_id, self._execute)
 
 
+class FakeAccounts:
+    def __init__(self, connected: tuple[tuple[str, str], ...] = (), raises: bool = False) -> None:
+        self.connected, self.raises = connected, raises
+
+    def list(self, *, user_ids: list[str]) -> Any:
+        if self.raises:
+            raise RuntimeError("down")
+        return SimpleNamespace(items=[{"toolkit": {"slug": slug}, "status": status} for slug, status in self.connected])
+
+
 class FakeClient:
-    def __init__(self, **kw: Any) -> None:
+    def __init__(self, connected: tuple[tuple[str, str], ...] = (), accounts_raise: bool = False, **kw: Any) -> None:
         self.sessions = FakeSessions(**kw)
+        self.connected_accounts = FakeAccounts(connected, accounts_raise)
 
 
 def _cfg(tmp_path: Path, owners: frozenset[int] = frozenset({7})) -> Any:
@@ -124,9 +137,9 @@ def test_the_session_is_the_owners_and_is_reused(tmp_path: Path) -> None:
     assert first.sessions.created == ["telegram-7"] and first.sessions.used == []
     assert b1.session_id == "trs_new_1"
     state = json.loads(cfg.state_path.read_text())
-    assert state == {"user_id": "telegram-7", "session_id": "trs_new_1", "disabled": list(DISABLED_TOOLKITS)}
-    assert first.sessions.toolkits == [{"disable": list(DISABLED_TOOLKITS)}]   # the web search toolkits are out
-    assert "composio_search" in DISABLED_TOOLKITS and "exa" in DISABLED_TOOLKITS
+    assert state == {"user_id": "telegram-7", "session_id": "trs_new_1", "toolkits": sorted(TOOLKITS)}
+    assert first.sessions.toolkits == [{"enable": sorted(TOOLKITS)}]          # an allow-list: no web toolkits
+    assert not set(TOOLKITS) & WEB_TOOLKITS
     assert stat.S_IMODE(cfg.state_path.stat().st_mode) == 0o600
     # Only function tools with a name survive; names is derived from them.
     assert all(t["type"] == "function" and t["name"] for t in b1.tools())
@@ -139,13 +152,13 @@ def test_the_session_is_the_owners_and_is_reused(tmp_path: Path) -> None:
     assert second.sessions.used == ["trs_new_1"] and second.sessions.created == []
     assert b2.session_id == "trs_new_1"
 
-    # A session stored before composio_search was disabled (no "disabled" in the state) still has it:
-    # it is not resumed, and a fresh one is made without it (2026-09-30).
+    # A session stored before the allow-list (no "toolkits" in the state) has the web toolkits:
+    # it is not resumed, and a fresh one is made with the list (2026-09-30).
     cfg.state_path.write_text(json.dumps({"user_id": "telegram-7", "session_id": "trs_old"}))
     older = FakeClient()
     ComposioBridge(cfg, client_factory=lambda: older).start()
     assert older.sessions.used == [] and older.sessions.created == ["telegram-7"]
-    assert json.loads(cfg.state_path.read_text())["disabled"] == list(DISABLED_TOOLKITS)
+    assert json.loads(cfg.state_path.read_text())["toolkits"] == sorted(TOOLKITS)
 
     # A stored id for someone else is not ours: create, and overwrite the state.
     cfg.state_path.write_text(json.dumps({"user_id": "telegram-999", "session_id": "trs_theirs"}))
@@ -320,3 +333,35 @@ def test_web_toolkit_slugs_catch_web_search_and_scrapers_by_prefix() -> None:
                       {"tool_slug": "EXAMPLEAPP_GET_THING", "arguments": {}}]}
     assert web_toolkit_slugs("COMPOSIO_MULTI_EXECUTE_TOOL", apps) == []
     assert web_toolkit_slugs("COMPOSIO_SEARCH_TOOLS", web) == []
+
+
+def test_the_allow_list_adds_what_is_connected_and_never_a_web_toolkit(tmp_path: Path) -> None:
+    cfg = _cfg(tmp_path)
+    client = FakeClient(connected=(("canvas", "ACTIVE"), ("gmail", "EXPIRED"), ("exa", "ACTIVE"), ("figma", "INITIATED")))
+    ComposioBridge(cfg, client_factory=lambda: client).start()
+    enabled = client.sessions.toolkits[0]["enable"]
+    assert "canvas" in enabled                                  # an app connected outside the list still works
+    assert "exa" not in enabled and "figma" not in enabled      # a web toolkit never; a half-made connection not
+    assert enabled == sorted(set(TOOLKITS) | {"canvas"})
+    # connecting an app changes the list: the stored session is not resumed, a fresh one is made
+    later = FakeClient(connected=(("canvas", "ACTIVE"), ("figma", "ACTIVE")))
+    ComposioBridge(cfg, client_factory=lambda: later).start()
+    assert later.sessions.used == [] and "figma" in later.sessions.toolkits[0]["enable"]
+    # the same list again: resumed
+    again = FakeClient(connected=(("canvas", "ACTIVE"), ("figma", "ACTIVE")))
+    ComposioBridge(cfg, client_factory=lambda: again).start()
+    assert again.sessions.created == [] and len(again.sessions.used) == 1
+
+
+def test_the_setting_replaces_the_list_all_lifts_it_and_a_failed_lookup_keeps_it(tmp_path: Path) -> None:
+    env = {"CC_BUDDY_COMPOSIO": "1", "COMPOSIO_API_KEY": "ak_test", "CC_BUDDY_COMPOSIO_STATE": str(tmp_path / "c.json")}
+    assert configured({**env, "CC_BUDDY_COMPOSIO_TOOLKITS": " Gmail, notion ,gmail"}, frozenset({7})).toolkits == (
+        "gmail", "notion")
+    unlimited = configured({**env, "CC_BUDDY_COMPOSIO_TOOLKITS": "all"}, frozenset({7}))
+    assert unlimited.toolkits is None
+    client = FakeClient()
+    ComposioBridge(unlimited, client_factory=lambda: client).start()
+    assert client.sessions.toolkits == [None]                   # no toolkits argument at all
+    down = FakeClient(accounts_raise=True)
+    ComposioBridge(configured(env, frozenset({7})), client_factory=lambda: down).start()
+    assert down.sessions.toolkits == [{"enable": sorted(TOOLKITS)}]
