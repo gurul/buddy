@@ -225,16 +225,6 @@ backup exists:
 
 ## Status
 
-What was checked, and how, is in [GATES.md](../GATES.md). As of 2026-09-30:
+What was checked and how is in [GATES.md](../GATES.md). As of 2026-09-30 it all works through the iPhone: a press on the stick, Buddy Link relaying, buddy hearing it and answering on the stick's speaker (live transcription about 0.3-1 s; release to buddy's first sound 2.4-3.9 s on the measured presses). Picking the stick up opens the call before the press.
 
-- The codec agrees byte for byte in all three languages.
-- The daemon's side is tested.
-- The firmware and both apps build.
-- The stick has been flashed.
-
-What still needs the owner's hands:
-
-- Tapping reset to leave download mode.
-- The Bluetooth pairing code.
-- The Telegram pairing tap.
-- The first press from away from home.
+Still open: a press with the phone locked and away from home Wi-Fi (G5.3), and the stick's played/lost counters, which count from boot rather than per connection.

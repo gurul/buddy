@@ -28,16 +28,16 @@ Scope: the owner asked on 2026-09-30 for the M5StickS3 to connect to the iPhone,
   EXPECT: STICK_COMPILE_OK
   EVIDENCE: exit=0; shell=/bin/sh; cwd=<repo>; path=8ae25fade4c8/16 entries; output=archived ELF for d93c39b-dirty | STICK_COMPILE_OK
 
-- [ ] G2.2: Flashed, the stick advertises the link service and a Mac probe (standing in for the phone) connects, gets its hello, sends it one second of tone, and the stick reports that many samples played.
+- [x] G2.2: Flashed, the stick advertises the link service and a Mac probe (standing in for the phone) connects, gets its hello, sends it one second of tone, and the stick reports that many samples played.
   CHECK: sh tools/stick_link/probe.sh tone
   EXPECT: STICK_PROBE_OK
-  EVIDENCE: pending. Last run 2026-09-30 failed: "Looking for the stick… | STICK_PROBE_TIMEOUT". The serial log shows why: boot:0x21 DOWNLOAD(USB/UART0), the stick latched in download mode after the reset hold; it needs one short reset tap.
+  EVIDENCE: exit=0; output=stat played 24000, lost 0, payload 244 | STICK_PROBE_OK (2026-09-30 ~16:50, BuddyProbe tone, after the reset tap)
 
-- [ ] G2.3: A press, held while the owner speaks, reaches the probe as audio loud enough to transcribe (peak above -30 dBFS). Manual: needs a voice.
-  EVIDENCE: pending
+- [x] G2.3: A press, held while the owner speaks, reaches the probe as audio loud enough to transcribe (peak above -30 dBFS). Manual: needs a voice.
+  EVIDENCE: manual, 2026-09-30: a 2.95 s press reached the probe at rms -20.8 dBFS, 0.00% clipped after the first 100 ms; gpt-4o-mini-transcribe on that WAV heard "My name is Guru. I'm testing the system."
 
-- [ ] G2.4: Buddy's voice is clear on the stick's speaker. Manual: the owner's ears.
-  EVIDENCE: pending
+- [x] G2.4: Buddy's voice is clear on the stick's speaker. Manual: the owner's ears.
+  EVIDENCE: manual, 2026-09-30: the owner heard replies on the stick, first "really quiet"; the ES8311 DAC was raised +12 dB (0xD7) and the owner then said "everything looks amazing"
 
 ## P3 The daemon
 
@@ -55,8 +55,8 @@ Scope: the owner asked on 2026-09-30 for the M5StickS3 to connect to the iPhone,
 
 ## P4 End to end through the Mac
 
-- [ ] G4.1: With the Mac relay standing in for the phone, a press on the stick is heard by buddy (the daemon log shows `call: press`) and the reply plays on the stick. Manual: needs a voice.
-  EVIDENCE: pending
+- [x] G4.1: With the Mac relay standing in for the phone, a press on the stick is heard by buddy (the daemon log shows `call: press`) and the reply plays on the stick. Manual: needs a voice.
+  EVIDENCE: manual, 2026-09-30 18:07: through BuddyProbe relay, "What is the weather tomorrow?" heard exactly; daemon log "call: press 3.0 s → heard in 0.94 s (live) → first sound 3.94 s"; the reply's audio streamed to the stick
 
 ## P5 The iPhone
 
@@ -65,10 +65,10 @@ Scope: the owner asked on 2026-09-30 for the M5StickS3 to connect to the iPhone,
   EXPECT: IOS_BUILD_OK
   EVIDENCE: exit=0; shell=/bin/sh; cwd=<repo>; path=8ae25fade4c8/16 entries; output=(xcodebuild's multiple-destination warning, the Mac's id redacted; build.sh now pins arm64) | IOS_BUILD_OK
 
-- [ ] G5.2: The app is installed on the owner's iPhone.
+- [x] G5.2: The app is installed on the owner's iPhone.
   CHECK: D=$(xcrun devicectl list devices 2>/dev/null | awk '/physical/ && /iPhone/ {for (i=1;i<=NF;i++) if ($i ~ /^[0-9A-F]{8}-[0-9A-F]{16}$/) print $i; exit}'); xcrun devicectl device info apps --device "$D" 2>&1 | grep -q com.github.cc-buddy-bridge.BuddyLink && echo IOS_INSTALLED_OK
   EXPECT: IOS_INSTALLED_OK
-  EVIDENCE: pending
+  EVIDENCE: exit=0; devicectl: App installed, bundleID com.github.cc-buddy-bridge.BuddyLink; info apps lists it (2026-09-30 ~18:20)
 
 - [ ] G5.3: Paired from the Telegram link, with the phone locked and off home Wi-Fi, a press on the stick gets a spoken answer on the stick. Manual: the owner, away from the desk.
   EVIDENCE: pending
