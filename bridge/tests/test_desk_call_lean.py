@@ -60,7 +60,12 @@ def test_a_desk_call_that_ends_leaves_the_phone_calls_listener() -> None:
         serving = asyncio.ensure_future(phones._serve(ws))  # type: ignore[arg-type]
         await settle()
         phone = phones.active
-        assert phone is not None and rig.inlet._call_say == phone.say
+        # An open phone call does not take the chat until its first press (2026-09-30: the stick opens one when
+        # it is picked up); the model's `phoneStart` is that press.
+        assert phone is not None and rig.inlet._call_say is not None and rig.inlet._call_say != phone.say
+        ws.inbox.put_nowait((phone_call.OP_TEXT, json.dumps({"type": "talk"}).encode()))
+        await settle()
+        assert rig.inlet._call_say == phone.say
 
         await desk.press(False)
         await desk.stop()                                        # the desk call ends (quiet, or stopped)

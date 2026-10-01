@@ -47,7 +47,13 @@ MAX_PRESS_SECS = 120.0                  # one press holds at most this much audi
 MIN_PRESS_SECS = 0.35                   # shorter than this is a tap, not words
 MAX_CALL_SECS = 60 * 60                 # a call this long is ended
 QUIET_SECS = 30.0                       # nothing from the phone this long (it sends a ping every 10 s): it is gone
-MAX_SPOKEN_CHARS = 1500                 # a reply longer than this is read in part; the chat has all of it
+MAX_SPOKEN_CHARS = 1500
+# A call holds the chat (its listener) from its first press, not from when it opens, and an idle one gives it back to
+# the desk's button. The stick opens a call when it is picked up (docs/stick-link.md), so an open call is often an
+# unused one: on 2026-09-30 one blocked the Voice PE ("desk call: the phone is on a call; the button waits") and
+# would have read the owner's texted replies out on the stick. Idle: no press, transcription, reply or speech for
+# this long.
+IDLE_YIELD_SECS = 8.0                 # a reply longer than this is read in part; the chat has all of it
 # The call's ears (owner, 2026-09-30, from the stick: "transcription is terrible"; "That's a vague Da they talking
 # to me" came back for a sentence with pauses). The full model, not the mini; CC_BUDDY_CALL_STT_MODEL overrides it.
 DEFAULT_STT_MODEL = "gpt-4o-transcribe"
@@ -429,6 +435,31 @@ class Call:
         self.opening: Optional[asyncio.Task[Any]] = None
         self.released_at: Optional[float] = None   # the press being answered: when it was let go
         self.timing: dict[str, float] = {}
+        self.listening = False                  # this call is the chat's listener (from its first press)
+        self.speaking = False
+        self.last_activity = clock()
+
+    def _touch(self) -> None:
+        self.last_activity = self.clock()
+
+    def _take_chat(self) -> bool:
+        if not self.listening:
+            self.listening = bool(self.brain.listen(self.say))
+        return self.listening
+
+    @property
+    def idle(self) -> bool:
+        return (not self.talking and not self.speaking and not self.tasks and self.lines.empty()
+                and self.clock() - self.last_activity >= IDLE_YIELD_SECS)
+
+    def release_if_idle(self) -> bool:
+        """The desk's button wants the chat: an idle call lets go of it (and stays open, for its next press)."""
+        if self.listening and self.idle:
+            self.brain.listen(None, owner=self.say)
+            self.listening = False
+            log.info("call: idle, so the desk's button takes the chat")
+            return True
+        return not self.listening
 
     def _spawn(self, coro: Awaitable[Any]) -> None:
         task = asyncio.ensure_future(coro)
@@ -472,6 +503,8 @@ class Call:
         carry = b""
         while True:
             text = await self.lines.get()
+            self.speaking = True
+            self._touch()
             await self._state("speaking")
             for piece in sentences(text):
                 async for chunk in self._speech(piece):
@@ -483,6 +516,8 @@ class Call:
                             self._first_sound()
                         await self.ws.send_bytes(data)
             if self.lines.empty():
+                self.speaking = False
+                self._touch()
                 await self._state("listening")
 
     def _first_sound(self) -> None:
@@ -517,6 +552,8 @@ class Call:
 
     async def _begin_press(self) -> None:
         self.talking, self.press, self.ears_live = True, bytearray(), False
+        self._touch()
+        self._take_chat()                       # the first press, or the first after the desk took it
         await self.interrupt()
         if self.ears is not None and not self.ears.broken:
             try:
@@ -576,7 +613,13 @@ class Call:
         """Until the phone hangs up or the hour is up. Returns why it ended."""
         self.reading = asyncio.ensure_future(self.read_out())
         self.opening = asyncio.ensure_future(self._open_ears())       # while the owner reaches for the button
-        if not self.brain.listen(self.say):
+        # Is there a chat to be in? Asked without taking the listener, which a desk call may hold: the call takes it
+        # at its first press. (A brain without chat_ready is asked the old way, by taking it.)
+        ready = getattr(self.brain, "chat_ready", None)
+        if callable(ready):
+            if not ready():
+                return "buddy's chat isn't running"
+        elif not self._take_chat():
             return "buddy's chat isn't running"
         started = self.clock()
         try:
@@ -627,6 +670,12 @@ class PhoneCalls:
                  clock: Callable[[], float] = time.monotonic) -> None:
         self.check_owner, self.brain, self.voice, self.clock = check_owner, brain, voice, clock
         self.active: Optional[Call] = None
+
+    def holding_chat(self) -> bool:
+        """Whether a phone call has the chat and is using it; an idle one gives it back first (Call.release_if_idle).
+        The desk's button waits only on this (daemon._desk_calls_get's phone_busy)."""
+        call = self.active
+        return call is not None and not call.release_if_idle()
 
     async def serve(self, reader: asyncio.StreamReader, writer: asyncio.StreamWriter, headers: dict[str, str],
                     token_check: Optional[Callable[[str], bool]] = None) -> None:
