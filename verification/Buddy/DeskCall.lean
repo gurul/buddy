@@ -63,7 +63,7 @@ inductive Event where
   | pressOff      -- {"cmd":"ptt","on":false}
   | quietEnd      -- the desk call ends: QUIET_SECS without a message
   | stopEnd       -- the desk call ends otherwise (stop, the hour, the link closed)
-  | phoneStart    -- PhoneCalls._serve reaches Call.run
+  | phoneStart    -- a phone call takes the chat: its first press (Call._begin_press → _take_chat), since 2026-09-30; before that, PhoneCalls._serve reaching Call.run
   | phoneEnd      -- the phone call's Call.run returns
   | convStart     -- a voice conversation opens (the wake word, or a think-aloud lesson)
   | convEnd

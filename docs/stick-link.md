@@ -36,7 +36,9 @@ the turn: **hold to talk**, **listening**, **thinking**, **speaking** or
 thinks, the stick ticks quietly until the first sound of the reply (the idea
 comes from Era's m5-atom-puck).
 
-A call opens on your first press and hangs up after 45 quiet seconds. While a
+A call opens when you pick the stick up (or on your first press) and hangs up after 45 quiet seconds. It
+takes buddy's chat only from your first press, and gives it back after 8 idle seconds if the Voice PE's button
+wants it, so an open stick call never blocks the desk. While a
 call is open, buddy's other chat replies are read out too, so it does not
 stay open all day.
 

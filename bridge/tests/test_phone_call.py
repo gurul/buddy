@@ -7,6 +7,7 @@ import asyncio
 import json
 import time
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Any
 
 import pytest
@@ -544,3 +545,71 @@ def test_the_calls_ears_are_the_full_model_cut_only_at_real_pauses_with_near_fie
     # and the meter can price it
     from cc_buddy_bridge import pricing
     assert pricing.estimate_transcribe_cost("gpt-4o-transcribe", {}, seconds=60) == pytest.approx(0.006)
+
+
+# ---- a call holds the chat from its first press, and an idle one gives it to the desk (2026-09-30) ----------------
+
+class ReadyBrain(Brain):
+    """The chat as telegram.TelegramInlet is now: asked whether it is there without taking its listener."""
+
+    def chat_ready(self) -> bool:
+        return True
+
+
+def test_an_open_unused_call_holds_nothing_and_an_idle_one_gives_the_chat_to_the_desk(tmp_path):
+    """The stick opens a call when it is picked up. On 2026-09-30 such a call, never pressed, kept the Voice PE's
+    button waiting ("desk call: the phone is on a call; the button waits")."""
+    now = {"t": 0.0}
+    brain = ReadyBrain()
+
+    async def go():
+        cfg = MiniAppConfig(enabled=True, token=TOKEN, owner_ids=frozenset({OWNER}), ledger_path=tmp_path / "l.json")
+        server = MiniAppServer(cfg, SpendLedger(cfg.ledger_path), page=b"home")
+        server.calls = phone_call.PhoneCalls(lambda d: check_init_data(d, TOKEN, cfg.owner_ids), brain, Voice(),
+                                             clock=lambda: now["t"])
+        port = await server.start()
+        url, origin = f"ws://127.0.0.1:{port}/api/call", f"http://127.0.0.1:{port}"
+        calls = server.calls
+        async with connect(url, origin=origin) as ws:
+            await ws.send(json.dumps({"initData": signed()}))
+            await until(ws, is_("state", state="connected"))
+            # open, never pressed: no listener, and the desk is free
+            assert brain.say is None and calls.holding_chat() is False
+            # the first press takes the chat; the reply is read out
+            await press(ws, 1.0)
+            await until(ws, is_("state", state="listening"))
+            call = calls.active
+            assert call.listening and brain.say == call.say
+            # just answered: still the phone's
+            now["t"] += phone_call.IDLE_YIELD_SECS - 1
+            assert calls.holding_chat() is True and brain.say == call.say
+            # quiet long enough: the desk's button takes it; the call stays open
+            now["t"] += 2
+            assert calls.holding_chat() is False and brain.say is None and calls.active is call
+            # the phone's next press takes it back
+            await press(ws, 1.0)
+            await until(ws, is_("state", state="listening"))
+            assert brain.say == call.say
+        await server.close()
+
+    asyncio.run(go())
+
+
+def test_a_call_that_is_speaking_or_answering_never_gives_the_chat_up(tmp_path):
+    now = {"t": 0.0}
+
+    class Brain2(ReadyBrain):
+        pass
+
+    brain = Brain2()
+    call = phone_call.Call(SimpleNamespace(closed=False), brain, Voice(), clock=lambda: now["t"])
+    call._take_chat()
+    now["t"] = 100.0
+    for busy in ("talking", "speaking"):
+        setattr(call, busy, True)
+        assert call.release_if_idle() is False and brain.say == call.say
+        setattr(call, busy, False)
+    call.lines.put_nowait("still to say")
+    assert call.release_if_idle() is False
+    call.lines.get_nowait()
+    assert call.release_if_idle() is True and brain.say is None       # control: idle, it lets go

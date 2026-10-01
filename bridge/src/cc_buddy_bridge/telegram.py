@@ -3768,6 +3768,14 @@ class TelegramInlet:
         await self._say(chat_id, text, title=MEET_TITLE)
 
     # ---- "Call buddy" (phone_call.py): the chat, spoken ----
+    def chat_ready(self) -> bool:
+        """Whether a call has an owner chat to be in, asked without taking the listener (phone_call.Call.run: a
+        call takes it at its first press). The model's cache is warmed for the first answer either way."""
+        if self._chat_id is None:
+            return False
+        self._spawn(self._warm(), "telegram-call-warm")
+        return True
+
     def listen(self, say: Optional[Callable[[str], None]], owner: Optional[Callable[[str], None]] = None) -> bool:
         """A phone call starts (``say``) or ends (None). While it lasts, what buddy says in the owner's chat is also
         read out on the call. False when there is no owner chat to be in.

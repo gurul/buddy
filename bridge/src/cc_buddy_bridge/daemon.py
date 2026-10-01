@@ -1021,9 +1021,14 @@ class Daemon:
             from .phone_call import make_voice
 
             def phone_busy() -> bool:
+                # Only a phone call that has the chat and is using it (phone_call.IDLE_YIELD_SECS): the stick keeps
+                # a call open whenever it is picked up, and an unused one must not hold the Voice PE's button.
                 server = getattr(getattr(self, "_miniapp", None), "server", None)
                 calls = getattr(server, "calls", None)
-                return getattr(calls, "active", None) is not None
+                if calls is None or getattr(calls, "active", None) is None:
+                    return False
+                holding = getattr(calls, "holding_chat", None)
+                return holding() if callable(holding) else True
 
             def speaker():
                 # buddy's reply on the Voice PE when it is the connected controller, else on the Mac.

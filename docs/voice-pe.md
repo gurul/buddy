@@ -68,7 +68,11 @@ The daemon side is `bridge/src/cc_buddy_bridge/desk_call.py`. It runs
 `phone_call.Call` unchanged, with a stand-in for the phone's WebSocket that
 routes the button, the Mac microphone and the Mac speaker. A call starts
 on the first press. It ends 30 s after buddy finishes, and the next press
-starts a new call. While the Mini App is on a call, the button waits. A
+starts a new call. While a phone call is in use (the Mini App's or the
+stick's: a press, its answer or buddy speaking, and 8 s after), the button
+waits. A phone call that is merely open, or idle for 8 s, does not hold it:
+a call takes buddy's chat only from its first press, and an idle one gives
+it back to the button (the stick opens a call whenever it is picked up). A
 wake-word conversation already has the microphone, so a press during one is
 ignored, and the wake word is off while the button is held. The Telegram
 chat and an OpenAI key must be set up, as they must for Mini App calls.
