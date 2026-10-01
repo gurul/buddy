@@ -66,7 +66,10 @@ SVC="gui/$(id -u)/$LABEL"
 daemon_loaded() { launchctl print "$SVC" >/dev/null 2>&1; }
 port_busy()     { lsof "$PORT" >/dev/null 2>&1; }
 
-if port_busy && daemon_loaded && lsof "$PORT" 2>/dev/null | grep -q python; then
+# Only when the daemon's own process holds the port: "some python holds it" also matched a serial monitor on the
+# bench (2026-09-30) and restarted the daemon, which moved the Mini App to a new port under a live call.
+DAEMON_PID=$(launchctl print "$SVC" 2>/dev/null | awk '/^\tpid = / {print $3}')
+if port_busy && daemon_loaded && [ -n "$DAEMON_PID" ] && lsof -t "$PORT" 2>/dev/null | grep -qx "$DAEMON_PID"; then
   trap 'daemon_loaded || { launchctl bootstrap "gui/$(id -u)" "$PLIST" && echo "daemon restarted"; }' EXIT
   echo "stopping $LABEL — it holds $PORT"
   if ! out=$(launchctl bootout "$SVC" 2>&1); then echo "  launchctl bootout: ${out:-no output}"; fi

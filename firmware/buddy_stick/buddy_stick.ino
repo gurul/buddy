@@ -43,6 +43,11 @@ static constexpr uint8_t REPLY_CH = 0, TONE_CH = 1;
 static constexpr uint32_t PING_EVERY_MS = 1000;        // keeps the phone's app awake while a turn is live
 static constexpr uint32_t AWAKE_AFTER_MS = 20000;      // and this long after the last one
 static constexpr uint32_t DIM_AFTER_MS = 30000;
+// Picking the stick up says a press is coming: a "wake" lets the phone open the call before it, so the first press
+// is transcribed live (measured 2026-09-30: 1.43 s by upload on a call opened by the press, 0.94 s live on an open
+// one). A change in acceleration over this much, at most once per WAKE_EVERY_MS.
+static constexpr float WAKE_G = 0.12f;
+static constexpr uint32_t WAKE_EVERY_MS = 20000;
 static const uint8_t VOLUMES[] = {90, 150, 210, 255};
 
 enum class Ui : uint8_t { NoPhone, Pairing, Ready, Listening, Thinking, Speaking, Offline, SelfTest };
@@ -73,6 +78,10 @@ static size_t frameFill = 0;
 static stick::State upState;
 static uint8_t upSeq = 0;
 static int32_t pressPeak = 0;
+// The codec's start-up pop: measured 2026-09-30, the first 100 ms of a press peaked at full scale (12 samples
+// clipped) and the rest never did. The owner starts talking after the press tone, so 60 ms is dropped.
+static constexpr uint32_t POP_SAMPLES = RATE * 60 / 1000;
+static uint32_t popLeft = 0;
 static uint32_t pressSamples = 0, lastPing = 0, lastActive = 0, lastInput = 0;
 static int16_t* playBuf[3];
 static uint8_t playNext = 0;
@@ -198,6 +207,13 @@ static void speakerUp() {
   M5.Mic.end();
   speakerOn = M5.Speaker.begin();
   M5.Speaker.setVolume(VOLUMES[volumeIdx]);
+  Serial.printf("[spk] begin=%d volume=%u\n", int(speakerOn), unsigned(VOLUMES[volumeIdx]));
+  {   // what the amplifier switch (M5PM1 GPIO3) and the codec's output path actually hold
+    auto rd = [](uint8_t addr, uint8_t reg) { return int(M5.In_I2C.readRegister8(addr, reg, 100000)); };
+    Serial.printf("[spk] pm1 0x10=%02x 0x11=%02x 0x13=%02x 0x16=%02x | es8311 00=%02x 0d=%02x 12=%02x 13=%02x 32=%02x 37=%02x\n",
+                  rd(0x6e, 0x10), rd(0x6e, 0x11), rd(0x6e, 0x13), rd(0x6e, 0x16),
+                  rd(0x18, 0x00), rd(0x18, 0x0d), rd(0x18, 0x12), rd(0x18, 0x13), rd(0x18, 0x32), rd(0x18, 0x37));
+  }
 }
 
 static void micUp() {
@@ -234,6 +250,13 @@ static void flushFrame(bool final) {
 }
 
 static void consumeMic(const int16_t* pcm, size_t n) {
+  if (popLeft) {
+    size_t skip = std::min<size_t>(n, popLeft);
+    popLeft -= skip;
+    pcm += skip;
+    n -= skip;
+    if (!n) return;
+  }
   for (size_t i = 0; i < n; ++i) {
     int32_t a = pcm[i] < 0 ? -int32_t(pcm[i]) : pcm[i];
     if (a > pressPeak) pressPeak = a;
@@ -264,6 +287,7 @@ static void startPress() {
   upState = stick::State();
   pressPeak = 0;
   pressSamples = 0;
+  popLeft = POP_SAMPLES;
   selfTestLen = 0;
   if (!selfTest) sendEvent("talk");
   setUi(selfTest ? Ui::SelfTest : Ui::Listening);
@@ -315,7 +339,15 @@ static void pumpSpeaker() {
   if (!n) return;
   waitTick.stop();
   M5.Speaker.setChannelVolume(REPLY_CH, 255);
-  M5.Speaker.playRaw(playBuf[playNext], n, RATE, false, 1, REPLY_CH);
+  bool queued = M5.Speaker.playRaw(playBuf[playNext], n, RATE, false, 1, REPLY_CH);
+  static uint32_t lastSpkLog = 0;
+  if (!queued || uint32_t(millis() - lastSpkLog) > 1000) {
+    lastSpkLog = millis();
+    int32_t peak = 0;
+    for (size_t i = 0; i < n; ++i) peak = std::max<int32_t>(peak, abs(int32_t(playBuf[playNext][i])));
+    Serial.printf("[spk] playRaw %u samples queued=%d peak=%d playing=%d buffered=%u\n", unsigned(n), int(queued),
+                  int(peak), int(M5.Speaker.isPlaying(REPLY_CH)), unsigned(ring->size()));
+  }
   playNext = (playNext + 1) % 3;
   xSemaphoreTake(lock, portMAX_DELAY);
   samplesPlayed += n;
@@ -449,7 +481,8 @@ void setup() {
   M5.Display.setRotation(1);
   M5.Display.setBrightness(120);
 
-  Serial.printf("[boot] board %d, psram %u\n", int(M5.getBoard()), unsigned(ESP.getPsramSize()));
+  Serial.printf("[boot] board %d, psram %u, imu %d\n", int(M5.getBoard()), unsigned(ESP.getPsramSize()),
+                int(M5.Imu.isEnabled()));
   lock = xSemaphoreCreateMutex();
   ringStore = (int16_t*)ps_malloc(RING_SAMPLES * sizeof(int16_t));
   selfTestPcm = (int16_t*)ps_malloc(RATE * 10 * sizeof(int16_t));
@@ -491,8 +524,11 @@ void loop() {
   }
   if (recording) {
     pumpMic();
-    if (M5.BtnA.wasReleased() || !M5.BtnA.isPressed() || (!selfTest && !(connected && secured)) ||
-        pressSamples >= RATE * 115) {
+    const char* why = M5.BtnA.wasReleased() ? "released" : !M5.BtnA.isPressed() ? "not pressed"
+                      : (!selfTest && !connected) ? "phone gone" : (!selfTest && !secured) ? "link not secured"
+                      : pressSamples >= RATE * 115 ? "time cap" : nullptr;
+    if (why) {
+      Serial.printf("[press] ended: %s after %u ms\n", why, unsigned(pressSamples * 1000 / RATE));
       endPress();
     }
   }
@@ -553,6 +589,25 @@ void loop() {
   }
 
   pumpSpeaker();
+
+  static uint32_t lastImu = 0, lastWake = 0;
+  static float px = 0, py = 0, pz = 0;
+  static bool imuPrimed = false;
+  if (!selfTest && M5.Imu.isEnabled() && uint32_t(now - lastImu) >= 100) {
+    lastImu = now;
+    float ax, ay, az;
+    if (M5.Imu.getAccel(&ax, &ay, &az)) {
+      float moved = fabsf(ax - px) + fabsf(ay - py) + fabsf(az - pz);
+      px = ax; py = ay; pz = az;
+      if (imuPrimed && moved > WAKE_G && connected && secured && !recording &&
+          (lastWake == 0 || uint32_t(now - lastWake) >= WAKE_EVERY_MS)) {
+        lastWake = now;
+        lastActive = now;                               // pings follow, so the phone stays awake for the press
+        sendEvent("wake");
+      }
+      imuPrimed = true;
+    }
+  }
 
   // Keep the phone's app awake while a turn is live, so the reply is relayed with the screen locked.
   bool live = recording || ui == Ui::Thinking || ui == Ui::Speaking || uint32_t(now - lastActive) < AWAKE_AFTER_MS;

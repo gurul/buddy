@@ -21,6 +21,7 @@ enum StickEvent {
     case audio([Int16])
     case done
     case ping
+    case wake                                    // picked up: a press is likely coming
     case stat([String: Any])
     case disconnected
 }
@@ -251,6 +252,7 @@ final class StickLink: NSObject, @preconcurrency CBCentralManagerDelegate, @prec
             onEvent?(.talk)
         case "done": onEvent?(.done)
         case "ping": onEvent?(.ping)
+        case "wake": onEvent?(.wake)
         case "stat": onEvent?(.stat(obj))
         default: break
         }
