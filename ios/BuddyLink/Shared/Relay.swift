@@ -129,6 +129,13 @@ final class Relay: ObservableObject {
             armHangUp()
         case .ping:
             keepAwake()
+        case .wake:
+            // The stick was picked up: open the call now, so it is up, with live transcription, by the press.
+            guard let pairing, !call.isOpen else { return }
+            keepAwake()
+            callStatus = "Calling buddy…"
+            call.open(base: pairing.base, token: pairing.token)
+            armHangUp()
         case .stat:
             break
         case .disconnected:

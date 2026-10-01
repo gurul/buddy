@@ -45,7 +45,9 @@ class PcmRing {
 // is one pause rather than a chopped sentence.
 class PlayGate {
  public:
-  static constexpr size_t START_SAMPLES = 24000 * 3 / 10;   // 300 ms at 24 kHz
+  // 150 ms at 24 kHz. It was 300 ms; the bench (2026-09-30) lost no frame over two whole replies, and the owner
+  // asked for less latency, so half of it rides out a burst.
+  static constexpr size_t START_SAMPLES = 24000 * 15 / 100;
   static constexpr uint32_t QUIET_MS = 200;
 
   void arrived(uint32_t now) { lastArrival_ = now; seen_ = true; }
