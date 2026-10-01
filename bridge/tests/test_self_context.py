@@ -29,7 +29,6 @@ from cc_buddy_bridge import (
 )
 from cc_buddy_bridge.codex_computer import CodexComputerAgent
 from cc_buddy_bridge.daemon import Daemon
-from cc_buddy_bridge.holo_computer import HoloComputerAgent
 
 # The engine buddy stopped using on 2026-09-24. It lives here, in a test, and never in a prompt.
 RETIRED = re.compile(r"\bexa\b", re.I)
@@ -123,31 +122,23 @@ def _built_by_the_daemon(monkeypatch: pytest.MonkeyPatch, env: dict[str, str]) -
     return made[0]
 
 
-@pytest.mark.parametrize("computer", ["holo", "codex", ""])
+@pytest.mark.parametrize("computer", ["codex", ""])
 def test_tasks_on_the_mac_name_the_agent_the_daemon_builds(computer: str, monkeypatch: pytest.MonkeyPatch,
                                                           lights_file: Path) -> None:
-    """2026-09-29: the block said Codex while the owner's daemon (CC_BUDDY_COMPUTER=holo) built Holo. The name is
-    now read from the same switch _make_agent reads, and this checks the two against each other, per setting."""
+    """The line names the agent _make_agent really builds (Codex, the only desktop executor), checked against it."""
     extra = {"CC_BUDDY_COMPUTER": computer} if computer else {}
     agent = _built_by_the_daemon(monkeypatch, extra)
     line = next(ln for ln in self_context.lines(owner_env(**extra), lights_path=lights_file, commit="")
                 if ln.startswith("Tasks on the Mac:"))
-    if computer == "holo":
-        assert isinstance(agent, HoloComputerAgent)
-        assert line == f"Tasks on the Mac: Holo ({agent.config.model})."
-        assert "Codex" not in self_context.block(owner_env(**extra), lights_path=lights_file, commit="")
-    else:                                                     # "codex" and unset are the same default
-        assert isinstance(agent, CodexComputerAgent)
-        assert line == "Tasks on the Mac: Codex."
-        assert "Holo" not in self_context.block(owner_env(**extra), lights_path=lights_file, commit="")
+    assert isinstance(agent, CodexComputerAgent)
+    assert line == "Tasks on the Mac: Codex."
     off = self_context.lines(owner_env(CC_BUDDY_COMPUTER_CONTROL="0", **extra), lights_path=lights_file, commit="")
     assert "Tasks on the Mac: off." in off
 
 
 def test_the_reader_and_the_watcher_ladder_follow_the_tinyfish_key(lights_file: Path) -> None:
-    without = self_context.lines(owner_env(CC_BUDDY_WEB_READER="1", CC_BUDDY_COMPUTER="holo"),
-                                 lights_path=lights_file, commit="")
-    assert "Tasks on the Mac: Holo (holo4-27b)." in without               # no reader without its key
+    without = self_context.lines(owner_env(CC_BUDDY_WEB_READER="1"), lights_path=lights_file, commit="")
+    assert "Tasks on the Mac: Codex." in without                          # no reader without its key
     assert "Watcher ladder: plain read, Perplexity search." in without
     with_key = self_context.lines(owner_env(CC_BUDDY_WEB_READER="1", TINYFISH_API_KEY="test-tinyfish"),
                                   lights_path=lights_file, commit="")
@@ -218,11 +209,11 @@ def test_the_block_stays_under_its_budget_with_everything_on(monkeypatch: pytest
                  lights.Light(name="c", kind="triones", address="u"), lights.Light(name="d", kind="tuya", id="x")], path)
     fake_router(monkeypatch, ("perplexity", "tinyfish", "firecrawl"))
     env = owner_env(CC_BUDDY_VOICE="1", CC_BUDDY_WEB_READER="1", TINYFISH_API_KEY="test-tinyfish",
-                    CC_BUDDY_WATCH_TLS="1", CC_BUDDY_WATCH_BROWSER="1", CC_BUDDY_COMPUTER="holo",
+                    CC_BUDDY_WATCH_TLS="1", CC_BUDDY_WATCH_BROWSER="1",
                     CC_BUDDY_CHIEF="on", CANVAS_BASE_URL="https://canvas.example.edu", CANVAS_API_TOKEN="test-canvas")
     text = self_context.block(env, lights_path=path, commit="abcdef123456")
     assert len(text) < self_context.BUDGET, len(text)
-    assert "Voice:" in text and "Jev picks" in text and "Sylvania (Tuya)" in text and "Holo (" in text
+    assert "Voice:" in text and "Jev picks" in text and "Sylvania (Tuya)" in text and "Tasks on the Mac: Codex" in text
     assert "Canvas (" in text and "Chief of staff: on." in text
 
 

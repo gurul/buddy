@@ -17,7 +17,7 @@ One job, end to end (design 4.1):
    (web_reader.py:302-325) and counted against its daily reads, or on the Mac with a read-only goal when
    browser_router does not say web; ``assess`` as one astra call with a strict schema whose pick may cite only a
    page the research read; ``act`` on the Mac through the task seam, always one-way (chief_card.ACT_CANNOT_ASK)
-   and always on ``floor="codex"`` (Holo, the live floor, cannot ask, holo_computer.py:15); ``watch`` through
+   and always on ``floor="codex"`` (Codex alone, no reflex or other body); ``watch`` through
    Watcher.add (watch.py:2704).
 3. **Budget before dispatch.** A phase starts only if what the card spent plus the phase's ceiling
    (``CEILINGS``: a web read 90 s, the Mac 10 min, the astra call) stays within the card's budget. Otherwise the
@@ -53,7 +53,7 @@ the budget warning and problems with the ledger skipped quiet hours; a batched "
 
 The reviewer's attacks after P4 (2026-09-29), the same way (tests/test_chief.py and test_telegram_chief.py,
 "attack"): a sentence opening with "ok" answered a waiting Go and ran the act; an act whose verb the pattern
-missed ran with no Go on Holo; Codex's returned failure sentence closed a card done; "It happened" and "It
+missed ran with no Go; Codex's returned failure sentence closed a card done; "It happened" and "It
 didn't" acted on an act that was running again; "I may have done" went out at 03:00; a card at its cap still paid
 for a reflection. An act with no screen seen is now ``handed_on``, never done (chief_receipt.from_agent).
 

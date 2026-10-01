@@ -73,10 +73,10 @@ Each phase is **two-way** (it can be undone, so it starts at once) or
 - a connected-app call in it would change something;
 - or the executor that would run it cannot stop and ask.
 
-**Every act is one-way** by the last rule. An act runs on the Mac, and the Mac
-floor on this Mac is Holo, which cannot stop and ask. The wording list alone
+**Every act is one-way** by the last rule. An act runs on the Mac with no one
+watching it, so it gets its Go before it starts. The wording list alone
 missed "cancel", "unsubscribe", "RSVP" and "text": "cancel my streaming plan"
-ran with no Go, on Holo (reviewer, 2026-09-29). A card saved before this rule
+ran with no Go (reviewer, 2026-09-29). A card saved before this rule
 loads with its acts one-way. An act whose goal has none of the listed wording
 is not marked "not grounded": nothing in it came from buddy's plan.
 

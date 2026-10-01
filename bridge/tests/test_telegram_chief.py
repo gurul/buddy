@@ -4,8 +4,8 @@ Gate G4.1: when off, take_on is absent, and a stray call returns the OFF reason 
 with the chief off, every request body, reply and / menu is byte for byte what origin/main sends; take_on makes no
 second model call (a fake creator counts the calls); /jobs and the id words make 0 model calls; the turn's note
 carries the chief's line; a chief Mac step queues while a task is running or the desk has the Mac; "go c12"
-approves only c12's pending act at its current revision; with Holo as the floor, the approved act is built on
-Codex (floor="codex"); the self-context block stays under BUDGET with everything on.
+approves only c12's pending act at its current revision; the approved act is built on Codex alone
+(floor="codex"), even with a leftover CC_BUDDY_COMPUTER=holo; the self-context block stays under BUDGET with everything on.
 
 No network: the chat's brain, the options call, the agent and Telegram are fakes (test_telegram's), the chief is a
 real Chief on a temporary ledger, and its clock stands at 10:00, outside quiet hours.
@@ -46,7 +46,6 @@ from cc_buddy_bridge.chief_reflect import Memory, Reflector
 from cc_buddy_bridge.codex_computer import CodexComputerAgent
 from cc_buddy_bridge.computer_agent import AgentEvent
 from cc_buddy_bridge.daemon import Daemon
-from cc_buddy_bridge.holo_computer import HoloComputerAgent
 from cc_buddy_bridge.telegram import CHIEF_OFF_REASON, CHIEF_TITLE, TASK_DONE_TITLE
 
 ROOT = Path(__file__).resolve().parents[2]
@@ -525,7 +524,10 @@ def test_a_tap_on_drop_under_the_backbrief_drops_the_card_by_code(tmp_path: Path
     assert len(rig.create.requests) == 1
 
 
-def test_with_holo_as_the_floor_the_approved_act_is_built_on_codex(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_a_leftover_holo_setting_builds_codex_and_the_approved_act_is_codex_alone(
+        monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture) -> None:
+    """Holo was removed on 2026-09-30: CC_BUDDY_COMPUTER=holo left in an env file is harmless, tasks run on Codex
+    and the daemon says so once at start."""
     made: list[tuple[object, dict[str, Any]]] = []
     monkeypatch.setattr("cc_buddy_bridge.app_reflex.ReflexFirstAgent",
                         lambda make_inner, *a, **k: made.append((make_inner(), k)) or SimpleNamespace())
@@ -535,10 +537,15 @@ def test_with_holo_as_the_floor_the_approved_act_is_built_on_codex(monkeypatch: 
     Daemon._make_agent(host, lambda e: None, None)
     Daemon._make_agent(host, lambda e: None, None, floor="codex")
     (floor_agent, floor_kw), (act_agent, act_kw) = made
-    assert isinstance(floor_agent, HoloComputerAgent)             # the positive control: Holo is the floor here
+    assert isinstance(floor_agent, CodexComputerAgent)            # the floor: Codex, whatever the old setting says
     assert floor_kw.get("route_body") == "the chrome lane"
     assert isinstance(act_agent, CodexComputerAgent)              # the approved act: Codex, which can ask
     assert act_kw.get("enabled") is False and "route_body" not in act_kw and "bodies" not in act_kw
+    with caplog.at_level("WARNING", logger="cc_buddy_bridge.daemon"):
+        assert Daemon._warn_removed_computer() is True
+        assert Daemon._warn_removed_computer({"CC_BUDDY_COMPUTER": "codex"}) is False      # control
+    assert [r.getMessage() for r in caplog.records].count(
+        "agent: CC_BUDDY_COMPUTER=holo is set, but Holo was removed (2026-09-30); tasks run on Codex") == 1
 
 
 # ---- the self-context line ------------------------------------------------------------------------------------
@@ -550,11 +557,11 @@ def test_the_self_context_block_stays_under_budget_with_everything_on(monkeypatc
                  lights.Light(name="c", kind="triones", address="u"), lights.Light(name="d", kind="tuya", id="x")], path)
     fake_router(monkeypatch, ("perplexity", "tinyfish", "firecrawl"))
     env = owner_env(CC_BUDDY_VOICE="1", CC_BUDDY_WEB_READER="1", TINYFISH_API_KEY="test-tinyfish",
-                    CC_BUDDY_WATCH_TLS="1", CC_BUDDY_WATCH_BROWSER="1", CC_BUDDY_COMPUTER="holo",
+                    CC_BUDDY_WATCH_TLS="1", CC_BUDDY_WATCH_BROWSER="1",
                     CC_BUDDY_CHIEF="on")
     text = self_context.block(env, lights_path=path, commit="abcdef123456")
     assert "\n- Chief of staff: on.\n" in text and len(text) < self_context.BUDGET, len(text)
-    assert "Voice:" in text and "Jev picks" in text and "Holo (" in text
+    assert "Voice:" in text and "Jev picks" in text and "Tasks on the Mac: Codex" in text
     monkeypatch.setattr(chief, "SHIPPED", False)
     assert "Chief of staff" not in self_context.block({**env, "CC_BUDDY_CHIEF": "auto"}, lights_path=path,
                                                        commit="abcdef123456")

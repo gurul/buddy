@@ -5,6 +5,10 @@
 the retained legacy worker and its experiments; the daemon does not select it or
 fall back to it. See [the Codex integration](../codex-computer-use/README.md).
 
+Codex is the only desktop executor. Holo, an opt-in alternative to Codex
+(`CC_BUDDY_COMPUTER=holo`), was removed on 2026-09-30 at the owner's request; a
+leftover setting is ignored with one warning at start, and the code is in git history.
+
 buddy has three engines that can decide something, and a fourth tier that is no model at all.
 They are not interchangeable, and the first version of this work went wrong by treating two of
 them as if they were. This page says what each one is, how it has to be asked, what was

@@ -25,8 +25,7 @@ The checks (chief_card.DONE_KINDS_LIVE) and what each reads:
                      ``ui_evidence`` (codex_computer.py:385; an empty list means "not verified", 577-578). Only the
                      LAST state of each act is read, the screen the act ended on: a page seen before the act
                      ("Button: Order now" on the product page) proves nothing about it. The text is at least two
-                     words (chief_card.MIN_UI_WORDS). Holo writes a bare "holo answer" marker there when it answers
-                     (holo_computer.py:294, 383); that is its own word, not UI state, so it is not read. Limit:
+                     words (chief_card.MIN_UI_WORDS). Limit:
                      Codex's evidence is any js tool output holding "Window:" (codex_computer.py:381-385), which the
                      agent's own script could print; that is codex_computer's to close, not this oracle's.
 * ``watch_armed``    the watcher's own row id, w<N> (watch.py:2642-2648, returned by Watcher.add, 2704); when the
@@ -58,13 +57,11 @@ from .chief_card import (
     is_watch_id,
 )
 
-__all__ = ["OUTCOMES", "EXECUTOR_MARKERS", "PhaseResult", "Evidence", "Verdict", "read_set", "check", "verify",
+__all__ = ["OUTCOMES", "PhaseResult", "Evidence", "Verdict", "read_set", "check", "verify",
            "close", "status_of", "card_status", "steps_not_run", "receipt", "from_search", "from_agent", "from_watch"]
 
 OUTCOMES = ("confirmed", "unverifiable", "failed")
 FAILED_RESULTS = ("refused", "failed", "over_budget")      # the phase itself did not happen
-# Strings an executor writes into its UI evidence that are its own word, not UI state (holo_computer.py:294, 383).
-EXECUTOR_MARKERS = frozenset({"holo answer"})
 _URL = re.compile(r"^https?://[^\s/]+\.[^\s]+$", re.I)
 
 
@@ -158,8 +155,7 @@ def check(check: Check, card: Card, *, owner_done: bool = False, live_watches: O
         for r in results:
             if r.status != "done":
                 continue
-            seen = [e.ref for e in r.evidence
-                    if e.kind == "ui_text" and e.ref.strip() and e.ref.strip().casefold() not in EXECUTOR_MARKERS]
+            seen = [e.ref for e in r.evidence if e.kind == "ui_text" and e.ref.strip()]
             if seen:
                 states.append(seen[-1])                    # the screen this act ended on
         if not states:
@@ -257,7 +253,7 @@ def from_search(out: Mapping[str, Any], *, secs: float = 0.0) -> PhaseResult:
 
 def from_agent(final: str, ui_evidence: Sequence[Mapping[str, Any]], *, ok: bool = True, usd: float = 0.0,
                secs: float = 0.0, act: bool = False) -> PhaseResult:
-    """A Mac executor's run: its closing sentence as text, its captured UI states as evidence (markers dropped).
+    """A Mac executor's run: its closing sentence as text, its captured UI states as evidence.
     ``ok`` False (the run failed, was stopped, or its agent reported an error) makes the result failed whatever it
     said. ``act``: an act that ran with no UI state seen is ``handed_on``, never done: Codex returns its failure
     sentence instead of raising (codex_computer.py:585-588), and the sentence alone is no evidence (reviewer after
@@ -265,7 +261,7 @@ def from_agent(final: str, ui_evidence: Sequence[Mapping[str, Any]], *, ok: bool
     states = []
     for item in ui_evidence or []:
         state = str(item.get("state") or "") if isinstance(item, Mapping) else ""
-        if state.strip() and state.strip().casefold() not in EXECUTOR_MARKERS:
+        if state.strip():
             states.append(Evidence("ui_text", state[:MAX_EVIDENCE_REF_CHARS]))
     status = "failed" if not ok else "handed_on" if act and not states else "done"
     return PhaseResult(status, tuple(states[-MAX_EVIDENCE:]), _cap(final, MAX_RESULT_TEXT_CHARS), _usd(usd),

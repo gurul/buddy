@@ -406,13 +406,6 @@ permission choices.
   a second Chrome that belongs to buddy (`~/.config/cc-buddy-bridge/chrome`), so there
   is no “Allow remote debugging?” prompt at all. Sign it in once with
   `cc-buddy-bridge chrome-profile`. See [buddy's own Chrome](docs/stackchan/routing.md#buddys-own-chrome-no-allow-to-press).
-- **Or Holo instead of Codex (opt-in):** with `CC_BUDDY_COMPUTER=holo`, the tasks Codex
-  would take run on H Company's Holo4 (`holo4-27b`) through the open-source
-  [holo-desktop-cli](https://github.com/hcompai/holo-desktop-cli). It needs `holo login`
-  once and Models API credits. buddy drives it through the CLI's own Python client
-  (`holo_driver.py`, under holo's Python), so a correction mid-task reaches Holo, a stop
-  pauses and cancels the session, and one runtime stays warm for the daemon's life. Holo
-  never asks questions. See [Holo computer use](docs/holo-computer-use.md).
 - **Stopping:** `stop_task` interrupts Codex, even while a permission is pending.
 - **Codex billing:** `CC_BUDDY_CODEX_AUTH=plan` is the default and uses your existing
   Codex sign-in. To bill Buddy's Codex to your OpenAI API key, put `OPENAI_API_KEY`
@@ -466,12 +459,12 @@ mode (`CC_BUDDY_BROWSER_ATTACH=1`), or buddy's own Chrome with no Allow prompt
 See [routing](docs/stackchan/routing.md) for switches and measured evaluations, and
 [voice and computer control](docs/stackchan/voice.md) for worker details.
 
-Twenty-one state machines are **formally verified in Lean 4** (`verification/`, 290
+Twenty state machines are **formally verified in Lean 4** (`verification/`, 286
 theorems): the Bash allow tier, the Telegram question slot and Stop, forget against the
 nightly dream, the serial link to the robot, the voice turn state, eight for the
 watcher (its rate limiter, conditions, scheduler and reading ladder, connection safety,
-links, routing and Ticketmaster), four for the Voice PE controller, Holo's steering and
-the OpenAI stream retry, and the chief of staff's cards (done needs evidence, one yes per
+links, routing and Ticketmaster), four for the Voice PE controller, the OpenAI stream
+retry, and the chief of staff's cards (done needs evidence, one yes per
 act, the budget, quiet hours and the push budget, no act run again after a restart). Each
 is either a kernel-checked counterexample on the old code plus a proof for every trace of
 the fix, or a proof of the code as it stands. The chief's model is also replayed against

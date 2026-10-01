@@ -13,7 +13,7 @@ from typing import TYPE_CHECKING, Any, Optional
 if TYPE_CHECKING:
     from .key_tap import KeyTapper
 
-from . import claude_live, holo_computer, mem0_memory, photos, voice_agent
+from . import claude_live, mem0_memory, photos, voice_agent
 from . import dream as dream_mod
 from . import follow as follow_mod
 from . import memory as memory_mod
@@ -400,11 +400,9 @@ class Daemon:
         # codex_warm.py: one Codex agent started ahead of time, so a hard task's handoff is the turn only.
         from . import codex_warm
         warm_on, warm_age = codex_warm.configured()
-        if holo_computer.configured().enabled:
-            log.info("agent: Holo desktop lane enabled; model=%s", holo_computer.configured().model)
-        # With Holo as the floor (CC_BUDDY_COMPUTER=holo) no Codex is kept warm: nothing would take it.
-        self._codex_warm = codex_warm.WarmCodex(CodexComputerAgent, enabled=warm_on and self._agent_cfg.enabled
-                                                and not holo_computer.configured().enabled, max_age=warm_age)
+        Daemon._warn_removed_computer()
+        self._codex_warm = codex_warm.WarmCodex(CodexComputerAgent, enabled=warm_on and self._agent_cfg.enabled,
+                                                max_age=warm_age)
         tasks.append(asyncio.create_task(self._codex_warm.refresh_loop(), name="codex-warm"))
         # The fast path into the owner's logged-in Chrome (chrome_lane.py): ONE attached lane for the daemon's
         # life, so Chrome's "Allow remote debugging?" is answered once per Chrome session (over Telegram).
@@ -470,8 +468,6 @@ class Daemon:
                 await self._canvas.close()
             if getattr(self, "_chrome_lane", None) is not None:
                 await self._chrome_lane.close()             # buddy's tab only; the owner's Chrome stays
-            if getattr(self, "_holo_runtime", None) is not None:
-                await self._holo_runtime.close()            # the warm Holo runtime ends with the daemon
             for t in tasks:
                 t.cancel()
             for pend in list(self._pending_turn_ends.values()):
@@ -1329,15 +1325,23 @@ class Daemon:
             log.info("chief: on (CC_BUDDY_CHIEF=%s); %d open card(s)", chief_mod.mode(), len(chief.ledger.open()))
         return chief
 
+    @staticmethod
+    def _warn_removed_computer(environ: Optional[Any] = None) -> bool:
+        """CC_BUDDY_COMPUTER once chose the desktop executor (Codex or Holo). Holo was removed on 2026-09-30, so
+        Codex is the only one: a leftover CC_BUDDY_COMPUTER=holo logs one warning and tasks run on Codex."""
+        env = os.environ if environ is None else environ
+        if (env.get("CC_BUDDY_COMPUTER") or "").strip().lower() != "holo":
+            return False
+        log.warning("agent: CC_BUDDY_COMPUTER=holo is set, but Holo was removed (2026-09-30); tasks run on Codex")
+        return True
+
     def _make_agent(self, on_event: Any, ask_user: Any, *, floor: Optional[str] = None) -> Any:
         """Codex computer use, behind the launch reflex (app_reflex.py): "open Spotify" is `open -a`,
-        with Jev for wording the rules do not know; everything else is Codex's, as before — or Holo's
-        (holo_computer.py) when CC_BUDDY_COMPUTER=holo.
+        with Jev for wording the rules do not know; everything else is Codex's.
 
-        ``floor="codex"`` (the chief's one-way act, 2026-09-29): Codex and nothing else, whatever the floor is set
-        to: no Holo (it cannot stop and ask, holo_computer.py:15), no reflex and no other body (the web reader,
-        the Chrome lane), so the act the owner approved goes whole to the agent that asks before a consequential
-        step."""
+        ``floor="codex"`` (the chief's one-way act, 2026-09-29): Codex and nothing else: no reflex and no other
+        body (the web reader, the Chrome lane), so the act the owner approved goes whole to the agent that asks
+        before a consequential step."""
         from . import app_reflex
 
         warm = getattr(self, "_codex_warm", None)       # codex_warm.py: a Codex agent already started
@@ -1348,14 +1352,6 @@ class Daemon:
                                                 on_done=warm.kick if warm is not None else (lambda: None))
             self._active_agent = agent
             return agent
-        holo = holo_computer.configured()
-        if holo.enabled:                                # CC_BUDDY_COMPUTER=holo: Holo is the floor, not Codex
-            # One warm runtime for the daemon's life (holo_computer.HoloRuntime), started by the first task.
-            if getattr(self, "_holo_runtime", None) is None:
-                self._holo_runtime = holo_computer.HoloRuntime(model=holo.model)
-            make_inner = lambda: holo_computer.HoloComputerAgent(on_event=on_event, ask_user=ask_user,  # noqa: E731
-                                                                 config=holo, runtime=self._holo_runtime)
-            warm = None
         agent = app_reflex.ReflexFirstAgent(make_inner, on_event, asker=app_reflex.jev_asker(),
                                             quit_asker=app_reflex.jev_quit_asker(),
                                             enabled=app_reflex.reflexes_on(),

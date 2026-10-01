@@ -125,12 +125,6 @@ def test_the_executors_sentence_alone_is_unverifiable() -> None:
     claimed = with_results(c, act=ui(text="I ordered the desk. Order confirmed, #12345."))
     assert one(claimed).outcome == "unverifiable"
     assert cr.close(claimed) == "unverified"
-    # Holo's answer marker is its own word, not a screen
-    assert one(with_results(c, act=ui("holo answer", text="order placed"))).outcome == "unverifiable"
-    answer = job([{"kind": "ui_seen", "arg": "holo answer"}], ["act"])      # the marker itself would match
-    assert one(with_results(answer, act=ui("holo answer"))).outcome == "unverifiable"
-    assert one(with_results(answer, act=ui("Window: Mail\nholo answer sent"))).outcome == "confirmed"   # control
-    assert cr.from_agent("order placed", [{"call_id": "1", "state": "holo answer"}]).evidence == ()
     # the research answer text names a link it never read: not a read link
     r = job([{"kind": "read_links", "arg": 1}], ["research"])
     said_only = with_results(r, research=PhaseResult("done", (), text="see https://shop.example/desk-a"))
@@ -196,7 +190,7 @@ def test_from_agent_and_from_watch() -> None:
     assert cr.from_agent("stopped", [{"state": "Window: Shop"}], ok=False).status == "failed"
     # an act that saw no screen is handed on, never done on its sentence (reviewer after P4, 2026-09-29)
     assert cr.from_agent("Codex ended without a result.", [], act=True).status == "handed_on"
-    assert cr.from_agent("I ordered it.", [{"state": "holo answer"}], act=True).status == "handed_on"
+    assert cr.from_agent("I ordered it.", [{"state": " "}], act=True).status == "handed_on"
     assert cr.from_agent("Done.", [{"state": "Window: Shop\nOrder confirmed"}], act=True).status == "done"
     assert cr.from_agent("Desk A is $549.", []).status == "done"                     # control: not an act
     assert cr.from_watch({"ok": True, "id": "w12", "watching_for": "below $500"}).evidence == (
