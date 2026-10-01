@@ -468,8 +468,7 @@ def test_attack_a_file_of_the_wrong_shape_is_moved_aside_not_overwritten(tmp_pat
 
 def test_attack_every_act_is_one_way_whatever_its_verb() -> None:
     """The verb pattern misses cancel, unsubscribe, RSVP, text …: "cancel my streaming plan" parsed two-way, so it
-    ran with no Go, on the configured floor (Holo, which cannot stop and ask). An act's executor is the Mac floor,
-    so every act is one-way (design 7.1, "its executor cannot stop and ask")."""
+    ran with no Go. An act runs on the Mac with no one watching it, so every act is one-way (design 7.1, "its executor cannot stop and ask")."""
     streaming = card(phases=[{"do": "act", "goal": "cancel my streaming plan in the open tab", "door": None}],
                      done_checks=[{"kind": "guru_says_done", "arg": None}])
     assert streaming.phases[0].door == "one_way"

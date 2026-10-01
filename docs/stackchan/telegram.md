@@ -851,9 +851,9 @@ text brain.
   `steer_task` on a chief step is refused and names the card, so the owner
   changes the card. Stop still works.
 - **Every act runs on Codex.** An approved act asks the daemon for
-  `floor="codex"`. `_make_agent` then builds Codex alone, even when Holo is the
-  floor (`CC_BUDDY_COMPUTER=holo`), because Holo cannot stop and ask. There is no
-  launch reflex and no other body (the web reader, the Chrome lane).
+  `floor="codex"`. `_make_agent` then builds Codex alone, which can stop and
+  ask. There is no launch reflex and no other body (the web reader, the Chrome
+  lane).
 - **The receipt replaces "Task result".** When a step on the Mac ends, its
   closing sentence and the agent's screen text go to the chief. The chief reads
   the evidence and sends the receipt. A step past its ten minutes is stopped
@@ -898,13 +898,11 @@ Two lines follow the daemon's own switches (fixed 2026-09-29):
   have their keys. Jev is shown all three options either way; the code masks the
   ones without a key, so the option list is not what the block reports. The
   router is imported defensively: a tree without it still builds the block.
-- **Tasks on the Mac** names the agent `daemon._make_agent` builds, read from the
-  same switch: Holo (with its model, `CC_BUDDY_HOLO_MODEL`) when
-  `CC_BUDDY_COMPUTER=holo`, otherwise Codex; "off" with
-  `CC_BUDDY_COMPUTER_CONTROL=0`. With the web reader on, the same line says what a
-  web reading task tries first (TinyFish, or the routed search). Before this fix
-  the block said Codex while the owner's daemon ran Holo. A test builds the agent
-  through `_make_agent` for each setting and checks the line against it.
+- **Tasks on the Mac** names the agent `daemon._make_agent` builds: Codex, the
+  only desktop executor; "off" with `CC_BUDDY_COMPUTER_CONTROL=0`. With the web
+  reader on, the same line says what a web reading task tries first (TinyFish, or
+  the routed search). A test builds the agent through `_make_agent` and checks the
+  line against it.
 
 - **Chief of staff** is one line, "Chief of staff: on.", present only while the
   chief is on (`chief.enabled`). With the chief off there is no line, and the
@@ -943,8 +941,8 @@ block and nothing after it (`tests/test_daemon_transcripts.py`).
 
 Size: under 1,100 characters (`self_context.BUDGET`; 1,000 before the tasks line).
 Measured on 2026-09-29, the block was 859 characters on the owner's setup and
-1,022 characters with every component on (Holo, routed search, voice, all four
-light brands). `tests/test_self_context.py` covers the budget, checks that each
+1,022 characters with every component on (routed search, voice, all four light
+brands, and the alternative desktop executor removed on 2026-09-30). `tests/test_self_context.py` covers the budget, checks that each
 door carries the block, and greps every prompt the three doors send (tools
 included) for the retired engine name.
 

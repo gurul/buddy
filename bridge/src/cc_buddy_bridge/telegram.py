@@ -4152,7 +4152,7 @@ class TelegramInlet:
                     floor: Optional[str] = None) -> dict[str, Any]:
         """A computer task. ``card`` (card id, step) makes it a chief's step (``chief_start``): its goal is the
         chief's own, exactly as the owner's Go showed it, so no link from the chat is added; ``floor`` is the
-        agent it must run on ("codex" for a one-way act: it can stop and ask, and Holo cannot); its result goes
+        agent it must run on ("codex" for a one-way act: Codex alone, which can stop and ask); its result goes
         to the chief, which sends the receipt, in place of "Task result"."""
         if not goal:
             return {"ok": False, "reason": "empty goal"}

@@ -12,9 +12,8 @@ daemon builds its doors from, so it cannot drift from what runs:
   (``search_router.available`` and ``mode``, 2026-09-29; imported defensively, so a tree without the router still
   builds the block), else websearch.py's one engine. Only live providers are named, never the full option set Jev
   is shown;
-* tasks on the Mac: the agent the daemon builds for one (daemon._make_agent: holo_computer.configured's Holo when
-  CC_BUDDY_COMPUTER=holo, else Codex; computer_agent.configured turns it off; 2026-09-29: the block said Codex
-  while the owner's daemon ran Holo), and what a web reading task tries first (web_reader.py);
+* tasks on the Mac: the agent the daemon builds for one (daemon._make_agent: Codex; computer_agent.configured
+  turns it off), and what a web reading task tries first (web_reader.py);
 * the watcher's reading ladder (watch.py), in the order the watcher climbs it;
 * the lights by brand (lights.py's file, as the daemon loads it at boot), the memory stores, the doors that are
   on, and the git commit the code runs from;
@@ -50,7 +49,7 @@ from typing import Iterator, Mapping, Optional
 log = logging.getLogger(__name__)
 
 BUDGET = 1100                         # characters for the whole block: every turn of every door pays for it
-# (1000 until 2026-09-29, when the line for tasks on the Mac came in: everything on, Holo, routed, is 1022)
+# (1000 until 2026-09-29, when the line for tasks on the Mac came in: everything on, routed, was 1022)
 HEADER = "\n\nYour live setup, from buddy's code and settings at start:"
 # Scoped to what the list is (owner, 2026-09-29): the source of truth for the models, services and providers buddy
 # runs on. What buddy can do is its tool list, so a question about a tool is never answered "I do not know" here.
@@ -64,7 +63,7 @@ PROVIDER_WORDS = {"tinyfish": "TinyFish", "firecrawl": "Firecrawl"}
 # The modules whose configured() this reads: their warnings were already logged once when the daemon built them.
 _QUIET = ("telegram", "voice_agent", "think", "miniapp", "websearch", "web_reader", "watch", "lights", "ears",
           "meet", "transcripts", "mem0_memory", "second_brain", "recall", "search_router", "jev", "tinyfish",
-          "firecrawl", "browser_router", "computer_agent", "holo_computer", "chief", "canvas")
+          "firecrawl", "browser_router", "computer_agent", "chief", "canvas")
 
 _building = threading.local()          # a configured() that builds the block reads other configured()s: no loop
 
@@ -173,23 +172,14 @@ def _search(env: Mapping[str, str]) -> str:
     return f"Web search: {_engine_words(cfg.engine)}."
 
 
-def _computer_name(env: Mapping[str, str]) -> str:
-    """The agent a task on the Mac goes to, by the same switch daemon._make_agent reads: Holo (with its model) when
-    holo_computer.configured says so, else Codex (its model is Codex's own setting, not buddy's)."""
-    from . import holo_computer
-
-    holo = holo_computer.configured(env)
-    return f"Holo ({holo.model})" if holo.enabled else "Codex"
-
-
 def _computer(env: Mapping[str, str]) -> str:
-    """Tasks on the Mac: the agent (_computer_name), and what the web reader (web_reader.py) tries first for a web
+    """Tasks on the Mac: the agent (Codex, daemon._make_agent; its model is Codex's own setting), and what the web reader (web_reader.py) tries first for a web
     reading task before handing it to that agent, one line for both (they are one path)."""
     from . import computer_agent, web_reader
 
     if not computer_agent.configured(env).enabled:       # CC_BUDDY_COMPUTER_CONTROL=0: no task body at all
         return "Tasks on the Mac: off."
-    floor = _computer_name(env)
+    floor = "Codex"
     cfg = web_reader.configured(env)
     if not cfg.enabled:
         return f"Tasks on the Mac: {floor}."

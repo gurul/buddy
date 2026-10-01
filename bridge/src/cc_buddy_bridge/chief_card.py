@@ -20,9 +20,9 @@ What code decides here, never a model:
 * **The door is a floor in code and add-only.** A phase is ``one_way`` when task_router's ``CONSEQUENTIAL``
   wording matches its goal (task_router.py:70), when a Composio call in it has consequential slugs
   (composio_tools.consequential_slugs, composio_tools.py:150-161), or when its executor cannot stop and ask.
-  Every ``act`` is one-way by that last rule (``ACT_CANNOT_ASK``): its executor is the Mac floor, which on this
-  Mac is Holo, and Holo cannot ask (holo_computer.py:15). The verb pattern alone let "cancel my streaming plan"
-  run with no Go, on Holo (reviewer after P4, 2026-09-29: cancel, unsubscribe, RSVP, text are not in it). A card
+  Every ``act`` is one-way by that last rule (``ACT_CANNOT_ASK``): an act runs on the Mac with no one watching
+  it, so it gets its Go before it starts. The verb pattern alone let "cancel my streaming plan" run with no Go
+  (reviewer after P4, 2026-09-29: cancel, unsubscribe, RSVP, text are not in it). A card
   stored before that loads with the act's floor too (``_phase_from``, add-only).
   The brain may raise a door to ``one_way``; it can never lower one, and a revision keeps the higher door of
   each phase (plan_contract's add-only ``consequential``, plan_contract.py:13-15).

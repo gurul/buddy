@@ -366,7 +366,7 @@ def test_every_act_asks_for_the_codex_floor_and_read_only_mac_research_keeps_the
            "phases": [{"do": "act", "goal": "tidy the downloads folder into dated folders", "door": None}]}
     run(take(c, job, "tidy my downloads folder"))
     run(c.drain())
-    # no consequential word, still an act: a Go, then Codex (the floor, Holo, cannot stop and ask)
+    # no consequential word, still an act: a Go, then Codex alone (floor="codex")
     assert len(f.asks) == 1 and [t["floor"] for t in f.tasks] == ["codex"]
     f.route = "mac"
     run(take(c, {**READ_JOB, "done_checks": [{"kind": "guru_says_done", "arg": None}],
