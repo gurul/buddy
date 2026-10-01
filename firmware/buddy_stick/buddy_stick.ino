@@ -49,6 +49,7 @@ static constexpr uint32_t DIM_AFTER_MS = 30000;
 static constexpr float WAKE_G = 0.12f;
 static constexpr uint32_t WAKE_EVERY_MS = 20000;
 static const uint8_t VOLUMES[] = {90, 150, 210, 255};
+static constexpr uint8_t DAC_GAIN = 0xBF + 24;           // ES8311 DAC volume: +12 dB over M5Unified's 0 dB
 
 enum class Ui : uint8_t { NoPhone, Pairing, Ready, Listening, Thinking, Speaking, Offline, SelfTest };
 
@@ -207,6 +208,10 @@ static void speakerUp() {
   M5.Mic.end();
   speakerOn = M5.Speaker.begin();
   M5.Speaker.setVolume(VOLUMES[volumeIdx]);
+  // The owner, 2026-09-30: "I can hear the sound but it's really quiet". M5Unified leaves the ES8311 DAC at 0 dB
+  // (reg 0x32 = 0xBF; 0.5 dB a step, 0xFF = +32 dB). +12 dB is about four times louder and still leaves speech
+  // its headroom; more than that clips a loud reply on a 1 W speaker.
+  if (speakerOn) M5.In_I2C.writeRegister8(0x18, 0x32, DAC_GAIN, 100000);
   Serial.printf("[spk] begin=%d volume=%u\n", int(speakerOn), unsigned(VOLUMES[volumeIdx]));
   {   // what the amplifier switch (M5PM1 GPIO3) and the codec's output path actually hold
     auto rd = [](uint8_t addr, uint8_t reg) { return int(M5.In_I2C.readRegister8(addr, reg, 100000)); };
@@ -216,10 +221,18 @@ static void speakerUp() {
   }
 }
 
+// The owner, 2026-09-30: "transcription is terrible". Presses talked into up close peaked at full scale (32752 of
+// 32767) at M5Unified's default x16 digital gain, so loud syllables clipped; x8 is 6 dB of headroom, and speech
+// still sat around -20 dBFS on the bench, plenty for transcription.
+static constexpr uint8_t MIC_GAIN = 8;
+
 static void micUp() {
   M5.Speaker.stop();
   M5.Speaker.end();
   speakerOn = false;
+  auto cfg = M5.Mic.config();
+  cfg.magnification = MIC_GAIN;
+  M5.Mic.config(cfg);
   M5.Mic.begin();
 }
 
