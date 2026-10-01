@@ -497,3 +497,50 @@ def test_calls_are_transcribed_in_english_unless_told_otherwise():
     finally:
         openai.AsyncOpenAI = orig
     assert sessions[0]["audio"]["input"]["transcription"] == {"model": "m", "language": "en"}
+
+
+def test_the_calls_ears_are_the_full_model_cut_only_at_real_pauses_with_near_field_noise_reduction(monkeypatch):
+    """2026-09-30, from the stick: "transcription is terrible". The mini model and 0.4 s cuts garbled a sentence
+    with pauses; the full model, 0.7 s and near-field noise reduction are what the live session is opened with."""
+    assert phone_call.DEFAULT_STT_MODEL == "gpt-4o-transcribe"
+    sent: list = []
+
+    class Session:
+        async def update(self, session):
+            sent.append(session)
+
+    class Conn:
+        session = Session()
+
+        def __aiter__(self):
+            return self
+
+        async def __anext__(self):
+            raise StopAsyncIteration
+
+    class Manager:
+        async def __aenter__(self):
+            return Conn()
+
+        async def __aexit__(self, *a):
+            return None
+
+    class Realtime:
+        def connect(self, **kw):
+            return Manager()
+
+    class Client:
+        def __init__(self, **kw):
+            self.realtime = Realtime()
+
+    import openai
+    monkeypatch.setattr(openai, "AsyncOpenAI", Client)
+    ears = phone_call.LiveEars("k", phone_call.DEFAULT_STT_MODEL)
+    asyncio.run(ears.open())
+    audio_in = sent[0]["audio"]["input"]
+    assert audio_in["transcription"]["model"] == "gpt-4o-transcribe"
+    assert audio_in["noise_reduction"] == {"type": "near_field"}
+    assert audio_in["turn_detection"]["silence_duration_ms"] == 700
+    # and the meter can price it
+    from cc_buddy_bridge import pricing
+    assert pricing.estimate_transcribe_cost("gpt-4o-transcribe", {}, seconds=60) == pytest.approx(0.006)

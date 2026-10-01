@@ -150,6 +150,9 @@ def estimate_jev_cost(input_tokens: int) -> float:
 LIVE_PER_MINUTE: dict[str, float] = {"gpt-live-1": 0.05}
 TRANSCRIBE_RATES: dict[str, dict[str, float]] = {
     "gpt-4o-mini-transcribe": {"input": 1.25, "output": 5.00, "per_minute": 0.003},
+    # developers.openai.com/api/docs/pricing, fetched 2026-09-30: input $2.50, output $10.00 per million tokens,
+    # $0.006 a minute estimated. The call's ears since 2026-09-30 (phone_call.DEFAULT_STT_MODEL).
+    "gpt-4o-transcribe": {"input": 2.50, "output": 10.00, "per_minute": 0.006},
 }
 EMBEDDING_RATES: dict[str, float] = {"text-embedding-3-small": 0.02}
 OPENAI_WEB_SEARCH_PER_CALL = 10.0 / 1000
