@@ -80,7 +80,19 @@ Expected: roughly 50 mA down to about 25–30 mA while connected and idle, so ab
 the stick lasts days lying unused. These figures are estimates from the datasheets, not measurements. The M5PM1
 reports battery voltage but not current, so the stick logs the voltage every 5 minutes since boot. Plug it into
 USB and it prints the log (`[pwr] battery mV every 5 min since boot`); type `pwr` on its serial port to print
-it again. Typing `off` powers it off on the spot, which tests the wake on pick-up.
+it again. Bench commands on its serial port:
+
+- `off` powers it off on the spot. On USB the power chip turns straight back on, because USB power is itself a wake source.
+- `offsoon` arms a power-off: after unplugging, it powers off once it has lain still for 15 s, which tests the wake on pick-up.
+- `imutest` arms the motion wake without powering off and watches the wake line for 10 s. The line must stay high while the stick is still and go low when it moves.
+- `pwr` also says what woke the stick last: `0x20` is the motion sensor, `0x04` the power button, `0x08` reset.
+
+Tuned on the device, 2026-09-30:
+
+- **The sensor's INT1 is open-drain, with the M5PM1's pull-up on GPIO4.** With push-pull, the line fell as the rails switched, and the stick woke the moment it powered off.
+- **A pick-up is about 200 mg held for 200 ms.** At 125 mg for 100 ms, footsteps on the floor woke it.
+
+The owner confirmed it powers off, stays off, and wakes when picked up.
 
 ## Setting it up
 

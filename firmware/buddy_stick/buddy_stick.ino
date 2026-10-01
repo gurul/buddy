@@ -540,37 +540,59 @@ static void imuWrite(uint8_t reg, uint8_t v) { M5.In_I2C.writeRegister8(0x68, re
 // arduino/m5sticks3/m5pm1) keeps the IMU's LDO through the M5PM1's shutdown and wakes on its GPIO4, which the
 // BMI270's INT1 drives. Registers from the M5PM1 library (github.com/m5stack/M5PM1, src/M5PM1.h) and Bosch's
 // BMI270 API (github.com/boschsensortec/BMI270_SensorAPI): any-motion is feature page 1, 0x3C..0x3F.
+static void imuArmMotion();
+static void pm1ArmWakeAndOff();
+
 static void powerOffUntilMoved() {
   Serial.println("[pwr] lying still on battery: off until moved or the power button");
   Serial.flush();
   speakerDown();
   M5.Display.sleep();
-  // BMI270: accelerometer only, low power, any-motion on INT1 as an active-low push-pull pulse.
+  imuArmMotion();
+  pm1ArmWakeAndOff();
+}
+
+// BMI270: accelerometer only, low power, any-motion on INT1 as an active-low push-pull pulse.
+static void imuArmMotion() {
   imuWrite(0x7C, 0x00);                                // adv_power_save off while it is configured
   delay(2);
   imuWrite(0x2F, 0x01);                                // feature page 1
   uint8_t feat[16] = {0};
   M5.In_I2C.readRegister(0x68, 0x30, feat, sizeof feat, 400000);
-  const uint16_t duration = 3;                         // 3 x 20 ms over the threshold
-  const uint16_t threshold = 0xAA;                     // Bosch's default, about 83 mg: a pick-up, not a table knock
+  // Bench, 2026-09-30: at 125 mg for 100 ms footsteps on the floor woke it (the owner: "shakes on the ground wake
+  // it up"). A pick-up is a bigger, longer move than a floor vibration: about 200 mg (0.488 mg a step) for 200 ms.
+  const uint16_t duration = 10;                        // 10 x 20 ms over the threshold
+  const uint16_t threshold = 0x1A0;
   uint16_t w0 = duration | (1u << 13) | (1u << 14) | (1u << 15);   // x, y, z
   uint16_t w1 = threshold | (1u << 15);                // enable
   feat[0x0C] = w0 & 0xFF; feat[0x0D] = w0 >> 8;
   feat[0x0E] = w1 & 0xFF; feat[0x0F] = w1 >> 8;
   M5.In_I2C.writeRegister(0x68, 0x30, feat, sizeof feat, 400000);
   imuWrite(0x2F, 0x00);
-  imuWrite(0x53, 0x08);                                // INT1: output on, push-pull, active low
+  // INT1: output on, OPEN-DRAIN, active low, with the M5PM1's own pull-up on GPIO4 (it stays powered through
+  // shutdown). Push-pull woke the stick at once on the bench (wake source 0x20 with the stick lying still, while the
+  // same setup stayed quiet when armed without powering off): the line fell as the rails switched. Open-drain only
+  // goes low when the sensor pulls it, on a real move.
+  imuWrite(0x53, 0x0C);
   imuWrite(0x55, 0x00);                                // not latched: a pulse per motion
   imuWrite(0x56, 0x40);                                // INT1 <- any-motion
   imuWrite(0x40, 0x17);                                // ACC_CONF: 50 Hz, averaging, filter_perf 0 (low power)
   imuWrite(0x7D, 0x04);                                // accelerometer only
   imuWrite(0x7C, 0x03);                                // adv_power_save on
+  // Changing the sensor's mode can itself read as motion: let it settle, then clear whatever it raised (reading
+  // INT_STATUS_0 clears it), so only a real move afterwards pulls INT1 low.
+  delay(500);
+  (void)M5.In_I2C.readRegister8(0x68, 0x1C, 400000);
+}
+
+static void pm1ArmWakeAndOff() {
   // M5PM1: keep the IMU's 3.3 V LDO through shutdown and wake on GPIO4 falling (GPIO3, the amplifier, shares
   // the wake line and stays off it).
   pm1Write(0x06, pm1Read(0x06) | (1u << 2) | (1u << 4));     // LDO_EN, LED_EN level (as M5Stack's example)
   pm1Write(0x07, pm1Read(0x07) | (1u << 5));                  // LDO power hold
   pm1Write(0x18, (pm1Read(0x18) | (1u << 4)) & ~(1u << 3));   // wake on GPIO4, not GPIO3
   pm1Write(0x19, pm1Read(0x19) & ~(1u << 4));                 // falling edge
+  pm1Write(0x15, (pm1Read(0x15) & ~0x03u) | 0x01u);           // GPIO4 pull-up (INT1 is open-drain)
   pm1Write(0x05, 0x00);                                       // clear the wake flags
   delay(20);
   pm1Write(0x0C, 0xA1);                                       // shutdown
@@ -583,7 +605,11 @@ static void powerOffUntilMoved() {
 static constexpr size_t PWR_LOG = 288;                 // 24 hours
 static uint16_t pwrLog[PWR_LOG];
 static size_t pwrLogLen = 0;
+static uint8_t bootWake = 0;                           // M5PM1 0x05 at boot: what powered the stick on
+static uint32_t offSoonAt = 0;                         // bench: power off this soon once lying still on battery
 static void pwrLogPrint() {
+  Serial.printf("[pwr] this boot woke by 0x%02x%s\n", bootWake,
+                (bootWake & (1u << 5)) ? " (moved: the IMU)" : (bootWake & (1u << 2)) ? " (power button)" : "");
   Serial.printf("[pwr] battery mV every 5 min since boot (%u):", unsigned(pwrLogLen));
   for (size_t i = 0; i < pwrLogLen; ++i) Serial.printf(" %u", unsigned(pwrLog[i]));
   Serial.println();
@@ -630,6 +656,7 @@ void setup() {
   Serial.printf("[boot] buddy_stick %s, cpu %u MHz\n", BUDDY_GIT_SHA, unsigned(getCpuFrequencyMhz()));
   {
     uint8_t why = pm1Read(0x05);                       // what powered it on: bit5 the IMU (moved), bit2 the button
+    bootWake = why;
     Serial.printf("[boot] woke by 0x%02x%s\n", why, (why & (1u << 5)) ? " (moved)" : (why & (1u << 2)) ? " (button)" : "");
     pm1Write(0x05, 0x00);
     pm1Write(0x07, pm1Read(0x07) & ~(1u << 5));        // the LDO hold is only for being off
@@ -799,7 +826,10 @@ void loop() {
     if (plan.displayOn) displayWake(); else displaySleep();
     if (!plan.audioOn && !recording) speakerDown();
     if (connected && secured) setLink(plan.linkFast);
-    if (plan.powerOff) powerOffUntilMoved();
+    // Bench ("offsoon" on USB, then unplug): off after 15 s lying still on battery, to test the wake on pick-up.
+    bool soon = offSoonAt && onBattery && !pin.live && uint32_t(now - lastMotion) >= 15000 &&
+                uint32_t(now - lastInput) >= 15000;
+    if (plan.powerOff || soon) powerOffUntilMoved();
   }
   static uint32_t lastPwrLog = 0;
   if (uint32_t(now - lastPwrLog) >= 5UL * 60 * 1000 || lastPwrLog == 0) {
@@ -819,6 +849,31 @@ void loop() {
     if (c == '\n' || c == '\r') {
       if (cmd == "off") powerOffUntilMoved();
       else if (cmd == "pwr") pwrLogPrint();
+      else if (cmd == "imutest") {
+        // Arm the any-motion wake without powering off, and watch the line the M5PM1 wakes on (its GPIO4 input,
+        // GPIO_IN 0x12 bit 4) for 10 s: it must stay high while the stick lies still and go low when it is moved.
+        Serial.println("[pwr] imutest: arming; keep it still for 5 s, then move it");
+        imuArmMotion();
+        uint32_t t0 = millis(), lows = 0, samples = 0, firstLow = 0;
+        uint8_t ints = 0;
+        while (millis() - t0 < 10000) {
+          bool high = pm1Read(0x12) & (1u << 4);
+          ints |= M5.In_I2C.readRegister8(0x68, 0x1C, 400000);
+          ++samples;
+          if (!high) { ++lows; if (!firstLow) firstLow = millis() - t0; }
+          if ((samples % 20) == 0) Serial.printf("[pwr] imutest %2us: lows %u of %u, int_status0 seen 0x%02x\n",
+                                                 unsigned((millis() - t0) / 1000), unsigned(lows), unsigned(samples), ints);
+          delay(50);
+        }
+        Serial.printf("[pwr] imutest done: first low at %u ms, lows %u of %u; restarting\n", unsigned(firstLow),
+                      unsigned(lows), unsigned(samples));
+        Serial.flush();
+        ESP.restart();
+      }
+      else if (cmd == "offsoon") {
+        offSoonAt = now | 1;
+        Serial.println("[pwr] armed: unplug, set it down; off after 15 s still, pick it up to wake");
+      }
       cmd = "";
     } else if (cmd.length() < 16) {
       cmd += c;
