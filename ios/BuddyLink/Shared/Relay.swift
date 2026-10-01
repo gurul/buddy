@@ -68,7 +68,20 @@ final class Relay: ObservableObject {
 
     // ---- the stick ----------------------------------------------------------------------------------------
 
+    /// Bench tracing (BuddyProbe relay): every event either way, one line each. Nil on the phone.
+    var trace: ((String) -> Void)?
+    private var pressIn = 0, pressOut = 0
+    /// Bench: the whole press as it went to buddy, at done. Nil on the phone.
+    var onPress: (([Int16]) -> Void)?
+    private var pressPCM: [Int16] = []
+
     private func fromStick(_ event: StickEvent) {
+        if let trace {
+            switch event {
+            case .audio: break
+            default: trace("stick → \(event)")
+            }
+        }
         switch event {
         case .ready(let fw, let batt):
             firmware = fw
@@ -92,16 +105,24 @@ final class Relay: ObservableObject {
             }
             call.talk()
         case .audio(let pcm):
+            pressIn += pcm.count
             guard talking else { return }
             batch += pcm
+            if onPress != nil { pressPCM += pcm }
             if batch.count >= Self.batchSamples {
+                pressOut += batch.count
                 call.audio(batch)
                 batch.removeAll(keepingCapacity: true)
             }
         case .done:
             guard talking else { return }
             talking = false
-            if !batch.isEmpty { call.audio(batch) }
+            if !batch.isEmpty { pressOut += batch.count; call.audio(batch) }
+            trace?("press: \(pressIn) samples from the stick, \(pressOut) sent to buddy, \(stick.framesLost) frames lost")
+            pressIn = 0
+            pressOut = 0
+            onPress?(pressPCM)
+            pressPCM = []
             batch.removeAll()
             call.done()
             callStatus = "buddy is thinking…"
@@ -121,6 +142,9 @@ final class Relay: ObservableObject {
     // ---- buddy ----------------------------------------------------------------------------------------------
 
     private func fromBuddy(_ event: CallEvent) {
+        if let trace {
+            if case .audio(let pcm) = event { trace("buddy → audio \(pcm.count) samples") } else { trace("buddy → \(event)") }
+        }
         switch event {
         case .open:
             callStatus = "On a call with buddy"

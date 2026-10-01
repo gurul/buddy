@@ -73,6 +73,10 @@ static size_t frameFill = 0;
 static stick::State upState;
 static uint8_t upSeq = 0;
 static int32_t pressPeak = 0;
+// The codec's start-up pop: measured 2026-09-30, the first 100 ms of a press peaked at full scale (12 samples
+// clipped) and the rest never did. The owner starts talking after the press tone, so 60 ms is dropped.
+static constexpr uint32_t POP_SAMPLES = RATE * 60 / 1000;
+static uint32_t popLeft = 0;
 static uint32_t pressSamples = 0, lastPing = 0, lastActive = 0, lastInput = 0;
 static int16_t* playBuf[3];
 static uint8_t playNext = 0;
@@ -234,6 +238,13 @@ static void flushFrame(bool final) {
 }
 
 static void consumeMic(const int16_t* pcm, size_t n) {
+  if (popLeft) {
+    size_t skip = std::min<size_t>(n, popLeft);
+    popLeft -= skip;
+    pcm += skip;
+    n -= skip;
+    if (!n) return;
+  }
   for (size_t i = 0; i < n; ++i) {
     int32_t a = pcm[i] < 0 ? -int32_t(pcm[i]) : pcm[i];
     if (a > pressPeak) pressPeak = a;
@@ -264,6 +275,7 @@ static void startPress() {
   upState = stick::State();
   pressPeak = 0;
   pressSamples = 0;
+  popLeft = POP_SAMPLES;
   selfTestLen = 0;
   if (!selfTest) sendEvent("talk");
   setUi(selfTest ? Ui::SelfTest : Ui::Listening);
