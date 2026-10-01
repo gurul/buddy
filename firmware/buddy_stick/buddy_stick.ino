@@ -23,6 +23,7 @@
 
 #include "link_codec.h"
 #include "pcm_ring.h"
+#include "power_policy.h"
 
 #ifndef BUDDY_GIT_SHA
 #define BUDDY_GIT_SHA "dev"
@@ -42,7 +43,17 @@ static constexpr size_t PLAY_CHUNK = 1200;             // 50 ms per speaker job
 static constexpr uint8_t REPLY_CH = 0, TONE_CH = 1;
 static constexpr uint32_t PING_EVERY_MS = 1000;        // keeps the phone's app awake while a turn is live
 static constexpr uint32_t AWAKE_AFTER_MS = 20000;      // and this long after the last one
-static constexpr uint32_t DIM_AFTER_MS = 30000;
+// Battery (power_policy.h; sources in docs/stick-link.md, Battery). The CPU runs at 80 MHz: BLE needs no more
+// (its lock holds APB at 80 MHz), I2S audio runs off its own 160 MHz PLL, and idle drops from 33 mA to 22 mA.
+static constexpr uint32_t CPU_MHZ = 80;
+// BLE timing, in Apple's rules (Accessory Design Guidelines R31, 58.6): fast 15-30 ms for a turn; idle 150-180 ms
+// with 4 events of latency (900 ms worst case, under 6 s; supervision 6 s, over 3 x 900 ms).
+static constexpr uint16_t FAST_MIN = 12, FAST_MAX = 24, FAST_LAT = 0;         // 1.25 ms units
+static constexpr uint16_t IDLE_MIN = 120, IDLE_MAX = 144, IDLE_LAT = 4;
+static constexpr uint16_t LINK_TIMEOUT = 600;                                // 10 ms units: 6 s
+// Advertising while no phone is connected: 417.5 ms, one of Apple's listed intervals (58.5); 0.625 ms units.
+static constexpr uint16_t ADV_INTERVAL = 668;
+static constexpr float MOTION_G = 0.08f;               // what counts as "moved" for the screen and staying on
 // Picking the stick up says a press is coming: a "wake" lets the phone open the call before it, so the first press
 // is transcribed live (measured 2026-09-30: 1.43 s by upload on a call opened by the press, 0.94 s live on an open
 // one). A change in acceleration over this much, at most once per WAKE_EVERY_MS.
@@ -68,6 +79,8 @@ static uint8_t inboxHead = 0, inboxCount = 0;
 
 // ---- loop() only -----------------------------------------------------------------------------------------
 static BLECharacteristic* up;
+static BLEServer* server;
+static volatile uint16_t connHandle = 0xFFFF;
 static Ui ui = Ui::NoPhone;
 static bool uiDirty = true, selfTest = false, recording = false, speakerOn = false;
 static String heardText, noteText;
@@ -84,6 +97,8 @@ static int32_t pressPeak = 0;
 static constexpr uint32_t POP_SAMPLES = RATE * 60 / 1000;
 static uint32_t popLeft = 0;
 static uint32_t pressSamples = 0, lastPing = 0, lastActive = 0, lastInput = 0;
+static uint32_t lastMotion = 0, lastSound = 0;
+static bool displayOn = true, linkFast = true;
 static int16_t* playBuf[3];
 static uint8_t playNext = 0;
 static WaitTick waitTick;
@@ -137,11 +152,14 @@ static void sendStat() {
 
 // ---- BLE callbacks (host task) -------------------------------------------------------------------------
 class ServerCallbacks : public BLEServerCallbacks {
-  void onConnect(BLEServer*, ble_gap_conn_desc*) override {
+  void onConnect(BLEServer*, ble_gap_conn_desc* desc) override {
+    connHandle = desc->conn_handle;
+    linkFast = true;                                   // a fresh connection starts at the phone's own interval
     connected = true;
     Serial.println("[link] phone connected");
   }
   void onDisconnect(BLEServer*, ble_gap_conn_desc*) override {
+    connHandle = 0xFFFF;
     connected = false;
     secured = false;
     payload = 20;
@@ -151,6 +169,10 @@ class ServerCallbacks : public BLEServerCallbacks {
     size_t p = mtu > 3 ? mtu - 3 : 20;
     payload = p > MAX_PAYLOAD ? MAX_PAYLOAD : p;
     Serial.printf("[link] mtu %u, values up to %u bytes\n", unsigned(mtu), unsigned(payload));
+  }
+  void onConnParamsUpdate(uint16_t, uint16_t interval, uint16_t latency, uint16_t timeout, uint8_t status) override {
+    Serial.printf("[pwr] link interval %u.%02u ms, latency %u, timeout %u ms, status %u\n", unsigned(interval * 5 / 4),
+                  unsigned(interval * 125 % 100), unsigned(latency), unsigned(timeout * 10), unsigned(status));
   }
 };
 
@@ -203,17 +225,37 @@ class DownCallbacks : public BLECharacteristicCallbacks {
 };
 
 // ---- audio ------------------------------------------------------------------------------------------------
+// The ES8311 off, per M5Unified's own microphone-disable sequence (analog off, ADC/DAC modulator off, CSM off):
+// M5.Speaker.end() only turns the amplifier off and leaves the codec at about 8 mA. Speaker.begin() rewrites the
+// codec's whole start-up sequence, so speakerUp() brings it back.
+static void codecOff() {
+  M5.In_I2C.writeRegister8(0x18, 0x0D, 0xFC, 100000);
+  M5.In_I2C.writeRegister8(0x18, 0x0E, 0x6A, 100000);
+  M5.In_I2C.writeRegister8(0x18, 0x00, 0x00, 100000);
+}
+
+static void speakerDown() {
+  if (!speakerOn) return;
+  M5.Speaker.end();
+  codecOff();
+  speakerOn = false;
+  Serial.println("[pwr] audio off");
+}
+
 static void speakerUp() {
   if (speakerOn) return;
   M5.Mic.end();
   speakerOn = M5.Speaker.begin();
   M5.Speaker.setVolume(VOLUMES[volumeIdx]);
+  lastSound = millis();
   // The owner, 2026-09-30: "I can hear the sound but it's really quiet". M5Unified leaves the ES8311 DAC at 0 dB
   // (reg 0x32 = 0xBF; 0.5 dB a step, 0xFF = +32 dB). +12 dB is about four times louder and still leaves speech
   // its headroom; more than that clips a loud reply on a 1 W speaker.
   if (speakerOn) M5.In_I2C.writeRegister8(0x18, 0x32, DAC_GAIN, 100000);
   Serial.printf("[spk] begin=%d volume=%u\n", int(speakerOn), unsigned(VOLUMES[volumeIdx]));
-  {   // what the amplifier switch (M5PM1 GPIO3) and the codec's output path actually hold
+  static bool dumped = false;
+  if (!dumped) {   // once: what the amplifier switch (M5PM1 GPIO3) and the codec's output path actually hold
+    dumped = true;
     auto rd = [](uint8_t addr, uint8_t reg) { return int(M5.In_I2C.readRegister8(addr, reg, 100000)); };
     Serial.printf("[spk] pm1 0x10=%02x 0x11=%02x 0x13=%02x 0x16=%02x | es8311 00=%02x 0d=%02x 12=%02x 13=%02x 32=%02x 37=%02x\n",
                   rd(0x6e, 0x10), rd(0x6e, 0x11), rd(0x6e, 0x13), rd(0x6e, 0x16),
@@ -237,7 +279,10 @@ static void micUp() {
 }
 
 static void beep(uint16_t hz, uint32_t ms) {
+  if (recording) return;                               // the speaker is down for a press
+  speakerUp();
   if (!speakerOn) return;
+  lastSound = millis();
   M5.Speaker.setChannelVolume(TONE_CH, 120);
   M5.Speaker.tone(hz, ms, TONE_CH);
 }
@@ -339,8 +384,16 @@ static void endPress() {
 }
 
 static void pumpSpeaker() {
-  if (!speakerOn || recording) return;
+  if (recording) return;
   if (waitTick.due(millis())) beep(520, 18);
+  if (!speakerOn) {
+    xSemaphoreTake(lock, portMAX_DELAY);
+    bool waiting = ring->size() > 0;
+    xSemaphoreGive(lock);
+    if (!waiting) return;
+    speakerUp();                                       // reply audio arrived while the path was off
+    if (!speakerOn) return;
+  }
   if (M5.Speaker.isPlaying(REPLY_CH) >= 2) return;
   xSemaphoreTake(lock, portMAX_DELAY);
   size_t buffered = ring->size();
@@ -353,6 +406,7 @@ static void pumpSpeaker() {
   waitTick.stop();
   M5.Speaker.setChannelVolume(REPLY_CH, 255);
   bool queued = M5.Speaker.playRaw(playBuf[playNext], n, RATE, false, 1, REPLY_CH);
+  lastSound = millis();
   static uint32_t lastSpkLog = 0;
   if (!queued || uint32_t(millis() - lastSpkLog) > 1000) {
     lastSpkLog = millis();
@@ -455,6 +509,86 @@ static void draw() {
   uiDirty = false;
 }
 
+// ---- power ------------------------------------------------------------------------------------------------
+static void displayWake() {
+  if (displayOn) return;
+  M5.Display.wakeup();
+  M5.Display.setBrightness(120);
+  displayOn = true;
+  markDirty();
+}
+
+static void displaySleep() {
+  if (!displayOn) return;
+  M5.Display.sleep();                                  // backlight 0 and the ST7789's own sleep command
+  displayOn = false;
+}
+
+static void setLink(bool fast) {
+  if (fast == linkFast || !server || connHandle == 0xFFFF || !secured) return;
+  linkFast = fast;
+  if (fast) server->updateConnParams(connHandle, FAST_MIN, FAST_MAX, FAST_LAT, LINK_TIMEOUT);
+  else server->updateConnParams(connHandle, IDLE_MIN, IDLE_MAX, IDLE_LAT, LINK_TIMEOUT);
+  Serial.printf("[pwr] asking for the %s link\n", fast ? "fast" : "idle");
+}
+
+static uint8_t pm1Read(uint8_t reg) { return M5.In_I2C.readRegister8(0x6E, reg, 100000); }
+static void pm1Write(uint8_t reg, uint8_t v) { M5.In_I2C.writeRegister8(0x6E, reg, v, 100000); }
+static void imuWrite(uint8_t reg, uint8_t v) { M5.In_I2C.writeRegister8(0x68, reg, v, 400000); }
+
+// Off until the stick is moved (or the power button): M5Stack's StickS3 low-power guide (docs.m5stack.com/en/
+// arduino/m5sticks3/m5pm1) keeps the IMU's LDO through the M5PM1's shutdown and wakes on its GPIO4, which the
+// BMI270's INT1 drives. Registers from the M5PM1 library (github.com/m5stack/M5PM1, src/M5PM1.h) and Bosch's
+// BMI270 API (github.com/boschsensortec/BMI270_SensorAPI): any-motion is feature page 1, 0x3C..0x3F.
+static void powerOffUntilMoved() {
+  Serial.println("[pwr] lying still on battery: off until moved or the power button");
+  Serial.flush();
+  speakerDown();
+  M5.Display.sleep();
+  // BMI270: accelerometer only, low power, any-motion on INT1 as an active-low push-pull pulse.
+  imuWrite(0x7C, 0x00);                                // adv_power_save off while it is configured
+  delay(2);
+  imuWrite(0x2F, 0x01);                                // feature page 1
+  uint8_t feat[16] = {0};
+  M5.In_I2C.readRegister(0x68, 0x30, feat, sizeof feat, 400000);
+  const uint16_t duration = 3;                         // 3 x 20 ms over the threshold
+  const uint16_t threshold = 0xAA;                     // Bosch's default, about 83 mg: a pick-up, not a table knock
+  uint16_t w0 = duration | (1u << 13) | (1u << 14) | (1u << 15);   // x, y, z
+  uint16_t w1 = threshold | (1u << 15);                // enable
+  feat[0x0C] = w0 & 0xFF; feat[0x0D] = w0 >> 8;
+  feat[0x0E] = w1 & 0xFF; feat[0x0F] = w1 >> 8;
+  M5.In_I2C.writeRegister(0x68, 0x30, feat, sizeof feat, 400000);
+  imuWrite(0x2F, 0x00);
+  imuWrite(0x53, 0x08);                                // INT1: output on, push-pull, active low
+  imuWrite(0x55, 0x00);                                // not latched: a pulse per motion
+  imuWrite(0x56, 0x40);                                // INT1 <- any-motion
+  imuWrite(0x40, 0x17);                                // ACC_CONF: 50 Hz, averaging, filter_perf 0 (low power)
+  imuWrite(0x7D, 0x04);                                // accelerometer only
+  imuWrite(0x7C, 0x03);                                // adv_power_save on
+  // M5PM1: keep the IMU's 3.3 V LDO through shutdown and wake on GPIO4 falling (GPIO3, the amplifier, shares
+  // the wake line and stays off it).
+  pm1Write(0x06, pm1Read(0x06) | (1u << 2) | (1u << 4));     // LDO_EN, LED_EN level (as M5Stack's example)
+  pm1Write(0x07, pm1Read(0x07) | (1u << 5));                  // LDO power hold
+  pm1Write(0x18, (pm1Read(0x18) | (1u << 4)) & ~(1u << 3));   // wake on GPIO4, not GPIO3
+  pm1Write(0x19, pm1Read(0x19) & ~(1u << 4));                 // falling edge
+  pm1Write(0x05, 0x00);                                       // clear the wake flags
+  delay(20);
+  pm1Write(0x0C, 0xA1);                                       // shutdown
+  delay(1000);
+  Serial.println("[pwr] still on after the shutdown command");
+}
+
+// The battery's voltage every 5 minutes since boot, kept in RAM and printed on USB: a run on battery shows its
+// discharge once the stick is plugged back in (the M5PM1 reports voltage, not current).
+static constexpr size_t PWR_LOG = 288;                 // 24 hours
+static uint16_t pwrLog[PWR_LOG];
+static size_t pwrLogLen = 0;
+static void pwrLogPrint() {
+  Serial.printf("[pwr] battery mV every 5 min since boot (%u):", unsigned(pwrLogLen));
+  for (size_t i = 0; i < pwrLogLen; ++i) Serial.printf(" %u", unsigned(pwrLog[i]));
+  Serial.println();
+}
+
 // ---- setup / loop -----------------------------------------------------------------------------------------
 static void startBle() {
   BLEDevice::init("buddy stick");
@@ -465,7 +599,7 @@ static void startBle() {
   sec->setAuthenticationMode(true, true, true);        // bond, MITM (the code), secure connections
   BLEDevice::setSecurityCallbacks(new SecurityCallbacks());
 
-  BLEServer* server = BLEDevice::createServer();
+  server = BLEDevice::createServer();
   server->setCallbacks(new ServerCallbacks());
   server->advertiseOnDisconnect(true);
   BLEService* svc = server->createService(SERVICE_UUID);
@@ -482,6 +616,8 @@ static void startBle() {
   adv->setScanResponse(true);
   adv->setMinPreferred(0x06);
   adv->setMaxPreferred(0x12);
+  adv->setMinInterval(ADV_INTERVAL);
+  adv->setMaxInterval(ADV_INTERVAL);
   BLEDevice::startAdvertising();
 }
 
@@ -489,8 +625,15 @@ void setup() {
   auto cfg = M5.config();
   cfg.fallback_board = m5::board_t::board_M5StickS3;
   M5.begin(cfg);
+  setCpuFrequencyMhz(CPU_MHZ);
   Serial.begin(115200);
-  Serial.printf("[boot] buddy_stick %s\n", BUDDY_GIT_SHA);
+  Serial.printf("[boot] buddy_stick %s, cpu %u MHz\n", BUDDY_GIT_SHA, unsigned(getCpuFrequencyMhz()));
+  {
+    uint8_t why = pm1Read(0x05);                       // what powered it on: bit5 the IMU (moved), bit2 the button
+    Serial.printf("[boot] woke by 0x%02x%s\n", why, (why & (1u << 5)) ? " (moved)" : (why & (1u << 2)) ? " (button)" : "");
+    pm1Write(0x05, 0x00);
+    pm1Write(0x07, pm1Read(0x07) & ~(1u << 5));        // the LDO hold is only for being off
+  }
   M5.Display.setRotation(1);
   M5.Display.setBrightness(120);
 
@@ -520,7 +663,7 @@ void setup() {
   beep(523, 80);
   delay(100);
   beep(784, 100);
-  lastInput = millis();
+  lastInput = lastMotion = millis();
 }
 
 void loop() {
@@ -529,7 +672,7 @@ void loop() {
 
   if (M5.BtnA.wasPressed() || M5.BtnB.wasPressed()) {
     lastInput = now;
-    M5.Display.setBrightness(120);
+    displayWake();
   }
   if (M5.BtnA.wasPressed()) {
     if (selfTest || (connected && secured)) startPress();
@@ -592,7 +735,7 @@ void loop() {
         setUi(Ui::NoPhone);
       } else if (passkey && !secured) {
         setUi(Ui::Pairing);
-        M5.Display.setBrightness(120);
+        displayWake();
         lastInput = now;
       } else if (secured && (ui == Ui::NoPhone || ui == Ui::Pairing)) {
         setUi(Ui::Ready);
@@ -612,6 +755,10 @@ void loop() {
     if (M5.Imu.getAccel(&ax, &ay, &az)) {
       float moved = fabsf(ax - px) + fabsf(ay - py) + fabsf(az - pz);
       px = ax; py = ay; pz = az;
+      if (imuPrimed && moved > MOTION_G) {
+        lastMotion = now;
+        displayWake();
+      }
       if (imuPrimed && moved > WAKE_G && connected && secured && !recording &&
           (lastWake == 0 || uint32_t(now - lastWake) >= WAKE_EVERY_MS)) {
         lastWake = now;
@@ -628,18 +775,62 @@ void loop() {
     lastPing = now;
     sendEvent("ping");
   }
-  if (uint32_t(now - lastInput) > DIM_AFTER_MS && !live && ui != Ui::Pairing) M5.Display.setBrightness(8);
+  if (!selfTest) {
+    PowerInputs pin{};
+    pin.now = now;
+    pin.lastInput = lastInput;
+    pin.lastMotion = lastMotion;
+    pin.lastActive = lastActive;
+    pin.lastSound = lastSound;
+    pin.live = live && (recording || ui == Ui::Thinking || ui == Ui::Speaking);
+    xSemaphoreTake(lock, portMAX_DELAY);
+    pin.soundPending = ring->size() > 0;
+    xSemaphoreGive(lock);
+    pin.soundPending = pin.soundPending || (speakerOn && M5.Speaker.isPlaying());
+    pin.pairing = ui == Ui::Pairing;
+    static uint32_t lastVbus = 0;
+    static bool onBattery = false;
+    if (lastVbus == 0 || uint32_t(now - lastVbus) >= 5000) {
+      lastVbus = now | 1;
+      onBattery = M5.Power.getVBUSVoltage() < 4000;
+    }
+    pin.onBattery = onBattery;
+    PowerPlan plan = PowerPolicy::plan(pin);
+    if (plan.displayOn) displayWake(); else displaySleep();
+    if (!plan.audioOn && !recording) speakerDown();
+    if (connected && secured) setLink(plan.linkFast);
+    if (plan.powerOff) powerOffUntilMoved();
+  }
+  static uint32_t lastPwrLog = 0;
+  if (uint32_t(now - lastPwrLog) >= 5UL * 60 * 1000 || lastPwrLog == 0) {
+    lastPwrLog = now | 1;
+    if (pwrLogLen < PWR_LOG) pwrLog[pwrLogLen++] = uint16_t(M5.Power.getBatteryVoltage());
+    pwrLogPrint();
+  }
   static uint32_t lastDraw = 0;
-  if (uiDirty || uint32_t(now - lastDraw) > 30000) {
+  if (displayOn && (uiDirty || uint32_t(now - lastDraw) > 30000)) {
     lastDraw = now;
     draw();
+  }
+  // Bench commands on USB: "off" powers off until moved (to test the wake), "pwr" prints the battery log.
+  static String cmd;
+  while (Serial.available()) {
+    char c = char(Serial.read());
+    if (c == '\n' || c == '\r') {
+      if (cmd == "off") powerOffUntilMoved();
+      else if (cmd == "pwr") pwrLogPrint();
+      cmd = "";
+    } else if (cmd.length() < 16) {
+      cmd += c;
+    }
   }
   static uint32_t lastBeat = 0;
   if (uint32_t(now - lastBeat) >= 5000) {              // the bench's view of a stick it cannot see
     lastBeat = now;
-    Serial.printf("[hb] ui=%d phone=%d secured=%d payload=%u batt=%d heap=%u psram=%u\n", int(ui), int(connected),
-                  int(secured), unsigned(payload), int(M5.Power.getBatteryLevel()), unsigned(ESP.getFreeHeap()),
-                  unsigned(ESP.getFreePsram()));
+    Serial.printf("[hb] ui=%d phone=%d secured=%d payload=%u batt=%d%% %dmV screen=%d audio=%d link=%s\n", int(ui),
+                  int(connected), int(secured), unsigned(payload), int(M5.Power.getBatteryLevel()),
+                  int(M5.Power.getBatteryVoltage()), int(displayOn), int(speakerOn), linkFast ? "fast" : "idle");
   }
-  if (!recording) delay(2);
+  // Recording paces itself on the mic; a turn needs the loop quick; idle, 20 ms is plenty for buttons and the IMU.
+  if (!recording) delay((live || speakerOn) ? 2 : 20);
 }
