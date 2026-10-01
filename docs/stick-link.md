@@ -50,6 +50,50 @@ Tuned on 2026-09-30, after the owner said the speaker was "really quiet" and tra
 - **Microphone:** M5Unified's default x16 digital gain clipped presses spoken up close (peaks at 32752). The stick uses x8, which leaves 6 dB of headroom.
 - **buddy's ears:** calls are transcribed by `gpt-4o-transcribe`, not the mini model; `CC_BUDDY_CALL_STT_MODEL` overrides it. The live session cuts a press only at pauses of 0.7 s (it was 0.4 s, which split sentences), with OpenAI's near-field noise reduction for a microphone held close.
 
+## Battery
+
+The owner asked on 2026-09-30 for the stick's battery life to be optimised. The 250 mAh battery and the stock
+Arduino core set the limits: the core is built without power management or Bluetooth modem sleep, so the
+ESP32-S3 cannot light-sleep while it stays connected. The StickS3 also has no 32 kHz crystal (its pins carry
+audio), so even a custom build would only reach about 3.3 mA. The stick instead keeps each part powered only
+while it is in use. `firmware/buddy_stick/power_policy.h` makes those decisions, and the host tests cover it.
+
+| Part | What the stick does | What it saves (source) |
+|---|---|---|
+| CPU | 80 MHz instead of 240 (`setCpuFrequencyMhz`). BLE holds the bus at 80 MHz anyway, and I2S runs off its own clock. | Idle current drops from about 33 mA to 22 mA (ESP32-S3 datasheet, table 5-9). |
+| Speaker and codec | Off 4 s after the last sound, and back on when audio arrives or a tone plays. `Speaker.end()` turns off only the amplifier, so the stick also powers down the ES8311 codec. | Amplifier about 10 mA, codec about 8 mA (AW8737 and ES8311 datasheets). |
+| Screen | Off (`Display.sleep()`: backlight off, ST7789 asleep) after 20 s with nothing new. A button, picking it up, or a message from the phone wakes it. | Backlight and panel. |
+| Bluetooth timing | 15–30 ms while a turn is on and for 20 s after. Idle, it asks for 150–180 ms with 4 events of latency. Picking the stick up asks for the fast interval again before you press. | Radio wake-ups between turns. The values follow Apple's Accessory Design Guidelines (R31, 58.6). |
+| Advertising | 417.5 ms while no phone is connected. | One of Apple's recommended intervals (58.5). |
+| Main loop | Waits 20 ms per pass when idle, instead of 2 ms. | CPU time. |
+| Power off | After 30 min lying still on battery (no motion, button or turn), the M5PM1 powers everything off, about 14 µA. Picking it up wakes it: the BMI270's any-motion interrupt, on feature page 1 at `0x3C`, drives the M5PM1's GPIO4. The power button wakes it too. It never powers off on USB. | About 14 µA while off (M5Stack's StickS3 page). |
+
+Sources:
+- [ESP32-S3 datasheet](https://documentation.espressif.com/esp32-s3_datasheet_en.pdf)
+- [Espressif low-power BLE guide](https://docs.espressif.com/projects/esp-idf/en/stable/esp32s3/api-guides/low-power-mode/low-power-mode-ble.html)
+- [Apple Accessory Design Guidelines](https://developer.apple.com/accessories/Accessory-Design-Guidelines.pdf)
+- [M5Stack StickS3 low-power configuration](https://docs.m5stack.com/en/arduino/m5sticks3/m5pm1)
+- [M5PM1 library](https://github.com/m5stack/M5PM1)
+- [Bosch BMI270 API](https://github.com/boschsensortec/BMI270_SensorAPI)
+
+Expected: roughly 50 mA down to about 25–30 mA while connected and idle, so about 5 h becomes about 8–10 h, and
+the stick lasts days lying unused. These figures are estimates from the datasheets, not measurements. The M5PM1
+reports battery voltage but not current, so the stick logs the voltage every 5 minutes since boot. Plug it into
+USB and it prints the log (`[pwr] battery mV every 5 min since boot`); type `pwr` on its serial port to print
+it again. Bench commands on its serial port:
+
+- `off` powers it off on the spot. On USB the power chip turns straight back on, because USB power is itself a wake source.
+- `offsoon` arms a power-off: after unplugging, it powers off once it has lain still for 15 s, which tests the wake on pick-up.
+- `imutest` arms the motion wake without powering off and watches the wake line for 10 s. The line must stay high while the stick is still and go low when it moves.
+- `pwr` also says what woke the stick last: `0x20` is the motion sensor, `0x04` the power button, `0x08` reset.
+
+Tuned on the device, 2026-09-30:
+
+- **The sensor's INT1 is open-drain, with the M5PM1's pull-up on GPIO4.** With push-pull, the line fell as the rails switched, and the stick woke the moment it powered off.
+- **A pick-up is about 200 mg held for 200 ms.** At 125 mg for 100 ms, footsteps on the floor woke it.
+
+The owner confirmed it powers off, stays off, and wakes when picked up.
+
 ## Setting it up
 
 You need the StickS3, an iPhone with Buddy Link, and the daemon with the

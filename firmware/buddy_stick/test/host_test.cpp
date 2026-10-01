@@ -10,6 +10,7 @@
 
 #include "../link_codec.h"
 #include "../pcm_ring.h"
+#include "../power_policy.h"
 
 static int failures = 0;
 #define CHECK(cond)                                                     \
@@ -164,12 +165,60 @@ static void gate() {
   CHECK(!t.due(0xFFFFFF00u + 100000));
 }
 
+static void power() {
+  using P = PowerPolicy;
+  PowerInputs idle{};
+  idle.now = 10u * 60 * 60 * 1000;               // ten hours after boot, nothing recent
+  idle.onBattery = true;
+  PowerPlan p = P::plan(idle);
+  CHECK(!p.displayOn && !p.audioOn && !p.linkFast && p.powerOff);          // all off, and off entirely
+
+  PowerInputs in = idle;
+  in.lastMotion = in.now - 1000;                 // just picked up
+  p = P::plan(in);
+  CHECK(p.displayOn && p.linkFast && !p.powerOff && !p.audioOn);           // screen and link up; no sound yet
+
+  in = idle;
+  in.lastSound = in.now - (P::AUDIO_MS - 1);
+  CHECK(P::plan(in).audioOn);
+  in.lastSound = in.now - P::AUDIO_MS;
+  CHECK(!P::plan(in).audioOn);                                              // 4 s after the last sound: off
+  in.soundPending = true;
+  CHECK(P::plan(in).audioOn && !P::plan(in).powerOff);                      // a reply still to play keeps it
+
+  in = idle;
+  in.live = true;                                                           // a turn: everything on, never off
+  p = P::plan(in);
+  CHECK(p.displayOn && p.audioOn && p.linkFast && !p.powerOff);
+
+  in = idle;
+  in.onBattery = false;                                                     // on USB: never powers off
+  CHECK(!P::plan(in).powerOff);
+  in = idle;
+  in.pairing = true;                                                        // a code on screen stays on
+  CHECK(P::plan(in).displayOn && !P::plan(in).powerOff);
+
+  in = idle;
+  in.lastActive = in.now - (P::LINK_MS - 1);
+  CHECK(P::plan(in).linkFast);
+  in.lastActive = in.now - P::LINK_MS;
+  CHECK(!P::plan(in).linkFast);                                             // back to the idle interval
+  in.lastMotion = in.now - (P::OFF_MS - 1);
+  CHECK(!P::plan(in).powerOff);                                             // moved 29:59 ago: stays on
+
+  in = idle;                                                                // across the millis() wrap
+  in.now = 5000;
+  in.lastMotion = 0xFFFFFFFFu - 1000;
+  CHECK(P::plan(in).displayOn && !P::plan(in).powerOff);
+}
+
 int main(int argc, char** argv) {
   int n = vectors(argc > 1 ? argv[1] : "tools/stick_link/vectors.txt");
   CHECK(n == 8);
   frames();
   ring();
   gate();
+  power();
   if (failures) {
     std::fprintf(stderr, "%d check(s) failed\n", failures);
     return 1;
