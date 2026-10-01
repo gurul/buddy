@@ -40,6 +40,14 @@ A call opens on your first press and hangs up after 45 quiet seconds. While a
 call is open, buddy's other chat replies are read out too, so it does not
 stay open all day.
 
+## Sound levels and transcription
+
+Tuned on 2026-09-30, after the owner said the speaker was "really quiet" and transcription was "terrible":
+
+- **Speaker:** M5Unified leaves the ES8311 DAC at 0 dB (register `0x32 = 0xBF`). The stick sets it to +12 dB (`0xD7`) each time the speaker starts. Click the side volume button for the four levels on top of that.
+- **Microphone:** M5Unified's default x16 digital gain clipped presses spoken up close (peaks at 32752). The stick uses x8, which leaves 6 dB of headroom.
+- **buddy's ears:** calls are transcribed by `gpt-4o-transcribe`, not the mini model; `CC_BUDDY_CALL_STT_MODEL` overrides it. The live session cuts a press only at pauses of 0.7 s (it was 0.4 s, which split sentences), with OpenAI's near-field noise reduction for a microphone held close.
+
 ## Setting it up
 
 You need the StickS3, an iPhone with Buddy Link, and the daemon with the

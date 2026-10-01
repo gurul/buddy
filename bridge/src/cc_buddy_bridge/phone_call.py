@@ -48,7 +48,14 @@ MIN_PRESS_SECS = 0.35                   # shorter than this is a tap, not words
 MAX_CALL_SECS = 60 * 60                 # a call this long is ended
 QUIET_SECS = 30.0                       # nothing from the phone this long (it sends a ping every 10 s): it is gone
 MAX_SPOKEN_CHARS = 1500                 # a reply longer than this is read in part; the chat has all of it
-DEFAULT_STT_MODEL = "gpt-4o-mini-transcribe"   # the room notes' model (notes.py)
+# The call's ears (owner, 2026-09-30, from the stick: "transcription is terrible"; "That's a vague Da they talking
+# to me" came back for a sentence with pauses). The full model, not the mini; CC_BUDDY_CALL_STT_MODEL overrides it.
+DEFAULT_STT_MODEL = "gpt-4o-transcribe"
+# Live transcription cuts the press at pauses and transcribes each piece alone, so a pause mid-sentence costs the
+# words around it their context: 0.7 s rather than 0.4 s cuts only at a real stop. Near-field noise reduction is for
+# a microphone held to the mouth (the stick, a phone), per OpenAI's realtime transcription session.
+LIVE_SILENCE_MS = 700
+LIVE_NOISE_REDUCTION = "near_field"
 # The language the owner speaks, ISO-639-1. Left to guess, the model heard "Spotify mode" as Chinese on a short
 # Voice PE press and buddy answered in Chinese (2026-09-27; owner: "it sometimes thinks i am speaking another
 # language"). CC_BUDDY_CALL_LANGUAGE sets it; an empty value lets the model guess again.
@@ -251,7 +258,8 @@ class LiveEars:
         await self.conn.session.update(session={"type": "transcription", "audio": {"input": {
             "format": {"type": "audio/pcm", "rate": SAMPLE_RATE},
             "transcription": {"model": self.model, **({"language": self.language} if self.language else {})},
-            "turn_detection": {"type": "server_vad", "silence_duration_ms": 400, "prefix_padding_ms": 200}}}})
+            "noise_reduction": {"type": LIVE_NOISE_REDUCTION},
+            "turn_detection": {"type": "server_vad", "silence_duration_ms": LIVE_SILENCE_MS, "prefix_padding_ms": 200}}}})
         self._reader = asyncio.ensure_future(self._read())
 
     async def _read(self) -> None:
