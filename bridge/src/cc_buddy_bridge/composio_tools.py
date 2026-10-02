@@ -45,8 +45,8 @@ _ON = frozenset({"1", "true", "yes", "on"})
 
 MULTI_EXECUTE = "COMPOSIO_MULTI_EXECUTE_TOOL"
 # The alias of the owner's own account on a toolkit with more than one: writes go there unless he names another
-# (accounts_note). Set on the connection in Composio (connected_accounts.update(<id>, alias="main")).
-PRIMARY_ALIAS = "main"
+# (accounts_note). Set on the connection in Composio (connected_accounts.update(<id>, alias="personal")).
+PRIMARY_ALIAS = "personal"
 # Toolkits kept out of buddy's session. composio_search is Composio's own web search and page fetch: on
 # 2026-09-30 the brain used it (COMPOSIO_SEARCH_WEB, COMPOSIO_SEARCH_FETCH_URL_CONTENT, per Composio's execution
 # log) to find a course's office hours, which costs a tool search plus a multi-execute per lookup, and ran out
