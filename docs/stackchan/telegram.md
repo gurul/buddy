@@ -403,9 +403,9 @@ regarding this"). buddy reads the script before it runs, without running it
 
 **Two accounts on one app** (owner, 2026-10-02: a second Google Calendar). Ask
 buddy to connect another account. If it can't, make a Composio Connect Link with
-`connected_accounts.link(<user id>, <auth config id>, alias="second",
+`connected_accounts.link(<user id>, <auth config id>, alias="work",
 allow_multiple=True)` and sign in with the other account. Name your own account
-on that app `main` (`connected_accounts.update(<connection id>, alias="main")`).
+on that app `personal` (`connected_accounts.update(<connection id>, alias="personal")`).
 When any app has two or more ACTIVE accounts, buddy does the following at start:
 
 - **The session is made in multi-account mode with explicit selection.** Every
@@ -415,9 +415,9 @@ When any app has two or more ACTIVE accounts, buddy does the following at start:
   resumed: a new one is created.
 - **The brain gets a short note** naming each app's accounts. It reads from
   every account and says which result came from where. It creates, changes and
-  deletes on `main` unless you name another account.
+  deletes on `personal` unless you name another account.
 - **A confirmation names the account it writes to,** for example "Run
-  GOOGLECALENDAR_CREATE_EVENT on second with …?".
+  GOOGLECALENDAR_CREATE_EVENT on work with …?".
 
 With one account per app, nothing changes: no mode, no note, and the same
 session.

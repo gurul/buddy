@@ -375,13 +375,13 @@ def test_the_setting_replaces_the_list_all_lifts_it_and_a_failed_lookup_keeps_it
 
 def test_two_accounts_on_one_app_make_a_multi_account_session_that_must_name_the_account(tmp_path: Path) -> None:
     cfg = _cfg(tmp_path)
-    one = FakeClient(connected=(("googlecalendar", "ACTIVE", "main"), ("gmail", "ACTIVE")))
+    one = FakeClient(connected=(("googlecalendar", "ACTIVE", "personal"), ("gmail", "ACTIVE")))
     bridge = ComposioBridge(cfg, client_factory=lambda: one)
     bridge.start()
     assert one.sessions.multi == [None]                         # one account per app: the session is unchanged
     assert bridge.multi_account is False and bridge.accounts_note() == ""
 
-    two = FakeClient(connected=(("googlecalendar", "ACTIVE", "main"), ("googlecalendar", "ACTIVE", "second"),
+    two = FakeClient(connected=(("googlecalendar", "ACTIVE", "personal"), ("googlecalendar", "ACTIVE", "work"),
                                 ("googlecalendar", "EXPIRED"), ("gmail", "ACTIVE")))
     bridge = ComposioBridge(cfg, client_factory=lambda: two)
     bridge.start()
@@ -389,7 +389,7 @@ def test_two_accounts_on_one_app_make_a_multi_account_session_that_must_name_the
     assert two.sessions.used == [] and two.sessions.created == ["telegram-7"]
     assert two.sessions.multi == [{"enable": True, "require_explicit_selection": True}]
     note = bridge.accounts_note()
-    assert "googlecalendar: main, second" in note and "gmail" not in note   # an expired one is not offered
+    assert "googlecalendar: personal, work" in note and "gmail" not in note   # an expired one is not offered
     assert f'"{PRIMARY_ALIAS}"' in note                         # writes go to the owner's own account
 
     again = FakeClient(connected=two.connected_accounts.connected)
@@ -399,9 +399,9 @@ def test_two_accounts_on_one_app_make_a_multi_account_session_that_must_name_the
 
 def test_the_confirmation_line_names_the_account_a_write_goes_to() -> None:
     args = {"tools": [{"tool_slug": "GOOGLECALENDAR_CREATE_EVENT", "arguments": {"summary": "Lunch"},
-                       "account": "second"}]}
+                       "account": "work"}]}
     assert describe_for_confirmation("COMPOSIO_MULTI_EXECUTE_TOOL", args) == (
-        "Run GOOGLECALENDAR_CREATE_EVENT on second with summary: Lunch?")
+        "Run GOOGLECALENDAR_CREATE_EVENT on work with summary: Lunch?")
     del args["tools"][0]["account"]
     assert describe_for_confirmation("COMPOSIO_MULTI_EXECUTE_TOOL", args) == (
         "Run GOOGLECALENDAR_CREATE_EVENT with summary: Lunch?")
