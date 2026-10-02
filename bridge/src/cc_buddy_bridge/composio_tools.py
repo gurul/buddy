@@ -44,6 +44,9 @@ DEFAULT_TIMEOUT_SECS = 60.0
 _ON = frozenset({"1", "true", "yes", "on"})
 
 MULTI_EXECUTE = "COMPOSIO_MULTI_EXECUTE_TOOL"
+# The alias of the owner's own account on a toolkit with more than one: writes go there unless he names another
+# (accounts_note). Set on the connection in Composio (connected_accounts.update(<id>, alias="main")).
+PRIMARY_ALIAS = "main"
 # Toolkits kept out of buddy's session. composio_search is Composio's own web search and page fetch: on
 # 2026-09-30 the brain used it (COMPOSIO_SEARCH_WEB, COMPOSIO_SEARCH_FETCH_URL_CONTENT, per Composio's execution
 # log) to find a course's office hours, which costs a tool search plus a multi-execute per lookup, and ran out
@@ -334,7 +337,9 @@ def describe_for_confirmation(name: str, args: Mapping[str, Any]) -> str:
         for tool in asked:
             slug = str(tool.get("tool_slug") or "a tool")
             pairs = _pairs(tool.get("arguments"))
-            parts.append(f"{slug} with {pairs}" if pairs else slug)
+            account = str(tool.get("account") or "").strip()
+            slug_on = f"{slug} on {_clip(account, VALUE_CLIP)}" if account else slug   # which account it writes to
+            parts.append(f"{slug_on} with {pairs}" if pairs else slug_on)
     elif name == WORKBENCH and (inner := consequential_slugs(name, args)) and inner != [name]:
         parts.append(", ".join(dict.fromkeys(inner)) + " from a workbench script")   # the tools it calls, not the code
     else:
@@ -387,6 +392,9 @@ class ComposioBridge:
         self._client: Any = None
         self._session: Any = None
         self._tools: list[dict[str, Any]] = []
+        # toolkit slug -> the owner's ACTIVE accounts on it, each by alias (or id when it has none); filled by
+        # _allowed_toolkits. Two or more on one toolkit puts the session in multi-account mode (start).
+        self._accounts: dict[str, list[str]] = {}
 
     @property
     def started(self) -> bool:
@@ -414,7 +422,13 @@ class ComposioBridge:
         session = None
         # Which toolkits a session has is fixed when it is made, so one made with another list is not resumed.
         allowed = self._allowed_toolkits()
-        if stored and state.get("user_id") == self.config.user_id and state.get("toolkits") == allowed:
+        multi = self.multi_account
+        # Multi-account mode with explicit selection: with two accounts on one app, Composio refuses a call that
+        # does not name its account rather than picking one silently. Fixed at creation, like the toolkits.
+        extra: dict[str, Any] = ({"multi_account": {"enable": True, "require_explicit_selection": True}}
+                                 if multi else {})
+        if (stored and state.get("user_id") == self.config.user_id and state.get("toolkits") == allowed
+                and bool(state.get("multi_account")) == multi):
             try:
                 session = sessions.use(stored)
                 log.info("composio: resumed the session for %s", self.config.user_id)
@@ -422,12 +436,12 @@ class ComposioBridge:
                 log.warning("composio: stored session unusable (%s); creating a fresh one", type(e).__name__)
         if session is None:
             if allowed is None:
-                session = sessions.create(user_id=self.config.user_id)
+                session = sessions.create(user_id=self.config.user_id, **extra)
             else:
-                session = sessions.create(user_id=self.config.user_id, toolkits={"enable": allowed})
+                session = sessions.create(user_id=self.config.user_id, toolkits={"enable": allowed}, **extra)
             _write_state(self.config.state_path, {"user_id": self.config.user_id,
                                                   "session_id": str(getattr(session, "session_id", "")),
-                                                  "toolkits": allowed})
+                                                  "toolkits": allowed, "multi_account": multi})
             log.info("composio: created a session for %s", self.config.user_id)
         self._session = session
         self._tools = self._load_tools()
@@ -435,10 +449,9 @@ class ComposioBridge:
     def _allowed_toolkits(self) -> Optional[list[str]]:
         """The session's allow-list: the configured toolkits plus every one the owner has connected (an app
         connected outside this list still works), sorted; None when unlimited. A failed lookup of the connected
-        accounts leaves the configured list alone."""
-        if self.config.toolkits is None:
-            return None
-        allowed = set(self.config.toolkits)
+        accounts leaves the configured list alone. Also records each toolkit's accounts in ``_accounts``."""
+        allowed = set(self.config.toolkits or ())
+        accounts: dict[str, list[str]] = {}
         try:
             listing = self._client.connected_accounts.list(user_ids=[self.config.user_id])
             for item in getattr(listing, "items", None) or []:
@@ -447,10 +460,36 @@ class ComposioBridge:
                 slug = kit.get("slug") if isinstance(kit, Mapping) else getattr(kit, "slug", kit)
                 if isinstance(slug, str) and slug and data.get("status") == "ACTIVE":
                     allowed.add(slug.lower())
+                    name = str(data.get("alias") or data.get("id") or "")
+                    if name:
+                        accounts.setdefault(slug.lower(), []).append(name)
         except Exception as e:  # noqa: BLE001 — the type only
             log.info("composio: connected accounts not listed (%s); the configured toolkits only", type(e).__name__)
+        self._accounts = {k: sorted(v) for k, v in accounts.items()}
+        if self.config.toolkits is None:
+            return None
         allowed -= WEB_TOOLKITS
         return sorted(allowed)
+
+    @property
+    def multi_account(self) -> bool:
+        """Some toolkit has two or more of the owner's accounts connected."""
+        return any(len(v) > 1 for v in self._accounts.values())
+
+    def accounts_note(self) -> str:
+        """For the brain, only while some toolkit has more than one account: which accounts there are and which
+        one each kind of call goes to. Empty otherwise, so a one-account prompt is unchanged."""
+        multi = {k: v for k, v in sorted(self._accounts.items()) if len(v) > 1}
+        if not multi:
+            return ""
+        lines = ["More than one account is connected for some apps. Every COMPOSIO_MULTI_EXECUTE_TOOL item for "
+                 "these apps must set \"account\" to one of the names below:"]
+        for kit, names in multi.items():
+            lines.append(f"- {kit}: {', '.join(names)}")
+        lines.append(f"To read (a calendar, mail, files), read every account of that app and say which account each "
+                     f"result came from. To create, change or delete, use the account named \"{PRIMARY_ALIAS}\" "
+                     f"unless the owner names another one.")
+        return "\n".join(lines)
 
     def _load_tools(self) -> list[dict[str, Any]]:
         raw = self._session.tools()

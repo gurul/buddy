@@ -16,6 +16,7 @@ import pytest
 
 from cc_buddy_bridge.composio_tools import (
     COMPOSIO_DEFAULT,
+    PRIMARY_ALIAS,
     TOOLKITS,
     WEB_TOOLKITS,
     ComposioBridge,
@@ -67,13 +68,15 @@ class FakeSessions:
         self.created: list[str] = []
         self.toolkits: list[Any] = []
         self.used: list[str] = []
+        self.multi: list[Any] = []
         self.use_raises = use_raises
         self._execute = execute
         self.n = 0
 
-    def create(self, *, user_id: str, toolkits: Any = None) -> FakeSession:
+    def create(self, *, user_id: str, toolkits: Any = None, multi_account: Any = None) -> FakeSession:
         self.created.append(user_id)
         self.toolkits.append(toolkits)
+        self.multi.append(multi_account)
         self.n += 1
         return FakeSession(f"trs_new_{self.n}", self._execute)
 
@@ -85,17 +88,19 @@ class FakeSessions:
 
 
 class FakeAccounts:
-    def __init__(self, connected: tuple[tuple[str, str], ...] = (), raises: bool = False) -> None:
+    def __init__(self, connected: tuple[tuple[str, ...], ...] = (), raises: bool = False) -> None:
         self.connected, self.raises = connected, raises
 
     def list(self, *, user_ids: list[str]) -> Any:
         if self.raises:
             raise RuntimeError("down")
-        return SimpleNamespace(items=[{"toolkit": {"slug": slug}, "status": status} for slug, status in self.connected])
+        # (slug, status) or (slug, status, alias): an alias of "" means the connection has none (named by id)
+        return SimpleNamespace(items=[{"toolkit": {"slug": c[0]}, "status": c[1], "id": f"ca_{c[0]}_{i}",
+                                       "alias": c[2] if len(c) > 2 else None} for i, c in enumerate(self.connected)])
 
 
 class FakeClient:
-    def __init__(self, connected: tuple[tuple[str, str], ...] = (), accounts_raise: bool = False, **kw: Any) -> None:
+    def __init__(self, connected: tuple[tuple[str, ...], ...] = (), accounts_raise: bool = False, **kw: Any) -> None:
         self.sessions = FakeSessions(**kw)
         self.connected_accounts = FakeAccounts(connected, accounts_raise)
 
@@ -137,7 +142,8 @@ def test_the_session_is_the_owners_and_is_reused(tmp_path: Path) -> None:
     assert first.sessions.created == ["telegram-7"] and first.sessions.used == []
     assert b1.session_id == "trs_new_1"
     state = json.loads(cfg.state_path.read_text())
-    assert state == {"user_id": "telegram-7", "session_id": "trs_new_1", "toolkits": sorted(TOOLKITS)}
+    assert state == {"user_id": "telegram-7", "session_id": "trs_new_1", "toolkits": sorted(TOOLKITS),
+                     "multi_account": False}
     assert first.sessions.toolkits == [{"enable": sorted(TOOLKITS)}]          # an allow-list: no web toolkits
     assert not set(TOOLKITS) & WEB_TOOLKITS
     assert stat.S_IMODE(cfg.state_path.stat().st_mode) == 0o600
@@ -365,3 +371,37 @@ def test_the_setting_replaces_the_list_all_lifts_it_and_a_failed_lookup_keeps_it
     down = FakeClient(accounts_raise=True)
     ComposioBridge(configured(env, frozenset({7})), client_factory=lambda: down).start()
     assert down.sessions.toolkits == [{"enable": sorted(TOOLKITS)}]
+
+
+def test_two_accounts_on_one_app_make_a_multi_account_session_that_must_name_the_account(tmp_path: Path) -> None:
+    cfg = _cfg(tmp_path)
+    one = FakeClient(connected=(("googlecalendar", "ACTIVE", "main"), ("gmail", "ACTIVE")))
+    bridge = ComposioBridge(cfg, client_factory=lambda: one)
+    bridge.start()
+    assert one.sessions.multi == [None]                         # one account per app: the session is unchanged
+    assert bridge.multi_account is False and bridge.accounts_note() == ""
+
+    two = FakeClient(connected=(("googlecalendar", "ACTIVE", "main"), ("googlecalendar", "ACTIVE", "second"),
+                                ("googlecalendar", "EXPIRED"), ("gmail", "ACTIVE")))
+    bridge = ComposioBridge(cfg, client_factory=lambda: two)
+    bridge.start()
+    # the stored one-account session is not resumed: multi-account mode is fixed when a session is made
+    assert two.sessions.used == [] and two.sessions.created == ["telegram-7"]
+    assert two.sessions.multi == [{"enable": True, "require_explicit_selection": True}]
+    note = bridge.accounts_note()
+    assert "googlecalendar: main, second" in note and "gmail" not in note   # an expired one is not offered
+    assert f'"{PRIMARY_ALIAS}"' in note                         # writes go to the owner's own account
+
+    again = FakeClient(connected=two.connected_accounts.connected)
+    ComposioBridge(cfg, client_factory=lambda: again).start()
+    assert again.sessions.used == ["trs_new_1"] and again.sessions.created == []   # same shape: resumed
+
+
+def test_the_confirmation_line_names_the_account_a_write_goes_to() -> None:
+    args = {"tools": [{"tool_slug": "GOOGLECALENDAR_CREATE_EVENT", "arguments": {"summary": "Lunch"},
+                       "account": "second"}]}
+    assert describe_for_confirmation("COMPOSIO_MULTI_EXECUTE_TOOL", args) == (
+        "Run GOOGLECALENDAR_CREATE_EVENT on second with summary: Lunch?")
+    del args["tools"][0]["account"]
+    assert describe_for_confirmation("COMPOSIO_MULTI_EXECUTE_TOOL", args) == (
+        "Run GOOGLECALENDAR_CREATE_EVENT with summary: Lunch?")

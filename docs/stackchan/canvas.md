@@ -34,6 +34,24 @@ Either setting missing: Canvas is off and the brain gets no Canvas tools.
 When the token expires or you delete it, buddy says so and tells you to make a
 new one (step 1), then replace `CANVAS_API_TOKEN` and restart.
 
+### When the school blocks personal tokens
+
+Some schools turn off **New Access Token**. In that case, use Canvas's own
+calendar feed instead. Click **Calendar → Calendar Feed** and copy the private
+`.ics` link. In Google Calendar, use **Other calendars → + → From URL** and add
+the link. buddy reads every Google calendar
+(`GOOGLECALENDAR_EVENTS_LIST_ALL_CALENDARS`), so assignments show up as events
+at their due time, with no Canvas settings. Set up 2026-10-02.
+
+The feed gives less than the token does:
+
+- **No submitted status and no announcements.** The feed carries neither.
+- **Slow updates.** Google refreshes a subscribed feed every few hours to a day.
+- **The rundown shows today only.** It lists today's assignments, not the
+  next three days'.
+
+The link is a secret: anyone who has it can read your calendar.
+
 ## What you can ask
 
 | You text | Tool | What comes back |
