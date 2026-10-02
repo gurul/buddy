@@ -612,29 +612,34 @@ def capture(root: Path, text: str, *, kind: str = "note", source: str = "telegra
     ensure_vault(root)
     when = now or datetime.now()
     day = when.strftime("%Y-%m-%d")
+    # Every write below holds _NOTE_LOCK, as edit_note and undo_note do: an unlocked read-modify-write
+    # of todos.md racing an edit_note on the same file silently lost one of the two changes.
     if kind == "todo":
         priority, item = _priority_of(body)
         item = " ".join(item.split())
         path = root / TODOS_FILE
-        current = path.read_text(encoding="utf-8") if path.exists() else _todos_skeleton()
-        path.write_text(_append_under(current, priority, f"- [ ] {item} (added {day})"), encoding="utf-8")
+        with _NOTE_LOCK:
+            current = path.read_text(encoding="utf-8") if path.exists() else _todos_skeleton()
+            _atomic_text(path, _append_under(current, priority, f"- [ ] {item} (added {day})"))
         log.info("second brain: todo captured under %s", priority)
         return CaptureResult(path=TODOS_FILE, kind=kind, title=item[:MAX_TITLE_CHARS])
     if kind == "journal":
         path = root / JOURNAL_DIR / f"{day}.md"
         path.parent.mkdir(parents=True, exist_ok=True)
-        if not path.exists():
-            path.write_text(f"# {day}\n\n", encoding="utf-8")
         line = " ".join(body.split())
-        with path.open("a", encoding="utf-8") as fh:
-            fh.write(f"- {when.strftime('%H:%M')} {line}\n")
+        with _NOTE_LOCK:
+            if not path.exists():
+                path.write_text(f"# {day}\n\n", encoding="utf-8")
+            with path.open("a", encoding="utf-8") as fh:
+                fh.write(f"- {when.strftime('%H:%M')} {line}\n")
         log.info("second brain: journal line appended to %s", path.name)
         return CaptureResult(path=_rel(root, path), kind=kind, title=line[:MAX_TITLE_CHARS])
     slug = slugify(body.splitlines()[0])
-    path = _unclashed(root / INBOX_DIR / f"{when.strftime('%Y-%m-%d-%H%M')}-{slug}.md")
     note = (f"---\ncreated: {when.strftime('%Y-%m-%dT%H:%M')}\nsource: {source}\nkind: {kind}\n"
             f"status: inbox\n---\n{body}\n")
-    path.write_text(note, encoding="utf-8")
+    with _NOTE_LOCK:
+        path = _unclashed(root / INBOX_DIR / f"{when.strftime('%Y-%m-%d-%H%M')}-{slug}.md")
+        path.write_text(note, encoding="utf-8")
     log.info("second brain: %s captured to %s", kind, path.name)
     return CaptureResult(path=_rel(root, path), kind=kind, title=title_of(note, slug))
 

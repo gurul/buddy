@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import threading
 from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime
 from pathlib import Path
@@ -629,6 +630,35 @@ def test_two_simultaneous_edits_cannot_overwrite_each_other(vault: Path) -> None
     assert sum(result["ok"] for result in results) == 1
     text = (vault / path).read_text()
     assert text.endswith("keep\none\n") or text.endswith("keep\ntwo\n")
+
+
+def test_todo_capture_and_edit_cannot_silently_lose_a_change(vault: Path, monkeypatch) -> None:
+    capture(vault, "first", kind="todo", now=NOW)
+    path = sb.TODOS_FILE
+    revision = read_note(vault, path)["revision"]
+    real_append_under = sb._append_under
+    edit_result: list = []
+    workers: list[threading.Thread] = []
+
+    def edit():
+        edit_result.append(dispatch(vault, "edit_note", {"path": path, "revision": revision,
+                                                         "old_text": "", "new_text": "edited line"}))
+
+    def slow_append_under(*args):
+        # An edit lands between the capture's read and its write.
+        worker = threading.Thread(target=edit)
+        workers.append(worker)
+        worker.start()
+        worker.join(timeout=0.3)
+        return real_append_under(*args)
+
+    monkeypatch.setattr(sb, "_append_under", slow_append_under)
+    capture(vault, "second", kind="todo", now=NOW)
+    workers[0].join(timeout=5)
+    text = (vault / path).read_text()
+    assert "second (added 2026-09-21)" in text
+    # Either both changes survive, or the edit was refused as stale; never "ok" and lost.
+    assert edit_result[0]["ok"] is False or "edited line" in text
 
 
 def test_failed_note_write_keeps_original_and_does_not_offer_failed_undo(vault: Path, monkeypatch) -> None:
