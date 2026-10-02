@@ -189,6 +189,10 @@ def _resolve_port(pattern: str, skip_serials: frozenset[str] = frozenset()) -> O
 
 
 class BuddySerial:
+    # A USB cable, not a radio link: the board's BLE "sec" flag says nothing about this link,
+    # so the daemon ignores it here (docs/SETUP-ISSUES.md #10).
+    wired = True
+
     def __init__(
         self,
         on_message: IncomingHandler,

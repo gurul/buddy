@@ -171,3 +171,27 @@ def test_ipc_sound_command(tmp_path) -> None:
         assert d.ble.sent[-1] == {"cmd": "sound", "on": False}
         assert (await d._handle_ipc({"evt": "sound", "action": "on"}))["sound"] == "on"
     asyncio.run(go())
+
+
+def test_status_ack_sec_ignored_on_a_wired_link(tmp_path, caplog) -> None:
+    # SETUP-ISSUES #10: over USB the board's BLE "sec" flag is not this link's security.
+    async def go():
+        d = _daemon(tmp_path)
+        d._last_stick_sec = None
+        d.ble.wired = True
+        with caplog.at_level("INFO", logger="cc_buddy_bridge.daemon"):
+            await d._handle_ble({"ack": "status", "ok": True, "data": {"sec": False}})
+        assert d._last_stick_sec is None
+        assert "UNENCRYPTED" not in caplog.text
+    asyncio.run(go())
+
+
+def test_status_ack_sec_still_warns_over_ble(tmp_path, caplog) -> None:
+    async def go():
+        d = _daemon(tmp_path)
+        d._last_stick_sec = None
+        with caplog.at_level("INFO", logger="cc_buddy_bridge.daemon"):
+            await d._handle_ble({"ack": "status", "ok": True, "data": {"sec": False}})
+        assert d._last_stick_sec is False
+        assert "UNENCRYPTED" in caplog.text
+    asyncio.run(go())
