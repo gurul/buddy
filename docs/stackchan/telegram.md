@@ -401,6 +401,27 @@ regarding this"). buddy reads the script before it runs, without running it
     under another name;
   - code that does not parse.
 
+**Two accounts on one app** (owner, 2026-10-02: a second Google Calendar). Ask
+buddy to connect another account. If it can't, make a Composio Connect Link with
+`connected_accounts.link(<user id>, <auth config id>, alias="second",
+allow_multiple=True)` and sign in with the other account. Name your own account
+on that app `main` (`connected_accounts.update(<connection id>, alias="main")`).
+When any app has two or more ACTIVE accounts, buddy does the following at start:
+
+- **The session is made in multi-account mode with explicit selection.** Every
+  `COMPOSIO_MULTI_EXECUTE_TOOL` call for that app must name its `account`, and
+  Composio refuses one that does not, instead of picking one silently. The
+  saved state records the mode. A session made in the other mode is not
+  resumed: a new one is created.
+- **The brain gets a short note** naming each app's accounts. It reads from
+  every account and says which result came from where. It creates, changes and
+  deletes on `main` unless you name another account.
+- **A confirmation names the account it writes to,** for example "Run
+  GOOGLECALENDAR_CREATE_EVENT on second with …?".
+
+With one account per app, nothing changes: no mode, no note, and the same
+session.
+
 Proven live 2026-09-21 from this code path: Gmail, Google Calendar and Google
 Drive connected; `GMAIL_FETCH_EMAILS`, `GOOGLECALENDAR_EVENTS_LIST_ALL_CALENDARS`
 and `GOOGLEDRIVE_FIND_FILE` each returned a real result with a Composio log id.

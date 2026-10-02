@@ -3608,6 +3608,9 @@ class TelegramInlet:
                                                 self._spotify.instructions() if self._spotify is not None else "",
                                                 self._canvas.instructions() if self._canvas is not None else "",
                                                 chief_mod.instructions(self.chief.live) if self.chief is not None
+                                                else "",
+                                                # which account each app call names, while an app has two
+                                                getattr(self._apps, "accounts_note", lambda: "")() if app_tools
                                                 else "")
                                                 if b)
         parts = {"profile": prof, "app_tools": app_tools, "vault": self._vault is not None, "today": today,
