@@ -2894,7 +2894,9 @@ class Daemon:
                     self._ack_escalation = 0
         if ack == "status" and obj.get("ok"):
             data = obj.get("data") or {}
-            sec = data.get("sec")
+            # "sec" is the board's BLE encryption; over a USB cable there is nothing to sniff,
+            # so leave it unknown (no warning, no HUD "UNSEC").
+            sec = None if getattr(self.ble, "wired", False) else data.get("sec")
             if sec is not None and sec != self._last_stick_sec:
                 log.info(
                     "stick link: %s (was %s)",

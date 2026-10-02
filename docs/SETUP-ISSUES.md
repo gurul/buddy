@@ -229,7 +229,10 @@ INFO cc_buddy_bridge.daemon: stick link: UNENCRYPTED — transcript sniffable!
 Emitted on a USB serial link, where the "link" is a physical cable. The warning
 is meaningful for BLE and noise for serial.
 
-**Fix:** suppress or reword when the transport is serial.
+**Fixed 2026-10-02:** `BuddySerial` is marked `wired`, and on a wired link the
+daemon ignores the board's `sec` flag. It no longer logs the warning, and the
+HUD leaves the lock segment out instead of showing `UNSEC`. BLE links still
+warn.
 
 **Owner:** `claude-pet`
 
