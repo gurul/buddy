@@ -41,7 +41,7 @@ final class StickLink: NSObject, @preconcurrency CBCentralManagerDelegate, @prec
     private var peripheral: CBPeripheral?
     private var up: CBCharacteristic?
     private var down: CBCharacteristic?
-    private var outbox: [Data] = []                // writes waiting for the link to take them
+    private var outbox = PacketQueue<Data>()      // writes waiting for the link to take them
     private var gaps = GapCounter()
     private var encoder = FrameEncoder(payload: 20)
 
@@ -90,7 +90,7 @@ final class StickLink: NSObject, @preconcurrency CBCentralManagerDelegate, @prec
         encoder.reset()
     }
 
-    var queuedAudioFrames: Int { outbox.lazy.filter { $0.first == Wire.kindAudio }.count }
+    var queuedAudioFrames: Int { outbox.count { $0.first == Wire.kindAudio } }
 
     private func writeRoom() -> Int {
         guard let peripheral else { return 20 }
@@ -105,7 +105,8 @@ final class StickLink: NSObject, @preconcurrency CBCentralManagerDelegate, @prec
     private func pump() {
         guard let peripheral, let down else { return }
         while !outbox.isEmpty, peripheral.canSendWriteWithoutResponse {
-            peripheral.writeValue(outbox.removeFirst(), for: down, type: .withoutResponse)
+            guard let value = outbox.popFirst() else { break }
+            peripheral.writeValue(value, for: down, type: .withoutResponse)
         }
     }
 

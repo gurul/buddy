@@ -90,7 +90,7 @@ final class CallSocket {
     private func handle(_ message: URLSessionWebSocketTask.Message) {
         switch message {
         case .data(let data):
-            let pcm = data.withUnsafeBytes { Array($0.bindMemory(to: Int16.self)) }
+            guard let pcm = PCM16.decode(data) else { return }
             onEvent?(.audio(pcm))
         case .string(let text):
             guard let obj = try? JSONSerialization.jsonObject(with: Data(text.utf8)) as? [String: Any],

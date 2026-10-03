@@ -709,8 +709,12 @@ def test_privacy_the_owners_words_reach_no_payload_row_event_or_log(tmp_path: Pa
     assert any(SENTINEL in p.read_text() for p in tmp_path.rglob("*.txt"))
 
 
-def test_privacy_spend_rows_carry_the_card_id_and_nothing_said(tmp_path: Path, _spend_ledger_in_tmp: Path) -> None:
+def test_privacy_spend_rows_carry_the_card_id_and_nothing_said(tmp_path: Path, _spend_ledger_in_tmp: Path,
+                                                           monkeypatch: pytest.MonkeyPatch) -> None:
     f, clock = Fakes(), Clock(at(10))
+    # The chief's injected date and the spend ledger's wall clock must agree;
+    # otherwise this test only works on the fixture's original calendar day.
+    monkeypatch.setattr(spend.time, "time", clock)
     c = make(tmp_path, f, clock)
     run(take(c, READ_JOB, READ_SAID))
     run(c.drain())

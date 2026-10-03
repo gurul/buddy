@@ -299,9 +299,13 @@ def test_off_the_self_context_block_is_byte_for_byte_origin_main(tmp_path: Path,
             env = owner_env(**extra)
             assert self_context.block(env, lights_path=path, commit="abc1234") == old.block(
                 env, lights_path=path, commit="abc1234")
+        off = self_context.block(owner_env(CC_BUDDY_CHIEF="off"), lights_path=path, commit="abc1234")
+        assert "\n- Chief of staff: on.\n" not in off
         for extra in ({"CC_BUDDY_CHIEF": "on"}, *(auto if chief.SHIPPED else ())):
             on = self_context.block(owner_env(**extra), lights_path=path, commit="abc1234")
-            assert on != old.block(owner_env(**extra), lights_path=path, commit="abc1234")
+            # The feature is now on origin/main too. Its positive control must
+            # compare modes, rather than assume that the remote predates it.
+            assert on != off
             assert "\n- Chief of staff: on.\n" in on
     finally:
         sys.modules.pop("cc_buddy_bridge._origin_self_context", None)

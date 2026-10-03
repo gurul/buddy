@@ -55,5 +55,55 @@ check(many[254...257].map { $0[1] } == [254, 255, 0, 1], "sequence wraps")
 var g = GapCounter(); for s: UInt8 in [250, 251, 254, 1] { g.see(s) }
 check(g.lost == 4, "gaps across the wrap")
 
+// Slow Array FIFO oracle for burst queues, radio stalls, interruption and compaction.
+var queue = PacketQueue<Data>()
+var reference: [Data] = []
+var random: UInt32 = 0x12345678
+for step in 0..<20_000 {
+    random = random &* 1664525 &+ 1013904223
+    if step < 4000 || random % 4 == 0 {
+        let packet = Data([step % 5 == 0 ? Wire.kindJSON : Wire.kindAudio,
+                           UInt8(truncatingIfNeeded: step), UInt8(truncatingIfNeeded: step >> 8)])
+        queue.append(packet)
+        reference.append(packet)
+    } else if random % 257 == 0 {
+        queue.removeAll { $0.first == Wire.kindAudio }
+        reference.removeAll { $0.first == Wire.kindAudio }
+    } else {
+        check(queue.popFirst() == (reference.isEmpty ? nil : reference.removeFirst()), "packet order at \(step)")
+    }
+    check(queue.count == reference.count && queue.isEmpty == reference.isEmpty, "queue size at \(step)")
+    if step % 200 == 0 {
+        check(queue.count { $0.first == Wire.kindAudio } == reference.filter { $0.first == Wire.kindAudio }.count,
+              "pending audio count at \(step)")
+    }
+}
+while !reference.isEmpty { check(queue.popFirst() == reference.removeFirst(), "drain order") }
+check(queue.isEmpty && queue.popFirst() == nil, "empty queue")
+queue.append(Data([Wire.kindAudio]))
+queue.removeAll()
+queue.append(Data([Wire.kindJSON]))
+check(queue.popFirst() == Data([Wire.kindJSON]), "clear and reuse")
+
+// Network buffers can start at any address, and the wire is explicitly little-endian.
+let wirePCM = Data([0x00, 0x80, 0xff, 0xff, 0x00, 0x00, 0x01, 0x00, 0xff, 0x7f])
+check(PCM16.decode(wirePCM) == [-32768, -1, 0, 1, 32767], "signed little-endian PCM")
+let padded = Data([0xaa]) + wirePCM + Data([0xaa])
+check(PCM16.decode(padded[1..<(padded.count - 1)]) == [-32768, -1, 0, 1, 32767], "unaligned PCM slice")
+check(PCM16.decode(Data()) == [], "empty PCM")
+check(PCM16.decode(Data([0])) == nil && PCM16.decode(wirePCM + Data([0])) == nil, "truncated PCM refused")
+
+// Sent payloads must be released before a stalled burst fully drains.
+final class PacketToken {}
+var tokens = PacketQueue<PacketToken>()
+var sent: PacketToken? = PacketToken()
+weak var released = sent
+tokens.append(sent!)
+tokens.append(PacketToken())
+sent = nil
+_ = tokens.popFirst()
+check(released == nil, "sent packet retained in queue")
+
 if failures > 0 { print("\(failures) check(s) failed"); exit(1) }
 print("swift codec: \(seen) vectors and all checks passed")
+print("SWIFT_RELAY_BUFFER_OK")

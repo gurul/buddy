@@ -27,6 +27,18 @@ def test_corrupt_file_keeps_sound_on(tmp_path) -> None:
     assert SoundSetting(p).load() is True
 
 
+def test_non_object_json_does_not_crash_microphone_or_sound_startup(tmp_path, caplog) -> None:
+    p = tmp_path / "switch.json"
+    for name in ("mic", "sound"):
+        for text in ("null", "[]", "false", "42", '"muted"'):
+            p.write_text(text)
+            assert SoundSetting(p, name=name).load() is True
+    assert "expected a JSON object" in caplog.text
+    # A valid stored setting is still honored.
+    p.write_text('{"muted": true}')
+    assert SoundSetting(p).load() is False
+
+
 def test_wire_helpers() -> None:
     assert build_sound_cmd(False) == {"cmd": "sound", "on": False}
     page = {"cmd": "caption", "page": 0, "chirp": True}

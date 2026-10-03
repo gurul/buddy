@@ -66,8 +66,7 @@ Telegram bot cannot take a Telegram call, so the call is in the Mini App: **Call
 
 ### Latency
 
-Measured 2026-09-25 (owner: "how can we improve latency"). Before: 5 to 11 s from letting go to buddy's
-voice. What each stage costs now, and how:
+Historical measurements from 2026-09-25 (owner: "how can we improve latency"). Before that change: 5 to 11 s from letting go to buddy's voice. The table describes the server-VAD configuration measured then; it is not a benchmark of the current transcription configuration.
 
 | Stage | How | Measured |
 |---|---|---|
@@ -77,7 +76,9 @@ voice. What each stage costs now, and how:
 
 Every press is timed in the daemon's log (`call: press … → heard in … → first reply … → first sound …`).
 None of OpenRouter's transcription models beat the live session (Deepgram Nova-3 0.69 s, Whisper Large V3
-Turbo 1.32 s, both uploaded), so the ears stay on OpenAI.
+Turbo 1.32 s, both uploaded) in that comparison.
+
+The current default is `gpt-4o-transcribe`. Since 2026-10-03, the realtime session waits for its configuration acknowledgment and uses manual commits: one complete button press is one item, including pauses. A new press waits until the preceding item finishes or is discarded, and delayed completions are matched by item ID. This removes the cross-press transcript race. Transcription finishes after release; release-to-text latency needs a new live measurement. If realtime setup, feeding or completion fails, the daemon uploads the whole recorded press. See the [optimization review](../optimization-review.md) for regression evidence and limits.
 
 ### When a turn fails
 
@@ -100,7 +101,7 @@ after the first sentence still fails the turn rather than repeat it.
 Code: `bridge/src/cc_buddy_bridge/phone_call.py` (the WebSocket, the call, the ears and the voice),
 `TelegramInlet.listen` / `hear`, `split_for_call` and `SentenceStream` in `telegram.py`,
 `make_stream_creator` in `computer_agent.py`, and the call screen in `miniapp_page.html`. Tests:
-`bridge/tests/test_phone_call.py` and the call tests in `test_telegram.py`. Spend shows as "phone calls".
+`bridge/tests/test_phone_call.py`, `bridge/tests/test_phone_call_turns.py` and the call tests in `test_telegram.py`. Spend shows as "phone calls".
 Switches: `CC_BUDDY_CALL_LIVE_STT` (on), `CC_BUDDY_CALL_TTS_PROVIDER` (`openrouter`, or `openai`),
 `CC_BUDDY_CALL_OR_TTS_MODEL`, `CC_BUDDY_CALL_OR_VOICE`, `CC_BUDDY_CALL_STT_MODEL`,
 `CC_BUDDY_CALL_TTS_MODEL`, `CC_BUDDY_CALL_VOICE`, `CC_BUDDY_CALL_LANGUAGE` (`en`: the language

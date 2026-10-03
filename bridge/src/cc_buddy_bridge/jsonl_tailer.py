@@ -64,8 +64,8 @@ class JSONLTailer:
         # initial sweep on daemon startup doesn't re-fire the callback for
         # every historical assistant message.
         self._emitted_assistant_uuids: dict[str, set[str]] = {}
-        # While True, the initial-sweep pass skips the live-emit callback so
-        # we don't spam the stick with dozens of past turns on daemon start.
+        # Until the initial sweep returns, history seeds the UUIDs without
+        # firing the live callback for past turns.
         self._initial_sweep_done = False
         # Deferred callbacks collected during _consume_obj (which is sync).
         # Fired from the awatch loop (async context).
@@ -83,10 +83,6 @@ class JSONLTailer:
         # during history replay; callbacks only fire for future writes.
         await self._initial_sweep()
         self._initial_sweep_done = True
-        # Seed the "already emitted" set from history so that the first live
-        # event on each file doesn't fire unless it's genuinely new. A full read
-        # of every transcript, so off the loop like the sweep.
-        await asyncio.to_thread(self._seed_emitted_from_history)
         await self._emit()
 
         # Watch for changes. watchfiles yields sets of (Change, path).
@@ -111,29 +107,6 @@ class JSONLTailer:
             except Exception:  # noqa: BLE001
                 log.exception("on_assistant_text callback failed")
 
-    def _seed_emitted_from_history(self) -> None:
-        """After initial sweep, scan each transcript and record every assistant
-        uuid we've already processed so the live callback skips them."""
-        for path in self._offsets.keys():
-            try:
-                with open(path, "rb") as f:
-                    data = f.read()
-            except OSError:
-                continue
-            seen = self._emitted_assistant_uuids.setdefault(path, set())
-            for raw in data.splitlines():
-                if not raw.strip():
-                    continue
-                try:
-                    obj = json.loads(raw)
-                except ValueError:
-                    continue
-                msg = obj.get("message") if isinstance(obj.get("message"), dict) else obj
-                if isinstance(msg, dict) and msg.get("role") == "assistant":
-                    uuid = obj.get("uuid")
-                    if uuid:
-                        seen.add(uuid)
-
     async def _initial_sweep(self) -> None:
         """Every transcript under the roots, read from its start. On a Mac with a
         year of sessions that is hundreds of files and hundreds of megabytes, and
@@ -150,6 +123,11 @@ class JSONLTailer:
                 log.debug("initial sweep of %s failed: %s", p, e)
 
     async def _handle_changes(self, changes: set[tuple[Change, str]]) -> None:
+        # Read and parse the batch in one worker. Await it before emitting or
+        # processing another batch, so the dictionaries still have one writer.
+        await asyncio.to_thread(self._process_changes, changes)
+
+    def _process_changes(self, changes: set[tuple[Change, str]]) -> None:
         for change, path_str in changes:
             if not path_str.endswith(".jsonl"):
                 continue
@@ -159,6 +137,7 @@ class JSONLTailer:
                 self._today_tokens_per_file.pop(path_str, None)
                 self._cost_per_file.pop(path_str, None)
                 self._today_cost_per_file.pop(path_str, None)
+                self._emitted_assistant_uuids.pop(path_str, None)
                 continue
             try:
                 self._process_file(path_str)
@@ -179,17 +158,9 @@ class JSONLTailer:
             self._today_tokens_per_file.pop(path, None)
             self._cost_per_file.pop(path, None)
             self._today_cost_per_file.pop(path, None)
+            self._offsets[path] = 0
         if start == size:
             return
-        with open(path, "rb") as f:
-            f.seek(start)
-            data = f.read(size - start)
-        # Parse complete lines only — if the last line is partial, leave it.
-        last_nl = data.rfind(b"\n")
-        if last_nl < 0:
-            return
-        consumed = data[: last_nl + 1]
-        self._offsets[path] = start + len(consumed)
 
         current_day = _today_key()
         if current_day != self._day_key:
@@ -198,14 +169,26 @@ class JSONLTailer:
             self._today_tokens_per_file.clear()
             self._today_cost_per_file.clear()
 
-        for raw in consumed.splitlines():
-            if not raw.strip():
-                continue
-            try:
-                obj = json.loads(raw)
-            except ValueError:
-                continue
-            self._consume_obj(path, obj, current_day)
+        # Buffered line reads avoid holding a transcript and its split copy in
+        # RAM. Limit every read to the size snapshot, so a busy writer cannot
+        # extend this batch forever. Incomplete trailing lines stay unconsumed.
+        with open(path, "rb") as f:
+            f.seek(start)
+            offset = start
+            while offset < size:
+                raw = f.readline(size - offset)
+                if not raw.endswith(b"\n"):
+                    break
+                offset += len(raw)
+                self._offsets[path] = offset
+                if not raw.strip():
+                    continue
+                try:
+                    obj = json.loads(raw)
+                except ValueError:
+                    continue
+                if isinstance(obj, dict):
+                    self._consume_obj(path, obj, current_day)
 
     def _consume_obj(self, path: str, obj: dict[str, Any], current_day: str) -> None:
         # Claude Code transcript entries can nest differently across versions.
@@ -217,35 +200,41 @@ class JSONLTailer:
         # A new assistant record with text fires the live callback.
         if msg.get("role") == "assistant":
             content = msg.get("content")
-            if isinstance(content, list):
-                # Fire live callback the moment a NEW assistant text record lands.
-                # Must happen after the initial sweep (we don't want to replay
-                # history on daemon startup) and only once per record uuid.
-                if self._initial_sweep_done and self.on_assistant_text is not None:
-                    record_uuid = obj.get("uuid") or ""
-                    if record_uuid:
-                        seen = self._emitted_assistant_uuids.setdefault(path, set())
-                        if record_uuid not in seen:
-                            for block in content:
-                                if (
-                                    isinstance(block, dict)
-                                    and block.get("type") == "text"
-                                    and isinstance(block.get("text"), str)
-                                    and block["text"].strip()
-                                ):
-                                    seen.add(record_uuid)
-                                    self._pending_assistant_emits.append(
-                                        (path, block["text"].strip(), record_uuid)
-                                    )
-                                    break
+            record_uuid = obj.get("uuid")
+            if isinstance(record_uuid, str) and record_uuid:
+                seen = self._emitted_assistant_uuids.setdefault(path, set())
+                if not self._initial_sweep_done:
+                    # Seed only records actually consumed by the initial sweep.
+                    # A second full scan can see newly appended records beyond
+                    # the offset and wrongly suppress their live callbacks.
+                    seen.add(record_uuid)
+                elif record_uuid not in seen and isinstance(content, list) and self.on_assistant_text is not None:
+                    for block in content:
+                        if (
+                            isinstance(block, dict)
+                            and block.get("type") == "text"
+                            and isinstance(block.get("text"), str)
+                            and block["text"].strip()
+                        ):
+                            seen.add(record_uuid)
+                            self._pending_assistant_emits.append(
+                                (path, block["text"].strip(), record_uuid)
+                            )
+                            break
 
         usage = msg.get("usage")
         if not isinstance(usage, dict):
             return
-        out = int(usage.get("output_tokens") or 0)
-        if not out:
+        try:
+            out = int(usage.get("output_tokens") or 0)
+            if not out:
+                return
+            cost = pricing.estimate_cost(msg.get("model") or "", usage)
+        except (ValueError, TypeError, AttributeError, OverflowError):
+            # A foreign/torn record's metadata must not prevent subsequent
+            # complete records in this file from being counted.
+            log.debug("invalid transcript usage metadata in %s", path)
             return
-        cost = pricing.estimate_cost(msg.get("model") or "", usage)
         self._tokens_per_file[path] = self._tokens_per_file.get(path, 0) + out
         self._cost_per_file[path] = self._cost_per_file.get(path, 0.0) + cost
         # Only attribute to today's counter if the record's own timestamp falls

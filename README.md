@@ -105,7 +105,9 @@ The [Telegram door](docs/stackchan/telegram.md) is **off by default**. With it o
 - **Rides in your pocket.** An M5StickS3 is a push-to-talk button that works wherever
   your phone has signal: hold, talk, let go, and buddy answers from the stick's speaker.
   The stick talks Bluetooth to the **Buddy Link** iPhone app, which carries each press
-  to the daemon as a call. `/stick` pairs it. See [the stick link](docs/stick-link.md).
+  to the daemon as a call. Each press is one transcription turn, including pauses,
+  and the stick suppresses the microphone's first 100 ms of startup noise.
+  `/stick` pairs it. See [the stick link](docs/stick-link.md).
 - **Takes calls from your phone.** **Call buddy** in the Mini App is push to talk into
   the same brain you text, so a call can do everything a text can. Replies are spoken,
   not texted, except what you need in writing (links, codes, alerts, screenshots). See
@@ -559,6 +561,10 @@ bridge/.venv/bin/python -m pip install -e './bridge[dev]'
   writes into `bridge/src/cc_buddy_bridge/learning/web/canvas/`.
 - **Firmware.** Host tests live in `firmware/claude_pet_stackchan/host/`; the
   [build guide](docs/stackchan/build.md) covers hardware setup and bench conventions.
+- **Widget file reads.** `sh widget/Tests/run.sh` checks the Foundation-only readers;
+  `sh widget/Tests/benchmark.sh` measures a synthetic history and meeting transcript.
+  The [optimization review](docs/optimization-review.md) records the repository
+  review scope, transcription fixes, primary sources, and reproducible benchmarks.
 - **Learning.** Browser and live-tutor checks are in the [learning guide](docs/learning.md).
 
 Hardware, live APIs and macOS-specific integrations need their own setup beyond the

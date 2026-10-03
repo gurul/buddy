@@ -57,10 +57,8 @@ IDLE_YIELD_SECS = 8.0                 # a reply longer than this is read in part
 # The call's ears (owner, 2026-09-30, from the stick: "transcription is terrible"; "That's a vague Da they talking
 # to me" came back for a sentence with pauses). The full model, not the mini; CC_BUDDY_CALL_STT_MODEL overrides it.
 DEFAULT_STT_MODEL = "gpt-4o-transcribe"
-# Live transcription cuts the press at pauses and transcribes each piece alone, so a pause mid-sentence costs the
-# words around it their context: 0.7 s rather than 0.4 s cuts only at a real stop. Near-field noise reduction is for
-# a microphone held to the mouth (the stick, a phone), per OpenAI's realtime transcription session.
-LIVE_SILENCE_MS = 700
+# Push-to-talk already supplies the turn boundary. Keep each press together, including its pauses, instead of
+# asking server VAD to create additional turns. Near-field reduction is for a microphone held to the mouth.
 LIVE_NOISE_REDUCTION = "near_field"
 # The language the owner speaks, ISO-639-1. Left to guess, the model heard "Spotify mode" as Chinese on a short
 # Voice PE press and buddy answered in Chinese (2026-09-27; owner: "it sometimes thinks i am speaking another
@@ -235,13 +233,13 @@ class Voice(Protocol):
 
 
 class LiveEars:
-    """Transcription while the owner is still talking (owner, 2026-09-25: "2 is quite important").
+    """Stream the held button's audio, with one manually committed transcript at release.
 
-    One OpenAI realtime transcription session per call, opened when the call starts (connecting costs about
-    0.8 s, measured live), and reused for every press. The press's audio is appended as it arrives; the server
-    cuts it at pauses (server VAD) and transcribes each finished piece while the owner keeps talking, so on
-    release only the last piece is left: commit it, wait for every piece's text, join them in order. Measured
-    live, 2026-09-25: commit to text 1.0 s on an open session, against 1.5 s uploading the press after release.
+    One OpenAI realtime transcription session per call, opened when the call starts and reused for every
+    press. Audio is appended as it arrives, and the server receives the entire press as one manually committed
+    turn. The next press cannot clear or reuse that turn's
+    bookkeeping until its transcript is complete. This preserves sentence context and prevents delayed events
+    from a previous press appearing at the start of the next one. Call's PCM upload remains the fallback.
     Any failure is the caller's cue to fall back to uploading the press (``Voice.transcribe``)."""
 
     def __init__(self, api_key: str, model: str, language: str = DEFAULT_LANGUAGE) -> None:
@@ -252,7 +250,10 @@ class LiveEars:
         self.order: list[str] = []
         self.done: dict[str, str] = {}
         self.changed = asyncio.Event()
+        self.configured = asyncio.Event()
+        self._press_lock = asyncio.Lock()
         self.commit_resolved = True
+        self._awaiting_commit = False
         self.broken = False
         self.fed = 0
 
@@ -265,60 +266,107 @@ class LiveEars:
             "format": {"type": "audio/pcm", "rate": SAMPLE_RATE},
             "transcription": {"model": self.model, **({"language": self.language} if self.language else {})},
             "noise_reduction": {"type": LIVE_NOISE_REDUCTION},
-            "turn_detection": {"type": "server_vad", "silence_duration_ms": LIVE_SILENCE_MS, "prefix_padding_ms": 200}}}})
+            "turn_detection": None}}})
         self._reader = asyncio.ensure_future(self._read())
+        # Sending session.update does not prove the server accepted it. Audio must not reach the default VAD
+        # session while the update is still pending, or it can produce an unsolicited startup turn.
+        async with asyncio.timeout(5.0):
+            await self.configured.wait()
+        if self.broken:
+            raise ConnectionError("the live transcription session was not configured")
 
     async def _read(self) -> None:
         try:
             async for ev in self.conn:
                 kind = getattr(ev, "type", "")
-                if kind == "input_audio_buffer.committed":
+                if kind == "session.updated":
+                    self.configured.set()
+                elif kind == "input_audio_buffer.committed":
+                    if not self._awaiting_commit:
+                        self.broken = True    # an unexpected turn must never become the owner's words
+                        self.changed.set()
+                        continue
                     self.order.append(ev.item_id)
                     self.commit_resolved = True
+                    self._awaiting_commit = False
                 elif kind == "conversation.item.input_audio_transcription.completed":
-                    self.done[ev.item_id] = (ev.transcript or "").strip()
+                    if ev.item_id in self.order:
+                        self.done[ev.item_id] = (ev.transcript or "").strip()
                 elif kind == "conversation.item.input_audio_transcription.failed":
-                    self.done[getattr(ev, "item_id", "")] = ""
+                    if getattr(ev, "item_id", "") in self.order:
+                        self.broken = True    # recover with the complete PCM instead of losing this press
                 elif kind == "error":
                     code = str(getattr(getattr(ev, "error", None), "code", "") or "")
-                    if "empty" in code or "buffer_too_small" in code:
-                        self.commit_resolved = True    # the server had committed it all already
-                    else:
-                        log.warning("call: live transcription error %s", code or "?")
+                    log.warning("call: live transcription error %s", code or "?")
+                    self.broken = True
+                    self.configured.set()
                 self.changed.set()
         except Exception as e:  # noqa: BLE001
             log.info("call: the live transcription session closed (%s)", type(e).__name__)
         self.broken = True
+        self.configured.set()
         self.changed.set()
 
     async def begin(self) -> None:
         """A new press: nothing left over from the last one."""
-        self.order, self.done, self.fed = [], {}, 0
-        self.commit_resolved = True
-        await self.conn.input_audio_buffer.clear()
+        await self._press_lock.acquire()
+        try:
+            if self.broken:
+                raise ConnectionError("the live transcription session closed")
+            self.order, self.done, self.fed = [], {}, 0
+            self.commit_resolved = True
+            self._awaiting_commit = False
+            await self.conn.input_audio_buffer.clear()
+        except BaseException:
+            self._press_lock.release()
+            raise
+
+    async def discard(self) -> None:
+        """A short tap has no transcript; clear its audio and let the next press begin."""
+        try:
+            await self.conn.input_audio_buffer.clear()
+        except BaseException:
+            self.broken = True
+            raise
+        finally:
+            if self._press_lock.locked():
+                self._press_lock.release()
 
     async def feed(self, pcm: bytes) -> None:
         self.fed += len(pcm)
         await self.conn.input_audio_buffer.append(audio=base64.b64encode(pcm).decode("ascii"))
 
     async def finish(self, timeout: float) -> str:
-        """The press is over: commit the rest and wait for every piece's words, in order."""
-        self.commit_resolved = False
-        await self.conn.input_audio_buffer.commit()
-        async with asyncio.timeout(timeout):
-            while True:
-                if self.broken:
-                    raise ConnectionError("the live transcription session closed")
-                if self.commit_resolved and all(i in self.done for i in self.order):
-                    break
-                self.changed.clear()
-                await self.changed.wait()
-        spend.record("openai", self.model, spend.CALLS, None, note=f"live transcription, {self.fed / BYTES_PER_SEC:.1f} s")
-        return " ".join(self.done[i] for i in self.order if self.done.get(i)).strip()
+        """One release commits one complete turn, then waits for that item's final transcript."""
+        try:
+            if self.broken:
+                raise ConnectionError("the live transcription session closed")
+            self.commit_resolved = False
+            self._awaiting_commit = True
+            async with asyncio.timeout(timeout):
+                await self.conn.input_audio_buffer.commit()
+                while True:
+                    if self.broken:
+                        raise ConnectionError("the live transcription session closed")
+                    if self.commit_resolved and self.order and all(i in self.done for i in self.order):
+                        break
+                    self.changed.clear()
+                    await self.changed.wait()
+            spend.record("openai", self.model, spend.CALLS, None,
+                         note=f"live transcription, {self.fed / BYTES_PER_SEC:.1f} s")
+            return " ".join(self.done[i] for i in self.order if self.done.get(i)).strip()
+        except BaseException:
+            # Timed-out or cancelled requests may still deliver events. Never reuse their session state.
+            self.broken = True
+            raise
+        finally:
+            if self._press_lock.locked():
+                self._press_lock.release()
 
     async def close(self) -> None:
         if self._reader is not None:
             self._reader.cancel()
+            await asyncio.gather(self._reader, return_exceptions=True)
         if self._manager is not None:
             with contextlib.suppress(Exception):
                 await self._manager.__aexit__(None, None, None)
@@ -546,42 +594,53 @@ class Call:
         try:
             await ears.open()
             self.ears = ears
+        except asyncio.CancelledError:
+            await ears.close()
+            raise
         except Exception as e:  # noqa: BLE001 — no live session: each press is uploaded after release
             log.warning("call: live transcription unavailable (%s); uploading presses instead", type(e).__name__)
             await ears.close()
 
     async def _begin_press(self) -> None:
+        if self.talking:
+            return                              # duplicate talk frames are not a new press
         self.talking, self.press, self.ears_live = True, bytearray(), False
         self._touch()
         self._take_chat()                       # the first press, or the first after the desk took it
         await self.interrupt()
-        if self.ears is not None and not self.ears.broken:
+        ears = self.ears
+        if ears is not None and not ears.broken:
             try:
-                await self.ears.begin()
+                await ears.begin()
                 self.ears_live = True
             except Exception as e:  # noqa: BLE001
                 log.info("call: live transcription dropped (%s)", type(e).__name__)
-                self.ears = None
+                if self.ears is ears:
+                    self.ears = None
+                    await ears.close()
 
     async def _feed(self, data: bytes) -> None:
         if not self.talking or len(self.press) >= MAX_PRESS_SECS * BYTES_PER_SEC:
             return
-        data = data[: len(data) - len(data) % 2]
+        remaining = int(MAX_PRESS_SECS * BYTES_PER_SEC) - len(self.press)
+        data = data[:min(len(data) - len(data) % 2, remaining)]
         self.press.extend(data)
         if self.ears_live and self.ears is not None:
             try:
                 await self.ears.feed(data)
             except Exception:  # noqa: BLE001 — the press is still kept whole, for the upload
-                self.ears_live = False
+                self.ears.broken = True
 
     async def _transcribe(self, pcm: bytes, live: bool) -> tuple[str, bool]:
-        if live and self.ears is not None:
+        ears = self.ears
+        if live and ears is not None:
             try:
-                return await self.ears.finish(timeout=6.0), True
+                return await ears.finish(timeout=6.0), True
             except Exception as e:  # noqa: BLE001
                 log.info("call: live transcription failed (%s); uploading the press", type(e).__name__)
-                if self.ears is not None and self.ears.broken:
+                if self.ears is ears:
                     self.ears = None
+                    await ears.close()
         return await asyncio.to_thread(self.voice.transcribe, pcm), False
 
     async def heard(self, pcm: bytes, live: bool, released: float) -> None:
@@ -589,7 +648,8 @@ class Call:
         if len(pcm) < MIN_PRESS_SECS * BYTES_PER_SEC:
             if live and self.ears is not None:
                 with contextlib.suppress(Exception):
-                    await self.ears.begin()           # nothing of a tap is left in the live session
+                    discard = getattr(self.ears, "discard", self.ears.begin)
+                    await discard()                   # nothing of a tap is left in the live session
             await self._state("listening", note="Hold the button while you talk.")
             return
         await self._state("thinking")

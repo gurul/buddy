@@ -16,13 +16,18 @@ class PcmRing {
   // ring is cut, never wrapped over itself).
   size_t push(const int16_t* in, size_t n) {
     size_t take = n < room() ? n : room();
-    for (size_t i = 0; i < take; ++i) buf_[(head_ + count_ + i) % cap_] = in[i];
+    if (!take) return 0;
+    size_t tail = (head_ + count_) % cap_;
+    size_t first = cap_ - tail < take ? cap_ - tail : take;
+    memcpy(buf_ + tail, in, first * sizeof(int16_t));
+    memcpy(buf_, in + first, (take - first) * sizeof(int16_t));
     count_ += take;
     return take;
   }
 
   size_t pop(int16_t* out, size_t n) {
     size_t take = n < count_ ? n : count_;
+    if (!take) return 0;
     size_t first = cap_ - head_ < take ? cap_ - head_ : take;
     memcpy(out, buf_ + head_, first * sizeof(int16_t));
     memcpy(out + first, buf_, (take - first) * sizeof(int16_t));

@@ -3,5 +3,7 @@
 set -eu
 cd "$(dirname "$0")/../../.."
 OUT=$(mktemp -d)
-swiftc -O -o "$OUT/codec_test" ios/BuddyLink/Shared/ADPCM.swift ios/BuddyLink/Tests/main.swift
+trap 'rm -rf "$OUT"' EXIT HUP INT TERM
+swiftc -O -o "$OUT/codec_test" ios/BuddyLink/Shared/ADPCM.swift ios/BuddyLink/Shared/PacketQueue.swift \
+  ios/BuddyLink/Shared/PCM.swift ios/BuddyLink/Tests/main.swift
 "$OUT/codec_test" tools/stick_link/vectors.txt

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import io
 import json
+import tracemalloc
 from pathlib import Path
 
 from cc_buddy_bridge.audit import (
@@ -225,3 +226,67 @@ def test_render_missing_file_says_empty(tmp_path):
     buf = io.StringIO()
     render(path=tmp_path / "no-such.jsonl", last=20, ascii_only=True, out=buf)
     assert "(empty" in buf.getvalue()
+
+
+def test_render_tails_matching_entries_in_order(tmp_path):
+    p = tmp_path / "audit.jsonl"
+    _seed(p, [{"tool": "Bash", "decision": "deny" if i % 2 else "allow", "hint": f"cmd-{i}"}
+              for i in range(12)])
+    buf = io.StringIO()
+    render(path=p, last=3, decision="deny", ascii_only=True, out=buf)
+    lines = buf.getvalue().splitlines()[1:]
+    assert len(lines) == 3
+    assert [line.rsplit(" ", 1)[-1] for line in lines] == ["cmd-7", "cmd-9", "cmd-11"]
+
+
+def test_render_non_positive_last_keeps_the_complete_history(tmp_path):
+    p = tmp_path / "audit.jsonl"
+    _seed(p, [{"hint": f"cmd-{i}"} for i in range(30)])
+    for last in (0, -1):
+        buf = io.StringIO()
+        render(path=p, last=last, ascii_only=True, out=buf)
+        assert len(buf.getvalue().splitlines()) == 31
+        assert "cmd-0" in buf.getvalue() and "cmd-29" in buf.getvalue()
+
+
+def test_render_tail_memory_does_not_scale_with_history(tmp_path):
+    class Sink:
+        def isatty(self):
+            return False
+
+        def write(self, text):
+            return len(text)
+
+    small, large = (tmp_path / f"{name}.jsonl" for name in ("small", "large"))
+    for path, count in ((small, 400), (large, 4000)):
+        with path.open("w") as file:
+            for i in range(count):
+                file.write(json.dumps({"tool": "Bash", "hint": str(i) + "x" * 200}) + "\n")
+
+    def peak(path, last):
+        tracemalloc.start()
+        try:
+            render(path=path, last=last, ascii_only=True, out=Sink())
+            return tracemalloc.get_traced_memory()[1]
+        finally:
+            tracemalloc.stop()
+
+    small_peak = peak(small, 20)
+    large_peak = peak(large, 20)
+    # Ten times the input must not retain ten times the parsed records.
+    assert large_peak < 2 * small_peak + 100_000, (small_peak, large_peak)
+    # Positive control: the previous approach retains every parsed record.
+    tracemalloc.start()
+    try:
+        retained = list(iter_entries(large))
+        full_peak = tracemalloc.get_traced_memory()[1]
+        assert len(retained) == 4000
+    finally:
+        tracemalloc.stop()
+    assert full_peak > 5 * large_peak, (large_peak, full_peak)
+
+
+def test_iter_entries_skips_non_object_json(tmp_path):
+    p = tmp_path / "audit.jsonl"
+    p.write_text('null\n[]\n42\n{"decision":"allow","hint":"safe"}\n')
+    assert list(iter_entries(p, decision="allow")) == [{"decision": "allow", "hint": "safe"}]

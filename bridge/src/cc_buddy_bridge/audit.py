@@ -40,6 +40,7 @@ import logging
 import os
 import sys
 import time
+from collections import deque
 from datetime import datetime
 from pathlib import Path
 from typing import Any, Iterator, Optional
@@ -143,6 +144,8 @@ def iter_entries(
                 entry = json.loads(raw)
             except ValueError:
                 continue
+            if not isinstance(entry, dict):
+                continue
             if decision is not None and entry.get("decision") != decision:
                 continue
             if source is not None and entry.get("source") != source:
@@ -227,12 +230,11 @@ def render(
         out.write("# (empty — no PreToolUse decisions recorded yet)\n")
         return 0
 
-    # Tail to `last` entries by collecting all that pass the filter then slicing.
-    # The file is bounded by daemon lifetime use, so slurping is fine even for
-    # multi-week histories (a heavy day is ~hundreds of entries).
-    entries = list(iter_entries(target, decision=decision, source=source, tool=tool))
-    if last > 0 and len(entries) > last:
-        entries = entries[-last:]
+    # Keep only the requested tail of matching records. The log is append-only
+    # across daemon restarts, so collecting the entire history grows without
+    # bound even when the viewer prints its default 20 lines.
+    matching = iter_entries(target, decision=decision, source=source, tool=tool)
+    entries = deque(matching, maxlen=last) if last > 0 else matching
     for e in entries:
         out.write(format_entry(e, ascii_only=not use_color, width=width) + "\n")
 
@@ -263,6 +265,8 @@ def render(
                 try:
                     entry = json.loads(line)
                 except ValueError:
+                    continue
+                if not isinstance(entry, dict):
                     continue
                 if decision is not None and entry.get("decision") != decision:
                     continue

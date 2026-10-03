@@ -1,16 +1,20 @@
 // The firmware's own link_codec.h and pcm_ring.h, on the Mac under ASan and UBSan (run.sh).
 // The codec must match tools/stick_link/vectors.txt byte for byte: the Python reference wrote it.
 #include <cassert>
+#include <algorithm>
 #include <cstdio>
 #include <cstdlib>
+#include <deque>
 #include <fstream>
 #include <sstream>
 #include <string>
 #include <vector>
 
 #include "../link_codec.h"
+#include "../mic_startup.h"
 #include "../pcm_ring.h"
 #include "../power_policy.h"
+#include "../../buddy_voice_pe/pcm_convert.h"
 
 static int failures = 0;
 #define CHECK(cond)                                                     \
@@ -138,6 +142,72 @@ static void ring() {
   r.push(a, 3);
   r.clear();
   CHECK(r.size() == 0);
+
+  // Compare arbitrary wrap/full/partial writes to an independent FIFO oracle.
+  uint32_t random = 0x12345678;
+  for (size_t cap : {size_t(1), size_t(7), size_t(480), size_t(1200)}) {
+    std::vector<int16_t> storage(cap), input(cap + 3), actual(cap + 3);
+    PcmRing q(storage.data(), cap);
+    std::deque<int16_t> expected;
+    for (size_t step = 0; step < 2000; ++step) {
+      random = random * 1664525u + 1013904223u;
+      size_t n = (random >> 8) % (cap + 4);
+      if (random & 1) {
+        for (size_t i = 0; i < n; ++i) input[i] = int16_t((step * 131 + i) % 32768);
+        size_t take = std::min(n, cap - expected.size());
+        CHECK(q.push(input.data(), n) == take);
+        expected.insert(expected.end(), input.begin(), input.begin() + take);
+      } else {
+        size_t take = std::min(n, expected.size());
+        CHECK(q.pop(actual.data(), n) == take);
+        for (size_t i = 0; i < take; ++i) {
+          CHECK(actual[i] == expected.front());
+          expected.pop_front();
+        }
+      }
+      CHECK(q.size() == expected.size() && q.room() == cap - expected.size());
+    }
+  }
+  PcmRing empty(nullptr, 0);
+  CHECK(empty.push(nullptr, 1) == 0 && empty.pop(nullptr, 1) == 0);
+}
+
+static void micStartup() {
+  MicStartup guard;
+  CHECK(guard.skip(0) == 0 && guard.skip(240) == 0);
+  guard.reset();
+  CHECK(MicStartup::SAMPLES == 2400);
+  CHECK(guard.skip(0) == 0);
+  for (int i = 0; i < 9; ++i) CHECK(guard.skip(240) == 240);
+  CHECK(guard.skip(241) == 240);             // first speech sample survives at the exact boundary
+  CHECK(guard.skip(240) == 0);
+  guard.reset();
+  CHECK(guard.skip(2399) == 2399);
+  CHECK(guard.skip(2) == 1);
+  CHECK(guard.skip(1) == 0);
+  guard.reset();                            // a new press cannot inherit a finished/partial guard
+  CHECK(guard.skip(17) == 17);
+  guard.reset();
+  CHECK(guard.skip(5000) == 2400);
+  CHECK(guard.skip(5000) == 0);
+  // Model the real consumer with an onset transient followed by distinct speech.
+  std::vector<int16_t> input(2407, 32752), kept;
+  for (int i = 0; i < 7; ++i) input[2400 + i] = int16_t(100 + i);
+  guard.reset();
+  for (size_t at = 0; at < input.size(); at += 137) {
+    size_t n = std::min(size_t(137), input.size() - at);
+    size_t skipped = guard.skip(n);
+    kept.insert(kept.end(), input.begin() + at + skipped, input.begin() + at + n);
+  }
+  CHECK(kept == std::vector<int16_t>({100, 101, 102, 103, 104, 105, 106}));
+}
+
+static void widen() {
+  CHECK(sbPcm16To32(INT16_MIN) == INT32_MIN);
+  CHECK(sbPcm16To32(INT16_MAX) == 2147418112);
+  for (int32_t sample = INT16_MIN; sample <= INT16_MAX; ++sample) {
+    CHECK(int64_t(sbPcm16To32(int16_t(sample))) == int64_t(sample) * 65536);
+  }
 }
 
 static void gate() {
@@ -219,10 +289,13 @@ int main(int argc, char** argv) {
   ring();
   gate();
   power();
+  micStartup();
+  widen();
   if (failures) {
     std::fprintf(stderr, "%d check(s) failed\n", failures);
     return 1;
   }
   std::printf("host tests: %d vectors and all checks passed\n", n);
+  std::puts("MIC_STARTUP_OK\nPCM_RING_OK\nPCM_WIDEN_OK");
   return 0;
 }

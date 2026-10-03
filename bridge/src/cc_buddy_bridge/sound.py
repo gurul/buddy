@@ -64,6 +64,8 @@ class SoundSetting:
     def load(self) -> bool:
         try:
             obj = json.loads(self.path.read_text(encoding="utf-8"))
+            if not isinstance(obj, dict):
+                raise ValueError("expected a JSON object")
             self.on = not bool(obj.get("muted", False))
         except FileNotFoundError:
             self.on = True

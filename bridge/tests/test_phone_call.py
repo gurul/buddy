@@ -349,47 +349,6 @@ def test_a_press_is_transcribed_live_and_falls_back_to_the_upload(tmp_path, fail
     assert voice.transcribed == ([48000] if fail else [])           # uploaded only when the live one failed
 
 
-def test_live_ears_join_every_piece_in_order_and_take_an_empty_commit():
-    class Conn:
-        def __init__(self) -> None:
-            self.sent: list[str] = []
-            self.input_audio_buffer = self
-
-        async def commit(self) -> None:
-            self.sent.append("commit")
-
-    async def go():
-        ears = phone_call.LiveEars("k", "m")
-        ears.conn = Conn()
-        # the server cut the press at a pause, and transcribes piece 2 before piece 1 finishes
-        ears.order = ["i1"]
-        finishing = asyncio.ensure_future(ears.finish(timeout=2))
-        await asyncio.sleep(0)
-        ears.order.append("i2")
-        ears.commit_resolved = True
-        ears.changed.set()
-        await asyncio.sleep(0)
-        ears.done["i2"] = "the dentist."
-        ears.changed.set()
-        await asyncio.sleep(0)
-        assert not finishing.done()                                  # piece 1 still out
-        ears.done["i1"] = "remind me to call"
-        ears.changed.set()
-        assert await finishing == "remind me to call the dentist."
-        # the server had committed everything already: our commit is empty, and that is fine
-        ears.order, ears.done = ["i3"], {"i3": "hi"}
-        finishing = asyncio.ensure_future(ears.finish(timeout=2))
-        await asyncio.sleep(0)
-        ears.commit_resolved = True
-        ears.changed.set()  # what the "commit_empty" error sets
-        assert await finishing == "hi"
-        ears.broken = True
-        with pytest.raises(ConnectionError):
-            await ears.finish(timeout=2)
-
-    asyncio.run(go())
-
-
 def test_the_fast_voice_falls_back_to_openai_before_a_sound_is_sent(monkeypatch):
     import contextlib as cl
 
@@ -468,7 +427,10 @@ def test_calls_are_transcribed_in_english_unless_told_otherwise():
             return self
 
         async def __anext__(self):
-            raise StopAsyncIteration
+            if not getattr(self, "configured", False):
+                self.configured = True
+                return SimpleNamespace(type="session.updated")
+            await asyncio.Future()
 
     class Manager:
         async def __aenter__(self):
@@ -500,9 +462,8 @@ def test_calls_are_transcribed_in_english_unless_told_otherwise():
     assert sessions[0]["audio"]["input"]["transcription"] == {"model": "m", "language": "en"}
 
 
-def test_the_calls_ears_are_the_full_model_cut_only_at_real_pauses_with_near_field_noise_reduction(monkeypatch):
-    """2026-09-30, from the stick: "transcription is terrible". The mini model and 0.4 s cuts garbled a sentence
-    with pauses; the full model, 0.7 s and near-field noise reduction are what the live session is opened with."""
+def test_the_calls_ears_keep_the_full_press_context_with_near_field_noise_reduction(monkeypatch):
+    """A physical press supplies the boundary; pauses within it stay in the same transcription turn."""
     assert phone_call.DEFAULT_STT_MODEL == "gpt-4o-transcribe"
     sent: list = []
 
@@ -517,7 +478,10 @@ def test_the_calls_ears_are_the_full_model_cut_only_at_real_pauses_with_near_fie
             return self
 
         async def __anext__(self):
-            raise StopAsyncIteration
+            if not getattr(self, "configured", False):
+                self.configured = True
+                return SimpleNamespace(type="session.updated")
+            await asyncio.Future()
 
     class Manager:
         async def __aenter__(self):
@@ -541,7 +505,7 @@ def test_the_calls_ears_are_the_full_model_cut_only_at_real_pauses_with_near_fie
     audio_in = sent[0]["audio"]["input"]
     assert audio_in["transcription"]["model"] == "gpt-4o-transcribe"
     assert audio_in["noise_reduction"] == {"type": "near_field"}
-    assert audio_in["turn_detection"]["silence_duration_ms"] == 700
+    assert audio_in["turn_detection"] is None
     # and the meter can price it
     from cc_buddy_bridge import pricing
     assert pricing.estimate_transcribe_cost("gpt-4o-transcribe", {}, seconds=60) == pytest.approx(0.006)

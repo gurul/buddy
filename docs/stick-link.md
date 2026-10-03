@@ -47,8 +47,10 @@ stay open all day.
 Tuned on 2026-09-30, after the owner said the speaker was "really quiet" and transcription was "terrible":
 
 - **Speaker:** M5Unified leaves the ES8311 DAC at 0 dB (register `0x32 = 0xBF`). The stick sets it to +12 dB (`0xD7`) each time the speaker starts. Click the side volume button for the four levels on top of that.
-- **Microphone:** M5Unified's default x16 digital gain clipped presses spoken up close (peaks at 32752). The stick uses x8, which leaves 6 dB of headroom.
-- **buddy's ears:** calls are transcribed by `gpt-4o-transcribe`, not the mini model; `CC_BUDDY_CALL_STT_MODEL` overrides it. The live session cuts a press only at pauses of 0.7 s (it was 0.4 s, which split sentences), with OpenAI's near-field noise reduction for a microphone held close.
+- **Microphone:** M5Unified's default x16 digital gain clipped presses spoken up close (peaks at 32752). The stick uses x8, which leaves 6 dB of headroom. It drops exactly 2,400 startup samples (100 ms at 24 kHz) on each press, then retains the following samples even if the boundary falls inside a capture chunk. Pause briefly after the press tone before speaking: the microphone startup window follows that tone. The earlier guard dropped only 60 ms, despite the recorded startup transient occupying the first 100 ms.
+- **buddy's ears:** calls use `gpt-4o-transcribe`; `CC_BUDDY_CALL_STT_MODEL` overrides it. Near-field noise reduction suits a microphone held close. Since the 2026-10-03 fix, server VAD is disabled: releasing the button commits one whole press, so a pause cannot make an extra transcription item. The daemon waits for session configuration, finishes or discards the preceding item before starting another, and matches completions by item ID. A broken realtime session falls back to uploading that press's complete PCM recording.
+
+These changes address two observed code paths that can introduce stray words at the beginning: startup noise outside the old guard and transcription items crossing press boundaries. The [optimization review](optimization-review.md) separates native regression evidence from live speech accuracy, which has not been remeasured for this revision.
 
 ## Battery
 
@@ -236,8 +238,8 @@ stick as the robot and reset it every two minutes.
 
 ```sh
 python3 tools/stick_link/test_adpcm.py     # the reference codec, and that vectors.txt is current
-sh firmware/buddy_stick/test/run.sh        # the stick's codec, ring and timers, under ASan and UBSan
-sh ios/BuddyLink/Tests/run.sh              # the app's codec
+sh firmware/buddy_stick/test/run.sh        # codec, ring, startup guard, signed PCM and timers; ASan/UBSan
+sh ios/BuddyLink/Tests/run.sh              # codec, packet FIFO, interrupted audio and PCM decoding
 ```
 
 **Bench probe.** `ios/BuddyLink/build.sh` also builds **BuddyProbe**, a small
@@ -272,5 +274,7 @@ backup exists:
 ## Status
 
 What was checked and how is in [GATES.md](../GATES.md). As of 2026-09-30 it all works through the iPhone: a press on the stick, Buddy Link relaying, buddy hearing it and answering on the stick's speaker (live transcription about 0.3-1 s; release to buddy's first sound 2.4-3.9 s on the measured presses). Picking the stick up opens the call before the press.
+
+Those timings describe the earlier server-VAD build. The 2026-10-03 transcription and buffering changes passed offline regressions and firmware/app compilation; they still need a daemon restart, updated stick firmware and Buddy Link installation, followed by a live press test. Current release-to-text latency and word error rate are unmeasured.
 
 Still open: a press with the phone locked and away from home Wi-Fi (G5.3), and the stick's played/lost counters, which count from boot rather than per connection.

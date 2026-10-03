@@ -1,6 +1,7 @@
 #include "sb_i2s.h"
 
 #include "sb_config.h"
+#include "pcm_convert.h"
 
 #if SB_I2S_SLAVE
 
@@ -79,7 +80,7 @@ void sbI2sSpeakerWriteMono(const int16_t *samples, size_t count) {
   while (count > 0) {
     size_t n = count > 128 ? 128 : count;
     for (size_t i = 0; i < n; i++) {
-      int32_t wide = static_cast<int32_t>(samples[i]) << 16;
+      int32_t wide = sbPcm16To32(samples[i]);
       frames[i * 2] = wide;
       frames[i * 2 + 1] = wide;
     }

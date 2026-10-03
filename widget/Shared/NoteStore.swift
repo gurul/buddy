@@ -614,6 +614,7 @@ enum NoteStore {
     /// the widget lists them rather than showing them. The file itself is what
     /// the owner opens or exports.
     static func readRoomNotes(store: URL, limit: Int = 40) -> [RoomNote] {
+        guard limit > 0 else { return [] }
         let fm = FileManager.default
         let root = store.appendingPathComponent("transcripts/meetings", isDirectory: true)
         let days = ((try? fm.contentsOfDirectory(at: root, includingPropertiesForKeys: nil)) ?? [])
@@ -625,7 +626,7 @@ enum NoteStore {
                 .filter { $0.pathExtension == "md" }
                 .sorted { $0.lastPathComponent > $1.lastPathComponent }
             for file in files {
-                guard let body = try? String(contentsOf: file, encoding: .utf8) else { continue }
+                guard let body = readRoomNoteHead(file) else { continue }
                 var title = "", gist = "", words = 0
                 var afterTitle = false
                 for raw in body.split(separator: "\n", omittingEmptySubsequences: false).prefix(40) {
@@ -651,6 +652,62 @@ enum NoteStore {
             }
         }
         return out
+    }
+
+    /// Read only the header the room-note list displays, including lines split
+    /// across read boundaries. A long transcript must not be loaded on each sync.
+    static func readRoomNoteHead(_ file: URL, chunkBytes: Int = 8192) -> String? {
+        guard chunkBytes > 0, let handle = try? FileHandle(forReadingFrom: file) else { return nil }
+        defer { try? handle.close() }
+        var head = Data()
+        var lines = 0
+        do {
+            while let chunk = try handle.read(upToCount: chunkBytes), !chunk.isEmpty {
+                for (i, byte) in chunk.enumerated() where byte == 0x0A {
+                    lines += 1
+                    if lines == 40 {
+                        head.append(chunk.prefix(i + 1))
+                        return String(data: head, encoding: .utf8)
+                    }
+                }
+                head.append(chunk)
+            }
+        } catch { return nil }
+        return String(data: head, encoding: .utf8)
+    }
+
+    /// Seek backwards until enough valid records are found. Decode whole lines
+    /// so a UTF-8 character or JSON record spanning chunks remains intact.
+    static func readThoughts(_ file: URL, limit: Int = limit, chunkBytes: Int = 65536) -> [Thought] {
+        guard limit > 0, chunkBytes > 0, let handle = try? FileHandle(forReadingFrom: file) else { return [] }
+        defer { try? handle.close() }
+        let decoder = JSONDecoder()
+        var thoughts: [Thought] = []
+        var suffix = Data()
+        func append(_ line: Data.SubSequence) {
+            if !line.isEmpty, let thought = try? decoder.decode(Thought.self, from: Data(line)) {
+                thoughts.append(thought)
+            }
+        }
+        do {
+            var offset = try handle.seekToEnd()
+            while offset > 0 {
+                let length = min(UInt64(chunkBytes), offset)
+                offset -= length
+                try handle.seek(toOffset: offset)
+                guard var chunk = try handle.read(upToCount: Int(length)), chunk.count == Int(length) else { return [] }
+                chunk.append(suffix)
+                var end = chunk.endIndex
+                while let newline = chunk[..<end].lastIndex(of: 0x0A) {
+                    append(chunk[chunk.index(after: newline)..<end])
+                    if thoughts.count >= limit { return thoughts }
+                    end = newline
+                }
+                suffix = Data(chunk[..<end])
+            }
+            append(suffix[...])
+        } catch { return [] }
+        return thoughts
     }
 
     /// `- claim (YYYY-MM-DD)` lines, an optional ★ after the bullet (records.py `_STAR_LINE`).
@@ -713,16 +770,8 @@ enum NoteStore {
             }
         }
 
-        var thoughts: [Thought] = []
         let memory = notesDir.appendingPathComponent("memory.jsonl", isDirectory: false)
-        if let body = try? String(contentsOf: memory, encoding: .utf8) {
-            let dec = JSONDecoder()
-            for line in body.split(separator: "\n", omittingEmptySubsequences: true).reversed() {
-                guard let data = line.data(using: .utf8), let t = try? dec.decode(Thought.self, from: data) else { continue }
-                thoughts.append(t)
-                if thoughts.count >= limit { break }
-            }
-        }
+        let thoughts = readThoughts(memory)
         let profileURL = notesDir.appendingPathComponent("profile.md", isDirectory: false)
         let profile = (try? String(contentsOf: profileURL, encoding: .utf8)) ?? ""
         let highlights = readHighlights(notesDir: notesDir)
