@@ -224,6 +224,39 @@ def test_repeated_silence_arms_rts_pulse(fast_watchdog: None, monkeypatch: pytes
     assert not bs._pulse_on_open  # armed then consumed, not left dangling
 
 
+def _deaf_reopens(err: Exception, count: int) -> BuddySerial:
+    """``count`` fresh handles whose first write raises ``err``, as the reader's reopen loop would hand them over."""
+    bs = BuddySerial(on_message=_noop, port="/dev/fake")
+
+    def bad_write(data: bytes) -> None:
+        raise err
+
+    async def scenario() -> None:
+        for _ in range(count):
+            fresh = FakeSerial([])
+            fresh.port = "/dev/cu.usbmodem101"  # type: ignore[attr-defined]
+            fresh.write = bad_write  # type: ignore[method-assign]
+            bs._ser, bs._drop_reason = fresh, None
+            assert not await bs.send({"time": 1})
+
+    _run(scenario())
+    return bs
+
+
+def test_repeated_write_timeouts_arm_rts_pulse() -> None:
+    """A board that stops draining its OUT endpoint (the Voice PE, 2026-10-01) gets the RTS reset
+    too, instead of a reopen every 5 s forever: a write timeout counts as a trip."""
+    import serial
+    bs = _deaf_reopens(serial.SerialTimeoutException("Write timeout"), serial_transport.RX_TRIP_PULSE_COUNT)
+    assert bs._pulse_on_open
+
+
+def test_other_write_failures_do_not_arm_rts_pulse() -> None:
+    """Control: only a timeout is the deaf board; a write that raises anything else is not counted."""
+    bs = _deaf_reopens(RuntimeError("late failure"), serial_transport.RX_TRIP_PULSE_COUNT)
+    assert not bs._pulse_on_open
+
+
 # ---- port choice: the board, or nothing ------------------------------------------------------
 
 class _Port:

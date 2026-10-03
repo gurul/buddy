@@ -325,6 +325,10 @@ The daemon does not check which board is attached (`serial_transport.py`,
 
 - It prints an `[alive] … live= total= running= waiting= agent=` line every
   5 s. The daemon reopens the port after 20 s without any bytes.
+- If the board stops taking writes (each write times out after 2 s), the
+  daemon counts that reopen like a silent one. Three in 10 minutes reset the
+  board through RTS on the next open. Before 2026-10-03 only silence counted,
+  and a board that did not read was reopened every 5 s for two days.
 - It answers `{"cmd":"status"}` with
   `{"ack":"status","ok":true,"data":{"name","owner","board":"voice-pe","snd","sys":{"up","heap"}}}`.
   It sends no `sec`, `bat` or `sys.fsTotal`: this board has no BLE, battery
