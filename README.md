@@ -1,9 +1,3 @@
-<p align="center">
-  <a href="https://youtu.be/6NOxdY_jqN4"><img src="docs/assets/buddy-launch-poster.jpg" alt="Watch the buddy launch film on YouTube (93 seconds)" width="80%"></a>
-  <br>
-  <a href="https://youtu.be/6NOxdY_jqN4"><b>▶ Watch the launch film on YouTube</b></a> · 93 s · <a href="docs/launch-video/remotion/README.md">how it was made</a>
-</p>
-
 # buddy
 
 **A small robot that lives on your desk, with a Mac as its host.** buddy listens for
