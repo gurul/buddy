@@ -537,7 +537,6 @@ Persistent data lives under `~/.config/cc-buddy-bridge/`:
 | `firmware/buddy_stick/`, `ios/BuddyLink/`, `tools/stick_link/` | M5StickS3 push-to-talk firmware, the Buddy Link iPhone app and bench probe, the shared audio codec | [The stick link](docs/stick-link.md) |
 | `tools/` | Firmware flashing, standalone learning launcher and demo utilities | [Build](docs/stackchan/build.md), [learning](docs/learning.md) |
 | `docs/stackchan/` | Hardware notes, personality, vision and integration details | [Personality](docs/stackchan/personality.md), [vision](docs/stackchan/vision.md), [memory](docs/stackchan/memory.md), [Claude Code](docs/stackchan/claude-code-integration.md) |
-| `docs/launch-video/` | Launch films (Remotion), script and reference material | [Video project](docs/launch-video/remotion/README.md) |
 | `past-experiments/` | Earlier boards, e-ink firmware and enclosure experiments | [Archive overview](past-experiments/README.md) |
 
 ## Development
