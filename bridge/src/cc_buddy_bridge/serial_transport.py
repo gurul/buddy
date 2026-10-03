@@ -251,6 +251,7 @@ class BuddySerial:
             # Only condemn the handle the failure belongs to — a write that
             # raises late must not tear down a fresh reopened connection.
             if self._ser is ser:
+                self._note_deaf(ser, e)
                 self._request_drop(f"send failed: {e}")
             return False
 
@@ -276,6 +277,7 @@ class BuddySerial:
             if err is not None:
                 log.warning("serial send failed: %s", err)
                 if self._ser is ser:
+                    self._note_deaf(ser, err)
                     self._request_drop(f"send failed: {err}")
             raise asyncio.CancelledError
         fut.result()
@@ -323,7 +325,7 @@ class BuddySerial:
                 # absence from a log is proof the pulse never ran.
                 self._pulse_on_open = False
                 log.warning(
-                    "serial: RTS-resetting the board — %d silent reopens of %s "
+                    "serial: RTS-resetting the board — %d silent or deaf reopens of %s "
                     "within %.0f min", RX_TRIP_PULSE_COUNT, port,
                     RX_TRIP_WINDOW_SECS / 60)
                 try:
@@ -455,6 +457,13 @@ class BuddySerial:
         if sum(1 for (_, p) in self._rx_trips if p == port) >= RX_TRIP_PULSE_COUNT:
             self._pulse_on_open = True
             self._rx_trips.clear()
+
+    def _note_deaf(self, ser: serial.Serial, err: BaseException) -> None:
+        """A write timeout is the deaf half of the wedge: the board has stopped draining the OUT endpoint. It
+        counts as a trip like a silent open, so repeated ones RTS-reset the board instead of reopening it every
+        5 s forever (the Voice PE, 2026-10-01 to 10-03: ~35,000 reopens, every one timing out)."""
+        if isinstance(err, serial.SerialTimeoutException) and ser.port:
+            self._note_rx_trip(ser.port)
 
     def pulse_reset(self, why: str) -> None:
         """Hardware-reset the board via the RTS line, then reconnect.
